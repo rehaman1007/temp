@@ -1,23 +1,17 @@
 import React, { useState, useEffect, useRef } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 
-// Use proper worker file (download to public/ if CDN blocked)
+// Set the correct worker URL
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.3.31/pdf.worker.min.js`;
 
 const PDFViewer = ({ pdfData }) => {
   const [pdfDoc, setPdfDoc] = useState(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(0);
-  const [scale] = useState(1.5);
-  const [rotation] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
   const canvasRef = useRef(null);
 
-  // Convert Base64 -> Blob -> Object URL -> Load PDF
   useEffect(() => {
     if (!pdfData) return;
 
+    // Convert Base64 -> Blob -> Object URL
     const byteCharacters = atob(pdfData);
     const byteNumbers = new Array(byteCharacters.length);
     for (let i = 0; i < byteCharacters.length; i++) {
@@ -27,60 +21,36 @@ const PDFViewer = ({ pdfData }) => {
     const blob = new Blob([byteArray], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
 
-    const loadPDF = async () => {
-      setLoading(true);
-      try {
-        const pdf = await pdfjsLib.getDocument(url).promise;
-        setPdfDoc(pdf);
-        setTotalPages(pdf.numPages);
-        setCurrentPage(1);
-        setLoading(false);
-      } catch (err) {
-        setError("Failed to load PDF: " + err.message);
-        setLoading(false);
-      }
-    };
+    // Load PDF
+    pdfjsLib.getDocument(url).promise.then((pdf) => {
+      setPdfDoc(pdf);
+      renderPage(pdf, 1); // always render page 1
+    });
 
-    loadPDF();
-
-    return () => {
-      URL.revokeObjectURL(url);
-      setPdfDoc(null);
-    };
+    return () => URL.revokeObjectURL(url);
   }, [pdfData]);
 
-  // Render current page
-  const renderPage = async () => {
-    if (!pdfDoc || !canvasRef.current) return;
+  const renderPage = async (pdf, pageNumber) => {
+    const page = await pdf.getPage(pageNumber);
 
-    try {
-      const page = await pdfDoc.getPage(currentPage);
-      const viewport = page.getViewport({ scale, rotation });
-      const canvas = canvasRef.current;
-      const context = canvas.getContext("2d");
+    // Fix rotation by combining default and page rotation
+    const viewport = page.getViewport({ scale: 1.5, rotation: page.rotate });
 
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
 
-      context.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
 
-      await page.render({ canvasContext: context, viewport }).promise;
-    } catch (err) {
-      setError("Failed to render page: " + err.message);
-    }
+    await page.render({
+      canvasContext: context,
+      viewport: viewport,
+    }).promise;
   };
 
-  useEffect(() => {
-    renderPage();
-  }, [pdfDoc, currentPage, scale, rotation]);
-
   return (
-    <div style={{ height: "600px", overflow: "auto" }}>
-      {loading && <p>Loading PDF...</p>}
-      {error && <p style={{ color: "red" }}>{error}</p>}
-      {!loading && pdfDoc && (
-        <canvas ref={canvasRef} style={{ display: "block", margin: "0 auto" }} />
-      )}
+    <div style={{ width: "100%", height: "600px", overflow: "auto" }}>
+      <canvas ref={canvasRef} style={{ display: "block", margin: "0 auto" }} />
     </div>
   );
 };
