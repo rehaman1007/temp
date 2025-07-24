@@ -1,44 +1,266 @@
-import { useEffect, useRef } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
-import 'pdfjs-dist/build/pdf.worker.entry'; // optional if bundler handles workers
+import React, { useState, useEffect, useRef } from 'react';
+import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCw, Download, FileText } from 'lucide-react';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+const PDFViewer = ({ pdfUrl = null, height = '600px' }) => {
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [scale, setScale] = useState(1.5);
+  const [rotation, setRotation] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [pdfDoc, setPdfDoc] = useState(null);
+  const canvasRef = useRef(null);
+  const fileInputRef = useRef(null);
 
-function PdfCanvasViewer({ pdfUrl }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
+  // Load PDF.js
   useEffect(() => {
-    const loadPdf = async () => {
-      try {
-        // Load PDF
-        const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
-        // Get first page
-        const page = await pdf.getPage(1);
-
-        const viewport = page.getViewport({ scale: 1.5 });
-        const canvas = canvasRef.current!;
-        const context = canvas.getContext('2d')!;
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-
-        // Render page
-        const renderContext = {
-          canvasContext: context,
-          viewport: viewport,
-        };
-        await page.render(renderContext).promise;
-      } catch (err) {
-        console.error('Error loading PDF', err);
-      }
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    script.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     };
+    document.head.appendChild(script);
 
-    loadPdf();
+    return () => {
+      document.head.removeChild(script);
+    };
+  }, []);
+
+  // Load PDF document
+  const loadPDF = async (url) => {
+    if (!window.pdfjsLib) {
+      setError('PDF.js not loaded yet');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const pdf = await window.pdfjsLib.getDocument(url).promise;
+      setPdfDoc(pdf);
+      setTotalPages(pdf.numPages);
+      setCurrentPage(1);
+      setLoading(false);
+    } catch (err) {
+      setError('Failed to load PDF: ' + err.message);
+      setLoading(false);
+    }
+  };
+
+  // Render current page
+  const renderPage = async () => {
+    if (!pdfDoc || !canvasRef.current) return;
+
+    try {
+      const page = await pdfDoc.getPage(currentPage);
+      const canvas = canvasRef.current;
+      const context = canvas.getContext('2d');
+
+      const viewport = page.getViewport({ scale, rotation });
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+
+      const renderContext = {
+        canvasContext: context,
+        viewport: viewport
+      };
+
+      await page.render(renderContext).promise;
+    } catch (err) {
+      setError('Failed to render page: ' + err.message);
+    }
+  };
+
+  // Handle file upload
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (file && file.type === 'application/pdf') {
+      const url = URL.createObjectURL(file);
+      loadPDF(url);
+    } else {
+      setError('Please select a valid PDF file');
+    }
+  };
+
+  // Effects
+  useEffect(() => {
+    if (pdfUrl) {
+      loadPDF(pdfUrl);
+    }
   }, [pdfUrl]);
 
-  return <canvas ref={canvasRef}></canvas>;
-}
+  useEffect(() => {
+    renderPage();
+  }, [pdfDoc, currentPage, scale, rotation]);
 
-export default PdfCanvasViewer;
+  // Navigation functions
+  const goToPage = (pageNum) => {
+    if (pageNum >= 1 && pageNum <= totalPages) {
+      setCurrentPage(pageNum);
+    }
+  };
 
+  const zoomIn = () => setScale(prev => Math.min(prev + 0.25, 3));
+  const zoomOut = () => setScale(prev => Math.max(prev - 0.25, 0.5));
+  const rotate = () => setRotation(prev => (prev + 90) % 360);
 
+  const downloadPDF = () => {
+    if (pdfUrl) {
+      const link = document.createElement('a');
+      link.href = pdfUrl;
+      link.download = 'document.pdf';
+      link.click();
+    }
+  };
 
+  return (
+    <div className="flex flex-col bg-gray-100 rounded-lg shadow-lg overflow-hidden" style={{ height }}>
+      {/* Toolbar */}
+      <div className="flex items-center justify-between p-3 bg-white border-b border-gray-200">
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+          >
+            <FileText className="w-4 h-4 mr-2" />
+            Open PDF
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf"
+            onChange={handleFileUpload}
+            className="hidden"
+          />
+        </div>
+
+        {pdfDoc && (
+          <>
+            {/* Navigation */}
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => goToPage(currentPage - 1)}
+                disabled={currentPage <= 1}
+                className="p-2 rounded hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              
+              <div className="flex items-center space-x-2">
+                <input
+                  type="number"
+                  value={currentPage}
+                  onChange={(e) => goToPage(parseInt(e.target.value))}
+                  className="w-16 px-2 py-1 text-center border rounded"
+                  min="1"
+                  max={totalPages}
+                />
+                <span className="text-sm text-gray-600">of {totalPages}</span>
+              </div>
+
+              <button
+                onClick={() => goToPage(currentPage + 1)}
+                disabled={currentPage >= totalPages}
+                className="p-2 rounded hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Zoom and Tools */}
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={zoomOut}
+                className="p-2 rounded hover:bg-gray-100"
+                title="Zoom Out"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
+              
+              <span className="text-sm text-gray-600 min-w-[60px] text-center">
+                {Math.round(scale * 100)}%
+              </span>
+              
+              <button
+                onClick={zoomIn}
+                className="p-2 rounded hover:bg-gray-100"
+                title="Zoom In"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+              
+              <button
+                onClick={rotate}
+                className="p-2 rounded hover:bg-gray-100"
+                title="Rotate"
+              >
+                <RotateCw className="w-4 h-4" />
+              </button>
+              
+              {pdfUrl && (
+                <button
+                  onClick={downloadPDF}
+                  className="p-2 rounded hover:bg-gray-100"
+                  title="Download"
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* PDF Display Area */}
+      <div className="flex-1 overflow-auto bg-gray-50 p-4">
+        {loading && (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-gray-600">Loading PDF...</div>
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-red-600 text-center">
+              <div className="text-lg font-semibold mb-2">Error</div>
+              <div>{error}</div>
+            </div>
+          </div>
+        )}
+
+        {!pdfDoc && !loading && !error && (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-gray-600 text-center">
+              <FileText className="w-12 h-12 mx-auto mb-4 text-gray-400" />
+              <div className="text-lg font-semibold mb-2">No PDF loaded</div>
+              <div>Click "Open PDF" to select a file or provide a PDF URL</div>
+            </div>
+          </div>
+        )}
+
+        {pdfDoc && !loading && (
+          <div className="flex justify-center">
+            <div className="bg-white shadow-lg">
+              <canvas
+                ref={canvasRef}
+                className="max-w-full"
+                style={{ display: 'block' }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Status Bar */}
+      {pdfDoc && (
+        <div className="px-3 py-2 bg-white border-t border-gray-200 text-sm text-gray-600">
+          Page {currentPage} of {totalPages} • Zoom: {Math.round(scale * 100)}%
+          {rotation > 0 && ` • Rotated: ${rotation}°`}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PDFViewer
