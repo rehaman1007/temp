@@ -1,56 +1,540 @@
-import { useEffect, useRef, useState } from "react";
-import * as THREE from "three";
-import NET from "vanta/dist/vanta.net.min"; // you can swap with "vanta.globe.min" if you want globe instead of net
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Button,
+  Tabs,
+  Tab,
+  Autocomplete,
+  TextField,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  MenuItem,
+  Chip,
+  CircularProgress,
+  createTheme,
+  ThemeProvider,
+  Typography,
+  Alert,
+  Divider,
+} from '@mui/material';
+import { DataGrid, GridActionsCellItem } from '@mui/x-data-grid';
+import { Add, Edit, Delete, Save, Cancel } from '@mui/icons-material';
+import FileDownloadIcon from '@mui/icons-material/FileDownload';
+import useApi from '../../../../../common/hooks/useApi';
+import useCustomSnackbar from '../../../../../common/hooks/useCustomSnackbar';
+import downloadFile from '../../../../../common/components/viewer/DownloadFile';
+import CustomizedDataGrid from '../../../../../common/components/ui/CustomizedDataGrid';
+import LoadingOverlay from '../../../../../common/components/ui/loadingOverlay';
+import FormInput from '../../../../../common/components/ui/FormInput';
 
-export default function TrancheSplash() {
-  const vantaRef = useRef(null);
-  const [vantaEffect, setVantaEffect] = useState(null);
+const tabLabels = [
+  'State Govt',
+  'Central Govt',
+  'Foreign Govt',
+  'Inter Bank Deposit',
+  'Other Margin Money',
+  'Others List',
+];
+const tabKeys = ['stateGovt', 'centralGovt', 'foreingGovt', 'interBankDeposite', 'otherMarginMoney', 'othersList'];
+const UID_OPTIONS = [
+  { value: 'Y', label: 'Yes' },
+  { value: 'N', label: 'No' },
+];
+
+const initialRow = (branch, identifier) => ({
+  GD_SR_NO: '0',
+  GD_IDENTIFIER: identifier,
+  GD_BID_NO: '0',
+  GD_EXCLUSION_CATEGORY: 'STATE GOVT',
+  GD_BRANCH_NO: branch?.BRANCH_CODE || '',
+  GD_BRANCHNAME: branch?.BRANCH_NAME || '',
+  GD_GL_CODE: '',
+  GD_FACILITY_PFM: '',
+  GD_CUSTOMER_NO: '',
+  GD_ACCT_NBR: '',
+  GD_CUSTOMER_NAME: '',
+  GD_AMOUNT: '',
+  GD_INTT_ACCRUED: '',
+  GD_FINAL_AMOUNT: '0.00',
+  GD_CONSTITUTION_CODE: '',
+  GD_CUST_TAX_PAN: '',
+  GD_UID_FLG: 'N',
+  GD_GSTN_NO: '',
+});
+
+export default function DICGCGranular({ identifier, setReFetchFlag }) {
+  const user = JSON.parse(localStorage.getItem('user'));
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const [branches, setBranches] = useState([]);
+  const [selectedBranch, setSelectedBranch] = useState(null);
+  const [granularData, setGranularData] = useState({});
+  const [activeTab, setActiveTab] = useState(0);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogMode, setDialogMode] = useState('add');
+  const [currentRow, setCurrentRow] = useState(initialRow(null));
+  const [loading, setLoading] = useState(false);
+  const defaultTheme = createTheme();
+
+  const pageSize = 5;
+
+  const handleDownload = async () => {
+    setLoading(true);
+    try {
+      const res = await callApi(
+        '/dicgcReport/dwnldGranXL',
+        {
+          circleCode: user.circleCode,
+          qed: user.quarterEndDate,
+          userId: user.userId,
+          identifier,
+        },
+        'POST',
+        'arraybuffer'
+      );
+      if (res) {
+        downloadFile(res, 'excel', `DICGC_${user.quarterEndDate}_Granular_${identifier}`);
+      } else {
+        showSnackBar('Download failed', 'error');
+      }
+    } catch {
+      showSnackBar('Download failed', 'error');
+    }
+    setLoading(false);
+  };
 
   useEffect(() => {
-    if (!vantaEffect) {
-      setVantaEffect(
-        NET({
-          el: vantaRef.current,
-          THREE: THREE,
-          mouseControls: true,
-          touchControls: true,
-          minHeight: 200.0,
-          minWidth: 200.0,
-          scale: 1.0,
-          scaleMobile: 1.0,
-          color: 0x00ffff,
-          backgroundColor: 0x000000,
-          points: 12.0,
-          maxDistance: 20.0,
-          spacing: 18.0,
-        })
-      );
-    }
-    return () => {
-      if (vantaEffect) vantaEffect.destroy();
+    fetchData();
+  }, []);
+
+  const fetchData = async () => {
+    setReFetchFlag(false);
+    const payload = {
+      circleCode: user.circleCode,
+      qed: user.quarterEndDate,
+      userId: user.userId,
     };
-  }, [vantaEffect]);
+    try {
+      const response = await callApi('/dicgcReport/getBranchList', payload);
+      console.log(response);
+      if (response.length > 0) {
+        setBranches(response);
+      } else {
+        showSnackBar('Error while loading branches list, Kindly try again', 'error');
+      }
+    } catch (error) {
+      console.error('Error fetching report data:', error.message);
+      if (error.code === 'ERR_CANCELED') {
+        return;
+      }
+    }
+  };
+
+  const fetchGranularData = async (branchCode) => {
+    setLoading(true);
+    try {
+      const res = await callApi('/dicgcReport/getGranularRows', {
+        circleCode: user.circleCode,
+        qed: user.quarterEndDate,
+        userId: user.userId,
+        branchCode,
+        identifier: +identifier,
+      });
+      setGranularData(res);
+    } catch {
+      showSnackBar('Error fetching granular data', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBranchChange = (_, branch) => {
+    setSelectedBranch(branch);
+    setActiveTab(0);
+    setGranularData({});
+    setDialogOpen(false);
+    if (branch) fetchGranularData(branch.BRANCH_CODE);
+  };
+
+  const openAddDialog = () => {
+    if (!selectedBranch) return showSnackBar('Please select a branch first', 'warning');
+    setDialogMode('add');
+    setCurrentRow(initialRow(selectedBranch, identifier));
+    setDialogOpen(true);
+  };
+
+  const openEditDialog = (row) => {
+    setDialogMode('edit');
+    setCurrentRow(row);
+    setDialogOpen(true);
+  };
+
+  const handleDelete = async (row) => {
+    try {
+      const response = await callApi('/dicgcReport/deleteGranularRow', {
+        identifier: row.GD_IDENTIFIER,
+        userId: user.userId,
+      });
+      if (response) {
+        const key = tabKeys[activeTab];
+        const newList = granularData[key].filter((r) => r.GD_SR_NO !== row.GD_SR_NO);
+        setGranularData((prev) => ({ ...prev, [key]: newList }));
+        setReFetchFlag(true);
+        showSnackBar('Deleted successfully', 'success');
+      } else {
+        showSnackBar('Deleted failed', 'error');
+      }
+    } catch {
+      showSnackBar('Delete failed', 'error');
+    }
+  };
+
+  const handleFieldChange = (field, value) => {
+    setCurrentRow((prev) => ({
+      ...prev,
+      [field]: value?.toUpperCase(),
+      GD_FINAL_AMOUNT: (parseFloat(prev.GD_AMOUNT || 0) + parseFloat(prev.GD_INTT_ACCRUED || 0)).toFixed(2),
+    }));
+  };
+
+  const handleSave = async () => {
+    const row = { ...currentRow };
+
+    if (!row.GD_BID_NO) row.GD_BID_NO = '0';
+    if (!row.GD_EXCLUSION_CATEGORY) row.GD_EXCLUSION_CATEGORY = 'STATE GOVT';
+
+    const payload = {
+      circleCode: user.circleCode,
+      qed: user.quarterEndDate,
+      userId: user.userId,
+      srNo: row.GD_SR_NO,
+      identifier: row.GD_IDENTIFIER || identifier,
+      bidNo: row.GD_BID_NO,
+      glCode: row.GD_GL_CODE,
+      exclusionCategory: row.GD_EXCLUSION_CATEGORY,
+      branchNo: row.GD_BRANCH_NO,
+      branchName: row.GD_BRANCHNAME,
+      facilityPFM: row.GD_FACILITY_PFM,
+      customerNo: row.GD_CUSTOMER_NO,
+      acctNbr: row.GD_ACCT_NBR,
+      customerName: row.GD_CUSTOMER_NAME,
+      gdAmount: (row.GD_AMOUNT || '').toString(),
+      inttAccrued: (row.GD_INTT_ACCRUED || '').toString(),
+      constitutionCode: row.GD_CONSTITUTION_CODE,
+      cusTaxPan: row.GD_CUST_TAX_PAN,
+      uidFlag: row.GD_UID_FLG,
+      gstnNo: row.GD_GSTN_NO,
+      finalAmount: ((+row.GD_AMOUNT || 0) + (+row.GD_INTT_ACCRUED || 0)).toFixed(2),
+    };
+
+    // Empty check
+    for (let key in payload) {
+      if (key === 'gstnNo') continue;
+      if (!payload[key] && payload[key] !== 0) {
+        showSnackBar(`${key} cannot be empty`, 'error');
+        return;
+      }
+    }
+
+    // Validation
+    const errors = [];
+    const alphaNumericRegex = /^[a-zA-Z0-9 ]*$/;
+    const amountRegex = /^-?\d+(\.\d{1,2})?$/;
+    const facilityPFMValues = ['SB', 'CA', 'TD', 'SPTD', 'OTTD'];
+    const glCodeRegex = /^\d{5}[A-Z]{3}\d{10}$/;
+
+    if (!facilityPFMValues.includes(payload.facilityPFM?.toUpperCase())) {
+      errors.push('A/c Type must be one of SB, CA, TD, SPTD, or OTTD.');
+    } else {
+      payload.facilityPFM = payload.facilityPFM.toUpperCase();
+    }
+
+    if (!glCodeRegex.test(payload.glCode)) {
+      errors.push('GL Code must be 18 characters: 5 digits, 3 uppercase letters, and 10 digits.');
+    }
+
+    ['customerNo', 'acctNbr', 'customerName', 'constitutionCode', 'cusTaxPan', 'uidFlag', 'gstnNo'].forEach((field) => {
+      const val = payload[field];
+      if (val && !alphaNumericRegex.test(val.toString())) {
+        errors.push(`${field} should not contain special characters.`);
+      }
+    });
+
+    ['gdAmount', 'inttAccrued', 'finalAmount'].forEach((field) => {
+      if (payload[field] && !amountRegex.test(payload[field])) {
+        errors.push(`${field} must be a valid amount (up to 2 decimal places).`);
+      }
+    });
+
+    if (errors.length > 0) {
+      showSnackBar(errors.join(' '), 'error');
+      return;
+    }
+
+    setDialogOpen(false);
+    setLoading(true);
+    try {
+      const isNew = row.GD_SR_NO === '0';
+      const url = isNew ? '/dicgcReport/createGranRowData' : '/dicgcReport/updateGranRowData';
+      const response = await callApi(url, payload);
+
+      const newSrNo = isNew ? response : payload.srNo;
+
+      const newRow = {
+        GD_SR_NO: newSrNo,
+        GD_IDENTIFIER: payload.identifier,
+        GD_BID_NO: payload.bidNo,
+        GD_GL_CODE: payload.glCode,
+        GD_EXCLUSION_CATEGORY: payload.exclusionCategory,
+        GD_BRANCH_NO: payload.branchNo,
+        GD_BRANCHNAME: payload.branchName,
+        GD_FACILITY_PFM: payload.facilityPFM,
+        GD_CUSTOMER_NO: payload.customerNo,
+        GD_ACCT_NBR: payload.acctNbr,
+        GD_CUSTOMER_NAME: payload.customerName,
+        GD_AMOUNT: payload.gdAmount,
+        GD_INTT_ACCRUED: payload.inttAccrued,
+        GD_FINAL_AMOUNT: payload.finalAmount,
+        GD_CONSTITUTION_CODE: payload.constitutionCode,
+        GD_CUST_TAX_PAN: payload.cusTaxPan,
+        GD_UID_FLG: payload.uidFlag,
+        GD_GSTN_NO: payload.gstnNo,
+      };
+
+      const tabKey = tabKeys[activeTab];
+      const list = granularData[tabKey] || [];
+
+      const updatedList = isNew ? [newRow, ...list] : list.map((r) => (r.GD_SR_NO === payload.srNo ? newRow : r));
+
+      setGranularData((prev) => ({ ...prev, [tabKey]: updatedList }));
+      showSnackBar('Saved successfully', 'success');
+      setDialogOpen(false);
+    } catch (err) {
+      console.error(err);
+      showSnackBar('Failed to save data. Please try again.', 'error');
+    }
+    setLoading(false);
+  };
+
+  const columns = [
+    { field: 'GD_GL_CODE', headerName: 'GL Code', width: 200, align: 'left', headerAlign: 'left' },
+    { field: 'GD_BRANCH_NO', headerName: 'Branch Code', width: 120, align: 'center', headerAlign: 'center' },
+    { field: 'GD_BRANCHNAME', headerName: 'Branch Name', width: 250, align: 'left', headerAlign: 'left' },
+    { field: 'GD_FACILITY_PFM', headerName: 'A/c Type', width: 120, align: 'center', headerAlign: 'center' },
+    { field: 'GD_CUSTOMER_NO', headerName: 'Customer ID', width: 160, align: 'right', headerAlign: 'right' },
+    { field: 'GD_ACCT_NBR', headerName: 'Account Number', width: 170, align: 'right', headerAlign: 'right' },
+    { field: 'GD_CUSTOMER_NAME', headerName: 'Customer Name', width: 250, align: 'left', headerAlign: 'left' },
+    { field: 'GD_AMOUNT', headerName: 'Amount', width: 200, align: 'right', headerAlign: 'right' },
+    { field: 'GD_INTT_ACCRUED', headerName: 'Interest', width: 200, align: 'right', headerAlign: 'right' },
+    {
+      field: 'GD_FINAL_AMOUNT',
+      headerName: 'Total',
+      width: 200,
+      align: 'right',
+      headerAlign: 'right',
+    },
+    {
+      field: 'GD_CONSTITUTION_CODE',
+      headerName: 'Constitution Code (or other Relevant Exclusion identifier)',
+      width: 200,
+      align: 'center',
+      headerAlign: 'center',
+    },
+    {
+      field: 'GD_CUST_TAX_PAN',
+      headerName: 'Applicable KYC Data 1 (PAN)',
+      width: 200,
+      align: 'center',
+      headerAlign: 'center',
+    },
+    {
+      field: 'GD_GSTN_NO',
+      headerName: 'Applicable KYC Data 2 (GSTIN)',
+      width: 200,
+      align: 'center',
+      headerAlign: 'center',
+    },
+    {
+      field: 'GD_UID_FLG',
+      headerName: 'Applicable KYC Data 3 (Aadhar Number)',
+      width: 120,
+      align: 'center',
+      headerAlign: 'center',
+      renderCell: (params) => {
+        const val = (params.row?.GD_UID_FLG || '').trim().toUpperCase();
+        if (val === 'Y') return <Chip label="Yes" color="success" size="small" />;
+        if (val === 'N') return <Chip label="No" color="error" size="small" />;
+        return null;
+      },
+    },
+    {
+      field: 'actions',
+      headerName: 'Actions',
+      width: 130,
+      type: 'actions',
+      getActions: (params) => [
+        <GridActionsCellItem icon={<Edit />} label="Edit" onClick={() => openEditDialog(params.row)} />,
+        <GridActionsCellItem icon={<Delete />} label="Delete" onClick={() => handleDelete(params.row)} />,
+      ],
+    },
+  ];
+
+  const rows = granularData[tabKeys[activeTab]] || [];
 
   return (
-    <div
-      ref={vantaRef}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        minHeight: "100vh",
-        fontFamily: "Arial, sans-serif",
-        color: "#fff",
-        textAlign: "center",
-      }}
-    >
-      <h1 style={{ fontSize: "48px", margin: "0 0 20px" }}>
-        Welcome to <span style={{ color: "#00eaff" }}>Tranche</span> Module
-      </h1>
-      <p style={{ fontSize: "20px", opacity: 0.8 }}>
-        Secure • Scalable • Finance Ready
-      </p>
-    </div>
+    <Box>
+      <Box display="flex" gap={12} mb={2} justifyContent="space-between" alignItems="center">
+        <Typography justifyContent="space-between" alignItems="center">
+          Download granular data of whole circle for the head
+        </Typography>
+        <Button onClick={handleDownload} startIcon={<FileDownloadIcon />} variant="contained">
+          Download All Branches
+        </Button>
+      </Box>
+
+      <Divider />
+
+      <Box mt={2} sx={{ width: '100%' }}>
+        <ThemeProvider theme={defaultTheme}>
+          <Autocomplete
+            sx={{ width: '60%' }}
+            options={branches}
+            value={selectedBranch}
+            onChange={handleBranchChange}
+            getOptionLabel={(b) => `${b.BRANCH_CODE} - ${b.BRANCH_NAME}`}
+            renderInput={(params) => <TextField {...params} label="Select Branch" />}
+          />
+        </ThemeProvider>
+      </Box>
+
+      {selectedBranch && !loading ? (
+        <>
+          <Box display="flex" justifyContent="space-between" mt={2}>
+            <Tabs
+              value={activeTab}
+              onChange={(_, v) => {
+                setActiveTab(v);
+                setDialogOpen(false);
+              }}
+            >
+              {tabLabels.map((lbl, idx) => (
+                <Tab key={idx} label={lbl} />
+              ))}
+            </Tabs>
+            <Button startIcon={<Add />} onClick={openAddDialog} variant="outlined">
+              Add Row
+            </Button>
+          </Box>
+
+          <Box mt={2}>
+            <CustomizedDataGrid
+              rows={rows}
+              columns={columns}
+              getRowId={(row) => row.GD_SR_NO}
+              pageSize={pageSize}
+              rowsPerPageOptions={[pageSize]}
+              disableSelectionOnClick
+              hideFooterSelectedRowCount
+              sx={{
+                border: 'none',
+                '& .MuiDataGrid-columnHeaders': { borderBottom: '1px solid #ddd' },
+                '& .MuiDataGrid-cell': { borderBottom: '1px solid #eee' },
+              }}
+            />
+          </Box>
+        </>
+      ) : null}
+
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle align="center">
+          {dialogMode === 'add' ? 'Add' : 'Edit'} Row in {tabLabels[activeTab] + ' Category' || 'Selected Category'} at{' '}
+          {selectedBranch ? `${selectedBranch.BRANCH_NAME} (${selectedBranch.BRANCH_CODE})` : 'Selected Branch'}
+        </DialogTitle>
+        <DialogContent>
+          <Box display="flex" flexWrap="wrap" gap={3} mt={2}>
+            {[
+              { label: 'GL Code', field: 'GD_GL_CODE', inputType: 'alphaNumeric', maxLength: '18' },
+              { label: 'A/c Type', field: 'GD_FACILITY_PFM', inputType: 'alphaInput', maxLength: '5' },
+              { label: 'Customer ID', field: 'GD_CUSTOMER_NO', inputType: 'numInput', maxLength: '10' },
+              { label: 'Account No.', field: 'GD_ACCT_NBR', inputType: 'numInput', maxLength: '10' },
+              { label: 'Customer Name', field: 'GD_CUSTOMER_NAME', inputType: 'splAlphaNumeric', maxLength: '20' },
+              {
+                label: 'Constitution Code (or other Relevant Exclusion identifier)',
+                field: 'GD_CONSTITUTION_CODE',
+                inputType: 'numInput',
+                maxLength: '7',
+              },
+              { label: 'Amount', field: 'GD_AMOUNT', inputType: 'amountDecimal', maxLength: '18' },
+              { label: 'Interest', field: 'GD_INTT_ACCRUED', inputType: 'amountDecimal', maxLength: '18' },
+              { label: 'Total', field: 'GD_FINAL_AMOUNT', disabled: true, inputType: 'amountDecimal', maxLength: '18' },
+              {
+                label: 'Applicable KYC Data 1 (PAN)',
+                field: 'GD_CUST_TAX_PAN',
+                inputType: 'panNumber',
+                maxLength: '10',
+              },
+              {
+                label: 'Applicable KYC Data 2 (GSTIN)',
+                field: 'GD_GSTN_NO',
+                inputType: 'alphaNumeric',
+                maxLength: '18',
+              },
+              {
+                label: 'Applicable KYC Data 3 (Aadhar Number)',
+                field: 'GD_UID_FLG',
+                select: true,
+                inputType: 'alphaNumeric',
+              },
+            ].map(({ label, field, disabled, select, inputType, maxLength }) => (
+              <Box key={field} display="flex" flexDirection="column" width="calc(33% - 16px)">
+                <Box mb={0.5} fontWeight="bold">
+                  {label}
+                </Box>
+                {select ? (
+                  <TextField
+                    select
+                    fullWidth
+                    value={currentRow[field] || ''}
+                    onChange={(e) => handleFieldChange(field, e.target.value)}
+                  >
+                    {UID_OPTIONS.map((opt) => (
+                      <MenuItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                ) : (
+                  <FormInput
+                    fullWidth
+                    inputType={inputType}
+                    disabled={disabled}
+                    maxLength={maxLength}
+                    value={currentRow[field] || ''}
+                    onChange={(e) => {
+                      handleFieldChange(field, e.target.value);
+                    }}
+                    debounceDuration={1}
+                  />
+                )}
+              </Box>
+            ))}
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ justifyContent: 'center', alignItems: 'center' }}>
+          <Box>
+            <Button onClick={handleSave} startIcon={<Save />} variant="contained" sx={{ mr: 2 }}>
+              Save
+            </Button>
+            <Button onClick={() => setDialogOpen(false)} variant="outlined" startIcon={<Cancel />}>
+              Cancel
+            </Button>
+          </Box>
+        </DialogActions>
+      </Dialog>
+
+      <LoadingOverlay loading={loading} />
+    </Box>
   );
 }
