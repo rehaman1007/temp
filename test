@@ -1,211 +1,314 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import {
-  PieChart,
-  Pie,
-  Cell,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
+  Box,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+  Typography,
+  Button,
+  Stack,
   Tooltip,
-  CartesianGrid,
-  ResponsiveContainer,
-} from "recharts";
+  IconButton,
+  Chip,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import { Check as CheckIcon, Clear as ClearIcon } from "@mui/icons-material";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
+import AccountCircleIcon from "@mui/icons-material/AccountCircle";
 
-const CHART_COLORS = [
-  "#3b82f6", // blue
-  "#8b5cf6", // purple  
-  "#10b981", // green
-  "#f59e0b", // amber
-  "#06b6d4", // cyan
-  "#ef4444", // red
-];
+export default function CommonRequestScreen({
+  requestType,
+  apiUrl,
+  patchUrl,
+  columns,
+  transformData,
+  defaultSort = { field: "reqDate", sort: "desc" },
+}) {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [remarks, setRemarks] = useState("");
+  const [confirmDialog, setConfirmDialog] = useState({
+    open: false,
+    type: null,
+    rowId: null,
+  });
 
-export default function ChartsComponent({ requestData = [] }) {
-  const total = requestData.length;
-  const hasData = total > 0;
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      const response = await callApi(
+        apiUrl,
+        { requestType: requestType || "CGL_CODE" },
+        "POST"
+      );
+      const result = response?.data || [];
 
-  // Request Type Counts
-  const typeCounts = [
-    { name: "Add", value: requestData.filter((r) => r.changeType === "ADD").length },
-    { name: "Modify", value: requestData.filter((r) => r.changeType === "MODIFY").length },
-    { name: "Delete", value: requestData.filter((r) => r.changeType === "DELETE").length },
-  ];
+      const data = result.map((row) => {
+        const payloadData =
+          row.payload && typeof row.payload === "object" ? row.payload : {};
+        const flattenedObject = {
+          ...row,
+          ...payloadData,
+        };
+        return flattenedObject;
+      });
+      console.log(data);
 
-  // Trend Data grouped by Date
-  const trendData = requestData.reduce((acc, curr) => {
-    const date = curr.reqDate?.split("T")[0] || "Unknown";
-    const existing = acc.find((item) => item.date === date);
-    if (existing) existing.requests++;
-    else acc.push({ date, requests: 1 });
-    return acc;
+      if (transformData) {
+        setRows(transformData(data));
+      } else {
+        setRows(data);
+      }
+
+      if (!data.length) {
+        showSnackBar("No pending requests found", "warning");
+      }
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error fetching data", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
   }, []);
 
-  const CustomTooltip = ({ active, payload, label }) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="bg-white border border-gray-300 rounded-lg p-3 shadow-lg">
-          <p className="text-gray-800 font-medium">{`${label}: ${payload[0].value}`}</p>
-        </div>
-      );
+  const handleConfirm = async () => {
+    if (confirmDialog.type === "reject" && !remarks.trim()) {
+      showSnackBar("Please provide remarks before rejecting", "warning");
+      return;
     }
-    return null;
+
+    try {
+      const payload = {
+        requestId: confirmDialog.rowId,
+        status: confirmDialog.type === "reject" ? "REJECTED" : "ACCEPTED",
+        remarks:
+          confirmDialog.type === "reject" ? remarks.trim() : "No Remarks",
+      };
+      const res = await callApi(patchUrl, payload, "PATCH");
+
+      if (res?.success || res) {
+        showSnackBar(
+          confirmDialog.type === "accept"
+            ? "Request Approved"
+            : "Request Rejected",
+          "success"
+        );
+        fetchData();
+      } else {
+        showSnackBar("Failed to process request", "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error while processing request", "error");
+    }
+    closeConfirmDialog();
   };
+
+  const openConfirmDialog = (type, rowId) => {
+    setConfirmDialog({ open: true, type, rowId });
+    setRemarks("");
+  };
+
+  const closeConfirmDialog = () => {
+    setConfirmDialog({ open: false, type: null, rowId: null });
+    setRemarks("");
+  };
+
+  // Add actions column dynamically
+  const allColumns = [
+    ...columns,
+    {
+      field: "changeType",
+      headerName: "Request Type",
+      flex: 0.5,
+      align: "center",
+      headerAlign: "center",
+      justifyContent: "center",
+      renderCell: (params) => {
+        const val = params.value;
+        return (
+          <Box>
+            {val === "A" ? (
+              <Chip icon={<AddBoxIcon />} label="Added" size="small" />
+            ) : val === "D" ? (
+              <Chip icon={<AutoDeleteIcon />} label="Deleted" size="small" />
+            ) : (
+              <Chip icon={<EditDocumentIcon />} label="Modified" size="small" />
+            )}
+          </Box>
+        );
+      },
+    },
+    {
+      field: "creatorId",
+      headerName: "Creator ID",
+      flex: 0.8,
+      sortable: true,
+      align: "center",
+      headerAlign: "center",
+      justifyContent: "center",
+      renderCell: (params) => {
+        const value = params.value;
+        return (
+          <Box>
+            <Chip icon={<AccountCircleIcon />} label={value} size="small" />
+          </Box>
+        );
+      },
+    },
+    {
+      field: "reqDate",
+      headerName: "Requested Date",
+      flex: 1,
+      sortable: true,
+      align: "center",
+      headerAlign: "center",
+      justifyContent: "center",
+      renderCell: (params) => {
+        const isoString = params.value;
+
+        if (!isoString) {
+          return null; // Handle cases where the date is not available
+        }
+
+        try {
+          const date = new Date(isoString);
+          const options = {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: true, // Use 12-hour format with AM/PM
+            timeZone: "Asia/Calcutta",
+          };
+
+          const formattedDateTime = date.toLocaleString("en-US", options);
+          return <Box>{formattedDateTime}</Box>;
+        } catch (error) {
+          console.error("Invalid date format:", error);
+          return <Box>{isoString}</Box>;
+        }
+      },
+    },
+    {
+      field: "actions",
+      headerName: "Actions",
+      sortable: false,
+      flex: 0.6,
+      align: "center",
+      headerAlign: "center",
+      justifyContent: "center",
+      renderCell: (params) => (
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          justifyContent="center"
+        >
+          <Tooltip title="Approve">
+            <IconButton
+              size="medium"
+              onClick={() => openConfirmDialog("accept", params.row.id)}
+              color="success"
+            >
+              <CheckIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Reject">
+            <IconButton
+              size="medium"
+              onClick={() => openConfirmDialog("reject", params.row.id)}
+              color="error"
+            >
+              <ClearIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
+  ];
 
   return (
-    <div className="w-full p-6 bg-gray-50">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Donut Chart - Request Types */}
-        <div className="bg-white rounded-lg shadow-lg p-6">
-          <h3 className="text-xl font-semibold text-gray-800 mb-4">Request Types</h3>
-          <div className="flex items-center justify-center">
-            <div className="relative">
-              <PieChart width={280} height={280}>
-                <Pie
-                  data={hasData ? typeCounts : [{ name: "No Data", value: 1 }]}
-                  dataKey="value"
-                  nameKey="name"
-                  innerRadius={70}
-                  outerRadius={110}
-                  startAngle={90}
-                  endAngle={-270}
-                  paddingAngle={3}
-                >
-                  {(hasData ? typeCounts : [{ name: "No Data", value: 1 }]).map((_, i) => (
-                    <Cell key={i} fill={hasData ? CHART_COLORS[i % CHART_COLORS.length] : "#e5e7eb"} />
-                  ))}
-                </Pie>
-              </PieChart>
+    <Box>
+      <DataGrid
+        rows={rows}
+        columns={allColumns}
+        disableRowSelectionOnClick
+        pageSizeOptions={[5, 10, 25, 50]}
+        initialState={{
+          pagination: { paginationModel: { pageSize: 10, page: 0 } },
+          sorting: { sortModel: [defaultSort] },
+        }}
+        getRowId={(row) => row.id}
+        loading={loading}
+        sx={{
+          height: 600,
+          width: "100%",
+          "& .MuiDataGrid-cell:focus": { outline: "none" },
+        }}
+      />
 
-              {/* Center Text */}
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                {hasData ? (
-                  <>
-                    <span className="text-3xl font-bold text-gray-800">{total}</span>
-                    <span className="text-sm text-gray-500">Requests</span>
-                  </>
-                ) : (
-                  <span className="text-sm text-gray-500">No Data</span>
-                )}
-              </div>
-            </div>
-
-            {/* Legend */}
-            <div className="ml-8 space-y-3">
-              {(hasData ? typeCounts : [{ name: "No Data", value: 0 }]).map((entry, index) => (
-                <div key={index} className="flex items-center">
-                  <div
-                    className="w-4 h-4 rounded-sm mr-3"
-                    style={{
-                      backgroundColor: hasData ? CHART_COLORS[index % CHART_COLORS.length] : "#e5e7eb",
-                    }}
-                  />
-                  <span className="text-sm font-medium text-gray-800">{entry.name}: {entry.value}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Trend Chart */}
-        <div className="bg-white rounded-lg shadow-lg p-6">
-          <h3 className="text-xl font-semibold text-gray-800 mb-4">Request Trends</h3>
-          {hasData ? (
-            <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={trendData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis 
-                  dataKey="date" 
-                  stroke="#6b7280"
-                  fontSize={12}
-                />
-                <YAxis 
-                  stroke="#6b7280"
-                  fontSize={12}
-                />
-                <Tooltip content={<CustomTooltip />} />
-                <Line 
-                  type="monotone" 
-                  dataKey="requests" 
-                  stroke="#06b6d4" 
-                  strokeWidth={3}
-                  dot={{ fill: "#06b6d4", strokeWidth: 2, r: 4 }}
-                  activeDot={{ r: 6, fill: "#06b6d4" }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-70">
-              <span className="text-gray-500">No Trend Data Available</span>
-            </div>
+      <Dialog
+        open={confirmDialog.open}
+        onClose={closeConfirmDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          {confirmDialog.type === "accept"
+            ? "Confirm Approval"
+            : "Confirm Rejection"}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ p: 2 }}>
+            {confirmDialog.type === "accept"
+              ? "Are you sure you want to approve this request?"
+              : "Are you sure you want to reject this request? Please enter remarks."}
+          </Typography>
+          {confirmDialog.type === "reject" && (
+            <TextField
+              fullWidth
+              label="Rejection Remarks"
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value.slice(0, 100))}
+              multiline
+              rows={2}
+              margin="dense"
+              inputProps={{ maxLength: 100 }}
+            />
           )}
-        </div>
-      </div>
-    </div>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={closeConfirmDialog}
+            color="inherit"
+            variant="contained"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirm}
+            color={confirmDialog.type === "accept" ? "success" : "error"}
+            variant="contained"
+          >
+            {confirmDialog.type === "accept" ? "Approve" : "Reject"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
   );
 }
-
-
-
-const validateRow = (row, index) => {
-    const rowNumber = index + 2;
-    const rowErrors = [];
-
-    const {
-      UCN: ucn,
-      "Firm Registration No.": frn,
-      "Firm Name": firmName,
-      "PAN NO.": pan,
-      "GSTIN NO.": gstin,
-      "Address Line": address,
-      City: city,
-      "State Name": state,
-      "District Name": district,
-      "Pin Code": pin,
-      "Primary Mobile No.": mobile,
-      "Point of Contact": contactName,
-      "Point of Contact's Designation": contactDesig,
-      "Point of Contact Email": contactEmail,
-      "Type of Establishment": establishment,
-    } = row;
-
-    /**
-     * todo:
-     *
-     * pan is null then don't check
-     * gstin is null then don't check
-     * ucn is null then don't check
-     * frn no : whitelist '/' char
-     *
-     */
-
-    if (!isOnlyNumbers(ucn)) rowErrors.push("UCN must be numbers only");
-    if (!isAlphanumeric(frn))
-      rowErrors.push("Firm Registration No. must be alphanumeric");
-    if (!firmName?.trim()) rowErrors.push("Firm Name is required");
-    if (!isPAN(pan)) rowErrors.push("Invalid PAN (alphanumeric only)");
-    if (!isGSTIN(gstin)) rowErrors.push("Invalid GSTIN (alphanumeric only)");
-    if (!isAddress(address))
-      rowErrors.push("Address must contain only alphabets");
-    if (!isAlpha(city)) rowErrors.push("City must contain only alphabets");
-    if (!isAlpha(state)) rowErrors.push("State must contain only alphabets");
-    if (!isAlpha(district))
-      rowErrors.push("District must contain only alphabets");
-    if (!isPinCode(pin)) rowErrors.push("Pin Code must be 6 digits");
-    if (!isMobile(mobile)) rowErrors.push("Mobile number must be 10 digits");
-    if (!isAlpha(contactName))
-      rowErrors.push("Contact Name must contain only text");
-    if (!isAlpha(contactDesig))
-      rowErrors.push("Designation must contain only text");
-    if (!contactEmail?.trim()) rowErrors.push("Contact Email is required");
-
-    if (
-      !["partnership firm", "proprietorship firm", "other"].includes(
-        establishment?.toString().toLowerCase()
-      )
-    ) {
-      rowErrors.push("Invalid Type of Establishment");
-    }
-
-    return { rowNumber, isValid: rowErrors.length === 0, errors: rowErrors };
-  };
