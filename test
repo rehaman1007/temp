@@ -1,3 +1,4 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -13,23 +14,26 @@ import {
   Tooltip,
   Chip,
   MenuItem,
+  CircularProgress,
 } from "@mui/material";
 import { DataGrid } from "@mui/x-data-grid";
-import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Edit as EditIcon,
   Add as AddIcon,
   Close as CloseIcon,
 } from "@mui/icons-material";
-import useApi from "../../../hooks/useApi";
 import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
+import useApi from "../../../hooks/useApi";
 import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 
 export default function CircleMasterTab() {
   const [rows, setRows] = useState([]);
+  const [zones, setZones] = useState([]);
   const [open, setOpen] = useState(false);
-  const { callApi } = useApi();
   const [editingId, setEditingId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const snackbar = useCustomSnackbar();
+  const { callApi } = useApi();
 
   const [circleData, setCircleData] = useState({
     circleCode: "",
@@ -37,248 +41,134 @@ export default function CircleMasterTab() {
     zoneCode: "",
     status: "Active",
   });
-  const [zones, setZones] = useState([]);
   const [errors, setErrors] = useState({});
-  const snackbar = useCustomSnackbar();
 
-  // --- throttle snackbars so they don't spam while typing ---
+  // --- debounce/snackbar control ---
   const snackGateRef = useRef(true);
   const notifyOnce = (msg, variant = "warning") => {
     if (!snackGateRef.current) return;
     snackGateRef.current = false;
     snackbar(msg, variant);
-    setTimeout(() => (snackGateRef.current = true), 800);
+    setTimeout(() => (snackGateRef.current = true), 900);
   };
 
+  // --- Fetch Data ---
   const fetchData = async () => {
-    const response1 = await callApi("/CM/zone-codes", null, "GET");
-    setZones(response1.data);
-    const response = await callApi("/CM/circle-codes", null, "GET");
-    setRows(response ? response.data ?? [] : []);
+    try {
+      setLoading(true);
+      const [zonesRes, circlesRes] = await Promise.all([
+        callApi("/CM/zone-codes", null, "GET"),
+        callApi("/CM/circle-codes", null, "GET"),
+      ]);
+      setZones(zonesRes?.data ?? []);
+      setRows(circlesRes?.data ?? []);
+    } catch (err) {
+      snackbar("Failed to fetch data", "error");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
     fetchData();
-  }, [zones, rows]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // --- validators ---
+  // --- Validation Rules ---
   const reDigits = /^[0-9]*$/;
   const reDesc = /^[a-zA-Z0-9\s/&()-]*$/;
 
   const validateField = (name, value) => {
-    let err = "";
+    switch (name) {
+      case "circleCode":
+        if (!value.trim()) return "Circle Code is required";
+        if (!reDigits.test(value)) return "Only digits allowed";
+        if (value.length !== 3) return "Must be 3 digits";
+        break;
 
-    if (name === "circleCode") {
-      if (!value.trim()) err = "Circle Code is required";
-      else if (!reDigits.test(value)) err = "Only digits allowed";
-      else if (value.length !== 3) err = "Must be 3 digits";
-    }
-    if (name === "circleName") {
-      if (!value.trim()) err = "Circle Name is required";
-      else if (!reDesc.test(value)) err = "Only letters, spaces";
-    }
-    if (name === "zoneCode") {
-      if (!value.trim()) err = "Zone Code is required";
-      else if (!reDesc.test(value)) err = "Only letters, digits ";
-    }
+      case "circleName":
+        if (!value.trim()) return "Circle Name is required";
+        if (!reDesc.test(value)) return "Invalid characters";
+        break;
 
-    return err;
+      case "zoneCode":
+        if (!value.trim()) return "Zone Code is required";
+        if (!reDesc.test(value)) return "Only letters and digits allowed";
+        break;
+
+      default:
+        return "";
+    }
+    return "";
   };
 
-  const isFormValid = () => {
-    return (
+  const isFormValid = useMemo(
+    () =>
       !validateField("circleCode", circleData.circleCode) &&
       !validateField("circleName", circleData.circleName) &&
-      !validateField("zoneCode", circleData.zoneCode)
-    );
-  };
+      !validateField("zoneCode", circleData.zoneCode),
+    [circleData]
+  );
 
-  // --- live validation on change + snackbars for bad keystrokes ---
   const handleChange = (e) => {
     const { name, value } = e.target;
-
-    // Allow soft typing for segmentCode: block invalid keystroke immediately
     if (name === "circleCode") {
       if (!reDigits.test(value)) {
         notifyOnce("Circle Code accepts digits only");
-        return; // block update
+        return;
       }
       if (value.length > 3) {
         notifyOnce("Circle Code must be 3 digits");
-        return; // block update
-      }
-    }
-    if (name === "circleName") {
-      // soft block invalid characters
-      if (!reDesc.test(value)) {
-        notifyOnce("Invalid character in Circle Name");
         return;
       }
-    }
-    if (name === "zoneCode") {
-      if (!reDesc.test(value)) {
-        notifyOnce("zoneCode accepts digits and letters");
-        return; // block update
-      }
+    } else if (name === "circleName" && !reDesc.test(value)) {
+      notifyOnce("Invalid character in Circle Name");
+      return;
+    } else if (name === "zoneCode" && !reDesc.test(value)) {
+      notifyOnce("Zone Code accepts only letters/digits");
+      return;
     }
 
     setCircleData((prev) => ({ ...prev, [name]: value }));
-
-    setErrors((prev) => ({
-      ...prev,
-      [name]: validateField(name, value),
-    }));
-  };
-
-  const validateFormAndSet = () => {
-    const newErrors = {
-      circleCode: validateField("circleCode", circleData.circleCode),
-      circleName: validateField("circleName", circleData.circleName),
-      zoneCode: validateField("zoneCode", circleData.zoneCode),
-    };
-    setErrors(newErrors);
-    const ok =
-      !newErrors.circleCode && !newErrors.circleName && !newErrors.zoneCode;
-
-    if (!ok) notifyOnce("Please fix validation errors", "error");
-    return ok;
+    setErrors((prev) => ({ ...prev, [name]: validateField(name, value) }));
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!validateFormAndSet()) return;
+    const allErrors = {
+      circleCode: validateField("circleCode", circleData.circleCode),
+      circleName: validateField("circleName", circleData.circleName),
+      zoneCode: validateField("zoneCode", circleData.zoneCode),
+    };
+    setErrors(allErrors);
 
-    const apiEndpoint = "/CR/create-request";
-    const method = "POST";
-    const changeType = editingId ? "UPDATE" : "ADD";
+    const valid = Object.values(allErrors).every((v) => !v);
+    if (!valid) {
+      notifyOnce("Please fix validation errors", "error");
+      return;
+    }
 
     const payloadData = {
       requestType: "CIRCLE",
-      changeType: "ADD",
+      changeType: editingId ? "UPDATE" : "ADD",
       targetId: circleData.circleCode,
       payload: {
         circleCode: circleData.circleCode.trim(),
         circleName: circleData.circleName.trim(),
         zoneCode: circleData.zoneCode.trim(),
-        description: circleData.description.trim(),
       },
     };
 
     try {
-      const response = await callApi(apiEndpoint, payloadData, method);
+      const response = await callApi("/CR/create-request", payloadData, "POST");
       if (response) {
-        snackbar(editingId ? "Circle updated" : " Circle created", "success");
-        fetchData();
+        snackbar(editingId ? "Circle updated" : "Circle created", "success");
         handleClose();
-      } else {
-        snackbar("No response from server", "error");
+        fetchData();
       }
-    } catch (error) {
-      snackbar(error?.message || "Request failed", "error");
+    } catch (err) {
+      snackbar(err?.message || "Request failed", "error");
     }
-  };
-
-  const columns = useMemo(
-    () => [
-      {
-        field: "circleCode",
-        headerName: "Circle Code",
-        flex: 2,
-        sortable: true,
-      },
-      {
-        field: "circleName",
-        headerName: "Circle Name",
-        flex: 2,
-        sortable: true,
-      },
-
-      {
-        field: "zoneCode",
-        headerName: "Zone Code",
-        flex: 3,
-        sortable: true,
-        valueGetter: (params) => {
-          const zoneId = params.value;
-          const zone = zones.find((item) => item.id === String(zoneId));
-          return zone ? zone.description : "NA";
-        },
-      },
-
-      {
-        field: "status",
-        headerName: "Status",
-        flex: 1,
-        sortable: true,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => (
-          <Box
-            sx={{ display: "flex", justifyContent: "center", width: "100%" }}
-          >
-            <Chip
-              sx={{
-                p: 0.5,
-                mt: 0.8,
-                width: "90%",
-                color:
-                  params.row.status === "Active"
-                    ? "success.main"
-                    : "warning.main",
-                "& .MuiChip-icon": {
-                  color:
-                    params.row.status === "Active"
-                      ? "success.main"
-                      : "warning.main",
-                },
-              }}
-              icon={<OnlinePredictionIcon />}
-              label={params.row.status || "Active"}
-              color="primary"
-            />
-          </Box>
-        ),
-      },
-      {
-        field: "actions",
-        headerName: "Actions",
-        sortable: false,
-        flex: 1,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => (
-          <Stack
-            direction="row"
-            sx={{ mt: 1.5 }}
-            spacing={1}
-            alignItems="center"
-            justifyContent="center"
-          >
-            <Tooltip title="Edit">
-              <IconButton
-                size="small"
-                onClick={() => handleEdit(params.row)}
-                color="primary"
-              >
-                <EditIcon fontSize="inherit" />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-        ),
-      },
-    ],
-    []
-  );
-
-  const resetForm = () => {
-    setCircleData({
-      circleCode: "",
-      circleName: "",
-      zoneCode: "",
-      status: "Active",
-    });
-    setErrors({});
-    setEditingId(null);
   };
 
   const handleEdit = (row) => {
@@ -286,11 +176,16 @@ export default function CircleMasterTab() {
       circleCode: String(row.circleCode ?? ""),
       circleName: String(row.circleName ?? ""),
       zoneCode: String(row.zoneCode ?? ""),
-
       status: row.status || "Active",
     });
     setEditingId(row.circleCode);
     setOpen(true);
+  };
+
+  const resetForm = () => {
+    setCircleData({ circleCode: "", circleName: "", zoneCode: "", status: "Active" });
+    setErrors({});
+    setEditingId(null);
   };
 
   const handleClose = () => {
@@ -298,49 +193,107 @@ export default function CircleMasterTab() {
     resetForm();
   };
 
+  // --- Columns ---
+  const columns = useMemo(
+    () => [
+      { field: "circleCode", headerName: "Circle Code", flex: 1.2 },
+      { field: "circleName", headerName: "Circle Name", flex: 2 },
+      {
+        field: "zoneCode",
+        headerName: "Zone Description",
+        flex: 2,
+        valueGetter: (params) => {
+          const zone = zones.find((z) => String(z.id) === String(params.value));
+          return zone ? zone.description : "N/A";
+        },
+      },
+      {
+        field: "status",
+        headerName: "Status",
+        flex: 1,
+        align: "center",
+        headerAlign: "center",
+        renderCell: (params) => (
+          <Chip
+            icon={<OnlinePredictionIcon />}
+            label={params.row.status || "Active"}
+            color={params.row.status === "Active" ? "success" : "warning"}
+            variant="outlined"
+            sx={{ fontWeight: 500 }}
+          />
+        ),
+      },
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.8,
+        align: "center",
+        headerAlign: "center",
+        renderCell: (params) => (
+          <Tooltip title="Edit">
+            <IconButton color="primary" size="small" onClick={() => handleEdit(params.row)}>
+              <EditIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        ),
+      },
+    ],
+    [zones]
+  );
+
   return (
-    <Box>
-      <Box>
-        <Fab
-          onClick={() => setOpen(true)}
-          color="primary"
-          variant="extended"
-          sx={{
-            position: "fixed",
-            borderRadius: 1,
-            fontSize: "15px",
-            bottom: (theme) => theme.spacing(8),
-            right: (theme) => theme.spacing(4),
-            zIndex: 1000,
+    <Box sx={{ p: 2 }}>
+      {loading ? (
+        <Stack alignItems="center" justifyContent="center" sx={{ height: "60vh" }}>
+          <CircularProgress size={40} />
+        </Stack>
+      ) : (
+        <DataGrid
+          rows={rows}
+          columns={columns}
+          disableRowSelectionOnClick
+          getRowId={(row) => row.circleCode}
+          pageSizeOptions={[5, 10, 25, 50]}
+          initialState={{
+            pagination: { paginationModel: { pageSize: 10, page: 0 } },
+            sorting: { sortModel: [{ field: "circleCode", sort: "asc" }] },
           }}
-        >
-          <AddIcon sx={{ mr: 1 }} />
-          Create
-        </Fab>
-      </Box>
+          sx={{
+            "& .MuiDataGrid-columnHeaders": { backgroundColor: "#f9f9f9" },
+            border: "none",
+            height: 500,
+          }}
+          localeText={{
+            noRowsLabel: "No Circle Records Found",
+          }}
+        />
+      )}
 
-      <DataGrid
-        rows={rows}
-        columns={columns}
-        disableRowSelectionOnClick
-        pageSizeOptions={[5, 10, 25, 50]}
-        initialState={{
-          pagination: { paginationModel: { pageSize: 10, page: 0 } },
-          sorting: { sortModel: [{ field: "circleCode", sort: "asc" }] },
+      {/* Floating Create Button */}
+      <Fab
+        onClick={() => setOpen(true)}
+        color="primary"
+        variant="extended"
+        sx={{
+          position: "fixed",
+          borderRadius: 1,
+          fontSize: "15px",
+          bottom: (theme) => theme.spacing(8),
+          right: (theme) => theme.spacing(4),
+          zIndex: 1200,
         }}
-        getRowId={(row) => row.circleCode}
-      />
+      >
+        <AddIcon sx={{ mr: 1 }} />
+        Create
+      </Fab>
 
-      <Dialog open={open} onClose={handleClose}>
-        <Box component="form" onSubmit={handleSubmit} sx={{ width: 500 }}>
+      {/* Dialog Form */}
+      <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
+        <Box component="form" onSubmit={handleSubmit}>
           <DialogTitle>
-            <Stack
-              direction="row"
-              justifyContent="space-between"
-              alignItems="center"
-            >
+            <Stack direction="row" justifyContent="space-between" alignItems="center">
               <Typography variant="h6" color="primary">
-                {editingId ? "Edit Circle Code" : "Add New Circle Code"}
+                {editingId ? "Edit Circle" : "Add Circle"}
               </Typography>
               <IconButton onClick={handleClose}>
                 <CloseIcon />
@@ -349,77 +302,66 @@ export default function CircleMasterTab() {
           </DialogTitle>
 
           <DialogContent>
-            <Grid container spacing={2} sx={{ pt: 1 }}>
-              <Box>
-                <Box>
-                  <Grid item xs={12} sx={{ mt: 2, width: 450, mb: 3 }}>
-                    <TextField
-                      fullWidth
-                      label="Circle Code"
-                      name="circleCode"
-                      value={circleData.circleCode}
-                      onChange={handleChange}
-                      disabled={!!editingId}
-                      error={!!errors.circleCode}
-                      helperText={errors.circleCode || "Exactly 3 digits"}
-                      inputProps={{ maxLength: 3, inputMode: "numeric" }}
-                    />
-                  </Grid>
+            <Grid container spacing={2} sx={{ mt: 1 }}>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  label="Circle Code"
+                  name="circleCode"
+                  value={circleData.circleCode}
+                  onChange={handleChange}
+                  disabled={!!editingId}
+                  error={!!errors.circleCode}
+                  helperText={errors.circleCode || "Exactly 3 digits"}
+                  inputProps={{ maxLength: 3, inputMode: "numeric" }}
+                />
+              </Grid>
 
-                  <Grid item xs={12}>
-                    <TextField
-                      fullWidth
-                      label="Circle Name"
-                      name="circleName"
-                      value={circleData.circleName}
-                      onChange={handleChange}
-                      error={!!errors.circleName}
-                      inputProps={{ maxLength: 99 }}
-                      helperText={
-                        errors.circleName ||
-                        "Allowed: letters, numbers, spaces, / & ( ) -"
-                      }
-                      multiline
-                      rows={3}
-                    />
-                  </Grid>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  label="Circle Name"
+                  name="circleName"
+                  value={circleData.circleName}
+                  onChange={handleChange}
+                  error={!!errors.circleName}
+                  helperText={
+                    errors.circleName || "Allowed: letters, digits, spaces, / & ( ) -"
+                  }
+                  multiline
+                  rows={2}
+                />
+              </Grid>
 
-                  <Grid item xs={12} sx={{ mt: 2, width: 450, mb: 3 }}>
-                    <TextField
-                      fullWidth
-                      select
-                      label="Zone Code"
-                      name="zoneCode"
-                      value={circleData.zoneCode}
-                      onChange={handleChange}
-                      error={!!errors.zoneCode}
-                      helperText={errors.zoneCode || "Exactly 4 digits"}
-                      inputProps={{ maxLength: 4, inputMode: "numeric" }}
-                    >
-                      {zones.map((zone) => (
-                        <MenuItem key={zone.id} value={zone.id}>
-                          {zone.description}
-                        </MenuItem>
-                      ))}
-                    </TextField>
-                  </Grid>
-                </Box>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  select
+                  label="Zone Code"
+                  name="zoneCode"
+                  value={circleData.zoneCode}
+                  onChange={handleChange}
+                  error={!!errors.zoneCode}
+                  helperText={errors.zoneCode || "Select corresponding Zone"}
+                >
+                  {zones.map((zone) => (
+                    <MenuItem key={zone.id} value={zone.id}>
+                      {zone.description}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              </Grid>
 
-                <Box>
-                  <Grid
-                    sx={{ display: "flex", justifyContent: "flex-end", mt: 1 }}
-                  >
-                    <Button
-                      type="submit"
-                      variant="contained"
-                      startIcon={editingId ? <EditIcon /> : <AddIcon />}
-                      disabled={!isFormValid()}
-                    >
-                      {editingId ? "Update" : "Add"}
-                    </Button>
-                  </Grid>
-                </Box>
-              </Box>
+              <Grid item xs={12} display="flex" justifyContent="flex-end">
+                <Button
+                  type="submit"
+                  variant="contained"
+                  startIcon={editingId ? <EditIcon /> : <AddIcon />}
+                  disabled={!isFormValid}
+                >
+                  {editingId ? "Update" : "Add"}
+                </Button>
+              </Grid>
             </Grid>
           </DialogContent>
         </Box>
