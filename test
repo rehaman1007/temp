@@ -9,18 +9,48 @@ import {
   Grid,
   IconButton,
   Typography,
+  Paper,
   List,
   ListItem,
   ListItemText,
-  ListItemButton,
-  Paper,
 } from "@mui/material";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import useApi from "../../../hooks/useApi";
 import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 import LockOutlineIcon from "@mui/icons-material/LockOutline";
 import LockOpenIcon from "@mui/icons-material/LockOpen";
 import { validations } from "../../../utils/Validations";
+
+import { DndProvider, useDrag, useDrop } from "react-dnd";
+import { HTML5Backend } from "react-dnd-html5-backend";
+
+const ItemTypes = { PERMISSION: "permission" };
+
+function DraggablePermission({ permission, onDrop, listType }) {
+  const [{ isDragging }, drag] = useDrag({
+    type: ItemTypes.PERMISSION,
+    item: { permission, from: listType },
+    collect: (monitor) => ({ isDragging: !!monitor.isDragging() }),
+  });
+
+  const [, drop] = useDrop({
+    accept: ItemTypes.PERMISSION,
+    drop: (item) => onDrop(item, listType),
+  });
+
+  return (
+    <ListItem
+      ref={(node) => drag(drop(node))}
+      sx={{
+        opacity: isDragging ? 0.5 : 1,
+        cursor: "grab",
+      }}
+      divider
+    >
+      <ListItemText primary={permission.title} />
+    </ListItem>
+  );
+}
 
 export default function RolesDialog({ open, onClose, form, setForm, canSave, fetchRoles }) {
   const user = JSON.parse(sessionStorage.getItem("user"));
@@ -29,19 +59,15 @@ export default function RolesDialog({ open, onClose, form, setForm, canSave, fet
 
   const [allPermissions, setAllPermissions] = useState([]);
   const [assignedPermissions, setAssignedPermissions] = useState([]);
+  const [availableFilter, setAvailableFilter] = useState("");
+  const [assignedFilter, setAssignedFilter] = useState("");
 
-  // Load permissions when dialog opens
   useEffect(() => {
     if (open) {
       (async () => {
         const res = await callApi("/UM/permissions/list", {}, "GET");
-        if (res?.result?.status) {
-          setAllPermissions(res.result.data || []);
-        } else {
-          setAllPermissions([]);
-        }
-
-        // Initialize assigned permissions from form if editing
+        if (res?.result?.status) setAllPermissions(res.result.data || []);
+        else setAllPermissions([]);
         setAssignedPermissions(form.permissions || []);
       })();
     }
@@ -52,22 +78,19 @@ export default function RolesDialog({ open, onClose, form, setForm, canSave, fet
       snackbar("Kindly fill all the required fields.", "error");
       return;
     }
-
     let subDialog = {
       roleId: form.roleId,
       roleName: form.roleName,
       description: form.description,
       permissions: assignedPermissions.map((p) => p.id),
     };
-
     let payload = {
       requestType: type,
       targetRoleId: form.roleId,
       requestorUserId: user.userId,
       requestPayload: JSON.stringify(subDialog),
     };
-
-    let res = await callApi("/UM/role/create-role-request", payload, "POST");
+    const res = await callApi("/UM/role/create-role-request", payload, "POST");
     if (res?.result?.status) {
       snackbar(res?.result?.message, "success");
       onClose();
@@ -76,132 +99,161 @@ export default function RolesDialog({ open, onClose, form, setForm, canSave, fet
   };
 
   const handleChange = (data, key, e, type) => {
-    let result = validations(type, e.target.value);
-    if (result === "") {
-      setForm({ ...data, [key]: e.target.value });
+    const result = validations(type, e.target.value);
+    if (result === "") setForm({ ...data, [key]: e.target.value });
+    else snackbar(result, "error");
+  };
+
+  const availablePermissions = useMemo(
+    () =>
+      allPermissions
+        .filter((p) => !assignedPermissions.some((ap) => ap.id === p.id))
+        .filter((p) => p.title.toLowerCase().includes(availableFilter.toLowerCase())),
+    [allPermissions, assignedPermissions, availableFilter]
+  );
+
+  const filteredAssignedPermissions = useMemo(
+    () =>
+      assignedPermissions.filter((p) =>
+        p.title.toLowerCase().includes(assignedFilter.toLowerCase())
+      ),
+    [assignedPermissions, assignedFilter]
+  );
+
+  const handleDrop = (item, targetList) => {
+    const { permission, from } = item;
+    if (from === targetList) return; // dropped in same list
+
+    if (targetList === "assigned") {
+      setAssignedPermissions([...assignedPermissions, permission]);
     } else {
-      snackbar(result, "error");
+      setAssignedPermissions(assignedPermissions.filter((p) => p.id !== permission.id));
     }
   };
 
-  // Move permission from available to assigned
-  const assignPermission = (permission) => {
-    setAssignedPermissions([...assignedPermissions, permission]);
-  };
-
-  // Remove permission from assigned
-  const removePermission = (permission) => {
-    setAssignedPermissions(assignedPermissions.filter((p) => p.id !== permission.id));
-  };
-
-  // Filter available permissions
-  const availablePermissions = allPermissions.filter(
-    (p) => !assignedPermissions.some((ap) => ap.id === p.id)
-  );
-
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      fullWidth
-      maxWidth="md"
-      PaperProps={{ sx: { minWidth: 800, maxWidth: "45vw" } }}
-    >
-      <DialogTitle>{form.roleId ? "Edit Role" : "Add New Role"}</DialogTitle>
+    <DndProvider backend={HTML5Backend}>
+      <Dialog
+        open={open}
+        onClose={onClose}
+        fullWidth
+        maxWidth="lg"
+        PaperProps={{ sx: { minWidth: 900, maxWidth: "70vw" } }}
+      >
+        <DialogTitle>{form.roleId ? "Edit Role" : "Add New Role"}</DialogTitle>
 
-      {form.roleId && (
-        <IconButton
-          aria-label="role status"
-          sx={(theme) => ({
-            position: "absolute",
-            right: 10,
-            top: 8,
-            color: theme.palette.grey[500],
-          })}
-          onClick={() => {
-            onSave(form.status === "ACTIVE" ? "BLOCK" : "UNBLOCK");
-          }}
-        >
-          {form.status === "ACTIVE" ? (
-            <LockOutlineIcon color="error" />
-          ) : (
-            <LockOpenIcon color="success" />
-          )}
-          <Typography variant="caption">
-            {form.status === "ACTIVE" ? "BLOCK" : "UNBLOCK"}
-          </Typography>
-        </IconButton>
-      )}
+        {form.roleId && (
+          <IconButton
+            aria-label="role status"
+            sx={(theme) => ({
+              position: "absolute",
+              right: 10,
+              top: 8,
+              color: theme.palette.grey[500],
+            })}
+            onClick={() => onSave(form.status === "ACTIVE" ? "BLOCK" : "UNBLOCK")}
+          >
+            {form.status === "ACTIVE" ? (
+              <LockOutlineIcon color="error" />
+            ) : (
+              <LockOpenIcon color="success" />
+            )}
+            <Typography variant="caption">
+              {form.status === "ACTIVE" ? "BLOCK" : "UNBLOCK"}
+            </Typography>
+          </IconButton>
+        )}
 
-      <DialogContent>
-        <Stack spacing={2} sx={{ mt: 1 }}>
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={4}>
-              <TextField
-                label="Role Name *"
-                slotProps={{ htmlInput: { maxLength: 50 } }}
-                value={form.roleName}
-                onChange={(e) => handleChange(form, "roleName", e, "inputValue")}
-                fullWidth
-                size="medium"
-              />
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Grid container spacing={2}>
+              <Grid item xs={12} md={4}>
+                <TextField
+                  label="Role Name *"
+                  slotProps={{ htmlInput: { maxLength: 50 } }}
+                  value={form.roleName}
+                  onChange={(e) => handleChange(form, "roleName", e, "inputValue")}
+                  fullWidth
+                  size="medium"
+                />
+              </Grid>
+              <Grid item xs={12} md={8}>
+                <TextField
+                  label="Description *"
+                  slotProps={{ htmlInput: { maxLength: 100 } }}
+                  value={form.description}
+                  onChange={(e) => handleChange(form, "description", e, "certainSpecialChars")}
+                  fullWidth
+                  size="medium"
+                />
+              </Grid>
             </Grid>
-            <Grid item xs={12} md={8}>
-              <TextField
-                label="Description *"
-                slotProps={{ htmlInput: { maxLength: 100 } }}
-                value={form.description}
-                onChange={(e) => handleChange(form, "description", e, "certainSpecialChars")}
-                fullWidth
-                size="medium"
-              />
-            </Grid>
-          </Grid>
 
-          {/* Permissions Transfer List */}
-          <Grid container spacing={2}>
-            <Grid item xs={6}>
-              <Typography variant="subtitle1">Available Permissions</Typography>
-              <Paper sx={{ maxHeight: 200, overflow: "auto" }}>
-                <List dense>
-                  {availablePermissions.map((p) => (
-                    <ListItem key={p.id} disablePadding>
-                      <ListItemButton onClick={() => assignPermission(p)}>
-                        <ListItemText primary={p.title} />
-                      </ListItemButton>
-                    </ListItem>
-                  ))}
-                </List>
-              </Paper>
-            </Grid>
-            <Grid item xs={6}>
-              <Typography variant="subtitle1">Assigned Permissions</Typography>
-              <Paper sx={{ maxHeight: 200, overflow: "auto" }}>
-                <List dense>
-                  {assignedPermissions.map((p) => (
-                    <ListItem key={p.id} disablePadding>
-                      <ListItemButton onClick={() => removePermission(p)}>
-                        <ListItemText primary={p.title} />
-                      </ListItemButton>
-                    </ListItem>
-                  ))}
-                </List>
-              </Paper>
-            </Grid>
-          </Grid>
-        </Stack>
-      </DialogContent>
+            <Grid container spacing={2} sx={{ mt: 2 }}>
+              {/* Available Permissions */}
+              <Grid item xs={6}>
+                <Typography variant="subtitle1">Available Permissions</Typography>
+                <TextField
+                  size="small"
+                  placeholder="Search..."
+                  fullWidth
+                  sx={{ mb: 1 }}
+                  value={availableFilter}
+                  onChange={(e) => setAvailableFilter(e.target.value)}
+                />
+                <Paper sx={{ maxHeight: 300, overflow: "auto" }}>
+                  <List>
+                    {availablePermissions.map((p) => (
+                      <DraggablePermission
+                        key={p.id}
+                        permission={p}
+                        onDrop={handleDrop}
+                        listType="assigned"
+                      />
+                    ))}
+                  </List>
+                </Paper>
+              </Grid>
 
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button
-          variant="contained"
-          disabled={!canSave}
-          onClick={() => onSave(form.roleId ? "MODIFY" : "CREATE")}
-        >
-          {form.roleId ? "Save Changes" : "Create Role"}
-        </Button>
-      </DialogActions>
-    </Dialog>
+              {/* Assigned Permissions */}
+              <Grid item xs={6}>
+                <Typography variant="subtitle1">Assigned Permissions</Typography>
+                <TextField
+                  size="small"
+                  placeholder="Search..."
+                  fullWidth
+                  sx={{ mb: 1 }}
+                  value={assignedFilter}
+                  onChange={(e) => setAssignedFilter(e.target.value)}
+                />
+                <Paper sx={{ maxHeight: 300, overflow: "auto" }}>
+                  <List>
+                    {filteredAssignedPermissions.map((p) => (
+                      <DraggablePermission
+                        key={p.id}
+                        permission={p}
+                        onDrop={handleDrop}
+                        listType="available"
+                      />
+                    ))}
+                  </List>
+                </Paper>
+              </Grid>
+            </Grid>
+          </Stack>
+        </DialogContent>
+
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={!canSave}
+            onClick={() => onSave(form.roleId ? "MODIFY" : "CREATE")}
+          >
+            {form.roleId ? "Save Changes" : "Create Role"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </DndProvider>
   );
 }
