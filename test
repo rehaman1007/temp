@@ -1,370 +1,282 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Box,
-  Button,
   Dialog,
-  DialogContent,
   DialogTitle,
-  Fab,
-  Grid,
-  IconButton,
-  Stack,
+  DialogContent,
+  DialogActions,
   TextField,
   Typography,
+  Button,
+  Stack,
   Tooltip,
+  IconButton,
   Chip,
-  MenuItem,
-  CircularProgress,
 } from "@mui/material";
 import { DataGrid } from "@mui/x-data-grid";
-import {
-  Edit as EditIcon,
-  Add as AddIcon,
-  Close as CloseIcon,
-} from "@mui/icons-material";
-import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
-import useApi from "../../../hooks/useApi";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import { Check as CheckIcon, Clear as ClearIcon } from "@mui/icons-material";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
+import AccountCircleIcon from "@mui/icons-material/AccountCircle";
+import { useNavigate } from "react-router-dom";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { COMMON_REQ_SCREEN_CONFIGS } from "../common/CommonConstants";
+import { useSelector } from "react-redux";
 
-export default function CircleMasterTab() {
-  const [rows, setRows] = useState([]);
-  const [zones, setZones] = useState([]);
-  const [open, setOpen] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const snackbar = useCustomSnackbar();
+export default function CommonRequestScreen() {
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
+  const navigate = useNavigate();
   const { callApi } = useApi();
-
-  const [circleData, setCircleData] = useState({
-    circleCode: "",
-    circleName: "",
-    zoneCode: "",
-    status: "Active",
+  const showSnackBar = useCustomSnackbar();
+  const screenConfig = COMMON_REQ_SCREEN_CONFIGS[selectedMenuItem?.id];
+  const { requestType, columns, transformData } = screenConfig;
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [remarks, setRemarks] = useState("");
+  const [confirmDialog, setConfirmDialog] = useState({
+    open: false,
+    type: null,
+    rowId: null,
   });
-  const [errors, setErrors] = useState({});
 
-  // --- debounce/snackbar control ---
-  const snackGateRef = useRef(true);
-  const notifyOnce = (msg, variant = "warning") => {
-    if (!snackGateRef.current) return;
-    snackGateRef.current = false;
-    snackbar(msg, variant);
-    setTimeout(() => (snackGateRef.current = true), 900);
-  };
-
-  // --- Fetch Data ---
   const fetchData = async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-      const [zonesRes, circlesRes] = await Promise.all([
-        callApi("/CM/zone-codes", null, "GET"),
-        callApi("/CM/circle-codes", null, "GET"),
-      ]);
-      setZones(zonesRes?.data ?? []);
-      setRows(circlesRes?.data ?? []);
+      const response = await callApi(
+        "/CR/pending-requests",
+        { requestType },
+        "POST"
+      );
+      const result = response?.data || [];
+
+      const data = result.map((row) => ({
+        ...row,
+        ...(typeof row.payload === "object" ? row.payload : {}),
+      }));
+
+      setRows(transformData ? transformData(data) : data);
+
+      if (!data.length) showSnackBar("No pending requests found", "warning");
     } catch (err) {
-      snackbar("Failed to fetch data", "error");
+      console.error(err);
+      showSnackBar("Error fetching data", "error");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    if (!screenConfig || !requestType) {
+      navigate("/404");
+      return;
+    }
+    setRows([]);
+    setRemarks("");
+    setConfirmDialog({ open: false, type: null, rowId: null });
+
     fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedMenuItem?.id]);
 
-  // --- Validation Rules ---
-  const reDigits = /^[0-9]*$/;
-  const reDesc = /^[a-zA-Z0-9\s/&()-]*$/;
-
-  const validateField = (name, value) => {
-    switch (name) {
-      case "circleCode":
-        if (!value.trim()) return "Circle Code is required";
-        if (!reDigits.test(value)) return "Only digits allowed";
-        if (value.length !== 3) return "Must be 3 digits";
-        break;
-
-      case "circleName":
-        if (!value.trim()) return "Circle Name is required";
-        if (!reDesc.test(value)) return "Invalid characters";
-        break;
-
-      case "zoneCode":
-        if (!value.trim()) return "Zone Code is required";
-        if (!reDesc.test(value)) return "Only letters and digits allowed";
-        break;
-
-      default:
-        return "";
-    }
-    return "";
-  };
-
-  const isFormValid = useMemo(
-    () =>
-      !validateField("circleCode", circleData.circleCode) &&
-      !validateField("circleName", circleData.circleName) &&
-      !validateField("zoneCode", circleData.zoneCode),
-    [circleData]
-  );
-
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    if (name === "circleCode") {
-      if (!reDigits.test(value)) {
-        notifyOnce("Circle Code accepts digits only");
-        return;
-      }
-      if (value.length > 3) {
-        notifyOnce("Circle Code must be 3 digits");
-        return;
-      }
-    } else if (name === "circleName" && !reDesc.test(value)) {
-      notifyOnce("Invalid character in Circle Name");
-      return;
-    } else if (name === "zoneCode" && !reDesc.test(value)) {
-      notifyOnce("Zone Code accepts only letters/digits");
+  const handleConfirm = async () => {
+    if (confirmDialog.type === "reject" && !remarks.trim()) {
+      showSnackBar("Please provide remarks before rejecting", "warning");
       return;
     }
-
-    setCircleData((prev) => ({ ...prev, [name]: value }));
-    setErrors((prev) => ({ ...prev, [name]: validateField(name, value) }));
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    const allErrors = {
-      circleCode: validateField("circleCode", circleData.circleCode),
-      circleName: validateField("circleName", circleData.circleName),
-      zoneCode: validateField("zoneCode", circleData.zoneCode),
-    };
-    setErrors(allErrors);
-
-    const valid = Object.values(allErrors).every((v) => !v);
-    if (!valid) {
-      notifyOnce("Please fix validation errors", "error");
-      return;
-    }
-
-    const payloadData = {
-      requestType: "CIRCLE",
-      changeType: editingId ? "UPDATE" : "ADD",
-      targetId: circleData.circleCode,
-      payload: {
-        circleCode: circleData.circleCode.trim(),
-        circleName: circleData.circleName.trim(),
-        zoneCode: circleData.zoneCode.trim(),
-      },
-    };
 
     try {
-      const response = await callApi("/CR/create-request", payloadData, "POST");
-      if (response) {
-        snackbar(editingId ? "Circle updated" : "Circle created", "success");
-        handleClose();
+      const payload = {
+        requestId: confirmDialog.rowId,
+        status: confirmDialog.type === "reject" ? "REJECTED" : "ACCEPTED",
+        remarks:
+          confirmDialog.type === "reject" ? remarks.trim() : "No Remarks",
+      };
+
+      const res = await callApi("/CR/update-requests", payload, "PATCH");
+
+      if (res?.success || res) {
+        showSnackBar(
+          confirmDialog.type === "accept"
+            ? "Request Approved"
+            : "Request Rejected",
+          "success"
+        );
         fetchData();
+      } else {
+        showSnackBar("Failed to process request", "error");
       }
     } catch (err) {
-      snackbar(err?.message || "Request failed", "error");
+      console.error(err);
+      showSnackBar("Error while processing request", "error");
     }
+    closeConfirmDialog();
   };
 
-  const handleEdit = (row) => {
-    setCircleData({
-      circleCode: String(row.circleCode ?? ""),
-      circleName: String(row.circleName ?? ""),
-      zoneCode: String(row.zoneCode ?? ""),
-      status: row.status || "Active",
-    });
-    setEditingId(row.circleCode);
-    setOpen(true);
-  };
+  const openConfirmDialog = (type, rowId) =>
+    setConfirmDialog({ open: true, type, rowId });
 
-  const resetForm = () => {
-    setCircleData({ circleCode: "", circleName: "", zoneCode: "", status: "Active" });
-    setErrors({});
-    setEditingId(null);
-  };
+  const closeConfirmDialog = () =>
+    setConfirmDialog({ open: false, type: null, rowId: null });
 
-  const handleClose = () => {
-    setOpen(false);
-    resetForm();
-  };
-
-  // --- Columns ---
-  const columns = useMemo(
-    () => [
-      { field: "circleCode", headerName: "Circle Code", flex: 1.2 },
-      { field: "circleName", headerName: "Circle Name", flex: 2 },
-      {
-        field: "zoneCode",
-        headerName: "Zone Description",
-        flex: 2,
-        valueGetter: (params) => {
-          const zone = zones.find((z) => String(z.id) === String(params.value));
-          return zone ? zone.description : "N/A";
-        },
+  const allColumns = [
+    ...columns,
+    {
+      field: "changeType",
+      headerName: "Request Type",
+      flex: 0.5,
+      align: "center",
+      headerAlign: "center",
+      renderCell: (params) => {
+        const val = params.value;
+        return (
+          <Box>
+            {val === "ADD" ? (
+              <Chip icon={<AddBoxIcon />} label="Added" size="small" />
+            ) : val === "DELETE" ? (
+              <Chip icon={<AutoDeleteIcon />} label="Deleted" size="small" />
+            ) : (
+              <Chip icon={<EditDocumentIcon />} label="Modified" size="small" />
+            )}
+          </Box>
+        );
       },
-      {
-        field: "status",
-        headerName: "Status",
-        flex: 1,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => (
-          <Chip
-            icon={<OnlinePredictionIcon />}
-            label={params.row.status || "Active"}
-            color={params.row.status === "Active" ? "success" : "warning"}
-            variant="outlined"
-            sx={{ fontWeight: 500 }}
-          />
-        ),
+    },
+    {
+      field: "creatorId",
+      headerName: "Creator ID",
+      flex: 0.8,
+      align: "center",
+      headerAlign: "center",
+      renderCell: (params) => (
+        <Chip icon={<AccountCircleIcon />} label={params.value} size="small" />
+      ),
+    },
+    {
+      field: "reqDate",
+      headerName: "Requested Date",
+      flex: 1,
+      align: "center",
+      headerAlign: "center",
+      renderCell: (params) => {
+        const isoString = params.value;
+        if (!isoString) return null;
+        try {
+          const date = new Date(isoString);
+          return (
+            <Box>
+              {date.toLocaleString("en-US", {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: true,
+                timeZone: "Asia/Calcutta",
+              })}
+            </Box>
+          );
+        } catch {
+          return <Box>{isoString}</Box>;
+        }
       },
-      {
-        field: "actions",
-        headerName: "Actions",
-        flex: 0.8,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => (
-          <Tooltip title="Edit">
-            <IconButton color="primary" size="small" onClick={() => handleEdit(params.row)}>
-              <EditIcon fontSize="small" />
+    },
+    {
+      field: "actions",
+      headerName: "Actions",
+      flex: 0.6,
+      align: "center",
+      headerAlign: "center",
+      renderCell: (params) => (
+        <Stack direction="row" spacing={1} justifyContent="center">
+          <Tooltip title="Approve">
+            <IconButton
+              onClick={() => openConfirmDialog("accept", params.row.id)}
+              color="success"
+            >
+              <CheckIcon />
             </IconButton>
           </Tooltip>
-        ),
-      },
-    ],
-    [zones]
-  );
+          <Tooltip title="Reject">
+            <IconButton
+              onClick={() => openConfirmDialog("reject", params.row.id)}
+              color="error"
+            >
+              <ClearIcon />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
+  ];
 
   return (
-    <Box sx={{ p: 2 }}>
-      {loading ? (
-        <Stack alignItems="center" justifyContent="center" sx={{ height: "60vh" }}>
-          <CircularProgress size={40} />
-        </Stack>
-      ) : (
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          disableRowSelectionOnClick
-          getRowId={(row) => row.circleCode}
-          pageSizeOptions={[5, 10, 25, 50]}
-          initialState={{
-            pagination: { paginationModel: { pageSize: 10, page: 0 } },
-            sorting: { sortModel: [{ field: "circleCode", sort: "asc" }] },
-          }}
-          sx={{
-            "& .MuiDataGrid-columnHeaders": { backgroundColor: "#f9f9f9" },
-            border: "none",
-            height: 500,
-          }}
-          localeText={{
-            noRowsLabel: "No Circle Records Found",
-          }}
-        />
-      )}
-
-      {/* Floating Create Button */}
-      <Fab
-        onClick={() => setOpen(true)}
-        color="primary"
-        variant="extended"
-        sx={{
-          position: "fixed",
-          borderRadius: 1,
-          fontSize: "15px",
-          bottom: (theme) => theme.spacing(8),
-          right: (theme) => theme.spacing(4),
-          zIndex: 1200,
+    <Box>
+      <DataGrid
+        rows={rows}
+        columns={allColumns}
+        disableRowSelectionOnClick
+        pageSizeOptions={[5, 10, 25, 50]}
+        initialState={{
+          pagination: { paginationModel: { pageSize: 10, page: 0 } },
+          sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
         }}
+        getRowId={(row) => row.id}
+        loading={loading}
+        sx={{
+          height: 600,
+          width: "100%",
+          "& .MuiDataGrid-cell:focus": { outline: "none" },
+        }}
+      />
+
+      <Dialog
+        open={confirmDialog.open}
+        onClose={closeConfirmDialog}
+        maxWidth="sm"
+        fullWidth
       >
-        <AddIcon sx={{ mr: 1 }} />
-        Create
-      </Fab>
-
-      {/* Dialog Form */}
-      <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-        <Box component="form" onSubmit={handleSubmit}>
-          <DialogTitle>
-            <Stack direction="row" justifyContent="space-between" alignItems="center">
-              <Typography variant="h6" color="primary">
-                {editingId ? "Edit Circle" : "Add Circle"}
-              </Typography>
-              <IconButton onClick={handleClose}>
-                <CloseIcon />
-              </IconButton>
-            </Stack>
-          </DialogTitle>
-
-          <DialogContent>
-            <Grid container spacing={2} sx={{ mt: 1 }}>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Circle Code"
-                  name="circleCode"
-                  value={circleData.circleCode}
-                  onChange={handleChange}
-                  disabled={!!editingId}
-                  error={!!errors.circleCode}
-                  helperText={errors.circleCode || "Exactly 3 digits"}
-                  inputProps={{ maxLength: 3, inputMode: "numeric" }}
-                />
-              </Grid>
-
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Circle Name"
-                  name="circleName"
-                  value={circleData.circleName}
-                  onChange={handleChange}
-                  error={!!errors.circleName}
-                  helperText={
-                    errors.circleName || "Allowed: letters, digits, spaces, / & ( ) -"
-                  }
-                  multiline
-                  rows={2}
-                />
-              </Grid>
-
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  select
-                  label="Zone Code"
-                  name="zoneCode"
-                  value={circleData.zoneCode}
-                  onChange={handleChange}
-                  error={!!errors.zoneCode}
-                  helperText={errors.zoneCode || "Select corresponding Zone"}
-                >
-                  {zones.map((zone) => (
-                    <MenuItem key={zone.id} value={zone.id}>
-                      {zone.description}
-                    </MenuItem>
-                  ))}
-                </TextField>
-              </Grid>
-
-              <Grid item xs={12} display="flex" justifyContent="flex-end">
-                <Button
-                  type="submit"
-                  variant="contained"
-                  startIcon={editingId ? <EditIcon /> : <AddIcon />}
-                  disabled={!isFormValid}
-                >
-                  {editingId ? "Update" : "Add"}
-                </Button>
-              </Grid>
-            </Grid>
-          </DialogContent>
-        </Box>
+        <DialogTitle>
+          {confirmDialog.type === "accept"
+            ? "Confirm Approval"
+            : "Confirm Rejection"}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ p: 2 }}>
+            {confirmDialog.type === "accept"
+              ? "Are you sure you want to approve this request?"
+              : "Are you sure you want to reject this request? Please enter remarks."}
+          </Typography>
+          {confirmDialog.type === "reject" && (
+            <TextField
+              fullWidth
+              label="Rejection Remarks"
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value.slice(0, 100))}
+              multiline
+              rows={2}
+              margin="dense"
+              inputProps={{ maxLength: 100 }}
+            />
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={closeConfirmDialog}
+            color="inherit"
+            variant="contained"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirm}
+            color={confirmDialog.type === "accept" ? "success" : "error"}
+            variant="contained"
+          >
+            {confirmDialog.type === "accept" ? "Approve" : "Reject"}
+          </Button>
+        </DialogActions>
       </Dialog>
     </Box>
   );
