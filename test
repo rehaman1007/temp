@@ -1,303 +1,228 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useMemo } from "react";
 import {
   Box,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  TextField,
   Typography,
-  Button,
+  Card,
   Stack,
-  Tooltip,
-  IconButton,
+  Divider,
   Chip,
-  CircularProgress,
+  useTheme,
 } from "@mui/material";
-import { DataGrid } from "@mui/x-data-grid";
 import {
-  Check as CheckIcon,
-  Clear as ClearIcon,
-} from "@mui/icons-material";
-import AddBoxIcon from "@mui/icons-material/AddBox";
-import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
-import EditDocumentIcon from "@mui/icons-material/EditDocument";
-import AccountCircleIcon from "@mui/icons-material/AccountCircle";
-import { useNavigate } from "react-router-dom";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import { COMMON_REQ_SCREEN_CONFIGS } from "../common/CommonConstants";
-import { useSelector } from "react-redux";
-import RequestAnalytics from "./RequestAnalytics"; // ✅ new import
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+} from "recharts";
 
-export default function CommonRequestScreen() {
-  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
-  const navigate = useNavigate();
-  const { callApi } = useApi();
-  const showSnackBar = useCustomSnackbar();
+// Gradient colors (matching your screenshot)
+const COLORS = [
+  "#6a5acd", // violet-blue
+  "#d87093", // pink
+  "#6495ed", // cornflower blue
+  "#20b2aa", // teal
+];
 
-  const screenConfig = COMMON_REQ_SCREEN_CONFIGS[selectedMenuItem?.id];
-  const { requestType, columns, transformData } = screenConfig || {};
+const RequestAnalytics = ({ data = [] }) => {
+  const theme = useTheme();
 
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [remarks, setRemarks] = useState("");
-  const [confirmDialog, setConfirmDialog] = useState({
-    open: false,
-    type: null,
-    rowId: null,
-  });
+  // ----- Compute Pie Chart Data -----
+  const pieData = useMemo(() => {
+    const counts = {
+      total: 0,
+      add: 0,
+      modify: 0,
+      delete: 0,
+    };
 
-  // ✅ Fetch data
-  const fetchData = useCallback(async () => {
-    if (!requestType) return;
-    setLoading(true);
-    try {
-      const response = await callApi("/CR/pending-requests", { requestType }, "POST");
-      const result = response?.data || [];
+    data.forEach((item) => {
+      if (item.status?.toLowerCase() === "pending") counts.total++;
+      if (item.reqType?.toLowerCase() === "add") counts.add++;
+      if (item.reqType?.toLowerCase() === "modify") counts.modify++;
+      if (item.reqType?.toLowerCase() === "delete") counts.delete++;
+    });
 
-      const data = result.map((row) => ({
-        ...row,
-        ...(typeof row.payload === "object" ? row.payload : {}),
-      }));
+    return [
+      { name: "Total Pending", value: counts.total },
+      { name: "Add Requests", value: counts.add },
+      { name: "Modify Requests", value: counts.modify },
+      { name: "Delete Requests", value: counts.delete },
+    ];
+  }, [data]);
 
-      setRows(transformData ? transformData(data) : data);
-
-      if (!data.length) showSnackBar("No pending requests found", "warning");
-    } catch (err) {
-      console.error(err);
-      showSnackBar("Error fetching data", "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [requestType, transformData, callApi, showSnackBar]);
-
-  useEffect(() => {
-    if (!screenConfig || !requestType) {
-      navigate("/404");
-      return;
-    }
-    setRows([]);
-    setRemarks("");
-    setConfirmDialog({ open: false, type: null, rowId: null });
-    fetchData();
-  }, [selectedMenuItem?.id, fetchData]);
-
-  // ✅ Confirm handler
-  const handleConfirm = async () => {
-    if (confirmDialog.type === "reject" && !remarks.trim()) {
-      showSnackBar("Please provide remarks before rejecting", "warning");
-      return;
-    }
-
-    try {
-      const payload = {
-        requestId: confirmDialog.rowId,
-        status: confirmDialog.type === "reject" ? "REJECTED" : "ACCEPTED",
-        remarks: confirmDialog.type === "reject" ? remarks.trim() : "No Remarks",
-      };
-
-      const res = await callApi("/CR/update-requests", payload, "PATCH");
-
-      if (res?.success || res) {
-        showSnackBar(
-          confirmDialog.type === "accept" ? "Request Approved" : "Request Rejected",
-          "success"
-        );
-        fetchData();
-      } else {
-        showSnackBar("Failed to process request", "error");
+  // ----- Compute Histogram Data (requests per date) -----
+  const histogramData = useMemo(() => {
+    const map = {};
+    data.forEach((item) => {
+      if (item.reqDate) {
+        const date = new Date(item.reqDate).toLocaleDateString("en-GB");
+        map[date] = (map[date] || 0) + 1;
       }
-    } catch (err) {
-      console.error(err);
-      showSnackBar("Error while processing request", "error");
-    }
-    closeConfirmDialog();
-  };
-
-  const openConfirmDialog = (type, rowId) =>
-    setConfirmDialog({ open: true, type, rowId });
-
-  const closeConfirmDialog = () =>
-    setConfirmDialog({ open: false, type: null, rowId: null });
-
-  // ✅ Memoized columns
-  const allColumns = useMemo(
-    () => [
-      ...columns,
-      {
-        field: "changeType",
-        headerName: "Request Type",
-        flex: 0.5,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => {
-          const val = params.value;
-          const color =
-            val === "ADD" ? "success" : val === "DELETE" ? "error" : "warning";
-          const icon =
-            val === "ADD"
-              ? <AddBoxIcon />
-              : val === "DELETE"
-              ? <AutoDeleteIcon />
-              : <EditDocumentIcon />;
-          return (
-            <Chip
-              icon={icon}
-              label={
-                val === "ADD"
-                  ? "Added"
-                  : val === "DELETE"
-                  ? "Deleted"
-                  : "Modified"
-              }
-              color={color}
-              size="small"
-            />
-          );
-        },
-      },
-      {
-        field: "creatorId",
-        headerName: "Creator ID",
-        flex: 0.8,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => (
-          <Chip
-            icon={<AccountCircleIcon />}
-            label={params.value}
-            size="small"
-            color="info"
-          />
-        ),
-      },
-      {
-        field: "reqDate",
-        headerName: "Requested Date",
-        flex: 1,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => {
-          const isoString = params.value;
-          if (!isoString) return null;
-          try {
-            const date = new Date(isoString);
-            return date.toLocaleString("en-IN", {
-              year: "numeric",
-              month: "short",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: true,
-              timeZone: "Asia/Kolkata",
-            });
-          } catch {
-            return isoString;
-          }
-        },
-      },
-      {
-        field: "actions",
-        headerName: "Actions",
-        flex: 0.6,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => (
-          <Stack direction="row" spacing={1} justifyContent="center">
-            <Tooltip title="Approve">
-              <IconButton
-                onClick={() => openConfirmDialog("accept", params.row.id)}
-                color="success"
-              >
-                <CheckIcon />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title="Reject">
-              <IconButton
-                onClick={() => openConfirmDialog("reject", params.row.id)}
-                color="error"
-              >
-                <ClearIcon />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-        ),
-      },
-    ],
-    [columns]
-  );
+    });
+    return Object.keys(map)
+      .sort(
+        (a, b) =>
+          new Date(a.split("/").reverse().join("-")) -
+          new Date(b.split("/").reverse().join("-"))
+      )
+      .map((date) => ({ date, count: map[date] }));
+  }, [data]);
 
   return (
-    <Box sx={{ p: 2 }}>
-      {!loading && rows.length > 0 && <RequestAnalytics rows={rows} />}
+    <Card
+      sx={{
+        bgcolor: "#1e1e2f",
+        color: "white",
+        p: 3,
+        borderRadius: 4,
+        boxShadow: "0px 4px 20px rgba(0,0,0,0.5)",
+        mb: 4,
+      }}
+    >
+      {/* Header */}
+      <Typography variant="h6" sx={{ mb: 1 }}>
+        Request Analytics Overview
+      </Typography>
+      <Typography variant="body2" sx={{ color: "gray", mb: 2 }}>
+        Requests compared by type and activity frequency
+      </Typography>
 
-      {loading ? (
-        <Stack alignItems="center" justifyContent="center" sx={{ height: 400 }}>
-          <CircularProgress />
-        </Stack>
-      ) : (
-        <DataGrid
-          rows={rows}
-          columns={allColumns}
-          disableRowSelectionOnClick
-          pageSizeOptions={[5, 10, 25, 50]}
-          initialState={{
-            pagination: { paginationModel: { pageSize: 10, page: 0 } },
-            sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
-          }}
-          getRowId={(row) => row.id}
-          sx={{
-            height: 600,
-            width: "100%",
-            "& .MuiDataGrid-cell:focus": { outline: "none" },
-          }}
-        />
-      )}
+      <Divider sx={{ borderColor: "rgba(255,255,255,0.1)", mb: 2 }} />
 
-      <Dialog
-        open={confirmDialog.open}
-        onClose={closeConfirmDialog}
-        maxWidth="sm"
-        fullWidth
+      {/* Pie Chart + Legend */}
+      <Box
+        sx={{
+          display: "flex",
+          flexDirection: { xs: "column", md: "row" },
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
       >
-        <DialogTitle sx={{ fontWeight: 600 }}>
-          {confirmDialog.type === "accept"
-            ? "Confirm Approval"
-            : "Confirm Rejection"}
-        </DialogTitle>
-        <DialogContent>
-          <Typography sx={{ p: 1 }}>
-            {confirmDialog.type === "accept"
-              ? "Are you sure you want to approve this request?"
-              : "Are you sure you want to reject this request? Please enter remarks."}
+        <Box sx={{ width: { xs: "100%", md: "50%" }, height: 250 }}>
+          <ResponsiveContainer>
+            <PieChart>
+              <defs>
+                {COLORS.map((color, index) => (
+                  <linearGradient
+                    key={index}
+                    id={`gradient-${index}`}
+                    x1="0"
+                    y1="0"
+                    x2="1"
+                    y2="1"
+                  >
+                    <stop offset="0%" stopColor={color} stopOpacity={0.9} />
+                    <stop offset="100%" stopColor={color} stopOpacity={0.5} />
+                  </linearGradient>
+                ))}
+              </defs>
+              <Pie
+                data={pieData}
+                cx="50%"
+                cy="50%"
+                innerRadius={60}
+                outerRadius={90}
+                paddingAngle={5}
+                dataKey="value"
+              >
+                {pieData.map((entry, index) => (
+                  <Cell
+                    key={`cell-${index}`}
+                    fill={`url(#gradient-${index})`}
+                    stroke="none"
+                  />
+                ))}
+              </Pie>
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "#2a2a3a",
+                  borderRadius: 10,
+                  border: "none",
+                  color: "#fff",
+                }}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+        </Box>
+
+        {/* Legends */}
+        <Box sx={{ width: { xs: "100%", md: "45%" }, mt: { xs: 2, md: 0 } }}>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Request Breakdown
           </Typography>
-          {confirmDialog.type === "reject" && (
-            <TextField
-              fullWidth
-              label="Rejection Remarks"
-              value={remarks}
-              onChange={(e) => setRemarks(e.target.value.slice(0, 100))}
-              multiline
-              rows={2}
-              margin="dense"
-              inputProps={{ maxLength: 100 }}
+          {pieData.map((item, i) => (
+            <Stack
+              direction="row"
+              alignItems="center"
+              justifyContent="space-between"
+              sx={{
+                bgcolor: "rgba(255,255,255,0.05)",
+                borderRadius: 2,
+                p: 1.2,
+                mb: 1,
+              }}
+              key={item.name}
+            >
+              <Stack direction="row" alignItems="center" spacing={1.5}>
+                <Box
+                  sx={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: "50%",
+                    bgcolor: COLORS[i],
+                  }}
+                />
+                <Typography variant="body2">{item.name}</Typography>
+              </Stack>
+              <Chip
+                label={item.value}
+                size="small"
+                sx={{
+                  bgcolor: COLORS[i],
+                  color: "white",
+                  fontWeight: "bold",
+                }}
+              />
+            </Stack>
+          ))}
+        </Box>
+      </Box>
+
+      <Divider sx={{ borderColor: "rgba(255,255,255,0.1)", my: 3 }} />
+
+      {/* Histogram */}
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Request Frequency by Date
+      </Typography>
+      <Box sx={{ width: "100%", height: 250 }}>
+        <ResponsiveContainer>
+          <BarChart data={histogramData}>
+            <CartesianGrid
+              strokeDasharray="3 3"
+              stroke="rgba(255,255,255,0.1)"
             />
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={closeConfirmDialog} variant="outlined">
-            Cancel
-          </Button>
-          <Button
-            onClick={handleConfirm}
-            color={confirmDialog.type === "accept" ? "success" : "error"}
-            variant="contained"
-          >
-            {confirmDialog.type === "accept" ? "Approve" : "Reject"}
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
+            <XAxis dataKey="date" stroke="white" />
+            <YAxis stroke="white" />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: "#2a2a3a",
+                borderRadius: 10,
+                border: "none",
+                color: "#fff",
+              }}
+            />
+            <Bar dataKey="count" fill="url(#gradient-0)" radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </Box>
+    </Card>
   );
-}
+};
+
+export default RequestAnalytics;
