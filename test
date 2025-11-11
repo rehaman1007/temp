@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
 import { useSelector } from "react-redux";
 
@@ -13,7 +14,9 @@ const useApi = () => {
   const token = useSelector((state) => state.auth.token);
 
   const activeRequestsRef = useRef(new Set());
+  const activeStreamsRef = useRef(new Map());
 
+  // === Token refresh ===
   const refreshToken = async () => {
     try {
       await axios.post("/LS/refresh-token", {}, { withCredentials: true });
@@ -22,20 +25,29 @@ const useApi = () => {
     }
   };
 
+  // === Cancel all active axios requests ===
   const cancelAllRequests = () => {
     activeRequestsRef.current.forEach((controller) => {
-      if (controller && !controller.signal.aborted) {
-        controller.abort();
-      }
+      if (controller && !controller.signal.aborted) controller.abort();
     });
     activeRequestsRef.current.clear();
     setLoading(false);
   };
 
+  // === Close all active SSE streams ===
+  const closeAllStreams = () => {
+    activeStreamsRef.current.forEach((abortCtrl) => abortCtrl.abort());
+    activeStreamsRef.current.clear();
+  };
+
   useEffect(() => {
-    return () => cancelAllRequests();
+    return () => {
+      cancelAllRequests();
+      closeAllStreams();
+    };
   }, []);
 
+  // === Normal HTTP calls ===
   const callApi = useCallback(
     async (
       url,
@@ -67,11 +79,8 @@ const useApi = () => {
         };
 
         if (payload !== null) {
-          if (method.toUpperCase() === "GET") {
-            config.params = payload;
-          } else {
-            config.data = payload;
-          }
+          if (method.toUpperCase() === "GET") config.params = payload;
+          else config.data = payload;
         }
 
         const response = await axios(config);
@@ -86,22 +95,16 @@ const useApi = () => {
           window.alert("You have logged in another session");
         }
 
-        if (
-          err.status === 401 &&
-          err.response?.data?.message === "INVALID_TOKEN"
-        ) {
+        if (err.status === 401 && err.response?.data?.message === "INVALID_TOKEN") {
           navigate("/");
         }
 
         if (!axios.isCancel(err) && !controller.signal.aborted) {
-          console.error("API call error:", err);
-          if (err.response.data?.result?.message) {
-            snackbar(err.response.data?.result?.message, "error");
-          } else if (err.response.data?.message) {
-            snackbar(err.response.data?.message, "error");
-          } else {
-            snackbar(err.response.statusText, "error");
-          }
+          const msg =
+            err.response?.data?.result?.message ||
+            err.response?.data?.message ||
+            err.response?.statusText;
+          snackbar(msg, "error");
           setError(err);
         }
 
@@ -111,10 +114,139 @@ const useApi = () => {
         setLoading(false);
       }
     },
-    [navigate]
+    [navigate, token, snackbar]
   );
 
-  return { data, error, loading, callApi, cancelAllRequests, refreshToken };
+  // === 🟢 SSE Stream API using fetch-event-source ===
+  const streamApi = useCallback(
+    async (
+      url,
+      {
+        onMessage,
+        onError,
+        onOpen,
+        onClose,
+        retryDelay = 0, // optional: 0 means no reconnect
+      } = {}
+    ) => {
+      const controller = new AbortController();
+      activeStreamsRef.current.set(url, controller);
+
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      };
+
+      let retryCount = 0;
+
+      const connect = async () => {
+        try {
+          await fetchEventSource(url, {
+            headers,
+            signal: controller.signal,
+            onopen: async (res) => {
+              if (res.ok) {
+                retryCount = 0;
+                onOpen && onOpen();
+              } else if (res.status === 401) {
+                console.error("Unauthorized — closing stream.");
+                controller.abort();
+              } else {
+                console.error("Failed to open SSE:", res.statusText);
+              }
+            },
+            onmessage: (msg) => {
+              try {
+                const parsed = JSON.parse(msg.data);
+                onMessage && onMessage(parsed);
+              } catch (err) {
+                console.warn("Invalid SSE message:", msg.data);
+              }
+            },
+            onerror: (err) => {
+              console.error("SSE error:", err);
+              onError && onError(err);
+
+              // Retry logic
+              if (retryDelay > 0 && !controller.signal.aborted) {
+                retryCount += 1;
+                const delay = Math.min(1000 * retryCount, 10000); // cap at 10s
+                console.log(`🔁 Reconnecting SSE in ${delay}ms...`);
+                setTimeout(connect, delay);
+              } else {
+                controller.abort();
+              }
+            },
+          });
+        } catch (err) {
+          if (!controller.signal.aborted) {
+            console.error("Stream connection failed:", err);
+            onError && onError(err);
+          }
+        } finally {
+          onClose && onClose();
+        }
+      };
+
+      connect();
+
+      // Cleanup function for component unmount
+      return () => {
+        console.log("Closing stream:", url);
+        controller.abort();
+        activeStreamsRef.current.delete(url);
+      };
+    },
+    [token]
+  );
+
+  return {
+    data,
+    error,
+    loading,
+    callApi,
+    streamApi, // new streaming hook
+    cancelAllRequests,
+    closeAllStreams,
+    refreshToken,
+  };
 };
 
 export default useApi;
+
+import React, { useEffect, useState } from "react";
+import useApi from "../hooks/useApi";
+import NotificationDrawerUI from "./NotificationDrawerUI";
+
+const NotificationDrawer = ({ open, setOpen }) => {
+  const [notifications, setNotifications] = useState([]);
+  const { callApi, streamApi, closeAllStreams } = useApi();
+
+  useEffect(() => {
+    if (!open) return;
+
+    // Fetch existing notifications
+    callApi("/api/notifications/all").then(setNotifications);
+
+    // Start SSE stream
+    const stopStream = streamApi("/api/notifications/stream", {
+      onMessage: (data) => setNotifications((prev) => [data, ...prev]),
+      onOpen: () => console.log("🔗 Notifications stream connected"),
+      onError: (err) => console.error("SSE error:", err),
+      retryDelay: 2000, // optional auto-reconnect
+    });
+
+    // Cleanup on unmount or close
+    return () => stopStream();
+  }, [open]);
+
+  return (
+    <NotificationDrawerUI
+      notificationDrawerOpen={open}
+      setNotificationDrawerOpen={setOpen}
+      notifications={notifications}
+    />
+  );
+};
+
+export default NotificationDrawer;
