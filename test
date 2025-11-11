@@ -1,3 +1,82 @@
+// src/hooks/useStreamApi.js
+import { useEffect, useRef, useState, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
+
+const useStreamApi = () => {
+  const token = useSelector((state) => state.auth.token);
+  const snackbar = useCustomSnackbar();
+  const controllerRef = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [messages, setMessages] = useState([]);
+
+  const startStream = useCallback(
+    (url, { onMessage, onError, onOpen } = {}) => {
+      if (controllerRef.current) controllerRef.current.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      setConnected(false);
+
+      fetchEventSource(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+
+        onopen(response) {
+          if (response.ok) {
+            setConnected(true);
+            onOpen?.(response);
+          } else {
+            console.error("Stream connection failed:", response.status);
+            snackbar(`Stream failed: ${response.status}`, "error");
+          }
+        },
+
+        onmessage(event) {
+          if (event.event === "connected") {
+            console.log("Connected:", event.data);
+            return;
+          }
+          try {
+            const data = JSON.parse(event.data);
+            setMessages((prev) => [data, ...prev]);
+            onMessage?.(data);
+          } catch (err) {
+            console.error("Stream parse error:", err);
+          }
+        },
+
+        onerror(err) {
+          console.error("Stream error:", err);
+          setConnected(false);
+          onError?.(err);
+        },
+      });
+    },
+    [token]
+  );
+
+  const stopStream = useCallback(() => {
+    if (controllerRef.current) {
+      controllerRef.current.abort();
+      controllerRef.current = null;
+      setConnected(false);
+      console.log("Stream stopped.");
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => stopStream(); // Cleanup on unmount
+  }, [stopStream]);
+
+  return { connected, messages, startStream, stopStream };
+};
+
+export default useStreamApi;
+
 import React, { useEffect } from "react";
 import {
   Box,
@@ -8,72 +87,34 @@ import {
   Paper,
 } from "@mui/material";
 import { Close } from "@mui/icons-material";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
+import useStreamApi from "../hooks/useStreamApi"; // ✅ import your hook
 
 const NotificationDrawer = ({
   notificationDrawerOpen,
   setNotificationDrawerOpen,
   notifications,
+  setNotifications, // <- make sure you have a setter from parent
 }) => {
-  // --- API base URL ---
-  const token = useSelector((state) => state.auth.token);
-  console.log("token", token);
-
+  const { connected, startStream, stopStream } = useStreamApi();
 
   useEffect(() => {
-    const controller = new AbortController();
+    if (!notificationDrawerOpen) {
+      stopStream();
+      return;
+    }
 
-    fetchEventSource("/NS/notifications/stream", {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
+    startStream("/NS/notifications/stream", {
+      onOpen: (res) => console.log("Stream opened", res),
+      onMessage: (newNotification) => {
+        setNotifications((prev) => [newNotification, ...prev]);
       },
-      signal: controller.signal,
-
-      onopen(response) {
-        console.log("response", response);
-        if (response.ok && response.status === 200) {
-          console.log("SSE Connection established");
-        } else if (
-          response.status >= 400 &&
-          response.status < 500 &&
-          response.status !== 429
-        ) {
-          // Client-side errors (like 401) - usually fatal
-          console.error("SSE Connection failed:", response.status);
-        }
-      },
-
-      onmessage(event) {
-        // 1. Handle the initial connection message
-        if (event.event === "connected") {
-          console.log("Server says:", event.data);
-          return;
-        }
-
-        // 2. Handle actual notifications
-        if (event.event === "new_notification") {
-          const newNotification = JSON.parse(event.data);
-          console.log("newNotification", newNotification);
-          // setNotifications((prev) => [newNotification, ...prev]);
-
-          // Optional: Trigger a toast or badge update here
-          // toast.info(newNotification.message);
-        }
-      },
-
-      onerror(err) {
-        console.error("SSE Error:", err);
-        // You can implement retry logic here if needed,
-        // though the library handles basic retries automatically.
+      onError: (err) => {
+        console.error("Notification stream error:", err);
       },
     });
 
-    return () => {
-      controller.abort(); // Close connection on unmount
-    };
-  }, [token]);
+    return () => stopStream();
+  }, [notificationDrawerOpen, startStream, stopStream]);
 
   return (
     <Drawer
@@ -88,20 +129,11 @@ const NotificationDrawer = ({
       }}
     >
       <Box sx={{ p: 3, borderBottom: "1px solid #E2E8F0" }}>
-        <Box
-          sx={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
+        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <Typography variant="h6" sx={{ fontWeight: 600 }}>
-            Notifications
+            Notifications {connected ? "(Live)" : ""}
           </Typography>
-          <IconButton
-            onClick={() => setNotificationDrawerOpen(false)}
-            size="small"
-          >
+          <IconButton onClick={() => setNotificationDrawerOpen(false)} size="small">
             <Close />
           </IconButton>
         </Box>
@@ -114,14 +146,10 @@ const NotificationDrawer = ({
             sx={{
               p: 2,
               mb: 2,
-              border: notification.unread
-                ? "1px solid #1565C0"
-                : "1px solid #E2E8F0",
+              border: notification.unread ? "1px solid #1565C0" : "1px solid #E2E8F0",
               backgroundColor: notification.unread ? "#F0F9FF" : "white",
               cursor: "pointer",
-              "&:hover": {
-                backgroundColor: "#F8FAFC",
-              },
+              "&:hover": { backgroundColor: "#F8FAFC" },
             }}
           >
             <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2 }}>
@@ -140,16 +168,10 @@ const NotificationDrawer = ({
                 }}
               />
               <Box sx={{ flex: 1 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 600, mb: 0.5 }}
-                >
+                <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
                   {notification.title}
                 </Typography>
-                <Typography
-                  variant="body2"
-                  sx={{ color: "text.secondary", mb: 1 }}
-                >
+                <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
                   {notification.message}
                 </Typography>
                 <Typography variant="caption" sx={{ color: "text.secondary" }}>
