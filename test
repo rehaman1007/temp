@@ -1,1 +1,120 @@
-gg
+import { useEffect, useRef, useState, useCallback } from "react";
+import axios from "axios";
+import { useNavigate } from "react-router-dom";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
+import { useSelector } from "react-redux";
+
+const useApi = () => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((state) => state.auth.token);
+
+  const activeRequestsRef = useRef(new Set());
+
+  const refreshToken = async () => {
+    try {
+      await axios.post("/LS/refresh-token", {}, { withCredentials: true });
+    } catch (err) {
+      console.error("Token refresh failed", err);
+    }
+  };
+
+  const cancelAllRequests = () => {
+    activeRequestsRef.current.forEach((controller) => {
+      if (controller && !controller.signal.aborted) {
+        controller.abort();
+      }
+    });
+    activeRequestsRef.current.clear();
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    return () => cancelAllRequests();
+  }, []);
+
+  const callApi = useCallback(
+    async (
+      url,
+      payload = null,
+      method = "GET",
+      responseType = "json",
+      contentType = "application/json",
+      extraConfig = {}
+    ) => {
+      const controller = new AbortController();
+      activeRequestsRef.current.add(controller);
+      setLoading(true);
+      setError(null);
+
+      try {
+        const headers = {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": contentType,
+        };
+
+        const config = {
+          method: method.toUpperCase(),
+          url,
+          headers,
+          responseType,
+          withCredentials: true,
+          signal: controller.signal,
+          ...extraConfig,
+        };
+
+        if (payload !== null) {
+          if (method.toUpperCase() === "GET") {
+            config.params = payload;
+          } else {
+            config.data = payload;
+          }
+        }
+
+        const response = await axios(config);
+
+        if (!controller.signal.aborted) {
+          setData(response.data);
+          return response.data;
+        }
+      } catch (err) {
+        if (err.status === 440) {
+          navigate("/");
+          window.alert("You have logged in another session");
+        }
+
+        if (
+          err.status === 401 &&
+          err.response?.data?.message === "INVALID_TOKEN"
+        ) {
+          navigate("/");
+        }
+
+        if (!axios.isCancel(err) && !controller.signal.aborted) {
+          console.error("API call error:", err);
+          if (err.response.data?.result?.message) {
+            snackbar(err.response.data?.result?.message, "error");
+          } else if (err.response.data?.message) {
+            snackbar(err.response.data?.message, "error");
+          } else {
+            snackbar(err.response.statusText, "error");
+          }
+          setError(err);
+        }
+
+        if (axios.isCancel(err)) throw err;
+      } finally {
+        activeRequestsRef.current.delete(controller);
+        setLoading(false);
+      }
+    },
+    [navigate]
+  );
+
+  return { data, error, loading, callApi, cancelAllRequests, refreshToken };
+};
+
+export default useApi;
