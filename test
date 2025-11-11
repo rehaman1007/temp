@@ -1,251 +1,172 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import axios from "axios";
-import { useNavigate } from "react-router-dom";
+import React, { useEffect } from "react";
+import {
+  Box,
+  Drawer,
+  Typography,
+  IconButton,
+  Button,
+  Paper,
+} from "@mui/material";
+import { Close } from "@mui/icons-material";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
 import { useSelector } from "react-redux";
 
-const useApi = () => {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const navigate = useNavigate();
-  const snackbar = useCustomSnackbar();
+const NotificationDrawer = ({
+  notificationDrawerOpen,
+  setNotificationDrawerOpen,
+  notifications,
+}) => {
+  // --- API base URL ---
   const token = useSelector((state) => state.auth.token);
+  console.log("token", token);
 
-  const activeRequestsRef = useRef(new Set());
-  const activeStreamsRef = useRef(new Map());
-
-  // === Token refresh ===
-  const refreshToken = async () => {
-    try {
-      await axios.post("/LS/refresh-token", {}, { withCredentials: true });
-    } catch (err) {
-      console.error("Token refresh failed", err);
-    }
-  };
-
-  // === Cancel all active axios requests ===
-  const cancelAllRequests = () => {
-    activeRequestsRef.current.forEach((controller) => {
-      if (controller && !controller.signal.aborted) controller.abort();
-    });
-    activeRequestsRef.current.clear();
-    setLoading(false);
-  };
-
-  // === Close all active SSE streams ===
-  const closeAllStreams = () => {
-    activeStreamsRef.current.forEach((abortCtrl) => abortCtrl.abort());
-    activeStreamsRef.current.clear();
-  };
 
   useEffect(() => {
-    return () => {
-      cancelAllRequests();
-      closeAllStreams();
-    };
-  }, []);
+    const controller = new AbortController();
 
-  // === Normal HTTP calls ===
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {}
-    ) => {
-      const controller = new AbortController();
-      activeRequestsRef.current.add(controller);
-      setLoading(true);
-      setError(null);
-
-      try {
-        const headers = {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": contentType,
-        };
-
-        const config = {
-          method: method.toUpperCase(),
-          url,
-          headers,
-          responseType,
-          withCredentials: true,
-          signal: controller.signal,
-          ...extraConfig,
-        };
-
-        if (payload !== null) {
-          if (method.toUpperCase() === "GET") config.params = payload;
-          else config.data = payload;
-        }
-
-        const response = await axios(config);
-
-        if (!controller.signal.aborted) {
-          setData(response.data);
-          return response.data;
-        }
-      } catch (err) {
-        if (err.status === 440) {
-          navigate("/");
-          window.alert("You have logged in another session");
-        }
-
-        if (err.status === 401 && err.response?.data?.message === "INVALID_TOKEN") {
-          navigate("/");
-        }
-
-        if (!axios.isCancel(err) && !controller.signal.aborted) {
-          const msg =
-            err.response?.data?.result?.message ||
-            err.response?.data?.message ||
-            err.response?.statusText;
-          snackbar(msg, "error");
-          setError(err);
-        }
-
-        if (axios.isCancel(err)) throw err;
-      } finally {
-        activeRequestsRef.current.delete(controller);
-        setLoading(false);
-      }
-    },
-    [navigate, token, snackbar]
-  );
-
-  // === 🟢 SSE Stream API using fetch-event-source ===
-  const streamApi = useCallback(
-    async (
-      url,
-      {
-        onMessage,
-        onError,
-        onOpen,
-        onClose,
-        retryDelay = 0, // optional: 0 means no reconnect
-      } = {}
-    ) => {
-      const controller = new AbortController();
-      activeStreamsRef.current.set(url, controller);
-
-      const headers = {
+    fetchEventSource("/NS/notifications/stream", {
+      method: "GET",
+      headers: {
         Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      };
+      },
+      signal: controller.signal,
 
-      let retryCount = 0;
-
-      const connect = async () => {
-        try {
-          await fetchEventSource(url, {
-            headers,
-            signal: controller.signal,
-            onopen: async (res) => {
-              if (res.ok) {
-                retryCount = 0;
-                onOpen && onOpen();
-              } else if (res.status === 401) {
-                console.error("Unauthorized — closing stream.");
-                controller.abort();
-              } else {
-                console.error("Failed to open SSE:", res.statusText);
-              }
-            },
-            onmessage: (msg) => {
-              try {
-                const parsed = JSON.parse(msg.data);
-                onMessage && onMessage(parsed);
-              } catch (err) {
-                console.warn("Invalid SSE message:", msg.data);
-              }
-            },
-            onerror: (err) => {
-              console.error("SSE error:", err);
-              onError && onError(err);
-
-              // Retry logic
-              if (retryDelay > 0 && !controller.signal.aborted) {
-                retryCount += 1;
-                const delay = Math.min(1000 * retryCount, 10000); // cap at 10s
-                console.log(`🔁 Reconnecting SSE in ${delay}ms...`);
-                setTimeout(connect, delay);
-              } else {
-                controller.abort();
-              }
-            },
-          });
-        } catch (err) {
-          if (!controller.signal.aborted) {
-            console.error("Stream connection failed:", err);
-            onError && onError(err);
-          }
-        } finally {
-          onClose && onClose();
+      onopen(response) {
+        console.log("response", response);
+        if (response.ok && response.status === 200) {
+          console.log("SSE Connection established");
+        } else if (
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 429
+        ) {
+          // Client-side errors (like 401) - usually fatal
+          console.error("SSE Connection failed:", response.status);
         }
-      };
+      },
 
-      connect();
+      onmessage(event) {
+        // 1. Handle the initial connection message
+        if (event.event === "connected") {
+          console.log("Server says:", event.data);
+          return;
+        }
 
-      // Cleanup function for component unmount
-      return () => {
-        console.log("Closing stream:", url);
-        controller.abort();
-        activeStreamsRef.current.delete(url);
-      };
-    },
-    [token]
-  );
+        // 2. Handle actual notifications
+        if (event.event === "new_notification") {
+          const newNotification = JSON.parse(event.data);
+          console.log("newNotification", newNotification);
+          // setNotifications((prev) => [newNotification, ...prev]);
 
-  return {
-    data,
-    error,
-    loading,
-    callApi,
-    streamApi, // new streaming hook
-    cancelAllRequests,
-    closeAllStreams,
-    refreshToken,
-  };
-};
+          // Optional: Trigger a toast or badge update here
+          // toast.info(newNotification.message);
+        }
+      },
 
-export default useApi;
-
-import React, { useEffect, useState } from "react";
-import useApi from "../hooks/useApi";
-import NotificationDrawerUI from "./NotificationDrawerUI";
-
-const NotificationDrawer = ({ open, setOpen }) => {
-  const [notifications, setNotifications] = useState([]);
-  const { callApi, streamApi, closeAllStreams } = useApi();
-
-  useEffect(() => {
-    if (!open) return;
-
-    // Fetch existing notifications
-    callApi("/api/notifications/all").then(setNotifications);
-
-    // Start SSE stream
-    const stopStream = streamApi("/api/notifications/stream", {
-      onMessage: (data) => setNotifications((prev) => [data, ...prev]),
-      onOpen: () => console.log("🔗 Notifications stream connected"),
-      onError: (err) => console.error("SSE error:", err),
-      retryDelay: 2000, // optional auto-reconnect
+      onerror(err) {
+        console.error("SSE Error:", err);
+        // You can implement retry logic here if needed,
+        // though the library handles basic retries automatically.
+      },
     });
 
-    // Cleanup on unmount or close
-    return () => stopStream();
-  }, [open]);
+    return () => {
+      controller.abort(); // Close connection on unmount
+    };
+  }, [token]);
 
   return (
-    <NotificationDrawerUI
-      notificationDrawerOpen={open}
-      setNotificationDrawerOpen={setOpen}
-      notifications={notifications}
-    />
+    <Drawer
+      anchor="right"
+      open={notificationDrawerOpen}
+      onClose={() => setNotificationDrawerOpen(false)}
+      sx={{
+        "& .MuiDrawer-paper": {
+          width: 400,
+          p: 0,
+        },
+      }}
+    >
+      <Box sx={{ p: 3, borderBottom: "1px solid #E2E8F0" }}>
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <Typography variant="h6" sx={{ fontWeight: 600 }}>
+            Notifications
+          </Typography>
+          <IconButton
+            onClick={() => setNotificationDrawerOpen(false)}
+            size="small"
+          >
+            <Close />
+          </IconButton>
+        </Box>
+      </Box>
+
+      <Box sx={{ p: 2 }}>
+        {notifications.map((notification) => (
+          <Paper
+            key={notification.id}
+            sx={{
+              p: 2,
+              mb: 2,
+              border: notification.unread
+                ? "1px solid #1565C0"
+                : "1px solid #E2E8F0",
+              backgroundColor: notification.unread ? "#F0F9FF" : "white",
+              cursor: "pointer",
+              "&:hover": {
+                backgroundColor: "#F8FAFC",
+              },
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2 }}>
+              <Box
+                sx={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  backgroundColor:
+                    notification.type === "success"
+                      ? "#10B981"
+                      : notification.type === "warning"
+                      ? "#F59E0B"
+                      : "#1565C0",
+                  mt: 1,
+                }}
+              />
+              <Box sx={{ flex: 1 }}>
+                <Typography
+                  variant="subtitle2"
+                  sx={{ fontWeight: 600, mb: 0.5 }}
+                >
+                  {notification.title}
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{ color: "text.secondary", mb: 1 }}
+                >
+                  {notification.message}
+                </Typography>
+                <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                  {notification.time}
+                </Typography>
+              </Box>
+            </Box>
+          </Paper>
+        ))}
+      </Box>
+
+      <Box sx={{ p: 2, borderTop: "1px solid #E2E8F0" }}>
+        <Button fullWidth variant="outlined">
+          View All Notifications
+        </Button>
+      </Box>
+    </Drawer>
   );
 };
 
