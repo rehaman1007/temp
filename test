@@ -1,195 +1,168 @@
-// src/hooks/useStreamApi.js
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
+Notification Service Integration Guide
+Version: 1.0.0 Backend Service: NotificationService Base URL: http://<your-gateway-or-service-url>:9010 
+Authentication
+All endpoints require a JWT Token.
+●	Header: Authorization
+●	Format: Bearer <your_jwt_token>
+1. Real-Time Notification Stream (SSE)
+Establishes a persistent connection to receive real-time updates.
+●	Endpoint: /notifications/stream
+●	Method: GET
+●	Headers: Authorization: Bearer <token>
+Important Implementation Note for React
+The native browser EventSource API does not support custom headers (like Authorization). Since our backend requires the token in the header, you cannot use new EventSource().
+Recommended Library: @microsoft/fetch-event-source
+React Implementation Example:
+import { fetchEventSource } from '@microsoft/fetch-event-source';
+import { useState, useEffect } from 'react';
 
-const useStreamApi = () => {
-  const token = useSelector((state) => state.auth.token);
-  const snackbar = useCustomSnackbar();
-  const controllerRef = useRef(null);
-  const [connected, setConnected] = useState(false);
-  const [messages, setMessages] = useState([]);
+const useNotifications = (token) => {
+  const [notifications, setNotifications] = useState([]);
 
-  const startStream = useCallback(
-    (url, { onMessage, onError, onOpen } = {}) => {
-      if (controllerRef.current) controllerRef.current.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      setConnected(false);
+  useEffect(() => {
+    if (!token) return;
 
-      fetchEventSource(url, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        signal: controller.signal,
+    const controller = new AbortController();
 
-        onopen(response) {
-          if (response.ok) {
-            setConnected(true);
-            onOpen?.(response);
-          } else {
-            console.error("Stream connection failed:", response.status);
-            snackbar(`Stream failed: ${response.status}`, "error");
-          }
-        },
+    fetchEventSource('http://localhost:9010/notifications/stream', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      signal: controller.signal,
 
-        onmessage(event) {
-          if (event.event === "connected") {
-            console.log("Connected:", event.data);
+      onopen(response) {
+        if (response.ok && response.status === 200) {
+          console.log("SSE Connection established");
+        } else if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+          // Client-side errors (like 401) - usually fatal
+          console.error("SSE Connection failed:", response.status);
+        }
+      },
+
+      onmessage(event) {
+        // 1. Handle the initial connection message
+        if (event.event === 'connected') {
+            console.log("Server says:", event.data);
             return;
-          }
-          try {
-            const data = JSON.parse(event.data);
-            setMessages((prev) => [data, ...prev]);
-            onMessage?.(data);
-          } catch (err) {
-            console.error("Stream parse error:", err);
-          }
-        },
+        }
 
-        onerror(err) {
-          console.error("Stream error:", err);
-          setConnected(false);
-          onError?.(err);
-        },
-      });
-    },
-    [token]
-  );
-
-  const stopStream = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
-      controllerRef.current = null;
-      setConnected(false);
-      console.log("Stream stopped.");
-    }
-  }, []);
-
-  useEffect(() => {
-    return () => stopStream(); // Cleanup on unmount
-  }, [stopStream]);
-
-  return { connected, messages, startStream, stopStream };
-};
-
-export default useStreamApi;
-
-import React, { useEffect } from "react";
-import {
-  Box,
-  Drawer,
-  Typography,
-  IconButton,
-  Button,
-  Paper,
-} from "@mui/material";
-import { Close } from "@mui/icons-material";
-import useStreamApi from "../hooks/useStreamApi"; // ✅ import your hook
-
-const NotificationDrawer = ({
-  notificationDrawerOpen,
-  setNotificationDrawerOpen,
-  notifications,
-  setNotifications, // <- make sure you have a setter from parent
-}) => {
-  const { connected, startStream, stopStream } = useStreamApi();
-
-  useEffect(() => {
-    if (!notificationDrawerOpen) {
-      stopStream();
-      return;
-    }
-
-    startStream("/NS/notifications/stream", {
-      onOpen: (res) => console.log("Stream opened", res),
-      onMessage: (newNotification) => {
-        setNotifications((prev) => [newNotification, ...prev]);
+        // 2. Handle actual notifications
+        if (event.event === 'new_notification') {
+            const newNotification = JSON.parse(event.data);
+            setNotifications(prev => [newNotification, ...prev]);
+            
+            // Optional: Trigger a toast or badge update here
+            // toast.info(newNotification.message);
+        }
       },
-      onError: (err) => {
-        console.error("Notification stream error:", err);
-      },
+
+      onerror(err) {
+        console.error("SSE Error:", err);
+        // You can implement retry logic here if needed, 
+        // though the library handles basic retries automatically.
+      }
     });
 
-    return () => stopStream();
-  }, [notificationDrawerOpen, startStream, stopStream]);
+    return () => {
+      controller.abort(); // Close connection on unmount
+    };
+  }, [token]);
 
-  return (
-    <Drawer
-      anchor="right"
-      open={notificationDrawerOpen}
-      onClose={() => setNotificationDrawerOpen(false)}
-      sx={{
-        "& .MuiDrawer-paper": {
-          width: 400,
-          p: 0,
-        },
-      }}
-    >
-      <Box sx={{ p: 3, borderBottom: "1px solid #E2E8F0" }}>
-        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <Typography variant="h6" sx={{ fontWeight: 600 }}>
-            Notifications {connected ? "(Live)" : ""}
-          </Typography>
-          <IconButton onClick={() => setNotificationDrawerOpen(false)} size="small">
-            <Close />
-          </IconButton>
-        </Box>
-      </Box>
-
-      <Box sx={{ p: 2 }}>
-        {notifications.map((notification) => (
-          <Paper
-            key={notification.id}
-            sx={{
-              p: 2,
-              mb: 2,
-              border: notification.unread ? "1px solid #1565C0" : "1px solid #E2E8F0",
-              backgroundColor: notification.unread ? "#F0F9FF" : "white",
-              cursor: "pointer",
-              "&:hover": { backgroundColor: "#F8FAFC" },
-            }}
-          >
-            <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2 }}>
-              <Box
-                sx={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  backgroundColor:
-                    notification.type === "success"
-                      ? "#10B981"
-                      : notification.type === "warning"
-                      ? "#F59E0B"
-                      : "#1565C0",
-                  mt: 1,
-                }}
-              />
-              <Box sx={{ flex: 1 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
-                  {notification.title}
-                </Typography>
-                <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
-                  {notification.message}
-                </Typography>
-                <Typography variant="caption" sx={{ color: "text.secondary" }}>
-                  {notification.time}
-                </Typography>
-              </Box>
-            </Box>
-          </Paper>
-        ))}
-      </Box>
-
-      <Box sx={{ p: 2, borderTop: "1px solid #E2E8F0" }}>
-        <Button fullWidth variant="outlined">
-          View All Notifications
-        </Button>
-      </Box>
-    </Drawer>
-  );
+  return notifications;
 };
 
-export default NotificationDrawer;
+Events Emitted
+1.	connected: Sent immediately upon connection. Data: "Connection established".
+2.	new_notification: Sent when a real notification arrives. Data: JSON Object (see Notification Object below).
+2. Fetch Notification History
+Get a paginated list of past notifications.
+●	Endpoint: /notifications
+●	Method: GET
+●	Headers: Authorization: Bearer <token>
+●	Query Parameters:
+○	page (optional): Page number (0-indexed). Default: 0
+○	size (optional): Items per page. Default: 20
+Response (200 OK)
+Returns a Spring Data Page object.
+{
+  "content": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-1234-56789abcdef0",
+      "userId": "user-123",
+      "message": "Your 'Add' request for Segment Code (SGM1) has been approved.",
+      "isRead": false,
+      "createdAt": "2023-11-12T10:15:30Z",
+      "linkUrl": "/my-requests/history/12345",
+      "sourceEventId": "outbox-event-uuid"
+    }
+  ],
+  "pageable": {
+    "pageNumber": 0,
+    "pageSize": 20,
+    "sort": { "sorted": true, "unsorted": false, "empty": false },
+    "offset": 0,
+    "paged": true,
+    "unpaged": false
+  },
+  "last": false,
+  "totalElements": 50,
+  "totalPages": 3,
+  "size": 20,
+  "number": 0,
+  "first": true,
+  "numberOfElements": 20,
+  "empty": false
+}
+
+3. Get Unread Count
+Get the number of unread notifications (useful for the bell icon badge).
+●	Endpoint: /notifications/unread-count
+●	Method: GET
+●	Headers: Authorization: Bearer <token>
+Response (200 OK)
+{
+  "count": 5
+}
+
+4. Mark Notification as Read
+Mark a specific notification as read.
+●	Endpoint: /notifications/{id}/read
+●	Method: POST
+●	Headers: Authorization: Bearer <token>
+●	Path Parameters:
+○	id: The UUID of the notification.
+Response
+●	200 OK: Successfully marked as read. (Empty body)
+●	404 Not Found: Notification ID not found or does not belong to the user.
+
+
+Notification Object Structure
+
+This is the standard JSON object used in both the History API and the SSE Stream.
+
+Field	Type	Description
+id	UUID (String)	Unique ID of the notification.
+userId	String	The user this notification belongs to.
+message	String	The text to display to the user.
+isRead	Boolean	true if read, false if new.
+createdAt	ISO String	Timestamp (e.g., 2023-11-12T10:00:00Z).
+linkUrl	String	Relative URL to redirect when clicked.
+sourceEventId	String	For tracing/debugging purposes.
+
+React Integration Checklist
+1.	[ ] Install @microsoft/fetch-event-source.
+2.	[ ] Create a global Context or Hook (useNotification) to manage the SSE connection so it persists across page navigations.
+3.	[ ] On App load (if logged in), call GET /notifications/unread-count to set the initial badge number.
+4.	[ ] On App load, connect to SSE.
+○	When new_notification arrives:
+■	Increment the local badge count state.
+■	Show a "Toast" or "Snackbar" popup with event.data.message.
+■	If the user is currently viewing the Notification List, prepend the new item to the list.
+
+5.	[ ] When user clicks the bell icon:
+○	Call GET /notifications?page=0&size=20.
+6.	[ ] When user clicks a notification item:
+○	Call POST /notifications/{id}/read.
+○	Decrement local badge count.
+○	Redirect user to linkUrl.
