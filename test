@@ -1,116 +1,204 @@
-import { useState, useEffect, useCallback } from "react";
-import useApi from "./useApi";
-import useStreamApi from "./useStreamApi";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
+import React, { useMemo } from "react";
+import {
+  Box,
+  Drawer,
+  Typography,
+  IconButton,
+  Button,
+  Paper,
+  alpha,
+  Tooltip,
+  Stack,
+  Divider,
+} from "@mui/material";
+import { Close, DoneAll } from "@mui/icons-material";
+import useNotifications from "../hooks/useNotifications";
 
-const BASE_URL = "/NS/notifications";
-
-const useNotifications = () => {
-  const { callApi } = useApi();
-  const { showSnackbar } = useCustomSnackbar();
-  const { startStream, stopStream, lastMessage, connected } = useStreamApi();
-
-  const [pageNumber, setPageNumber] = useState(0);
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const size = 10;
-
-  /** --- 1️⃣ Fetch unread count --- **/
-  const fetchUnreadCount = useCallback(async () => {
-    try {
-      const data = await callApi(`${BASE_URL}/unread-count`);
-      if (data?.count !== undefined) setUnreadCount(data.count);
-    } catch (err) {
-      console.error("Failed to fetch unread count:", err);
-    }
-  }, [callApi]);
-
-  /** --- 2️⃣ Fetch notification history (paged) --- **/
-  const fetchHistory = useCallback(
-    async (page = pageNumber) => {
-      try {
-        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
-        const newItems = data?.content || [];
-
-        setNotifications((prev) => {
-          // Avoid duplicates by checking IDs
-          const existingIds = new Set(prev.map((n) => n.id));
-          const filtered = newItems.filter((n) => !existingIds.has(n.id));
-          return [...prev, ...filtered];
-        });
-
-        setHasMore(!data?.last);
-        setPageNumber(page);
-      } catch (err) {
-        console.error("Failed to fetch notifications:", err);
-        showSnackbar("Failed to load notifications", "error");
-      }
-    },
-    [callApi, pageNumber, size, showSnackbar]
-  );
-
-  /** --- 3️⃣ Mark as read --- **/
-  const markAsRead = useCallback(
-    async (id) => {
-      try {
-        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
-        if (response) {
-          setNotifications((prev) =>
-            prev.map((n) =>
-              n.id === id ? { ...n, isRead: true } : n
-            )
-          );
-          setUnreadCount((prev) => Math.max(0, prev - 1));
-        } else {
-          showSnackbar("Failed to mark as read", "error");
-        }
-      } catch (err) {
-        console.error("Mark as read failed:", err);
-      }
-    },
-    [callApi, showSnackbar]
-  );
-
-  /** --- 4️⃣ SSE stream: receive live notifications --- **/
-  useEffect(() => {
-    fetchUnreadCount();
-    fetchHistory(0); // load first page
-
-    startStream(`${BASE_URL}/stream`, {
-      onMessage: (newNotification) => {
-        setNotifications((prev) => [newNotification, ...prev]);
-        setUnreadCount((prev) => prev + 1);
-      },
-    });
-
-    return () => stopStream();
-  }, [fetchUnreadCount, fetchHistory, startStream, stopStream]);
-
-  /** --- 5️⃣ When new message arrives externally --- **/
-  useEffect(() => {
-    if (lastMessage) {
-      setNotifications((prev) => [lastMessage, ...prev]);
-      setUnreadCount((prev) => prev + 1);
-    }
-  }, [lastMessage]);
-
-  /** --- 6️⃣ Pagination helper --- **/
-  const loadMore = useCallback(() => {
-    if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, fetchHistory, pageNumber]);
-
-  return {
-    connected,
+const NotificationDrawer = ({
+  notificationDrawerOpen,
+  setNotificationDrawerOpen,
+}) => {
+  const {
     notifications,
-    unreadCount,
-    fetchUnreadCount,
-    fetchHistory,
     markAsRead,
-    stopStream,
     loadMore,
     hasMore,
+  } = useNotifications();
+
+  /** 📅 Sort notifications latest first */
+  const sortedNotifications = useMemo(
+    () =>
+      [...notifications].sort(
+        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+      ),
+    [notifications]
+  );
+
+  /** ✅ Placeholder: mark all as read (you’ll implement API later) */
+  const handleMarkAllAsRead = () => {
+    console.log("Marking all notifications as read (placeholder)");
+    // TODO: Implement markAllAsRead API later
+    // For now, update local state visually
+    sortedNotifications.forEach((n) => markAsRead(n.id));
   };
+
+  /** ⏱️ Relative time formatter */
+  const formatRelativeTime = (dateString) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const secondsAgo = Math.floor((now - date) / 1000);
+    const minutesAgo = Math.floor(secondsAgo / 60);
+    const hoursAgo = Math.floor(minutesAgo / 60);
+    const daysAgo = Math.floor(hoursAgo / 24);
+    const monthsAgo = Math.floor(daysAgo / 30);
+    const yearsAgo = Math.floor(monthsAgo / 12);
+
+    if (secondsAgo < 10) return "just now";
+    if (secondsAgo < 60) return `${secondsAgo}s ago`;
+    if (minutesAgo < 60) return `${minutesAgo}m ago`;
+    if (hoursAgo < 24) return `${hoursAgo}h ago`;
+    if (daysAgo < 30) return `${daysAgo}d ago`;
+    if (monthsAgo < 12) return `${monthsAgo}mo ago`;
+    return `${yearsAgo}y ago`;
+  };
+
+  return (
+    <Drawer
+      anchor="right"
+      open={notificationDrawerOpen}
+      onClose={() => setNotificationDrawerOpen(false)}
+      sx={{
+        "& .MuiDrawer-paper": {
+          width: 400,
+          p: 0,
+          display: "flex",
+          flexDirection: "column",
+          bgcolor: "#f9fafc",
+        },
+      }}
+    >
+      {/* Header */}
+      <Box
+        sx={{
+          p: 3,
+          borderBottom: "1px solid #E2E8F0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <Typography variant="h6" sx={{ fontWeight: 600 }}>
+          Notifications
+        </Typography>
+
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Tooltip title="Mark all as read">
+            <IconButton size="small" onClick={handleMarkAllAsRead}>
+              <DoneAll fontSize="small" color="primary" />
+            </IconButton>
+          </Tooltip>
+
+          <IconButton
+            onClick={() => setNotificationDrawerOpen(false)}
+            size="small"
+          >
+            <Close />
+          </IconButton>
+        </Stack>
+      </Box>
+
+      {/* Notification list */}
+      <Box
+        sx={{
+          flex: 1,
+          overflowY: "auto",
+          p: 2,
+          display: "flex",
+          flexDirection: "column",
+          gap: 1.5,
+        }}
+      >
+        {sortedNotifications.length === 0 ? (
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            align="center"
+            sx={{ mt: 4 }}
+          >
+            No notifications found
+          </Typography>
+        ) : (
+          sortedNotifications.map((n) => {
+            const isRead = n.isRead;
+            return (
+              <Paper
+                key={n.id}
+                onClick={() => markAsRead(n.id)}
+                sx={{
+                  p: 2,
+                  borderRadius: 2,
+                  border: isRead
+                    ? "1px solid #E2E8F0"
+                    : "1px solid #5D3FD3",
+                  backgroundColor: isRead
+                    ? alpha("#5D3FD3", 0.06)
+                    : "#FFFFFF",
+                  transition: "all 0.25s ease",
+                  cursor: "pointer",
+                  "&:hover": {
+                    backgroundColor: isRead
+                      ? alpha("#5D3FD3", 0.1)
+                      : alpha("#A28DF0", 0.15),
+                    transform: "translateY(-2px)",
+                  },
+                }}
+              >
+                <Typography
+                  variant="subtitle2"
+                  sx={{
+                    fontWeight: isRead ? 500 : 600,
+                    color: isRead ? "text.primary" : "#2E2E2E",
+                  }}
+                >
+                  {n.message}
+                </Typography>
+
+                <Typography
+                  variant="caption"
+                  sx={{
+                    color: "text.secondary",
+                    display: "block",
+                    mt: 0.5,
+                  }}
+                >
+                  {formatRelativeTime(n.createdAt)}
+                </Typography>
+              </Paper>
+            );
+          })
+        )}
+      </Box>
+
+      {/* Footer */}
+      <Divider />
+      <Box sx={{ p: 2 }}>
+        {hasMore ? (
+          <Button fullWidth variant="outlined" onClick={loadMore}>
+            Show More
+          </Button>
+        ) : (
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            align="center"
+            sx={{ py: 1 }}
+          >
+            No more notifications
+          </Typography>
+        )}
+      </Box>
+    </Drawer>
+  );
 };
 
-export default useNotifications;
+export default NotificationDrawer;
