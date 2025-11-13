@@ -1,191 +1,64 @@
-import React, {
-  createContext,
-  useContext,
-  useState,
-  useEffect,
-  useCallback,
-} from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import useApi from "../hooks/useApi";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
+import "./App.css";
+import AppRouter from "./routes/AppRouter";
+import {
+  Box,
+  CssBaseline,
+  StyledEngineProvider,
+  useColorScheme,
+} from "@mui/material";
+import { useEffect } from "react";
+import { SnackbarProviderComponent } from "./utils/SnackbarContext";
+import GlobalBackground from "./theme/GlobalBackground";
+import AppTheme from "./theme/AppTheme";
+import { NotificationProvider } from "./context/NotificationContext";
+import NotificationPopup from "./components/notification/NotificationPopup";
 
-const NotificationContext = createContext();
+const ColorSchemeInitializer = () => {
+  const { mode, setMode } = useColorScheme();
 
-export const useNotificationContext = () => useContext(NotificationContext);
-
-const BASE_URL = "/NS/notifications";
-const PAGE_SIZE = 10;
-
-export const NotificationProvider = ({ children }) => {
-  const { callApi } = useApi();
-  const { showSnackbar } = useCustomSnackbar();
-
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [pageNumber, setPageNumber] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const [connected, setConnected] = useState(false);
-  const [newPopup, setNewPopup] = useState(null);
-  const [eventSource, setEventSource] = useState(null);
-
-  /** Format relative time like "Just now", "5 seconds ago", etc. */
-  const formatRelativeTime = (timestamp) => {
-    const now = new Date();
-    const diff = Math.floor((now - new Date(timestamp)) / 1000);
-    if (diff < 5) return "Just now";
-    if (diff < 60) return `${diff} seconds ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)} hrs ago`;
-    if (diff < 604800) return `${Math.floor(diff / 86400)} days ago`;
-    return `${Math.floor(diff / 604800)} weeks ago`;
-  };
-
-  /** --- Fetch unread count --- **/
-  const fetchUnreadCount = useCallback(async () => {
-    try {
-      const data = await callApi(`${BASE_URL}/unread-count`);
-      if (data?.count !== undefined) setUnreadCount(data.count);
-    } catch (err) {
-      console.error("Failed to fetch unread count:", err);
+  useEffect(() => {
+    if (mode === "system" || mode === undefined) {
+      setMode("light");
     }
-  }, [callApi]);
+    console.log("Current color scheme :: ", mode);
+  }, [mode, setMode]);
 
-  /** --- Fetch notification history --- **/
-  const fetchHistory = useCallback(
-    async (page = 0) => {
-      try {
-        const data = await callApi(`${BASE_URL}?page=${page}&size=${PAGE_SIZE}`);
-        const newItems = data?.content || [];
+  return null;
+};
 
-        setNotifications((prev) => {
-          const existingIds = new Set(prev.map((n) => n.id));
-          const filtered = newItems.filter((n) => !existingIds.has(n.id));
-          const merged = [...prev, ...filtered].sort(
-            (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
-          );
-          return merged;
-        });
-
-        setHasMore(!data?.last);
-        setPageNumber(page);
-      } catch (err) {
-        console.error("Failed to fetch notifications:", err);
-        showSnackbar("Failed to load notifications", "error");
-      }
-    },
-    [callApi, showSnackbar]
-  );
-
-  /** --- Mark one notification as read --- **/
-  const markAsRead = useCallback(
-    async (id) => {
-      try {
-        const res = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
-        if (res) {
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
-          );
-          setUnreadCount((prev) => Math.max(prev - 1, 0));
-        }
-      } catch (err) {
-        console.error("Failed to mark as read", err);
-      }
-    },
-    [callApi]
-  );
-
-  /** --- Mark all notifications as read --- **/
-  const markAllAsRead = useCallback(async () => {
-    try {
-      const res = await callApi(`${BASE_URL}/mark-all-read`, {}, "POST");
-      if (res) {
-        setNotifications((prev) =>
-          prev.map((n) => ({ ...n, isRead: true }))
-        );
-        setUnreadCount(0);
-        showSnackbar("All notifications marked as read", "success");
-      }
-    } catch (err) {
-      console.error("Failed to mark all as read", err);
-      showSnackbar("Failed to mark all as read", "error");
+function App() {
+  useEffect(() => {
+    if (window.performance) {
+      const perfData = window.performance.timing;
+      const pageLoadTime = perfData.loadEventEnd - perfData.navigationStart;
+      console.log("Page Load Time:", pageLoadTime, "ms");
     }
-  }, [callApi, showSnackbar]);
-
-  /** --- Load more notifications (pagination) --- **/
-  const loadMore = useCallback(() => {
-    if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, pageNumber, fetchHistory]);
-
-  /** --- SSE Stream connection --- **/
-  const startStream = useCallback(() => {
-    const ctrl = new AbortController();
-    const source = fetchEventSource(`${BASE_URL}/stream`, {
-      method: "GET",
-      signal: ctrl.signal,
-      onopen() {
-        setConnected(true);
-        console.log("SSE connected");
-      },
-      onmessage(event) {
-        try {
-          const data = JSON.parse(event.data);
-          if (data && data.id) {
-            setNotifications((prev) => [data, ...prev]);
-            setUnreadCount((prev) => prev + 1);
-            setNewPopup(data);
-
-            // Hide popup after 2 seconds
-            setTimeout(() => setNewPopup(null), 2000);
-          }
-        } catch (e) {
-          console.error("Error parsing SSE message:", e);
-        }
-      },
-      onerror(err) {
-        console.error("SSE error:", err);
-        setConnected(false);
-      },
-      onclose() {
-        setConnected(false);
-        console.log("SSE closed");
-      },
-    });
-    setEventSource(ctrl);
-    return () => ctrl.abort();
   }, []);
 
-  const stopStream = useCallback(() => {
-    if (eventSource) eventSource.abort();
-    setConnected(false);
-  }, [eventSource]);
-
-  /** --- Initialize notifications --- **/
-  useEffect(() => {
-    fetchUnreadCount();
-    fetchHistory(0);
-    const cleanup = startStream();
-    return cleanup;
-  }, [fetchUnreadCount, fetchHistory, startStream]);
-
-  const value = {
-    notifications: notifications.map((n) => ({
-      ...n,
-      relativeTime: formatRelativeTime(n.timestamp),
-    })),
-    unreadCount,
-    hasMore,
-    loadMore,
-    markAsRead,
-    markAllAsRead,
-    connected,
-    newPopup,
-    setNewPopup,
-    stopStream,
-  };
-
   return (
-    <NotificationContext.Provider value={value}>
-      {children}
-    </NotificationContext.Provider>
+    <AppTheme>
+      <StyledEngineProvider injectFirst>
+        <ColorSchemeInitializer />
+        <CssBaseline enableColorScheme />
+        <GlobalBackground />
+        <Box
+          sx={{
+            transition:
+              "background-color 0.6s ease, color 0.6s ease, filter 0.6s ease",
+          }}
+        >
+          {/* ✅ Move NotificationProvider INSIDE Router context */}
+          <SnackbarProviderComponent>
+            <AppRouter>
+              <NotificationProvider>
+                <NotificationPopup />
+              </NotificationProvider>
+            </AppRouter>
+          </SnackbarProviderComponent>
+        </Box>
+      </StyledEngineProvider>
+    </AppTheme>
   );
-};
+}
+
+export default App;
