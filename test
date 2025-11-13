@@ -1,74 +1,124 @@
-import React, {
-  createContext,
-  useContext,
-  useState,
-  useEffect,
-  useCallback,
-  useRef,
-} from "react";
-import axios from "axios";
-import useStreamApi from "../hooks/useStreamApi";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
 
-const NotificationContext = createContext();
-const BASE_URL = "/NS/notifications";
-const PAGE_SIZE = 10;
+const useStreamApi = () => {
+  const token = useSelector((state) => state.auth.token);
+  const snackbar = useCustomSnackbar();
 
-export const NotificationProvider = ({ children }) => {
+  const controllerRef = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [lastMessage, setLastMessage] = useState(null);
+
+  const startStream = useCallback(
+    (url, { onMessage, onOpen, onError } = {}) => {
+      if (!token) return console.warn("No token, cannot start SSE stream");
+
+      // Cancel any existing connection
+      if (controllerRef.current) controllerRef.current.abort();
+
+      const controller = new AbortController();
+      controllerRef.current = controller;
+
+      fetchEventSource(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+
+        onopen(response) {
+          if (response.ok && response.status === 200) {
+            console.log("SSE Connection established");
+            setConnected(true);
+            onOpen?.(response);
+          } else {
+            console.error("SSE Connection failed:", response.status);
+            snackbar(`SSE Connection failed (${response.status})`, "error");
+          }
+        },
+
+        onmessage(event) {
+          if (event.event === "connected") {
+            // console.log("Server connected:", event.data);
+            return;
+          }
+          if (event.event === "new_notification") {
+            try {
+              const data = JSON.parse(event.data);
+              setLastMessage(data);
+              onMessage?.(data);
+            } catch (err) {
+              console.error("SSE message parse error:", err);
+            }
+          }
+        },
+
+        onerror(err) {
+          console.error("SSE Error:", err);
+          setConnected(false);
+          onError?.(err);
+        },
+      });
+    },
+    [snackbar, token]
+  );
+
+  const stopStream = useCallback(() => {
+    if (controllerRef.current) {
+      controllerRef.current.abort();
+      controllerRef.current = null;
+      setConnected(false);
+      console.log("SSE connection stopped.");
+    }
+  }, []);
+
+  useEffect(() => stopStream, [stopStream]);
+
+  return { connected, lastMessage, startStream, stopStream };
+};
+
+export default useStreamApi;
+
+import { useState, useEffect, useCallback } from "react";
+import useApi from "./useApi";
+import useStreamApi from "./useStreamApi";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
+
+const BASE_URL = "/NS/notifications";
+
+const useNotifications = () => {
+  const { callApi } = useApi();
   const { showSnackbar } = useCustomSnackbar();
   const { startStream, stopStream, lastMessage, connected } = useStreamApi();
 
+  const [pageNumber, setPageNumber] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [pageNumber, setPageNumber] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const [popupNotification, setPopupNotification] = useState(null);
-  const popupTimer = useRef(null);
+  const size = 10;
 
-  // Axios instance
-  const api = axios.create({
-    baseURL: BASE_URL,
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
-
-  // ✅ Helper: format relative timestamps
-  const formatRelativeTime = (timestamp) => {
-    if (!timestamp) return "";
-    const diff = Math.floor((Date.now() - new Date(timestamp)) / 1000);
-    if (diff < 5) return "just now";
-    if (diff < 60) return `${diff} sec ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)} hr ago`;
-    if (diff < 604800) return `${Math.floor(diff / 86400)} day ago`;
-    if (diff < 2419200) return `${Math.floor(diff / 604800)} week ago`;
-    return new Date(timestamp).toLocaleDateString();
-  };
-
-  // ✅ Fetch unread count
+  /** --- Fetch unread count --- **/
   const fetchUnreadCount = useCallback(async () => {
     try {
-      const { data } = await api.get(`/unread-count`);
+      const data = await callApi(`${BASE_URL}/unread-count`);
       if (data?.count !== undefined) setUnreadCount(data.count);
     } catch (err) {
       console.error("Failed to fetch unread count:", err);
     }
-  }, []);
+  }, [callApi]);
 
-  // ✅ Fetch paginated notifications
+  /** --- Fetch notification history (paged) --- **/
   const fetchHistory = useCallback(
-    async (page = 0) => {
+    async (page = pageNumber) => {
       try {
-        const { data } = await api.get(`?page=${page}&size=${PAGE_SIZE}`);
+        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
         const newItems = data?.content || [];
 
         setNotifications((prev) => {
+          // Avoid duplicates by checking IDs
           const existingIds = new Set(prev.map((n) => n.id));
           const filtered = newItems.filter((n) => !existingIds.has(n.id));
-          return [...prev, ...filtered].sort(
-            (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
-          );
+          return [...prev, ...filtered];
         });
 
         setHasMore(!data?.last);
@@ -78,107 +128,328 @@ export const NotificationProvider = ({ children }) => {
         showSnackbar("Failed to load notifications", "error");
       }
     },
-    [showSnackbar]
+    [callApi, pageNumber, size, showSnackbar]
   );
 
-  // ✅ Mark a notification as read
+  /** --- Mark as read --- **/
   const markAsRead = useCallback(
     async (id) => {
       try {
-        await api.post(`/${id}/read`);
-        setNotifications((prev) =>
-          prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
-        );
-        setUnreadCount((prev) => Math.max(prev - 1, 0));
+        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
+        if (response) {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
+          );
+          setUnreadCount((prev) => prev - 1);
+        } else {
+          showSnackbar("Failed to mark as read", "error");
+        }
       } catch (err) {
         console.error("Mark as read failed:", err);
-        showSnackbar("Failed to mark as read", "error");
       }
     },
-    [showSnackbar]
+    [callApi, showSnackbar]
   );
 
-  // ✅ Mark all notifications as read
-  const markAllAsRead = useCallback(async () => {
-    try {
-      await api.post(`/mark-all-read`);
-      setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
-      setUnreadCount(0);
-      showSnackbar("All notifications marked as read", "success");
-    } catch (err) {
-      console.error("Failed to mark all as read:", err);
-      showSnackbar("Failed to mark all notifications as read", "error");
-    }
-  }, [showSnackbar]);
-
-  // ✅ Load next page
-  const loadMore = useCallback(() => {
-    if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, fetchHistory, pageNumber]);
-
-  // ✅ Popup for 2 seconds when new notification arrives
-  const showPopup = (notification) => {
-    setPopupNotification(notification);
-    if (popupTimer.current) clearTimeout(popupTimer.current);
-    popupTimer.current = setTimeout(() => setPopupNotification(null), 2500);
-  };
-
-  // ✅ Initial fetch + SSE setup
+  /** --- SSE stream: receive live notifications --- **/
   useEffect(() => {
     fetchUnreadCount();
-    fetchHistory(0);
+    fetchHistory(0); // load first page
 
     startStream(`${BASE_URL}/stream`, {
       onMessage: (newNotification) => {
         setNotifications((prev) => [newNotification, ...prev]);
         setUnreadCount((prev) => prev + 1);
-        showPopup(newNotification);
       },
     });
 
-    return () => {
-      stopStream();
-      if (popupTimer.current) clearTimeout(popupTimer.current);
-    };
+    return () => stopStream();
   }, [fetchUnreadCount, fetchHistory, startStream, stopStream]);
 
-  // ✅ Handle new messages via stream
+  /** --- When new message arrives externally --- **/
   useEffect(() => {
     if (lastMessage) {
       setNotifications((prev) => [lastMessage, ...prev]);
       setUnreadCount((prev) => prev + 1);
-      showPopup(lastMessage);
     }
   }, [lastMessage]);
 
-  // ✅ Context Value
-  const value = {
+  /** --- Pagination helper --- **/
+  const loadMore = useCallback(() => {
+    if (hasMore) fetchHistory(pageNumber + 1);
+  }, [hasMore, fetchHistory, pageNumber]);
+
+  console.log("unreadCount >>", unreadCount);
+
+  return {
     connected,
     notifications,
     unreadCount,
-    hasMore,
-    loadMore,
-    markAsRead,
-    markAllAsRead,
     fetchUnreadCount,
     fetchHistory,
-    popupNotification,
-    formatRelativeTime,
+    markAsRead,
+    stopStream,
+    loadMore,
+    hasMore,
   };
+};
+
+export default useNotifications;
+
+import { Notifications, Menu as MenuIcon } from "@mui/icons-material";
+import {
+  Badge,
+  Box,
+  IconButton,
+  Toolbar,
+  Typography,
+  useTheme,
+  useMediaQuery,
+} from "@mui/material";
+import React, { useState } from "react";
+import { useSelector } from "react-redux";
+import NotificationDrawer from "./NotificationDrawer";
+import useNotifications from "../hooks/useNotifications";
+
+const LayoutHeader = () => {
+  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
+  const { unreadCount } = useNotifications();
+
+  const theme = useTheme();
 
   return (
-    <NotificationContext.Provider value={value}>
-      {children}
-    </NotificationContext.Provider>
+    <Box
+      position="fixed"
+      sx={{
+        width: { xs: "100%", lg: `calc(100% - ${drawerWidth}px)` },
+        right: 0,
+        top: 0,
+        zIndex: 1200,
+        background:
+          "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
+      }}
+    >
+      <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
+
+        {/* Right side section */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <SearchBar navigateToPage={navigateToPage} />
+
+          <IconButton
+            color="inherit"
+            onClick={() => setNotificationDrawerOpen(true)}
+          >
+            {unreadCount > 0 ? (
+              <Badge badgeContent={unreadCount || ""} color="error">
+                <Notifications />
+              </Badge>
+            ) : (
+              <Notifications />
+            )}
+          </IconButton>
+        </Box>
+      </Toolbar>
+
+      <NotificationDrawer
+        notificationDrawerOpen={notificationDrawerOpen}
+        setNotificationDrawerOpen={setNotificationDrawerOpen}
+      />
   );
 };
 
-// ✅ Custom hook
-export const useNotificationContext = () => {
-  const context = useContext(NotificationContext);
-  if (!context)
-    throw new Error(
-      "useNotificationContext must be used within a NotificationProvider"
-    );
-  return context;
+export default React.memo(LayoutHeader);
+
+
+import React, { useMemo } from "react";
+import {
+  Box,
+  Drawer,
+  Typography,
+  IconButton,
+  Button,
+  Paper,
+  alpha,
+  Tooltip,
+  Stack,
+  Divider,
+} from "@mui/material";
+import { Close, DoneAll, NotificationsNone } from "@mui/icons-material";
+import useNotifications from "../hooks/useNotifications";
+import { formatRelativeTime } from "../utils/CommonUtilities";
+
+const NotificationDrawer = ({
+  notificationDrawerOpen,
+  setNotificationDrawerOpen,
+}) => {
+  const { notifications, markAsRead, loadMore, hasMore } = useNotifications();
+
+  /** Sort notifications latest first */
+  const sortedNotifications = useMemo(
+    () =>
+      [...notifications].sort(
+        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+      ),
+    [notifications]
+  );
+
+  /** Placeholder: mark all as read (you’ll implement API later) */
+  const handleMarkAllAsRead = () => {
+    console.log("Marking all notifications as read (placeholder)");
+    // TODO: Implement markAllAsRead API later
+    // For now, update local state visually
+    sortedNotifications.forEach((n) => markAsRead(n.id));
+  };
+
+  return (
+    <Drawer
+      anchor="right"
+      open={notificationDrawerOpen}
+      onClose={() => setNotificationDrawerOpen(false)}
+      sx={{
+        "& .MuiDrawer-paper": {
+          width: 400,
+          p: 0,
+          display: "flex",
+          flexDirection: "column",
+        },
+      }}
+    >
+      {/* Header */}
+      <Box
+        sx={{
+          p: 3,
+          borderBottom: "1px solid #E2E8F0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <Typography variant="h6" sx={{ fontWeight: 600 }}>
+          Notifications
+        </Typography>
+
+        <Stack direction="row" alignItems="center" spacing={1}>
+          {notifications.length > 0 && (
+            <Tooltip title="Mark all as read">
+              <IconButton size="small" onClick={handleMarkAllAsRead}>
+                <DoneAll /* fontSize="small" */ color="primary" />
+              </IconButton>
+            </Tooltip>
+          )}
+
+          <IconButton
+            onClick={() => setNotificationDrawerOpen(false)}
+            size="small"
+          >
+            <Close />
+          </IconButton>
+        </Stack>
+      </Box>
+
+      <Divider sx={{ my: 1 }} />
+      {/* Notification list */}
+      {notifications.length === 0 ? (
+        <Box
+          sx={{
+            textAlign: "center",
+            mt: 4,
+            color: "text.secondary",
+          }}
+        >
+          <NotificationsNone sx={{ fontSize: 50, mb: 1, opacity: 0.6 }} />
+          <Typography>No notifications yet</Typography>
+        </Box>
+      ) : (
+        <Box
+          sx={{
+            flex: 1,
+            overflowY: "auto",
+            p: 2,
+            display: "flex",
+            flexDirection: "column",
+            gap: 1.5,
+          }}
+        >
+          {sortedNotifications.length === 0 ? (
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              align="center"
+              sx={{ mt: 4 }}
+            >
+              No notifications found
+            </Typography>
+          ) : (
+            sortedNotifications.map((n) => {
+              const isRead = n.isRead;
+              return (
+                <Paper
+                  key={n.id}
+                  onClick={() => markAsRead(n.id)}
+                  sx={{
+                    p: 2,
+                    borderRadius: 2,
+                    border: isRead ? "1px solid #E2E8F0" : "1px solid #5D3FD3",
+                    backgroundColor: isRead
+                      ? alpha("#5D3FD3", 0.06)
+                      : "#FFFFFF",
+                    transition: "all 0.25s ease",
+                    cursor: "pointer",
+                    "&:hover": {
+                      backgroundColor: isRead
+                        ? alpha("#5D3FD3", 0.1)
+                        : alpha("#A28DF0", 0.15),
+                      transform: "translateY(-2px)",
+                    },
+                  }}
+                >
+                  <Typography
+                    variant="subtitle2"
+                    sx={{
+                      fontWeight: isRead ? 500 : 600,
+                      color: isRead ? "text.primary" : "#2E2E2E",
+                    }}
+                  >
+                    {n.message}
+                  </Typography>
+
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "text.secondary",
+                      display: "block",
+                      mt: 0.5,
+                    }}
+                  >
+                    {formatRelativeTime(n.createdAt)}
+                  </Typography>
+                </Paper>
+              );
+            })
+          )}
+        </Box>
+      )}
+
+      {/* Footer */}
+      <Divider />
+      <Box sx={{ p: 2 }}>
+        {hasMore ? (
+          <Button fullWidth variant="outlined" onClick={loadMore}>
+            Show More
+          </Button>
+        ) : (
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            align="center"
+            sx={{ py: 1 }}
+          >
+            No more notifications
+          </Typography>
+        )}
+      </Box>
+    </Drawer>
+  );
 };
+
+export default NotificationDrawer;
