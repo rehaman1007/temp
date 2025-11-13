@@ -1,200 +1,228 @@
-import React, { useMemo } from "react";
-import {
-  Box,
-  Drawer,
-  Typography,
-  IconButton,
-  Button,
-  Paper,
-  alpha,
-  Tooltip,
-  Stack,
-  Divider,
-} from "@mui/material";
-import { Close, DoneAll } from "@mui/icons-material";
-import useNotifications from "../hooks/useNotifications";
+// src/context/NotificationContext.jsx
+import React, { createContext, useContext, useState, useEffect } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 
-const NotificationDrawer = ({
-  notificationDrawerOpen,
-  setNotificationDrawerOpen,
-}) => {
-  const {
-    notifications,
-    markAsRead,
-    loadMore,
-    hasMore,
-  } = useNotifications();
+const NotificationContext = createContext();
 
-  /** 📅 Sort notifications latest first */
-  const sortedNotifications = useMemo(
-    () =>
-      [...notifications].sort(
-        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-      ),
-    [notifications]
-  );
+export const NotificationProvider = ({ token, children }) => {
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [newPopup, setNewPopup] = useState(null); // For 2-sec pop notification
 
-  /** ✅ Placeholder: mark all as read (you’ll implement API later) */
-  const handleMarkAllAsRead = () => {
-    console.log("Marking all notifications as read (placeholder)");
-    // TODO: Implement markAllAsRead API later
-    // For now, update local state visually
-    sortedNotifications.forEach((n) => markAsRead(n.id));
+  // --- SSE Setup ---
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+
+    fetchEventSource("http://localhost:9010/notifications/stream", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+
+      onopen(response) {
+        console.log("✅ SSE Connected");
+      },
+
+      onmessage(event) {
+        if (event.event === "new_notification") {
+          const notif = JSON.parse(event.data);
+
+          // Add to list (latest first)
+          setNotifications((prev) => [notif, ...prev]);
+          setUnreadCount((c) => c + 1);
+
+          // Trigger popup
+          setNewPopup({
+            ...notif,
+            receivedAt: new Date().toISOString(),
+          });
+
+          // Hide popup after 2 sec
+          setTimeout(() => setNewPopup(null), 2000);
+        }
+      },
+
+      onerror(err) {
+        console.error("SSE Error:", err);
+      },
+    });
+
+    return () => controller.abort();
+  }, [token]);
+
+  const markAsRead = (id) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
+    );
+    setUnreadCount((c) => (c > 0 ? c - 1 : 0));
   };
 
-  /** ⏱️ Relative time formatter */
-  const formatRelativeTime = (dateString) => {
-    const date = new Date(dateString);
-    const now = new Date();
-    const secondsAgo = Math.floor((now - date) / 1000);
-    const minutesAgo = Math.floor(secondsAgo / 60);
-    const hoursAgo = Math.floor(minutesAgo / 60);
-    const daysAgo = Math.floor(hoursAgo / 24);
-    const monthsAgo = Math.floor(daysAgo / 30);
-    const yearsAgo = Math.floor(monthsAgo / 12);
-
-    if (secondsAgo < 10) return "just now";
-    if (secondsAgo < 60) return `${secondsAgo}s ago`;
-    if (minutesAgo < 60) return `${minutesAgo}m ago`;
-    if (hoursAgo < 24) return `${hoursAgo}h ago`;
-    if (daysAgo < 30) return `${daysAgo}d ago`;
-    if (monthsAgo < 12) return `${monthsAgo}mo ago`;
-    return `${yearsAgo}y ago`;
+  const markAllAsRead = () => {
+    setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
+    setUnreadCount(0);
   };
 
   return (
-    <Drawer
-      anchor="right"
-      open={notificationDrawerOpen}
-      onClose={() => setNotificationDrawerOpen(false)}
-      sx={{
-        "& .MuiDrawer-paper": {
-          width: 400,
-          p: 0,
-          display: "flex",
-          flexDirection: "column",
-          bgcolor: "#f9fafc",
-        },
+    <NotificationContext.Provider
+      value={{
+        notifications,
+        unreadCount,
+        markAsRead,
+        markAllAsRead,
+        newPopup,
       }}
     >
-      {/* Header */}
-      <Box
+      {children}
+    </NotificationContext.Provider>
+  );
+};
+
+export const useNotificationContext = () => useContext(NotificationContext);
+
+
+
+// src/components/NotificationPopup.jsx
+import React from "react";
+import { Box, Typography, Avatar, Slide, Paper } from "@mui/material";
+import NotificationsActiveIcon from "@mui/icons-material/NotificationsActive";
+
+const NotificationPopup = ({ popup }) => {
+  if (!popup) return null;
+
+  return (
+    <Slide in={!!popup} direction="left" mountOnEnter unmountOnExit>
+      <Paper
+        elevation={6}
         sx={{
-          p: 3,
-          borderBottom: "1px solid #E2E8F0",
+          position: "fixed",
+          top: 16,
+          right: 16,
+          zIndex: 2000,
+          p: 2,
+          borderRadius: 2,
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <Typography variant="h6" sx={{ fontWeight: 600 }}>
-          Notifications
-        </Typography>
-
-        <Stack direction="row" alignItems="center" spacing={1}>
-          <Tooltip title="Mark all as read">
-            <IconButton size="small" onClick={handleMarkAllAsRead}>
-              <DoneAll fontSize="small" color="primary" />
-            </IconButton>
-          </Tooltip>
-
-          <IconButton
-            onClick={() => setNotificationDrawerOpen(false)}
-            size="small"
-          >
-            <Close />
-          </IconButton>
-        </Stack>
-      </Box>
-
-      {/* Notification list */}
-      <Box
-        sx={{
-          flex: 1,
-          overflowY: "auto",
-          p: 2,
-          display: "flex",
-          flexDirection: "column",
           gap: 1.5,
+          width: { xs: "90%", sm: 360 },
+          backgroundColor: "#ffffffcc",
+          backdropFilter: "blur(10px)",
         }}
       >
-        {sortedNotifications.length === 0 ? (
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            align="center"
-            sx={{ mt: 4 }}
-          >
-            No notifications found
+        <Avatar sx={{ bgcolor: "#5D3FD3" }}>
+          <NotificationsActiveIcon />
+        </Avatar>
+        <Box flex={1}>
+          <Typography fontWeight={600}>Crysta App</Typography>
+          <Typography variant="body2" noWrap>
+            {popup.message}
           </Typography>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mt: 0.3 }}
+          >
+            {new Date(popup.createdAt || popup.receivedAt).toLocaleTimeString()}
+          </Typography>
+        </Box>
+      </Paper>
+    </Slide>
+  );
+};
+
+export default NotificationPopup;
+
+// src/components/NotificationDrawer.jsx
+import React from "react";
+import {
+  Drawer,
+  Box,
+  Typography,
+  IconButton,
+  Divider,
+  List,
+  ListItem,
+  ListItemText,
+  ListItemAvatar,
+  Avatar,
+  Button,
+  Tooltip,
+} from "@mui/material";
+import NotificationsNoneIcon from "@mui/icons-material/NotificationsNone";
+import DoneAllIcon from "@mui/icons-material/DoneAll";
+import { useNotificationContext } from "../context/NotificationContext";
+
+const NotificationDrawer = ({ open, onClose }) => {
+  const { notifications, markAsRead, markAllAsRead } = useNotificationContext();
+
+  return (
+    <Drawer anchor="right" open={open} onClose={onClose}>
+      <Box sx={{ width: { xs: 300, sm: 400 }, p: 2 }}>
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <Typography variant="h6">Notifications</Typography>
+          {notifications.length > 0 && (
+            <Tooltip title="Mark all as read">
+              <IconButton size="small" onClick={markAllAsRead}>
+                <DoneAllIcon color="primary" />
+              </IconButton>
+            </Tooltip>
+          )}
+        </Box>
+        <Divider sx={{ my: 1 }} />
+
+        {notifications.length === 0 ? (
+          <Box
+            sx={{
+              textAlign: "center",
+              mt: 4,
+              color: "text.secondary",
+            }}
+          >
+            <NotificationsNoneIcon sx={{ fontSize: 50, mb: 1, opacity: 0.6 }} />
+            <Typography>No notifications yet</Typography>
+          </Box>
         ) : (
-          sortedNotifications.map((n) => {
-            const isRead = n.isRead;
-            return (
-              <Paper
-                key={n.id}
-                onClick={() => markAsRead(n.id)}
+          <List>
+            {notifications.map((notif) => (
+              <ListItem
+                key={notif.id}
+                onClick={() => markAsRead(notif.id)}
                 sx={{
-                  p: 2,
-                  borderRadius: 2,
-                  border: isRead
-                    ? "1px solid #E2E8F0"
-                    : "1px solid #5D3FD3",
-                  backgroundColor: isRead
-                    ? alpha("#5D3FD3", 0.06)
-                    : "#FFFFFF",
-                  transition: "all 0.25s ease",
+                  mb: 0.5,
+                  borderRadius: 1,
                   cursor: "pointer",
+                  bgcolor: notif.isRead ? "background.paper" : "#f0f2ff",
+                  transition: "all 0.2s",
                   "&:hover": {
-                    backgroundColor: isRead
-                      ? alpha("#5D3FD3", 0.1)
-                      : alpha("#A28DF0", 0.15),
-                    transform: "translateY(-2px)",
+                    bgcolor: notif.isRead ? "#f9f9f9" : "#e4e6ff",
+                    transform: "scale(1.01)",
                   },
                 }}
               >
-                <Typography
-                  variant="subtitle2"
-                  sx={{
-                    fontWeight: isRead ? 500 : 600,
-                    color: isRead ? "text.primary" : "#2E2E2E",
-                  }}
-                >
-                  {n.message}
-                </Typography>
-
-                <Typography
-                  variant="caption"
-                  sx={{
-                    color: "text.secondary",
-                    display: "block",
-                    mt: 0.5,
-                  }}
-                >
-                  {formatRelativeTime(n.createdAt)}
-                </Typography>
-              </Paper>
-            );
-          })
-        )}
-      </Box>
-
-      {/* Footer */}
-      <Divider />
-      <Box sx={{ p: 2 }}>
-        {hasMore ? (
-          <Button fullWidth variant="outlined" onClick={loadMore}>
-            Show More
-          </Button>
-        ) : (
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            align="center"
-            sx={{ py: 1 }}
-          >
-            No more notifications
-          </Typography>
+                <ListItemAvatar>
+                  <Avatar sx={{ bgcolor: notif.isRead ? "grey.400" : "primary.main" }}>
+                    <NotificationsNoneIcon />
+                  </Avatar>
+                </ListItemAvatar>
+                <ListItemText
+                  primary={
+                    <Typography
+                      fontWeight={notif.isRead ? 400 : 600}
+                      variant="body1"
+                    >
+                      {notif.message}
+                    </Typography>
+                  }
+                  secondary={new Date(notif.createdAt).toLocaleString()}
+                />
+              </ListItem>
+            ))}
+          </List>
         )}
       </Box>
     </Drawer>
@@ -202,3 +230,52 @@ const NotificationDrawer = ({
 };
 
 export default NotificationDrawer;
+
+import React from "react";
+import { NotificationProvider } from "./context/NotificationContext";
+import NotificationPopup from "./components/NotificationPopup";
+import NotificationBell from "./components/NotificationBell";
+
+const token = "YOUR_JWT_TOKEN";
+
+function App() {
+  return (
+    <NotificationProvider token={token}>
+      <div style={{ padding: 16 }}>
+        <h2>My App</h2>
+        <NotificationBell />
+      </div>
+
+      {/* Real-time pop-up */}
+      <NotificationPopup popup={useNotificationContext().newPopup} />
+    </NotificationProvider>
+  );
+}
+
+export default App;
+
+// src/components/NotificationBell.jsx
+import React, { useState } from "react";
+import { Badge, IconButton } from "@mui/material";
+import NotificationsIcon from "@mui/icons-material/Notifications";
+import { useNotificationContext } from "../context/NotificationContext";
+import NotificationDrawer from "./NotificationDrawer";
+
+const NotificationBell = () => {
+  const { unreadCount, newPopup } = useNotificationContext();
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <IconButton color="inherit" onClick={() => setOpen(true)}>
+        <Badge badgeContent={unreadCount} color="error">
+          <NotificationsIcon />
+        </Badge>
+      </IconButton>
+
+      <NotificationDrawer open={open} onClose={() => setOpen(false)} />
+    </>
+  );
+};
+
+export default NotificationBell;
