@@ -1,75 +1,116 @@
-import "./App.css";
-import AppRouter from "./routes/AppRouter";
-import {
-  Box,
-  CssBaseline,
-  StyledEngineProvider,
-  ThemeProvider,
-  useColorScheme,
-} from "@mui/material";
-import { useEffect } from "react";
-import { SnackbarProviderComponent } from "./utils/SnackbarContext";
-import GlobalBackground from "./theme/GlobalBackground";
-import AppTheme from "./theme/AppTheme";
-import { NotificationProvider, useNotificationContext } from "./context/NotificationContext";
-import NotificationPopup from "./components/notification/NotificationPopup";
+import { useState, useEffect, useCallback } from "react";
+import useApi from "./useApi";
+import useStreamApi from "./useStreamApi";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
 
-const ColorSchemeInitializer = () => {
-  const { mode, setMode } = useColorScheme();
+const BASE_URL = "/NS/notifications";
 
-  useEffect(() => {
-    if (mode === "system" || mode === undefined) {
-      setMode("light");
+const useNotifications = () => {
+  const { callApi } = useApi();
+  const { showSnackbar } = useCustomSnackbar();
+  const { startStream, stopStream, lastMessage, connected } = useStreamApi();
+
+  const [pageNumber, setPageNumber] = useState(0);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const size = 10;
+
+  /** --- Fetch unread count --- **/
+  const fetchUnreadCount = useCallback(async () => {
+    try {
+      const data = await callApi(`${BASE_URL}/unread-count`);
+      if (data?.count !== undefined) setUnreadCount(data.count);
+    } catch (err) {
+      console.error("Failed to fetch unread count:", err);
     }
-    console.log("Current color scheme :: ", mode);
-  }, [mode, setMode]);
+  }, [callApi]);
 
-  return null;
+  /** --- Fetch notification history (paged) --- **/
+  const fetchHistory = useCallback(
+    async (page = pageNumber) => {
+      try {
+        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
+        const newItems = data?.content || [];
+
+        setNotifications((prev) => {
+          // Avoid duplicates by checking IDs
+          const existingIds = new Set(prev.map((n) => n.id));
+          const filtered = newItems.filter((n) => !existingIds.has(n.id));
+          return [...prev, ...filtered];
+        });
+
+        setHasMore(!data?.last);
+        setPageNumber(page);
+      } catch (err) {
+        console.error("Failed to fetch notifications:", err);
+        showSnackbar("Failed to load notifications", "error");
+      }
+    },
+    [callApi, pageNumber, size, showSnackbar]
+  );
+
+  /** --- Mark as read --- **/
+  const markAsRead = useCallback(
+    async (id) => {
+      try {
+        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
+        if (response) {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
+          );
+          setUnreadCount((prev) => prev - 1);
+        } else {
+          showSnackbar("Failed to mark as read", "error");
+        }
+      } catch (err) {
+        console.error("Mark as read failed:", err);
+      }
+    },
+    [callApi, showSnackbar]
+  );
+
+  /** --- SSE stream: receive live notifications --- **/
+  useEffect(() => {
+    fetchUnreadCount();
+    fetchHistory(0); // load first page
+
+    startStream(`${BASE_URL}/stream`, {
+      onMessage: (newNotification) => {
+        setNotifications((prev) => [newNotification, ...prev]);
+        setUnreadCount((prev) => prev + 1);
+      },
+    });
+
+    return () => stopStream();
+  }, [fetchUnreadCount, fetchHistory, startStream, stopStream]);
+
+  /** --- When new message arrives externally --- **/
+  useEffect(() => {
+    if (lastMessage) {
+      setNotifications((prev) => [lastMessage, ...prev]);
+      setUnreadCount((prev) => prev + 1);
+    }
+  }, [lastMessage]);
+
+  /** --- Pagination helper --- **/
+  const loadMore = useCallback(() => {
+    if (hasMore) fetchHistory(pageNumber + 1);
+  }, [hasMore, fetchHistory, pageNumber]);
+
+  console.log("unreadCount >>", unreadCount);
+
+  return {
+    connected,
+    notifications,
+    unreadCount,
+    fetchUnreadCount,
+    fetchHistory,
+    markAsRead,
+    stopStream,
+    loadMore,
+    hasMore,
+  };
 };
 
-function AppContent() {
-  // ✅ Safe hook call — top level
-  const { newPopup } = useNotificationContext();
-
-  return (
-    <>
-      <SnackbarProviderComponent>
-        <AppRouter />
-      </SnackbarProviderComponent>
-      <NotificationPopup popup={newPopup} />
-    </>
-  );
-}
-
-function App() {
-  useEffect(() => {
-    if (window.performance) {
-      const perfData = window.performance.timing;
-      const pageLoadTime = perfData.loadEventEnd - perfData.navigationStart;
-      console.log("Page Load Time:", pageLoadTime, "ms");
-    }
-  }, []);
-
-  return (
-    <AppTheme>
-      <StyledEngineProvider enableCssLayer>
-        <ColorSchemeInitializer />
-        <CssBaseline enableColorScheme />
-        <GlobalBackground />
-        <Box
-          sx={{
-            transition:
-              "background-color 0.6s ease, color 0.6s ease, filter 0.6s ease",
-          }}
-        >
-          {/* ✅ Context should wrap the AppContent that uses it */}
-          <NotificationProvider>
-            <AppContent />
-          </NotificationProvider>
-        </Box>
-      </StyledEngineProvider>
-    </AppTheme>
-  );
-}
-
-export default App;
+export default useNotifications;
