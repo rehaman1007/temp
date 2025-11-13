@@ -1,20 +1,44 @@
-import { useState, useEffect, useCallback } from "react";
-import useApi from "./useApi";
-import useStreamApi from "./useStreamApi";
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+} from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import useApi from "../hooks/useApi";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
 
-const BASE_URL = "/NS/notifications";
+const NotificationContext = createContext();
 
-const useNotifications = () => {
+export const useNotificationContext = () => useContext(NotificationContext);
+
+const BASE_URL = "/NS/notifications";
+const PAGE_SIZE = 10;
+
+export const NotificationProvider = ({ children }) => {
   const { callApi } = useApi();
   const { showSnackbar } = useCustomSnackbar();
-  const { startStream, stopStream, lastMessage, connected } = useStreamApi();
 
-  const [pageNumber, setPageNumber] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [pageNumber, setPageNumber] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const size = 10;
+  const [connected, setConnected] = useState(false);
+  const [newPopup, setNewPopup] = useState(null);
+  const [eventSource, setEventSource] = useState(null);
+
+  /** Format relative time like "Just now", "5 seconds ago", etc. */
+  const formatRelativeTime = (timestamp) => {
+    const now = new Date();
+    const diff = Math.floor((now - new Date(timestamp)) / 1000);
+    if (diff < 5) return "Just now";
+    if (diff < 60) return `${diff} seconds ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)} hrs ago`;
+    if (diff < 604800) return `${Math.floor(diff / 86400)} days ago`;
+    return `${Math.floor(diff / 604800)} weeks ago`;
+  };
 
   /** --- Fetch unread count --- **/
   const fetchUnreadCount = useCallback(async () => {
@@ -26,18 +50,20 @@ const useNotifications = () => {
     }
   }, [callApi]);
 
-  /** --- Fetch notification history (paged) --- **/
+  /** --- Fetch notification history --- **/
   const fetchHistory = useCallback(
-    async (page = pageNumber) => {
+    async (page = 0) => {
       try {
-        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
+        const data = await callApi(`${BASE_URL}?page=${page}&size=${PAGE_SIZE}`);
         const newItems = data?.content || [];
 
         setNotifications((prev) => {
-          // Avoid duplicates by checking IDs
           const existingIds = new Set(prev.map((n) => n.id));
           const filtered = newItems.filter((n) => !existingIds.has(n.id));
-          return [...prev, ...filtered];
+          const merged = [...prev, ...filtered].sort(
+            (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
+          );
+          return merged;
         });
 
         setHasMore(!data?.last);
@@ -47,70 +73,119 @@ const useNotifications = () => {
         showSnackbar("Failed to load notifications", "error");
       }
     },
-    [callApi, pageNumber, size, showSnackbar]
-  );
-
-  /** --- Mark as read --- **/
-  const markAsRead = useCallback(
-    async (id) => {
-      try {
-        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
-        if (response) {
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
-          );
-          setUnreadCount((prev) => prev - 1);
-        } else {
-          showSnackbar("Failed to mark as read", "error");
-        }
-      } catch (err) {
-        console.error("Mark as read failed:", err);
-      }
-    },
     [callApi, showSnackbar]
   );
 
-  /** --- SSE stream: receive live notifications --- **/
-  useEffect(() => {
-    fetchUnreadCount();
-    fetchHistory(0); // load first page
+  /** --- Mark one notification as read --- **/
+  const markAsRead = useCallback(
+    async (id) => {
+      try {
+        const res = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
+        if (res) {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
+          );
+          setUnreadCount((prev) => Math.max(prev - 1, 0));
+        }
+      } catch (err) {
+        console.error("Failed to mark as read", err);
+      }
+    },
+    [callApi]
+  );
 
-    startStream(`${BASE_URL}/stream`, {
-      onMessage: (newNotification) => {
-        setNotifications((prev) => [newNotification, ...prev]);
-        setUnreadCount((prev) => prev + 1);
-      },
-    });
-
-    return () => stopStream();
-  }, [fetchUnreadCount, fetchHistory, startStream, stopStream]);
-
-  /** --- When new message arrives externally --- **/
-  useEffect(() => {
-    if (lastMessage) {
-      setNotifications((prev) => [lastMessage, ...prev]);
-      setUnreadCount((prev) => prev + 1);
+  /** --- Mark all notifications as read --- **/
+  const markAllAsRead = useCallback(async () => {
+    try {
+      const res = await callApi(`${BASE_URL}/mark-all-read`, {}, "POST");
+      if (res) {
+        setNotifications((prev) =>
+          prev.map((n) => ({ ...n, isRead: true }))
+        );
+        setUnreadCount(0);
+        showSnackbar("All notifications marked as read", "success");
+      }
+    } catch (err) {
+      console.error("Failed to mark all as read", err);
+      showSnackbar("Failed to mark all as read", "error");
     }
-  }, [lastMessage]);
+  }, [callApi, showSnackbar]);
 
-  /** --- Pagination helper --- **/
+  /** --- Load more notifications (pagination) --- **/
   const loadMore = useCallback(() => {
     if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, fetchHistory, pageNumber]);
+  }, [hasMore, pageNumber, fetchHistory]);
 
-  console.log("unreadCount >>", unreadCount);
+  /** --- SSE Stream connection --- **/
+  const startStream = useCallback(() => {
+    const ctrl = new AbortController();
+    const source = fetchEventSource(`${BASE_URL}/stream`, {
+      method: "GET",
+      signal: ctrl.signal,
+      onopen() {
+        setConnected(true);
+        console.log("SSE connected");
+      },
+      onmessage(event) {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.id) {
+            setNotifications((prev) => [data, ...prev]);
+            setUnreadCount((prev) => prev + 1);
+            setNewPopup(data);
 
-  return {
-    connected,
-    notifications,
+            // Hide popup after 2 seconds
+            setTimeout(() => setNewPopup(null), 2000);
+          }
+        } catch (e) {
+          console.error("Error parsing SSE message:", e);
+        }
+      },
+      onerror(err) {
+        console.error("SSE error:", err);
+        setConnected(false);
+      },
+      onclose() {
+        setConnected(false);
+        console.log("SSE closed");
+      },
+    });
+    setEventSource(ctrl);
+    return () => ctrl.abort();
+  }, []);
+
+  const stopStream = useCallback(() => {
+    if (eventSource) eventSource.abort();
+    setConnected(false);
+  }, [eventSource]);
+
+  /** --- Initialize notifications --- **/
+  useEffect(() => {
+    fetchUnreadCount();
+    fetchHistory(0);
+    const cleanup = startStream();
+    return cleanup;
+  }, [fetchUnreadCount, fetchHistory, startStream]);
+
+  const value = {
+    notifications: notifications.map((n) => ({
+      ...n,
+      relativeTime: formatRelativeTime(n.timestamp),
+    })),
     unreadCount,
-    fetchUnreadCount,
-    fetchHistory,
-    markAsRead,
-    stopStream,
-    loadMore,
     hasMore,
+    loadMore,
+    markAsRead,
+    markAllAsRead,
+    connected,
+    newPopup,
+    setNewPopup,
+    stopStream,
   };
-};
 
-export default useNotifications;
+  return (
+    <NotificationContext.Provider value={value}>
+      {children}
+    </NotificationContext.Provider>
+  );
+};
