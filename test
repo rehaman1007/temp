@@ -1,455 +1,83 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-
-const useStreamApi = () => {
-  const token = useSelector((state) => state.auth.token);
-  const snackbar = useCustomSnackbar();
-
-  const controllerRef = useRef(null);
-  const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState(null);
-
-  const startStream = useCallback(
-    (url, { onMessage, onOpen, onError } = {}) => {
-      if (!token) return console.warn("No token, cannot start SSE stream");
-
-      // Cancel any existing connection
-      if (controllerRef.current) controllerRef.current.abort();
-
-      const controller = new AbortController();
-      controllerRef.current = controller;
-
-      fetchEventSource(url, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-
-        onopen(response) {
-          if (response.ok && response.status === 200) {
-            console.log("SSE Connection established");
-            setConnected(true);
-            onOpen?.(response);
-          } else {
-            console.error("SSE Connection failed:", response.status);
-            snackbar(`SSE Connection failed (${response.status})`, "error");
-          }
-        },
-
-        onmessage(event) {
-          if (event.event === "connected") {
-            // console.log("Server connected:", event.data);
-            return;
-          }
-          if (event.event === "new_notification") {
-            try {
-              const data = JSON.parse(event.data);
-              setLastMessage(data);
-              onMessage?.(data);
-            } catch (err) {
-              console.error("SSE message parse error:", err);
-            }
-          }
-        },
-
-        onerror(err) {
-          console.error("SSE Error:", err);
-          setConnected(false);
-          onError?.(err);
-        },
-      });
-    },
-    [snackbar, token]
-  );
-
-  const stopStream = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
-      controllerRef.current = null;
-      setConnected(false);
-      console.log("SSE connection stopped.");
-    }
-  }, []);
-
-  useEffect(() => stopStream, [stopStream]);
-
-  return { connected, lastMessage, startStream, stopStream };
-};
-
-export default useStreamApi;
-
-import { useState, useEffect, useCallback } from "react";
-import useApi from "./useApi";
-import useStreamApi from "./useStreamApi";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-
-const BASE_URL = "/NS/notifications";
-
-const useNotifications = () => {
-  const { callApi } = useApi();
-  const { showSnackbar } = useCustomSnackbar();
-  const { startStream, stopStream, lastMessage, connected } = useStreamApi();
-
-  const [pageNumber, setPageNumber] = useState(0);
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const size = 10;
-
-  /** --- Fetch unread count --- **/
-  const fetchUnreadCount = useCallback(async () => {
-    try {
-      const data = await callApi(`${BASE_URL}/unread-count`);
-      if (data?.count !== undefined) setUnreadCount(data.count);
-    } catch (err) {
-      console.error("Failed to fetch unread count:", err);
-    }
-  }, [callApi]);
-
-  /** --- Fetch notification history (paged) --- **/
-  const fetchHistory = useCallback(
-    async (page = pageNumber) => {
-      try {
-        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
-        const newItems = data?.content || [];
-
-        setNotifications((prev) => {
-          // Avoid duplicates by checking IDs
-          const existingIds = new Set(prev.map((n) => n.id));
-          const filtered = newItems.filter((n) => !existingIds.has(n.id));
-          return [...prev, ...filtered];
-        });
-
-        setHasMore(!data?.last);
-        setPageNumber(page);
-      } catch (err) {
-        console.error("Failed to fetch notifications:", err);
-        showSnackbar("Failed to load notifications", "error");
-      }
-    },
-    [callApi, pageNumber, size, showSnackbar]
-  );
-
-  /** --- Mark as read --- **/
-  const markAsRead = useCallback(
-    async (id) => {
-      try {
-        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
-        if (response) {
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
-          );
-          setUnreadCount((prev) => prev - 1);
-        } else {
-          showSnackbar("Failed to mark as read", "error");
-        }
-      } catch (err) {
-        console.error("Mark as read failed:", err);
-      }
-    },
-    [callApi, showSnackbar]
-  );
-
-  /** --- SSE stream: receive live notifications --- **/
-  useEffect(() => {
-    fetchUnreadCount();
-    fetchHistory(0); // load first page
-
-    startStream(`${BASE_URL}/stream`, {
-      onMessage: (newNotification) => {
-        setNotifications((prev) => [newNotification, ...prev]);
-        setUnreadCount((prev) => prev + 1);
-      },
-    });
-
-    return () => stopStream();
-  }, [fetchUnreadCount, fetchHistory, startStream, stopStream]);
-
-  /** --- When new message arrives externally --- **/
-  useEffect(() => {
-    if (lastMessage) {
-      setNotifications((prev) => [lastMessage, ...prev]);
-      setUnreadCount((prev) => prev + 1);
-    }
-  }, [lastMessage]);
-
-  /** --- Pagination helper --- **/
-  const loadMore = useCallback(() => {
-    if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, fetchHistory, pageNumber]);
-
-  console.log("unreadCount >>", unreadCount);
-
-  return {
-    connected,
-    notifications,
-    unreadCount,
-    fetchUnreadCount,
-    fetchHistory,
-    markAsRead,
-    stopStream,
-    loadMore,
-    hasMore,
-  };
-};
-
-export default useNotifications;
-
-import { Notifications, Menu as MenuIcon } from "@mui/icons-material";
+import React from "react";
 import {
-  Badge,
-  Box,
-  IconButton,
-  Toolbar,
-  Typography,
-  useTheme,
-  useMediaQuery,
-} from "@mui/material";
-import React, { useState } from "react";
-import { useSelector } from "react-redux";
-import NotificationDrawer from "./NotificationDrawer";
-import useNotifications from "../hooks/useNotifications";
-
-const LayoutHeader = () => {
-  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
-  const { unreadCount } = useNotifications();
-
-  const theme = useTheme();
-
-  return (
-    <Box
-      position="fixed"
-      sx={{
-        width: { xs: "100%", lg: `calc(100% - ${drawerWidth}px)` },
-        right: 0,
-        top: 0,
-        zIndex: 1200,
-        background:
-          "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
-      }}
-    >
-      <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
-
-        {/* Right side section */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <SearchBar navigateToPage={navigateToPage} />
-
-          <IconButton
-            color="inherit"
-            onClick={() => setNotificationDrawerOpen(true)}
-          >
-            {unreadCount > 0 ? (
-              <Badge badgeContent={unreadCount || ""} color="error">
-                <Notifications />
-              </Badge>
-            ) : (
-              <Notifications />
-            )}
-          </IconButton>
-        </Box>
-      </Toolbar>
-
-      <NotificationDrawer
-        notificationDrawerOpen={notificationDrawerOpen}
-        setNotificationDrawerOpen={setNotificationDrawerOpen}
-      />
-  );
-};
-
-export default React.memo(LayoutHeader);
-
-
-import React, { useMemo } from "react";
-import {
-  Box,
-  Drawer,
-  Typography,
-  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
   Button,
-  Paper,
-  alpha,
-  Tooltip,
-  Stack,
-  Divider,
+  Typography,
+  Grid,
+  Box,
 } from "@mui/material";
-import { Close, DoneAll, NotificationsNone } from "@mui/icons-material";
-import useNotifications from "../hooks/useNotifications";
-import { formatRelativeTime } from "../utils/CommonUtilities";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
 
-const NotificationDrawer = ({
-  notificationDrawerOpen,
-  setNotificationDrawerOpen,
-}) => {
-  const { notifications, markAsRead, loadMore, hasMore } = useNotifications();
+// Helper function to format keys from 'segmentCode' to 'Segment Code'
+const formatKeyForDisplay = (key) => {
+  // Add a space before all caps and then capitalize the first letter
+  const result = key.replace(/([A-Z])/g, " $1").trim();
+  return result.charAt(0).toUpperCase() + result.slice(1);
+};
 
-  /** Sort notifications latest first */
-  const sortedNotifications = useMemo(
-    () =>
-      [...notifications].sort(
-        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-      ),
-    [notifications]
-  );
+const ViewRequestDailog = ({ open, handleClose, data }) => {
+  if (!data || !data.payload) {
+    return null;
+  }
 
-  /** Placeholder: mark all as read (you’ll implement API later) */
-  const handleMarkAllAsRead = () => {
-    console.log("Marking all notifications as read (placeholder)");
-    // TODO: Implement markAllAsRead API later
-    // For now, update local state visually
-    sortedNotifications.forEach((n) => markAsRead(n.id));
-  };
+  const { payload } = data;
+  const mainDetails = [
+    { label: "Request Type", value: data.changeType },
+    { label: "Status", value: data.reqStatus },
+    {
+      label: "Requested Date",
+      value: timeStampFormatter(data.reqDate),
+    },
+    { label: "Creator ID", value: data.creatorId },
+  ];
 
   return (
-    <Drawer
-      anchor="right"
-      open={notificationDrawerOpen}
-      onClose={() => setNotificationDrawerOpen(false)}
-      sx={{
-        "& .MuiDrawer-paper": {
-          width: 400,
-          p: 0,
-          display: "flex",
-          flexDirection: "column",
-        },
-      }}
-    >
-      {/* Header */}
-      <Box
-        sx={{
-          p: 3,
-          borderBottom: "1px solid #E2E8F0",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <Typography variant="h6" sx={{ fontWeight: 600 }}>
-          Notifications
+    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Request Details (ID: {data.id})</DialogTitle>
+      <DialogContent dividers>
+        {/* Display main request details */}
+        <Grid container spacing={2} sx={{ mb: 3 }}>
+          {mainDetails.map((item) => (
+            <Grid item xs={6} key={item.label}>
+              <Typography variant="subtitle2" color="text.secondary">
+                {item.label}
+              </Typography>
+              <Typography variant="body1">{item.value}</Typography>
+            </Grid>
+          ))}
+        </Grid>
+
+        {/* Display dynamic payload details */}
+        <Typography variant="h6" gutterBottom>
+          Data
         </Typography>
-
-        <Stack direction="row" alignItems="center" spacing={1}>
-          {notifications.length > 0 && (
-            <Tooltip title="Mark all as read">
-              <IconButton size="small" onClick={handleMarkAllAsRead}>
-                <DoneAll /* fontSize="small" */ color="primary" />
-              </IconButton>
-            </Tooltip>
-          )}
-
-          <IconButton
-            onClick={() => setNotificationDrawerOpen(false)}
-            size="small"
-          >
-            <Close />
-          </IconButton>
-        </Stack>
-      </Box>
-
-      <Divider sx={{ my: 1 }} />
-      {/* Notification list */}
-      {notifications.length === 0 ? (
-        <Box
-          sx={{
-            textAlign: "center",
-            mt: 4,
-            color: "text.secondary",
-          }}
-        >
-          <NotificationsNone sx={{ fontSize: 50, mb: 1, opacity: 0.6 }} />
-          <Typography>No notifications yet</Typography>
+        <Box sx={{ borderTop: "1px solid #eee", pt: 2 }}>
+          <Grid container spacing={2}>
+            {Object.entries(payload).map(([key, value]) => (
+              <Grid item xs={12} sm={6} key={key}>
+                <Typography variant="subtitle2" color="text.secondary">
+                  {formatKeyForDisplay(key)}
+                </Typography>
+                <Typography variant="body1">
+                  {value === null || value === undefined
+                    ? "N/A"
+                    : String(value)}
+                </Typography>
+              </Grid>
+            ))}
+          </Grid>
         </Box>
-      ) : (
-        <Box
-          sx={{
-            flex: 1,
-            overflowY: "auto",
-            p: 2,
-            display: "flex",
-            flexDirection: "column",
-            gap: 1.5,
-          }}
-        >
-          {sortedNotifications.length === 0 ? (
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              align="center"
-              sx={{ mt: 4 }}
-            >
-              No notifications found
-            </Typography>
-          ) : (
-            sortedNotifications.map((n) => {
-              const isRead = n.isRead;
-              return (
-                <Paper
-                  key={n.id}
-                  onClick={() => markAsRead(n.id)}
-                  sx={{
-                    p: 2,
-                    borderRadius: 2,
-                    border: isRead ? "1px solid #E2E8F0" : "1px solid #5D3FD3",
-                    backgroundColor: isRead
-                      ? alpha("#5D3FD3", 0.06)
-                      : "#FFFFFF",
-                    transition: "all 0.25s ease",
-                    cursor: "pointer",
-                    "&:hover": {
-                      backgroundColor: isRead
-                        ? alpha("#5D3FD3", 0.1)
-                        : alpha("#A28DF0", 0.15),
-                      transform: "translateY(-2px)",
-                    },
-                  }}
-                >
-                  <Typography
-                    variant="subtitle2"
-                    sx={{
-                      fontWeight: isRead ? 500 : 600,
-                      color: isRead ? "text.primary" : "#2E2E2E",
-                    }}
-                  >
-                    {n.message}
-                  </Typography>
-
-                  <Typography
-                    variant="caption"
-                    sx={{
-                      color: "text.secondary",
-                      display: "block",
-                      mt: 0.5,
-                    }}
-                  >
-                    {formatRelativeTime(n.createdAt)}
-                  </Typography>
-                </Paper>
-              );
-            })
-          )}
-        </Box>
-      )}
-
-      {/* Footer */}
-      <Divider />
-      <Box sx={{ p: 2 }}>
-        {hasMore ? (
-          <Button fullWidth variant="outlined" onClick={loadMore}>
-            Show More
-          </Button>
-        ) : (
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            align="center"
-            sx={{ py: 1 }}
-          >
-            No more notifications
-          </Typography>
-        )}
-      </Box>
-    </Drawer>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={handleClose} color="primary">
+          Close
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 };
 
-export default NotificationDrawer;
+export default ViewRequestDailog;
