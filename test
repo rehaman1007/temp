@@ -1,92 +1,605 @@
-import React from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Box,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
   Typography,
-  Avatar,
-  Slide,
-  Paper,
+  Button,
   Stack,
+  Tooltip,
   IconButton,
+  Chip,
 } from "@mui/material";
-import NotificationsActiveIcon from "@mui/icons-material/NotificationsActive";
-import { getIconComponent } from "../utils/IconUtils";
+import { DataGrid } from "@mui/x-data-grid";
+import {
+  Check as CheckIcon,
+  Clear as ClearIcon,
+  Visibility as ViewIcon,
+} from "@mui/icons-material";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
+import AccountCircleIcon from "@mui/icons-material/AccountCircle";
+import { useNavigate } from "react-router-dom";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { COMMON_REQ_SCREEN_CONFIGS } from "../common/CommonConstants";
 import { useSelector } from "react-redux";
-import { formatRelativeTime } from "../utils/CommonUtilities";
+import RequestAnalytics from "./RequestAnalytics";
+import CustomChip from "../../utils/CustomChip";
+import ViewRequestDailog from "./ViewRequestDailog";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
 
-const NotificationPopup = ({ popup, onOpenDrawer }) => {
-  const menuItems = useSelector((state) => state.menus.menus);
+export default function CommonRequestScreen() {
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
+  const navigate = useNavigate();
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
 
-  if (!popup) return null;
+  const screenConfig = COMMON_REQ_SCREEN_CONFIGS[selectedMenuItem?.id];
+  const { requestType, columns, transformData } = screenConfig || {};
 
-  /** Find menu icon & title */
-  const menu = menuItems.find((m) => m.route === popup.linkUrl);
-  const IconComp = getIconComponent(menu?.icon || "NotificationsActive");
-  const menuTitle = menu?.title || "Crysta App";
+  const [rows, setRows] = useState([]);
+  const [remarks, setRemarks] = useState("");
+  const [confirmDialog, setConfirmDialog] = useState({
+    open: false,
+    type: null,
+    rowId: null,
+  });
+  const [openViewDailog, setOpenViewDailog] = useState(false);
+  const [viewData, setViewData] = useState(false);
 
-  return (
-    <Slide in={!!popup} direction="left" mountOnEnter unmountOnExit>
-      <Paper
-        onClick={onOpenDrawer}
-        elevation={10}
+  const fetchData = useCallback(async () => {
+    if (!requestType) return;
+    try {
+      const response = await callApi(
+        "/CR/pending-requests",
+        { requestType },
+        "POST"
+      );
+      const result = response?.data || [];
+
+      const data = result.map((row) => ({
+        ...row,
+        ...(typeof row.payload === "object" ? row.payload : {}),
+      }));
+
+      setRows(transformData ? transformData(data) : data);
+
+      if (!data.length) showSnackBar("No pending requests found", "warning");
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error fetching data", "error");
+    }
+  }, [requestType, transformData, callApi, showSnackBar]);
+
+  useEffect(() => {
+    if (!screenConfig || !requestType) {
+      navigate("/404");
+      return;
+    }
+    setRows([]);
+    setRemarks("");
+    setConfirmDialog({ open: false, type: null, rowId: null });
+    fetchData();
+  }, [selectedMenuItem?.id, fetchData]);
+
+  const handleViewRequest = (row) => {
+    setViewData(row);
+    setOpenViewDailog(true);
+  };
+
+  const handleConfirm = async () => {
+    if (confirmDialog.type === "reject" && !remarks.trim()) {
+      showSnackBar("Please provide remarks before rejecting", "warning");
+      return;
+    }
+
+    try {
+      const payload = {
+        requestId: confirmDialog.rowId,
+        status: confirmDialog.type === "reject" ? "REJECTED" : "ACCEPTED",
+        remarks:
+          confirmDialog.type === "reject" ? remarks.trim() : "No Remarks",
+      };
+
+      const res = await callApi("/CR/update-request", payload, "PATCH");
+
+      if (res?.success || res) {
+        showSnackBar(
+          confirmDialog.type === "accept"
+            ? "Request Approved"
+            : "Request Rejected",
+          "success"
+        );
+        fetchData();
+      } else {
+        showSnackBar("Failed to process request" + res?.message, "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error while processing request", "error");
+    }
+    closeConfirmDialog();
+  };
+
+  const openConfirmDialog = (type, rowId) =>
+    setConfirmDialog({ open: true, type, rowId });
+
+  const closeConfirmDialog = () =>
+    setConfirmDialog({ open: false, type: null, rowId: null });
+
+  const allColumns = useMemo(() => {
+    const baseColumns = columns || [];
+
+    return [
+      ...baseColumns,
+      {
+        field: "changeType",
+        headerName: "Request Type",
+        flex: 0.5,
+        align: "center",
+        headerAlign: "center",
+        renderCell: (params) => {
+          const val = params.value;
+          const color =
+            val === "ADD" ? "success" : val === "DELETE" ? "error" : "warning";
+          const icon =
+            val === "ADD" ? (
+              <AddBoxIcon />
+            ) : val === "DELETE" ? (
+              <AutoDeleteIcon />
+            ) : (
+              <EditDocumentIcon />
+            );
+          return (
+            <CustomChip
+              icon={icon}
+              label={
+                val === "ADD"
+                  ? "Added"
+                  : val === "DELETE"
+                  ? "Deleted"
+                  : "Modified"
+              }
+              size="small"
+              color={color}
+            />
+          );
+        },
+      },
+      {
+        field: "creatorId",
+        headerName: "Creator ID",
+        flex: 0.8,
+        align: "center",
+        headerAlign: "center",
+        renderCell: (params) => (
+          <Chip
+            icon={<AccountCircleIcon />}
+            label={params.value}
+            size="small"
+          />
+        ),
+      },
+      {
+        field: "reqDate",
+        headerName: "Requested Date",
+        flex: 1,
+        align: "center",
+        headerAlign: "center",
+        renderCell: (params) => {
+          return (
+            <Typography variant="body1" component="span">
+              {timeStampFormatter(params.value)}
+            </Typography>
+          );
+        },
+      },
+
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.6,
+        align: "center",
+        headerAlign: "center",
+        renderCell: (params) => (
+          <Stack direction="row" spacing={1} justifyContent="center">
+            <Tooltip title="Approve">
+              <IconButton
+                onClick={() => openConfirmDialog("accept", params.row.id)}
+                color="success"
+                sx={{
+                  backgroundColor: "success",
+                }}
+              >
+                <CheckIcon />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Reject">
+              <IconButton
+                onClick={() => openConfirmDialog("reject", params.row.id)}
+                color="error"
+              >
+                <ClearIcon />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="View Request">
+              <IconButton onClick={() => handleViewRequest(params.row)}>
+                <ViewIcon />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+        ),
+      },
+    ];
+  }, [columns]);
+
+  const CustomNoRowsOverlay = () => {
+    return (
+      <Box
         sx={{
-          position: "fixed",
-          top: 16,
-          right: 16,
-          zIndex: 3000,
-          p: 2,
-          pr: 2.5,
-          borderRadius: 3,
           display: "flex",
+          flexDirection: "column",
           alignItems: "center",
-          gap: 1.5,
-          width: { xs: "90%", sm: 380 },
-          backgroundColor: "rgba(255,255,255,0.7)",
-          backdropFilter: "blur(10px)",
-          cursor: "pointer",
-          boxShadow: "0 8px 20px rgba(0,0,0,0.15)",
-          transition: "all 0.25s ease",
-          "&:hover": {
-            transform: "scale(1.015)",
-            boxShadow: "0 10px 24px rgba(0,0,0,0.22)",
-          },
+          justifyContent: "center",
+          height: "100%",
         }}
       >
-        {/* ICON */}
-        <Avatar
+        <Typography variant="body1" color="textSecondary">
+          No pending requests
+        </Typography>
+      </Box>
+    );
+  };
+
+  return (
+    <Box sx={{ p: 2 }}>
+      <Box>
+        <RequestAnalytics data={rows} />
+        <DataGrid
+          rows={rows}
+          columns={allColumns}
+          disableRowSelectionOnClick
+          pageSizeOptions={[5, 10, 25, 50]}
+          initialState={{
+            pagination: { paginationModel: { pageSize: 5, page: 0 } },
+            sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
+          }}
+          getRowId={(row) => row.id}
+          slots={{
+            noRowsOverlay: CustomNoRowsOverlay,
+          }}
           sx={{
-            bgcolor: "#5D3FD3",
-            width: 44,
-            height: 44,
+            minHeight: 350,
+            width: "100%",
+            "& .MuiDataGrid-cell:focus": { outline: "none" },
+          }}
+        />
+      </Box>
+
+      <ViewRequestDailog
+        open={openViewDailog}
+        handleClose={() => setOpenViewDailog(false)}
+        data={viewData}
+      />
+      <Dialog
+        open={confirmDialog.open}
+        onClose={closeConfirmDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 600 }}>
+          {confirmDialog.type === "accept"
+            ? "Confirm Approval"
+            : "Confirm Rejection"}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ p: 1 }}>
+            {confirmDialog.type === "accept"
+              ? "Are you sure you want to approve this request?"
+              : "Are you sure you want to reject this request? Please enter remarks."}
+          </Typography>
+          {confirmDialog.type === "reject" && (
+            <TextField
+              fullWidth
+              label="Rejection Remarks"
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value.slice(0, 100))}
+              multiline
+              rows={2}
+              margin="dense"
+              inputProps={{ maxLength: 100 }}
+            />
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeConfirmDialog} variant="outlined">
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirm}
+            color={
+              confirmDialog.type === "accept"
+                ? "success"
+                : confirmDialog.type === "reject"
+                ? "error"
+                : ""
+            }
+            variant="contained"
+          >
+            {confirmDialog.type === "accept"
+              ? "Approve"
+              : confirmDialog.type === "reject"
+              ? "Reject"
+              : ""}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+}
+
+
+import React, { useMemo } from "react";
+import { Box, Typography, Card, Stack, Chip } from "@mui/material";
+import {
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+} from "recharts";
+
+// Gradient colors (consistent with modern look)
+const COLORS = ["#d87093", "#6a5acd", "#20b2aa"];
+
+const RequestAnalytics = ({ data = [] }) => {
+  // ----- Compute Pie Chart Data -----
+  const { total, pieData } = useMemo(() => {
+    const counts = { total: 0, add: 0, modify: 0, delete: 0 };
+    data.forEach((item) => {
+      counts.total++;
+      if (item.changeType === "ADD") counts.add++;
+      if (item.changeType === "UPDATE") counts.modify++;
+      if (item.changeType === "DELETE") counts.delete++;
+    });
+    const pieData = [
+      { name: "Add Requests", value: counts.add },
+      { name: "Modify Requests", value: counts.modify },
+      { name: "Delete Requests", value: counts.delete },
+    ];
+    return { total: counts.total, pieData };
+  }, [data]);
+
+  // ----- Compute Histogram Data -----
+  const histogramData = useMemo(() => {
+    const map = {};
+    data.forEach((item) => {
+      if (item.reqDate) {
+        const date = new Date(item.reqDate).toLocaleDateString("en-GB");
+        map[date] = (map[date] || 0) + 1;
+      }
+    });
+    return Object.keys(map)
+      .sort(
+        (a, b) =>
+          new Date(a.split("/").reverse().join("-")) -
+          new Date(b.split("/").reverse().join("-"))
+      )
+      .map((date) => ({ date, count: map[date] }));
+  }, [data]);
+
+  return (
+    <Card
+      sx={{
+        // bgcolor: "transparent",
+        // color: "white",
+        p: 2,
+        // borderRadius: 2,
+        mb: 3,
+        // boxShadow: "0 4px 10px rgba(0,0,0,0.2)",
+      }}
+    >
+      {/* Header */}
+      <Typography variant="subtitle1" sx={{ mb: 0.5, fontWeight: 600 }}>
+        Request Analytics Overview
+      </Typography>
+      <Typography
+        variant="caption"
+        sx={{ color: "gray", mb: 2, display: "block" }}
+      >
+        Requests comparison by type and daily frequency
+      </Typography>
+
+      {total > 0 ? (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: { xs: "column", lg: "row" },
+            gap: 2,
+            alignItems: "flex-start",
           }}
         >
-          <IconComp style={{ fontSize: 22 }} />
-        </Avatar>
-
-        {/* TEXTS */}
-        <Box flex={1}>
-          <Typography fontWeight={700} sx={{ mb: 0.2 }}>
-            {menuTitle}
-          </Typography>
-
-          <Typography
-            variant="body2"
+          {/* Pie Chart Section */}
+          <Box
             sx={{
-              mb: 0.3,
-              fontSize: "0.85rem",
-              color: "text.primary",
+              flex: 1,
+              position: "relative",
+              height: 220,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
             }}
-            noWrap
           >
-            {popup.message}
-          </Typography>
+            <Box sx={{ width: "100%", height: 180 }}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <defs>
+                    {COLORS.map((color, index) => (
+                      <linearGradient
+                        key={index}
+                        id={`gradient-${index}`}
+                        x1="0"
+                        y1="0"
+                        x2="1"
+                        y2="1"
+                      >
+                        <stop offset="0%" stopColor={color} stopOpacity={0.9} />
+                        <stop
+                          offset="100%"
+                          stopColor={color}
+                          stopOpacity={0.5}
+                        />
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <Pie
+                    data={pieData}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={55}
+                    outerRadius={80}
+                    paddingAngle={3}
+                    dataKey="value"
+                  >
+                    {pieData.map((entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={`url(#gradient-${index})`}
+                        stroke="none"
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#2a2a3a",
+                      borderRadius: 8,
+                      border: "none",
+                      color: "#fff",
+                      fontSize: 12,
+                    }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
 
-          <Typography variant="caption" color="text.secondary">
-            {formatRelativeTime(popup.createdAt || popup.receivedAt)}
-          </Typography>
+              {/* Center Label */}
+              <Box
+                sx={{
+                  position: "absolute",
+                  top: "50%",
+                  left: "50%",
+                  transform: "translate(-50%, -50%)",
+                  textAlign: "center",
+                }}
+              >
+                <Typography variant="caption" sx={{ color: "gray" }}>
+                  Total Requests
+                </Typography>
+                <Typography
+                  variant="subtitle1"
+                  sx={{ fontWeight: "bold", color: "white" }}
+                >
+                  {total}
+                </Typography>
+              </Box>
+            </Box>
+
+            {/* Legend row */}
+            <Stack
+              direction="row"
+              justifyContent="center"
+              alignItems="center"
+              spacing={1.5}
+              sx={{ mt: 1, flexWrap: "wrap", width: "100%" }}
+            >
+              {pieData.map((item, i) => (
+                <Stack
+                  key={item.name}
+                  direction="row"
+                  alignItems="center"
+                  spacing={0.5}
+                  sx={{
+                    bgcolor: "rgba(255,255,255,0.05)",
+                    borderRadius: 2,
+                    px: 1,
+                    py: 0.3,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: "50%",
+                      bgcolor: COLORS[i],
+                    }}
+                  />
+                  <Typography variant="caption">{item.name}</Typography>
+                  <Chip
+                    label={item.value}
+                    size="small"
+                    sx={{
+                      bgcolor: COLORS[i],
+                      color: "white",
+                      fontWeight: "bold",
+                      height: 18,
+                      fontSize: "0.7rem",
+                    }}
+                  />
+                </Stack>
+              ))}
+            </Stack>
+          </Box>
+
+          {/* Histogram Section */}
+          <Box sx={{ flex: 1, width: "100%", height: 220 }}>
+            <ResponsiveContainer>
+              <BarChart data={histogramData}>
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="rgba(255,255,255,0.1)"
+                />
+                <XAxis
+                  dataKey="date"
+                  stroke="white"
+                  fontSize={10}
+                  tickMargin={4}
+                />
+                <YAxis stroke="white" fontSize={10} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: "#2a2a3a",
+                    borderRadius: 8,
+                    border: "none",
+                    color: "#fff",
+                    fontSize: 12,
+                  }}
+                />
+                <Bar
+                  dataKey="count"
+                  fill="url(#gradient-0)"
+                  radius={[6, 6, 0, 0]}
+                  barSize={"140"}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </Box>
         </Box>
-      </Paper>
-    </Slide>
+      ) : (
+        <Typography align="center">
+          No data/requests for viewing request analytics
+        </Typography>
+      )}
+    </Card>
   );
 };
 
-export default NotificationPopup;
+export default RequestAnalytics;
