@@ -41,11 +41,12 @@ import CustomChip from "../../utils/CustomChip";
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
 import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
-import TrendingUpIcon from "@mui/icons-material/TrendingUp"; // Example Icon for Credit
-import TrendingDownIcon from "@mui/icons-material/TrendingDown"; // Example Icon for Debit
+import TrendingUpIcon from "@mui/icons-material/TrendingUp"; // Credit icon
+import TrendingDownIcon from "@mui/icons-material/TrendingDown"; // Debit icon
 import SavingsIcon from "@mui/icons-material/Savings";
 import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
 import NoteIcon from "@mui/icons-material/Note";
+import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 
 const ACCOUNT_CLASSIFICATIONS = [
   { value: "A", label: "Asset" },
@@ -65,7 +66,7 @@ const initialCGLState = {
   defBalType: "",
   balCompare: "1",
   manualPosting: "1",
-  status: "Active",
+  status: 1, // keep numeric status consistent with grid (1 = active)
   openDate: new Date().toISOString().split("T")[0],
   closeDate: null,
 };
@@ -77,7 +78,6 @@ export default function CGLMasterTab() {
   const [errors, setErrors] = useState({});
   const [openDialog, setOpenDialog] = useState(false);
 
-  const [isActive, setIsActive] = useState(false);
   const [SEGMENTS, SetSegments] = useState([]);
 
   const { callApi } = useApi();
@@ -128,14 +128,14 @@ export default function CGLMasterTab() {
     fetchData();
   }, []); // eslint-disable-line
 
-  // Auto-derive defBalType + enforce balFwd for classifications
+  // Auto-derive defBalType + enforce balFwd and balCompare for classifications
   useEffect(() => {
     const cls = cglData.acClassification;
     let defBalType = cglData.defBalType;
     let balFwd = cglData.balFwd;
     let balCompare = cglData.balCompare;
 
-    // Default balance type mapping
+    // Default balance type mapping:
     // Asset - Debit(D)
     // Liability - Credit(C)
     // Memo - Memo(M)
@@ -146,6 +146,7 @@ export default function CGLMasterTab() {
     else if (cls === "M") defBalType = "M";
     else if (cls === "I") defBalType = "C";
     else if (cls === "E") defBalType = "D";
+    else defBalType = defBalType || "";
 
     // Balance Carry Forward rules:
     // For Asset and Liability - Disabled (Checked)
@@ -153,7 +154,7 @@ export default function CGLMasterTab() {
     // Else (Memo/other) - Enable (user choice)
     if (["A", "L"].includes(cls)) balFwd = true;
     else if (["I", "E"].includes(cls)) balFwd = false;
-    // else keep previous value for Memo or empty
+    // else keep previous for Memo
 
     // Balance Compare Flag:
     // Disable for Income and Expense with Exclude ("0"), else keep previous
@@ -167,6 +168,27 @@ export default function CGLMasterTab() {
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cglData.acClassification]);
+
+  // When comp1 changes (including during edit), set or re-evaluate classification
+  useEffect(() => {
+    if (!cglData.comp1) return;
+
+    const first = cglData.comp1.charAt(0);
+    let autoClass = "";
+    if (["1", "6"].includes(first)) autoClass = "A";
+    else if (["2", "3", "4"].includes(first)) autoClass = "L";
+    else if (first === "5") autoClass = "M";
+    else if (first === "7") autoClass = "I";
+    else if (first === "8") autoClass = "E";
+    else autoClass = "";
+
+    // Only update if different to avoid loops
+    if (autoClass !== "" && autoClass !== cglData.acClassification) {
+      setCglData((prev) => ({ ...prev, acClassification: autoClass }));
+    }
+    // if autoClass is empty we allow manual selection (do not overwrite)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cglData.comp1]);
 
   // single-field validator
   const validateField = useCallback((name, value) => {
@@ -198,7 +220,7 @@ export default function CGLMasterTab() {
     }
   }, []);
 
-  // isFormValid: remove defBalType as field (it's hidden and auto-set)
+  // isFormValid: defBalType removed from required fields (hidden/auto-set)
   const isFormValid = useMemo(() => {
     const fields = ["comp1", "segmentCode", "comp2", "description", "acClassification"];
     return fields.every((f) => !validateField(f, cglData[f]));
@@ -236,7 +258,6 @@ export default function CGLMasterTab() {
           acClassification: autoClass || "",
         }));
 
-        // set per-field error for comp1
         const msg = validateField("comp1", value);
         setErrors((prev) => ({ ...prev, comp1: msg }));
         return;
@@ -260,7 +281,7 @@ export default function CGLMasterTab() {
         }
       }
 
-      // update state
+      // update state for all other fields (checkboxes handled)
       setCglData((prev) => ({
         ...prev,
         [name]: type === "checkbox" ? checked : value,
@@ -338,19 +359,22 @@ export default function CGLMasterTab() {
   };
 
   const handleEdit = useCallback((cgl) => {
+    // keep status numeric as returned by API (1/0)
     setCglData({
       ...initialCGLState,
       ...cgl,
       comp1: String(cgl.comp1 ?? "").padStart(4, "0"),
-      comp2: String(parseInt(cgl.comp2, 10) || "").toString(),
+      comp2:
+        cgl.comp2 !== undefined && cgl.comp2 !== null
+          ? String(parseInt(cgl.comp2, 10))
+          : "",
       defBalType: cgl.defBalType,
       segmentCode: cgl.segmentCode,
       description: cgl.description,
-      status: cgl.status === 1 ? "Active" : "Inactive",
+      status: cgl.status, // numeric
     });
     setEditingId(cgl.cglNumber);
     setOpenDialog(true);
-    setIsActive(cgl.status == 1);
   }, []);
 
   const openBlockDialog = useCallback((cgl) => {
@@ -362,7 +386,7 @@ export default function CGLMasterTab() {
     SetRows((prev) =>
       prev.map((item) =>
         item.cglNumber === selectedCGL.cglNumber
-          ? { ...item, status: "Inactive" }
+          ? { ...item, status: 0 }
           : item
       )
     );
@@ -382,7 +406,7 @@ export default function CGLMasterTab() {
   }, [handleReset]);
 
   const classificationIcons = {
-    A: <SavingsIcon fontSize="small" />,
+    A: <AccountBalanceIcon fontSize="small" />, // asset -> bank/balance icon
     L: <AccountBalanceWalletIcon fontSize="small" />,
     I: <TrendingUpIcon fontSize="small" />,
     E: <TrendingDownIcon fontSize="small" />,
@@ -403,7 +427,6 @@ export default function CGLMasterTab() {
         flex: 3,
         sortable: true,
       },
-
       {
         field: "acClassification",
         headerName: "Account Classification",
@@ -427,7 +450,6 @@ export default function CGLMasterTab() {
           );
         },
       },
-
       {
         field: "defBalType",
         headerName: "Type",
@@ -451,7 +473,6 @@ export default function CGLMasterTab() {
           );
         },
       },
-
       {
         field: "reqStatus",
         headerName: "Status",
@@ -511,13 +532,13 @@ export default function CGLMasterTab() {
         },
       },
     ],
-    [handleEdit]
+    [handleEdit] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const handleUnblock = useCallback((id) => {
     SetRows((prev) =>
       prev.map((item) =>
-        item.id === id ? { ...item, status: "Active", closeDate: null } : item
+        item.id === id ? { ...item, status: 1, closeDate: null } : item
       )
     );
   }, []);
@@ -696,7 +717,7 @@ export default function CGLMasterTab() {
                     ))}
                   </TextField>
 
-                  {/* Default Balance Type is intentionally hidden (auto-set) */}
+                  {/* Default Balance Type intentionally hidden (auto-set in logic) */}
                 </Box>
               </Grid>
 
@@ -707,14 +728,10 @@ export default function CGLMasterTab() {
                       name="balFwd"
                       checked={cglData.balFwd}
                       onChange={handleChange}
-                      // For Asset and Liability - Disabled (Checked)
-                      // For Income and Expense - Disabled (Unchecked)
-                      // Else - Enable
-                      disabled={
-                        ["A", "L", "I", "E"].includes(
-                          cglData.acClassification
-                        )
-                      }
+                      // Disabled for A,L,I,E (A/L auto checked, I/E auto unchecked)
+                      disabled={["A", "L", "I", "E"].includes(
+                        cglData.acClassification
+                      )}
                     />
                   }
                   label="Balance Carry Forward to next year"
@@ -780,18 +797,7 @@ export default function CGLMasterTab() {
                 </FormControl>
               </Grid>
 
-              {editingId && (
-                <Grid item>
-                  <TextField
-                    fullWidth
-                    label="Status"
-                    value={cglData.status == 1 ? "Active" : "In-Active"}
-                    disabled
-                    variant="outlined"
-                    sx={{ color: isActive ? "success.main" : "error.main" }}
-                  />
-                </Grid>
-              )}
+              {/* Status field removed from dialog as requested */}
             </Grid>
 
             <Box
