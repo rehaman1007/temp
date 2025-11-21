@@ -1,28 +1,4 @@
-Implement following changes in component so that other logic should not effect
- 
-1. Account Classification should be based on comp1 value (also onChange)
- if it starts with 1,6 then set Asset
- if it starts with 2,3,4 then set Liability
- if it starts with 5 then set Memo 
- if it starts with 7 then set Income 
- if it starts with 8 then set Expense
- else enable dropdown to choose any
- 
-2. Balance Carry Forward to next year field should as follows 
- For Asset and Liability - Disabled (Checked)
- For Income and Expense - Disable (Unchecked)
- Else - Enable (can choose any) 
- 
-3.  Balance Compare Flag should Disable for Income and Expense with Exclude else enable can choose any for others
-
-4. Default Balance type should be hidden no need to show but set values but auto set as following
- if Asset - Debit(D)
- if Liability - Credit(C)
- if Memo - Memo(M)
- if Income - Credit(C)
- if Expense - Debit(D)
- 
- import React, {
+import React, {
   useState,
   useMemo,
   useCallback,
@@ -42,8 +18,6 @@ import {
   Checkbox,
   Button,
   Box,
-  Alert,
-  Snackbar,
   Grid,
   Dialog,
   DialogTitle,
@@ -59,7 +33,6 @@ import {
 import {
   Edit as EditIcon,
   Block as BlockIcon,
-  LockOpen as UnblockIcon,
   Add as AddIcon,
   Close as CloseIcon,
 } from "@mui/icons-material";
@@ -68,8 +41,11 @@ import CustomChip from "../../utils/CustomChip";
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
 import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
-import TrendingUpIcon from "@mui/icons-material/TrendingUp"; // Example Icon for Debit
-import TrendingDownIcon from "@mui/icons-material/TrendingDown"; // Example Icon for Credit
+import TrendingUpIcon from "@mui/icons-material/TrendingUp"; // Example Icon for Credit
+import TrendingDownIcon from "@mui/icons-material/TrendingDown"; // Example Icon for Debit
+import SavingsIcon from "@mui/icons-material/Savings";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import NoteIcon from "@mui/icons-material/Note";
 
 const ACCOUNT_CLASSIFICATIONS = [
   { value: "A", label: "Asset" },
@@ -150,24 +126,47 @@ export default function CGLMasterTab() {
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, []); // eslint-disable-line
 
-  // auto-derive defBalType + enforce balFwd disabled for Income/Expense
+  // Auto-derive defBalType + enforce balFwd for classifications
   useEffect(() => {
-    if (!cglData.acClassification) return;
+    const cls = cglData.acClassification;
     let defBalType = cglData.defBalType;
-    if (["A", "E", "M"].includes(cglData.acClassification)) defBalType = "D";
-    if (["L", "I"].includes(cglData.acClassification)) defBalType = "C";
+    let balFwd = cglData.balFwd;
+    let balCompare = cglData.balCompare;
+
+    // Default balance type mapping
+    // Asset - Debit(D)
+    // Liability - Credit(C)
+    // Memo - Memo(M)
+    // Income - Credit(C)
+    // Expense - Debit(D)
+    if (cls === "A") defBalType = "D";
+    else if (cls === "L") defBalType = "C";
+    else if (cls === "M") defBalType = "M";
+    else if (cls === "I") defBalType = "C";
+    else if (cls === "E") defBalType = "D";
+
+    // Balance Carry Forward rules:
+    // For Asset and Liability - Disabled (Checked)
+    // For Income and Expense - Disabled (Unchecked)
+    // Else (Memo/other) - Enable (user choice)
+    if (["A", "L"].includes(cls)) balFwd = true;
+    else if (["I", "E"].includes(cls)) balFwd = false;
+    // else keep previous value for Memo or empty
+
+    // Balance Compare Flag:
+    // Disable for Income and Expense with Exclude ("0"), else keep previous
+    if (["I", "E"].includes(cls)) balCompare = "0";
 
     setCglData((prev) => ({
       ...prev,
       defBalType,
-      balFwd:
-        prev.acClassification === "I" || prev.acClassification === "E"
-          ? false
-          : prev.balFwd,
+      balFwd,
+      balCompare,
     }));
-  }, [cglData.acClassification]); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cglData.acClassification]);
 
   // single-field validator
   const validateField = useCallback((name, value) => {
@@ -194,23 +193,14 @@ export default function CGLMasterTab() {
       case "acClassification":
         if (!value) return "Account classification is required";
         return "";
-      case "defBalType":
-        if (!value) return "Default balance type is required";
-        return "";
       default:
         return "";
     }
   }, []);
 
+  // isFormValid: remove defBalType as field (it's hidden and auto-set)
   const isFormValid = useMemo(() => {
-    const fields = [
-      "comp1",
-      "segmentCode",
-      "comp2",
-      "description",
-      "acClassification",
-      "defBalType",
-    ];
+    const fields = ["comp1", "segmentCode", "comp2", "description", "acClassification"];
     return fields.every((f) => !validateField(f, cglData[f]));
   }, [cglData, validateField]);
 
@@ -229,6 +219,27 @@ export default function CGLMasterTab() {
           notifyOnce("Comp1 must be exactly 4 digits");
           return;
         }
+
+        // Determine auto classification based on first digit
+        const first = value.charAt(0);
+        let autoClass = "";
+        if (["1", "6"].includes(first)) autoClass = "A";
+        else if (["2", "3", "4"].includes(first)) autoClass = "L";
+        else if (first === "5") autoClass = "M";
+        else if (first === "7") autoClass = "I";
+        else if (first === "8") autoClass = "E";
+        else autoClass = ""; // allow user to choose manually
+
+        setCglData((prev) => ({
+          ...prev,
+          comp1: value,
+          acClassification: autoClass || "",
+        }));
+
+        // set per-field error for comp1
+        const msg = validateField("comp1", value);
+        setErrors((prev) => ({ ...prev, comp1: msg }));
+        return;
       }
 
       if (name === "comp2") {
@@ -263,14 +274,7 @@ export default function CGLMasterTab() {
   );
 
   const validateForm = useCallback(() => {
-    const fields = [
-      "comp1",
-      "segmentCode",
-      "comp2",
-      "description",
-      "acClassification",
-      "defBalType",
-    ];
+    const fields = ["comp1", "segmentCode", "comp2", "description", "acClassification"];
     const newErrors = {};
     fields.forEach((f) => {
       const msg = validateField(f, cglData[f]);
@@ -377,6 +381,14 @@ export default function CGLMasterTab() {
     handleReset();
   }, [handleReset]);
 
+  const classificationIcons = {
+    A: <SavingsIcon fontSize="small" />,
+    L: <AccountBalanceWalletIcon fontSize="small" />,
+    I: <TrendingUpIcon fontSize="small" />,
+    E: <TrendingDownIcon fontSize="small" />,
+    M: <NoteIcon fontSize="small" />,
+  };
+
   const columns = useMemo(
     () => [
       {
@@ -401,15 +413,14 @@ export default function CGLMasterTab() {
         headerAlign: "center",
         renderCell: (params) => {
           const targetId = params.row.acClassification;
-          console.log(targetId);
           const findValue = ACCOUNT_CLASSIFICATIONS.find(
             (row) => row.value === targetId
           );
-          console.log(findValue);
 
           return (
             <CustomChip
-              label={findValue.label}
+              icon={classificationIcons[targetId]}
+              label={findValue ? findValue.label : ""}
               variant="outlined"
               size="small"
             />
@@ -450,7 +461,6 @@ export default function CGLMasterTab() {
         headerAlign: "center",
         justifyContent: "center",
         renderCell: (params) => {
-          console.log(params.row.status);
           const isActive = params.row.status == 1;
           const label = isActive ? "Active" : "In Active";
           const Icon = isActive ? OnlinePredictionIcon : TrendingUpIcon;
@@ -501,7 +511,7 @@ export default function CGLMasterTab() {
         },
       },
     ],
-    [handleEdit, openBlockDialog]
+    [handleEdit]
   );
 
   const handleUnblock = useCallback((id) => {
@@ -662,30 +672,31 @@ export default function CGLMasterTab() {
                     value={cglData.acClassification}
                     onChange={handleChange}
                     error={!!errors.acClassification}
-                    helperText={errors.acClassification}
+                    helperText={
+                      errors.acClassification ||
+                      (cglData.acClassification
+                        ? ""
+                        : "Will be auto-set based on Comp1 if possible")
+                    }
                   >
                     <MenuItem value="">Select Classification</MenuItem>
                     {ACCOUNT_CLASSIFICATIONS.map((option) => (
                       <MenuItem key={option.value} value={option.value}>
-                        {option.label}
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 1,
+                          }}
+                        >
+                          {classificationIcons[option.value]}
+                          <span>{option.label}</span>
+                        </Box>
                       </MenuItem>
                     ))}
                   </TextField>
 
-                  <TextField
-                    select
-                    fullWidth
-                    label="Default Balance Type *"
-                    name="defBalType"
-                    value={cglData.defBalType}
-                    onChange={handleChange}
-                    error={!!errors.defBalType}
-                    helperText={errors.defBalType}
-                  >
-                    <MenuItem value="">Select Type</MenuItem>
-                    <MenuItem value="D">Debit</MenuItem>
-                    <MenuItem value="C">Credit</MenuItem>
-                  </TextField>
+                  {/* Default Balance Type is intentionally hidden (auto-set) */}
                 </Box>
               </Grid>
 
@@ -696,7 +707,14 @@ export default function CGLMasterTab() {
                       name="balFwd"
                       checked={cglData.balFwd}
                       onChange={handleChange}
-                      disabled={["I", "E"].includes(cglData.acClassification)}
+                      // For Asset and Liability - Disabled (Checked)
+                      // For Income and Expense - Disabled (Unchecked)
+                      // Else - Enable
+                      disabled={
+                        ["A", "L", "I", "E"].includes(
+                          cglData.acClassification
+                        )
+                      }
                     />
                   }
                   label="Balance Carry Forward to next year"
@@ -704,6 +722,8 @@ export default function CGLMasterTab() {
                 <FormHelperText>
                   {["I", "E"].includes(cglData.acClassification)
                     ? "Not applicable for Income/Expense accounts"
+                    : ["A", "L"].includes(cglData.acClassification)
+                    ? "Auto-enabled for Asset & Liability"
                     : ""}
                 </FormHelperText>
               </Grid>
@@ -714,18 +734,24 @@ export default function CGLMasterTab() {
                   <RadioGroup
                     row
                     name="balCompare"
-                    value={cglData.balCompare}
+                    value={
+                      ["I", "E"].includes(cglData.acClassification)
+                        ? "0"
+                        : cglData.balCompare
+                    }
                     onChange={handleChange}
                   >
                     <FormControlLabel
                       value="1"
                       control={<Radio />}
                       label="Include"
+                      disabled={["I", "E"].includes(cglData.acClassification)}
                     />
                     <FormControlLabel
                       value="0"
                       control={<Radio />}
                       label="Exclude"
+                      disabled={["I", "E"].includes(cglData.acClassification)}
                     />
                   </RadioGroup>
                 </FormControl>
