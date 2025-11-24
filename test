@@ -1,30 +1,4 @@
-
-Implement following changes in component so that other logic should not effect
- 
-1. Account Classification should be based on comp1 value (also onChange)
- if it starts with 1,6 then set Asset disable
- if it starts with 2,3,4 then set Liability disable
- if it starts with 5 then set Memo disable
- if it starts with 7 then set Income disable
- if it starts with 8 then set Expense disable
- else enable dropdown to choose any 
- 
-2. Balance Carry Forward to next year field should as follows 
- For Asset and Liability - Disabled (Checked)
- For Income and Expense - Disable (Unchecked)
- Else - Enable (can choose any) 
- 
-3.  Balance Compare Flag should Disable for Income and Expense with Exclude else enable can choose any for others
-
-4. Default Balance type should be hidden no need to show in form but set values but auto set as following
- if Asset - Debit(D)
- if Liability - Credit(C)
- if Memo - Memo(M)
- if Income - Credit(C)
- if Expense - Debit(D)
- 
- 
- import React, {
+import React, {
   useEffect,
   useMemo,
   useCallback,
@@ -82,6 +56,34 @@ const initialCGLState = {
   closeDate: null,
 };
 
+function classificationFromComp1(comp1Val) {
+  if (!comp1Val || comp1Val.length === 0) return null;
+  const ch = String(comp1Val)[0];
+  if (ch === "1" || ch === "6") return "A"; // Asset
+  if (ch === "2" || ch === "3" || ch === "4") return "L"; // Liability
+  if (ch === "5") return "M"; // Memo
+  if (ch === "7") return "I"; // Income
+  if (ch === "8") return "E"; // Expense
+  return null;
+}
+
+function defBalTypeFromClassification(ac) {
+  switch (ac) {
+    case "A":
+      return "D";
+    case "L":
+      return "C";
+    case "M":
+      return "M";
+    case "I":
+      return "C";
+    case "E":
+      return "D";
+    default:
+      return "";
+  }
+}
+
 export default function CGLFormDialog({
   open,
   onClose,
@@ -98,6 +100,9 @@ export default function CGLFormDialog({
   const [isActive, setIsActive] = useState(false);
   const [segments, setSegments] = useState([]);
   const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
+
+  // whether classification was locked by comp1 rule (if true, dropdown disabled)
+  const [classificationLocked, setClassificationLocked] = useState(false);
 
   // throttle snackbars during typing
   const snackGateRef = useRef(true);
@@ -135,16 +140,43 @@ export default function CGLFormDialog({
 
     if (editInitialData) {
       // populate form from editInitialData
-      setCglData({
+      const comp1Str = String(editInitialData.comp1 ?? "").padStart(4, "0");
+      const comp2Str = String(parseInt(editInitialData.comp2, 10) || "");
+      const mapped = classificationFromComp1(comp1Str);
+
+      const initial = {
         ...initialCGLState,
         ...editInitialData,
-        comp1: String(editInitialData.comp1 ?? "").padStart(4, "0"),
-        comp2: String(parseInt(editInitialData.comp2, 10) || ""),
-        defBalType: editInitialData.defBalType ?? "",
+        comp1: comp1Str,
+        comp2: comp2Str,
         segmentCode: editInitialData.segmentCode ?? "",
         description: editInitialData.description ?? "",
         balFwd: !!editInitialData.balFwd,
-      });
+      };
+
+      // if comp1 determines classification, enforce it and lock dropdown
+      if (mapped) {
+        initial.acClassification = mapped;
+        initial.defBalType = defBalTypeFromClassification(mapped);
+        setClassificationLocked(true);
+      } else {
+        initial.acClassification = editInitialData.acClassification ?? "";
+        initial.defBalType =
+          editInitialData.defBalType || defBalTypeFromClassification(initial.acClassification);
+        setClassificationLocked(false);
+      }
+
+      // Apply balFwd and balCompare rules based on classification
+      const ac = initial.acClassification;
+      if (ac === "A" || ac === "L") {
+        initial.balFwd = true;
+        initial.balCompare = initial.balCompare ?? "1";
+      } else if (ac === "I" || ac === "E") {
+        initial.balFwd = false;
+        initial.balCompare = "0";
+      }
+
+      setCglData(initial);
       setEditingId(editInitialData.cglNumber);
       setIsActive(editInitialData.status === 1);
       setErrors({});
@@ -154,24 +186,33 @@ export default function CGLFormDialog({
       setEditingId(null);
       setIsActive(false);
       setErrors({});
+      setClassificationLocked(false);
     }
   }, [open, editInitialData, fetchSegments]);
 
-  // auto-derive defBalType + enforce balFwd disabled for Income/Expense
+  // whenever acClassification changes we auto-set defBalType and adjust balFwd / balCompare rules
   useEffect(() => {
-    if (!cglData.acClassification) return;
-    let defBalType = cglData.defBalType;
-    if (["A", "E", "M"].includes(cglData.acClassification)) defBalType = "D";
-    if (["L", "I"].includes(cglData.acClassification)) defBalType = "C";
+    const ac = cglData.acClassification;
+    if (!ac) return;
 
-    setCglData((prev) => ({
-      ...prev,
-      defBalType,
-      balFwd:
-        prev.acClassification === "I" || prev.acClassification === "E"
-          ? false
-          : prev.balFwd,
-    }));
+    setCglData((prev) => {
+      const newDef = defBalTypeFromClassification(ac);
+      const next = { ...prev, defBalType: newDef };
+
+      // balFwd rules:
+      if (ac === "A" || ac === "L") {
+        next.balFwd = true; // disabled & checked
+      } else if (ac === "I" || ac === "E") {
+        next.balFwd = false; // disabled & unchecked
+      } // else leave balFwd as-is (user can change)
+
+      // balCompare rules:
+      if (ac === "I" || ac === "E") {
+        next.balCompare = "0"; // force exclude
+      }
+
+      return next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cglData.acClassification]);
 
@@ -200,9 +241,7 @@ export default function CGLFormDialog({
       case "acClassification":
         if (!value) return "Account classification is required";
         return "";
-      case "defBalType":
-        if (!value) return "Default balance type is required";
-        return "";
+      // defBalType is auto-set; no user action required so we do not validate it here
       default:
         return "";
     }
@@ -215,7 +254,7 @@ export default function CGLFormDialog({
       "comp2",
       "description",
       "acClassification",
-      "defBalType",
+      // defBalType auto-set: ensure it's non-empty implicitly by checking classification
     ];
     return fields.every((f) => !validateField(f, cglData[f]));
   }, [cglData, validateField]);
@@ -255,7 +294,63 @@ export default function CGLFormDialog({
         }
       }
 
-      // update state
+      // If comp1 changes we must apply classification-from-comp1 rules (Option A)
+      if (name === "comp1") {
+        const newComp1 = value;
+        // update comp1 immediately
+        setCglData((prev) => ({ ...prev, comp1: newComp1 }));
+        // only attempt classification mapping when there's at least 1 char
+        const mapped = classificationFromComp1(newComp1);
+        if (mapped) {
+          // auto-set classification, lock dropdown and set defBalType, balFwd and balCompare accordingly
+          setCglData((prev) => {
+            const def = defBalTypeFromClassification(mapped);
+            const updated = {
+              ...prev,
+              comp1: newComp1,
+              acClassification: mapped,
+              defBalType: def,
+            };
+
+            // balFwd rules
+            if (mapped === "A" || mapped === "L") updated.balFwd = true;
+            else if (mapped === "I" || mapped === "E") updated.balFwd = false;
+
+            // balCompare rules
+            if (mapped === "I" || mapped === "E") updated.balCompare = "0";
+
+            return updated;
+          });
+          setClassificationLocked(true);
+          // clear any classification field error
+          setErrors((prev) => ({ ...prev, comp1: "", acClassification: "" }));
+        } else {
+          // not mapped => unlock dropdown and clear auto classification so user can choose
+          setClassificationLocked(false);
+          setCglData((prev) => ({ ...prev, acClassification: "" }));
+        }
+
+        // validate comp1
+        const err = validateField("comp1", newComp1);
+        setErrors((prev) => ({ ...prev, comp1: err }));
+        return;
+      }
+
+      // For balFwd checkbox toggling (only possible when enabled)
+      if (name === "balFwd") {
+        setCglData((prev) => ({ ...prev, balFwd: checked }));
+        setErrors((prev) => ({ ...prev, balFwd: "" }));
+        return;
+      }
+
+      // For balCompare (radio)
+      if (name === "balCompare") {
+        setCglData((prev) => ({ ...prev, balCompare: value }));
+        setErrors((prev) => ({ ...prev, balCompare: "" }));
+        return;
+      }
+
+      // Normal update for other fields
       setCglData((prev) => ({
         ...prev,
         [name]: type === "checkbox" ? checked : value,
@@ -275,7 +370,7 @@ export default function CGLFormDialog({
       "comp2",
       "description",
       "acClassification",
-      "defBalType",
+      // defBalType auto-set
     ];
     const newErrors = {};
     fields.forEach((f) => {
@@ -301,6 +396,9 @@ export default function CGLFormDialog({
       const changeType = editingId ? "UPDATE" : "ADD";
       const reqStatus = "P";
 
+      // ensure defBalType present (derived from acClassification)
+      const effectiveDef = defBalTypeFromClassification(cglData.acClassification);
+
       const innerPayload = {
         comp1: cglData.comp1,
         segmentCode: cglData.segmentCode,
@@ -309,7 +407,7 @@ export default function CGLFormDialog({
         description: cglData.description,
         acClassification: cglData.acClassification,
         balFwd: cglData.balFwd ? 1 : 0,
-        defBalType: cglData.defBalType,
+        defBalType: effectiveDef,
         reqStatus,
         balCompare: cglData.balCompare,
         manualPosting: cglData.manualPosting,
@@ -345,6 +443,7 @@ export default function CGLFormDialog({
     setCglData(initialCGLState);
     setEditingId(null);
     setErrors({});
+    setClassificationLocked(false);
   }, []);
 
   const handleClose = useCallback(() => {
@@ -381,8 +480,11 @@ export default function CGLFormDialog({
     }
   }, [callApi, cglNumber, editingId, onSaved, snackbar, handleClose]);
 
-  // expose an 'open as edit' helper for parent usage (parent can pass editInitialData)
-  // but we also want to allow parent to just open dialog for create (editInitialData null)
+  // helpers to decide UI disabled state based on current classification
+  const classification = cglData.acClassification;
+  const isBalFwdDisabled = classification === "A" || classification === "L" || classification === "I" || classification === "E";
+  const balFwdChecked = classification === "A" || classification === "L" ? true : classification === "I" || classification === "E" ? false : cglData.balFwd;
+  const isBalCompareDisabled = classification === "I" || classification === "E";
 
   return (
     <>
@@ -405,17 +507,18 @@ export default function CGLFormDialog({
         </DialogTitle>
 
         <DialogContent>
-          <Box component="form" onSubmit={handleSubmit}>
-            <Grid xs={12} sm={6}>
-              <Paper variant="outlined" sx={{ p: 2, width: "100%" }}>
-                <Typography variant="body" color="textSecondary">
-                  CGL Number: {cglNumber || ""}
-                </Typography>
-              </Paper>
-            </Grid>
+          <Box component="form" onSubmit={handleSubmit} sx={{ mt: 2 }}>
+            <Grid container spacing={2}>
+              <Grid item xs={12}>
+                <Paper variant="outlined" sx={{ p: 2, width: "100%" }}>
+                  <Typography variant="body2" color="textSecondary">
+                    CGL Number
+                  </Typography>
+                  <Typography variant="h6">{cglNumber || ""}</Typography>
+                </Paper>
+              </Grid>
 
-            <Grid xs={12} sm={6} spacing={2}>
-              <Grid xs={12} sm={6}>
+              <Grid item xs={12}>
                 <Box display="flex" gap={1}>
                   <TextField
                     fullWidth
@@ -467,7 +570,7 @@ export default function CGLFormDialog({
                 </Box>
               </Grid>
 
-              <Grid xs={12} sm={6}>
+              <Grid item xs={12}>
                 <TextField
                   fullWidth
                   label="Description *"
@@ -485,8 +588,9 @@ export default function CGLFormDialog({
                 />
               </Grid>
 
-              <Grid xs={12} sm={6}>
+              <Grid item xs={12}>
                 <Box display="flex" gap={2}>
+                  {/* Account Classification: auto-set & disabled when classificationLocked is true */}
                   <TextField
                     select
                     fullWidth
@@ -495,7 +599,12 @@ export default function CGLFormDialog({
                     value={cglData.acClassification}
                     onChange={handleChange}
                     error={!!errors.acClassification}
-                    helperText={errors.acClassification}
+                    helperText={
+                      classificationLocked
+                        ? "Set by Comp1"
+                        : errors.acClassification || ""
+                    }
+                    disabled={classificationLocked}
                   >
                     <MenuItem value="">Select Classification</MenuItem>
                     {ACCOUNT_CLASSIFICATIONS.map((option) => (
@@ -505,44 +614,33 @@ export default function CGLFormDialog({
                     ))}
                   </TextField>
 
-                  <TextField
-                    select
-                    fullWidth
-                    label="Default Balance Type *"
-                    name="defBalType"
-                    value={cglData.defBalType}
-                    onChange={handleChange}
-                    error={!!errors.defBalType}
-                    helperText={errors.defBalType}
-                  >
-                    <MenuItem value="">Select Type</MenuItem>
-                    <MenuItem value="D">Debit</MenuItem>
-                    <MenuItem value="C">Credit</MenuItem>
-                  </TextField>
+                  {/* Default Balance Type is HIDDEN from UI (auto-managed) */}
                 </Box>
               </Grid>
 
-              <Grid xs={12} sm={6}>
+              <Grid item xs={12}>
                 <FormControlLabel
                   control={
                     <Checkbox
                       name="balFwd"
-                      checked={cglData.balFwd}
+                      checked={!!balFwdChecked}
                       onChange={handleChange}
-                      disabled={["I", "E"].includes(cglData.acClassification)}
+                      disabled={isBalFwdDisabled}
                     />
                   }
                   label="Balance Carry Forward to next year"
                 />
                 <FormHelperText>
-                  {["I", "E"].includes(cglData.acClassification)
-                    ? "Not applicable for Income/Expense accounts"
+                  {classification === "I" || classification === "E"
+                    ? "Not applicable for Income/Expense accounts (Unchecked)"
+                    : classification === "A" || classification === "L"
+                    ? "Automatically enabled for Asset/Liability"
                     : ""}
                 </FormHelperText>
               </Grid>
 
-              <Grid xs={12} sm={6} md={6}>
-                <FormControl component="fieldset">
+              <Grid item xs={12} md={6}>
+                <FormControl component="fieldset" fullWidth>
                   <FormLabel component="legend">Balance Compare Flag</FormLabel>
                   <RadioGroup
                     row
@@ -554,18 +652,25 @@ export default function CGLFormDialog({
                       value="1"
                       control={<Radio />}
                       label="Include"
+                      disabled={isBalCompareDisabled}
                     />
                     <FormControlLabel
                       value="0"
                       control={<Radio />}
                       label="Exclude"
+                      disabled={isBalCompareDisabled}
                     />
                   </RadioGroup>
+                  {isBalCompareDisabled && (
+                    <FormHelperText>
+                      Income/Expense accounts forced to Exclude
+                    </FormHelperText>
+                  )}
                 </FormControl>
               </Grid>
 
-              <Grid xs={12} sm={6} md={6}>
-                <FormControl component="fieldset">
+              <Grid item xs={12} md={6}>
+                <FormControl component="fieldset" fullWidth>
                   <FormLabel component="legend">Manual Posting Flag</FormLabel>
                   <RadioGroup
                     row
@@ -588,7 +693,7 @@ export default function CGLFormDialog({
               </Grid>
 
               {editingId && (
-                <Grid xs={12} sm={6}>
+                <Grid item xs={12}>
                   <TextField
                     fullWidth
                     label="Status"
@@ -648,13 +753,11 @@ export default function CGLFormDialog({
             Are you sure you want to block CGL {editingId || cglNumber}?
           </Typography>
         </DialogContent>
-        <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end", p: 2 }}>
+        <Box
+          sx={{ display: "flex", gap: 1, justifyContent: "flex-end", p: 2 }}
+        >
           <Button onClick={() => setBlockConfirmOpen(false)}>Cancel</Button>
-          <Button
-            color="error"
-            variant="contained"
-            onClick={handleBlockConfirm}
-          >
+          <Button color="error" variant="contained" onClick={handleBlockConfirm}>
             Block
           </Button>
         </Box>
