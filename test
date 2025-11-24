@@ -1,48 +1,32 @@
-import React, {
-  useState,
-  useMemo,
-  useCallback,
-  useEffect,
-  useRef,
-} from "react";
+// CGLFormDialog.jsx
+import React, { useEffect, useMemo, useCallback, useState, useRef } from "react";
 import {
-  Paper,
-  Typography,
-  TextField,
-  MenuItem,
-  FormControl,
-  FormLabel,
-  RadioGroup,
-  FormControlLabel,
-  Radio,
-  Checkbox,
-  Button,
-  Box,
-  Grid,
   Dialog,
   DialogTitle,
   DialogContent,
-  DialogActions,
+  Box,
+  Grid,
+  TextField,
+  MenuItem,
+  Paper,
+  Typography,
+  FormControlLabel,
+  Checkbox,
   FormHelperText,
-  Fab,
-  Stack,
-  Tooltip,
+  FormControl,
+  FormLabel,
+  RadioGroup,
+  Radio,
+  Button,
   IconButton,
 } from "@mui/material";
-import {
-  Edit as EditIcon,
-  Block as BlockIcon,
-  LockOpen as UnblockIcon,
-  Add as AddIcon,
-  Close as CloseIcon,
-} from "@mui/icons-material";
-import { DataGrid } from "@mui/x-data-grid";
-import CustomChip from "../../utils/CustomChip";
+import CloseIcon from "@mui/icons-material/Close";
+import EditIcon from "@mui/icons-material/Edit";
+import AddIcon from "@mui/icons-material/Add";
+import BlockIcon from "@mui/icons-material/Block";
+
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
-import TrendingUpIcon from "@mui/icons-material/TrendingUp"; // Example Icon for Debit
-import TrendingDownIcon from "@mui/icons-material/TrendingDown"; // Example Icon for Credit
 
 const ACCOUNT_CLASSIFICATIONS = [
   { value: "A", label: "Asset" },
@@ -67,22 +51,22 @@ const initialCGLState = {
   closeDate: null,
 };
 
-export default function CGLMasterTab() {
-  const [cglData, setCglData] = useState(initialCGLState);
-  const [rows, SetRows] = useState([]);
-  const [editingId, setEditingId] = useState(null);
-  const [errors, setErrors] = useState({});
-  const [openDialog, setOpenDialog] = useState(false);
-
-  const [isActive, setIsActive] = useState(false);
-  const [SEGMENTS, SetSegments] = useState([]);
-
+export default function CGLFormDialog({
+  open,
+  onClose,
+  onSaved, // callback to parent to refresh list after successful save
+  editInitialData = null, // when editing, parent passes the row object
+}) {
   const { callApi } = useApi();
-
-  const [blockDialogOpen, setBlockDialogOpen] = useState(false);
-  const [selectedCGL, setSelectedCGL] = useState(null);
-
   const snackbar = useCustomSnackbar();
+
+  // form state & validation lives here
+  const [cglData, setCglData] = useState(initialCGLState);
+  const [errors, setErrors] = useState({});
+  const [editingId, setEditingId] = useState(null);
+  const [isActive, setIsActive] = useState(false);
+  const [segments, setSegments] = useState([]);
+  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
 
   // throttle snackbars during typing
   const snackGateRef = useRef(true);
@@ -93,6 +77,7 @@ export default function CGLMasterTab() {
     setTimeout(() => (snackGateRef.current = true), 800);
   };
 
+  // derived cglNumber
   const cglNumber = useMemo(() => {
     return cglData.comp1 && cglData.segmentCode && cglData.comp2
       ? `${cglData.comp1}${cglData.segmentCode}${String(cglData.comp2).padStart(
@@ -102,28 +87,44 @@ export default function CGLMasterTab() {
       : "";
   }, [cglData.comp1, cglData.segmentCode, cglData.comp2]);
 
-  const fetchData = async () => {
-    const payload = { requestType: "CGL_CODE" };
-    const segmentpayload = { requestType: "SEGMENT_CODE" };
-    const response = await callApi("/CM/cgls", payload, "GET");
-    const segmentresponse = await callApi(
+  // load segments (dialog owns this API call)
+  const fetchSegments = useCallback(async () => {
+    const resp = await callApi(
       "/CM/segment-codes",
-      segmentpayload,
+      { requestType: "SEGMENT_CODE" },
       "GET"
     );
+    setSegments(resp?.data || []);
+  }, [callApi]);
 
-    if (response && segmentresponse) {
-      SetRows(response.data || []);
-      SetSegments(segmentresponse.data || []);
-    } else {
-      SetRows([]);
-      SetSegments([]);
-    }
-  };
-
+  // when dialog opens for Add or Edit, populate
   useEffect(() => {
-    fetchData();
-  }, []);
+    if (!open) return;
+    fetchSegments();
+
+    if (editInitialData) {
+      // populate form from editInitialData
+      setCglData({
+        ...initialCGLState,
+        ...editInitialData,
+        comp1: String(editInitialData.comp1 ?? "").padStart(4, "0"),
+        comp2: String(parseInt(editInitialData.comp2, 10) || ""),
+        defBalType: editInitialData.defBalType ?? "",
+        segmentCode: editInitialData.segmentCode ?? "",
+        description: editInitialData.description ?? "",
+        balFwd: !!editInitialData.balFwd,
+      });
+      setEditingId(editInitialData.cglNumber);
+      setIsActive(editInitialData.status === 1);
+      setErrors({});
+    } else {
+      // fresh
+      setCglData(initialCGLState);
+      setEditingId(null);
+      setIsActive(false);
+      setErrors({});
+    }
+  }, [open, editInitialData, fetchSegments]);
 
   // auto-derive defBalType + enforce balFwd disabled for Income/Expense
   useEffect(() => {
@@ -140,7 +141,8 @@ export default function CGLMasterTab() {
           ? false
           : prev.balFwd,
     }));
-  }, [cglData.acClassification]); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cglData.acClassification]);
 
   // single-field validator
   const validateField = useCallback((name, value) => {
@@ -257,87 +259,56 @@ export default function CGLMasterTab() {
     return true;
   }, [cglData, validateField, snackbar]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!validateForm()) return;
+  // submit — dialog does the API call
+  const handleSubmit = useCallback(
+    async (e) => {
+      e?.preventDefault();
+      if (!validateForm()) return;
 
-    const apiEndpoint = "/CR/create-request";
-    const method = "POST";
-    const changeType = editingId ? "UPDATE" : "ADD";
-    const reqStatus = "P";
+      const apiEndpoint = "/CR/create-request";
+      const method = "POST";
+      const changeType = editingId ? "UPDATE" : "ADD";
+      const reqStatus = "P";
 
-    const innerPayload = {
-      comp1: cglData.comp1,
-      segmentCode: cglData.segmentCode,
-      comp2: cglData.comp2,
-      cglNumber:
-        cglData.comp1 +
-        cglData.segmentCode +
-        String(cglData.comp2).padStart(2, "0"),
-      description: cglData.description,
-      acClassification: cglData.acClassification,
-      balFwd: cglData.balFwd ? 1 : 0,
-      defBalType: cglData.defBalType,
-      reqStatus,
-      balCompare: cglData.balCompare,
-      manualPosting: cglData.manualPosting,
-    };
+      const innerPayload = {
+        comp1: cglData.comp1,
+        segmentCode: cglData.segmentCode,
+        comp2: cglData.comp2,
+        cglNumber: cglNumber,
+        description: cglData.description,
+        acClassification: cglData.acClassification,
+        balFwd: cglData.balFwd ? 1 : 0,
+        defBalType: cglData.defBalType,
+        reqStatus,
+        balCompare: cglData.balCompare,
+        manualPosting: cglData.manualPosting,
+      };
 
-    const payloadData = {
-      requestType: "CGL_CODE",
-      changeType,
-      payload: innerPayload,
-    };
+      const payloadData = {
+        requestType: "CGL_CODE",
+        changeType,
+        payload: innerPayload,
+      };
 
-    try {
-      const response = await callApi(apiEndpoint, payloadData, method);
-      if (response) {
-        snackbar(
-          editingId ? "CGL updated successfully" : "CGL created successfully",
-          "success"
-        );
-        fetchData();
-        setOpenDialog(false);
-      } else {
-        snackbar("No response from server", "error");
+      try {
+        const response = await callApi(apiEndpoint, payloadData, method);
+        if (response) {
+          snackbar(
+            editingId ? "CGL updated successfully" : "CGL created successfully",
+            "success"
+          );
+          // tell parent to refresh list
+          onSaved?.();
+          handleClose();
+        } else {
+          snackbar("No response from server", "error");
+        }
+      } catch (error) {
+        snackbar(error?.message || "Request failed", "error");
       }
-    } catch (error) {
-      snackbar(error?.message || "Request failed", "error");
-    }
-  };
-
-  const handleEdit = useCallback((cgl) => {
-    setCglData({
-      ...initialCGLState,
-      ...cgl,
-      comp1: String(cgl.comp1 ?? "").padStart(4, "0"),
-      comp2: String(parseInt(cgl.comp2, 10) || "").toString(),
-      defBalType: cgl.defBalType,
-      segmentCode: cgl.segmentCode,
-      description: cgl.description,
-      status: cgl.status === 1 ? "Active" : "Inactive",
-    });
-    setEditingId(cgl.cglNumber);
-    setOpenDialog(true);
-    setIsActive(cgl.status == 1);
-  }, []);
-
-  const openBlockDialog = useCallback((cgl) => {
-    setSelectedCGL(cgl);
-    setBlockDialogOpen(true);
-  }, []);
-
-  const handleBlock = useCallback(() => {
-    SetRows((prev) =>
-      prev.map((item) =>
-        item.cglNumber === selectedCGL.cglNumber
-          ? { ...item, status: "Inactive" }
-          : item
-      )
-    );
-    setBlockDialogOpen(false);
-    setOpenDialog(false);
-  }, [selectedCGL]);
+    },
+    [callApi, cglData, cglNumber, editingId, onSaved, snackbar, validateForm]
+  );
 
   const handleReset = useCallback(() => {
     setCglData(initialCGLState);
@@ -345,199 +316,52 @@ export default function CGLMasterTab() {
     setErrors({});
   }, []);
 
-  const handleCloseDialog = useCallback(() => {
-    setOpenDialog(false);
+  const handleClose = useCallback(() => {
+    onClose?.();
     handleReset();
-  }, [handleReset]);
+    setBlockConfirmOpen(false);
+  }, [onClose, handleReset]);
 
-  const columns = useMemo(
-    () => [
-      {
-        field: "cglNumber",
-        headerName: "CGL CODE",
-        flex: 1,
-        sortable: true,
-      },
-      {
-        field: "description",
-        headerName: "Description",
-        flex: 3,
-        sortable: true,
-      },
-
-      {
-        field: "acClassification",
-        headerName: "Account Classification",
-        flex: 1,
-        sortable: true,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => {
-          const targetId = params.row.acClassification;
-          console.log(targetId);
-          const findValue = ACCOUNT_CLASSIFICATIONS.find(
-            (row) => row.value === targetId
-          );
-          console.log(findValue);
-
-          return (
-            <CustomChip
-              label={findValue.label}
-              variant="outlined"
-              size="small"
-            />
-          );
-        },
-      },
-
-      {
-        field: "defBalType",
-        headerName: "Type",
-        flex: 1,
-        sortable: true,
-        align: "center",
-        headerAlign: "center",
-        renderCell: (params) => {
-          const isDebit = params.row.defBalType === "D";
-          const label = isDebit ? "Debit" : "Credit";
-          const Icon = isDebit ? TrendingDownIcon : TrendingUpIcon;
-
-          return (
-            <CustomChip
-              icon={<Icon />}
-              label={label}
-              color={isDebit ? "error" : "success"}
-              variant="outlined"
-              size="small"
-            />
-          );
-        },
-      },
-
-      {
-        field: "reqStatus",
-        headerName: "Status",
-        flex: 1,
-        sortable: true,
-        align: "center",
-        headerAlign: "center",
-        justifyContent: "center",
-        renderCell: (params) => {
-          console.log(params.row.status);
-          const isActive = params.row.status == 1;
-          const label = isActive ? "Active" : "In Active";
-          const Icon = isActive ? OnlinePredictionIcon : TrendingUpIcon;
-          return (
-            <CustomChip
-              sx={{
-                p: 0.5,
-                m: 0,
-                width: "90%",
-                color: "success.main",
-                "& .MuiChip-icon": { color: "success.main" },
-              }}
-              icon={Icon}
-              label={label}
-              variant="outlined"
-              color="primary"
-            />
-          );
-        },
-      },
-      {
-        field: "actions",
-        headerName: "Actions",
-        sortable: false,
-        flex: 1,
-        align: "center",
-        headerAlign: "center",
-        justifyContent: "center",
-        renderCell: (params) => {
-          return (
-            <Stack
-              direction="row"
-              sx={{ display: "flex", justifyContent: "center", mt: 1 }}
-              spacing={1}
-              alignItems="center"
-            >
-              <Tooltip title="Edit">
-                <IconButton
-                  size="small"
-                  onClick={() => handleEdit(params.row)}
-                  color="primary"
-                >
-                  <EditIcon fontSize="inherit" />
-                </IconButton>
-              </Tooltip>
-            </Stack>
-          );
-        },
-      },
-    ],
-    [handleEdit, openBlockDialog]
-  );
-
-  const handleUnblock = useCallback((id) => {
-    SetRows((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, status: "Active", closeDate: null } : item
-      )
-    );
+  // block flow — dialog owns the blocking behaviour (local mock here)
+  const openBlockConfirm = useCallback(() => {
+    setBlockConfirmOpen(true);
   }, []);
+  const handleBlockConfirm = useCallback(async () => {
+    // if your API exists, call it here. For now we just call a simple API shape:
+    try {
+      // example API (adjust per your backend)
+      const payload = {
+        requestType: "CGL_CODE",
+        changeType: "BLOCK",
+        payload: { cglNumber: editingId || cglNumber },
+      };
+      const resp = await callApi("/CR/block-cgl", payload, "POST");
+      if (resp) {
+        snackbar("Blocked successfully", "success");
+        onSaved?.();
+      } else {
+        snackbar("Block failed", "error");
+      }
+    } catch (err) {
+      snackbar(err?.message || "Block request failed", "error");
+    } finally {
+      setBlockConfirmOpen(false);
+      handleClose();
+    }
+  }, [callApi, cglNumber, editingId, onSaved, snackbar, handleClose]);
+
+  // expose an 'open as edit' helper for parent usage (parent can pass editInitialData)
+  // but we also want to allow parent to just open dialog for create (editInitialData null)
 
   return (
-    <Box sx={{ width: "100%", p: 0, m: 0 }}>
-      <Box>
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          getRowId={(row) => row.cglNumber}
-          disableRowSelectionOnClick
-          pageSizeOptions={[5, 10, 25, 50]}
-          initialState={{
-            pagination: { paginationModel: { pageSize: 10, page: 0 } },
-            sorting: { sortModel: [{ field: "cglNumber", sort: "asc" }] },
-          }}
-        />
-      </Box>
-
-      <Box>
-        <Fab
-          onClick={() => setOpenDialog(true)}
-          color="primary"
-          variant="extended"
-          sx={{
-            position: "fixed",
-            borderRadius: 1,
-            fontSize: "15px",
-            bottom: (theme) => theme.spacing(8),
-            right: (theme) => theme.spacing(4),
-            zIndex: 1000,
-          }}
-        >
-          <AddIcon sx={{ mr: 1 }} />
-          Create
-        </Fab>
-      </Box>
-
-      <Dialog
-        open={openDialog}
-        onClose={handleCloseDialog}
-        fullWidth
-        maxWidth="sm"
-      >
+    <>
+      <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
         <DialogTitle>
-          <Box
-            sx={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <Typography variant="h6" color="primary">
               {editingId ? "Edit CGL" : "Add New CGL"}
             </Typography>
-            <IconButton onClick={handleCloseDialog}>
+            <IconButton onClick={handleClose}>
               <CloseIcon />
             </IconButton>
           </Box>
@@ -573,11 +397,8 @@ export default function CGLMasterTab() {
                     disabled={!!editingId}
                   >
                     <MenuItem value="">Select Segment</MenuItem>
-                    {SEGMENTS.map((segment) => (
-                      <MenuItem
-                        key={segment.segmentCode}
-                        value={segment.segmentCode}
-                      >
+                    {segments.map((segment) => (
+                      <MenuItem key={segment.segmentCode} value={segment.segmentCode}>
                         {segment.segmentCode} - {segment.description}
                       </MenuItem>
                     ))}
@@ -599,7 +420,7 @@ export default function CGLMasterTab() {
               </Grid>
 
               <Grid item xs={12}>
-                <Paper variant="outlined" sx={{ p: 2, width: 550 }}>
+                <Paper variant="outlined" sx={{ p: 2, width: "100%" }}>
                   <Typography variant="body2" color="textSecondary">
                     CGL Number
                   </Typography>
@@ -607,7 +428,7 @@ export default function CGLMasterTab() {
                 </Paper>
               </Grid>
 
-              <Grid item xs={12} sx={{ width: 600 }}>
+              <Grid item xs={12}>
                 <TextField
                   fullWidth
                   label="Description *"
@@ -617,15 +438,14 @@ export default function CGLMasterTab() {
                   error={!!errors.description}
                   inputProps={{ maxLength: 100 }}
                   helperText={
-                    errors.description ||
-                    "Allowed: letters, numbers, spaces, / & ( ) -"
+                    errors.description || "Allowed: letters, numbers, spaces, / & ( ) -"
                   }
                   multiline
                   rows={3}
                 />
               </Grid>
 
-              <Grid item xs={12} sx={{ width: 600 }}>
+              <Grid item xs={12}>
                 <Box display="flex" gap={2}>
                   <TextField
                     select
@@ -662,7 +482,7 @@ export default function CGLMasterTab() {
                 </Box>
               </Grid>
 
-              <Grid item xs={12} sx={{ width: 550 }}>
+              <Grid item xs={12}>
                 <FormControlLabel
                   control={
                     <Checkbox
@@ -684,22 +504,9 @@ export default function CGLMasterTab() {
               <Grid item xs={12} md={6}>
                 <FormControl component="fieldset">
                   <FormLabel component="legend">Balance Compare Flag</FormLabel>
-                  <RadioGroup
-                    row
-                    name="balCompare"
-                    value={cglData.balCompare}
-                    onChange={handleChange}
-                  >
-                    <FormControlLabel
-                      value="1"
-                      control={<Radio />}
-                      label="Include"
-                    />
-                    <FormControlLabel
-                      value="0"
-                      control={<Radio />}
-                      label="Exclude"
-                    />
+                  <RadioGroup row name="balCompare" value={cglData.balCompare} onChange={handleChange}>
+                    <FormControlLabel value="1" control={<Radio />} label="Include" />
+                    <FormControlLabel value="0" control={<Radio />} label="Exclude" />
                   </RadioGroup>
                 </FormControl>
               </Grid>
@@ -707,48 +514,26 @@ export default function CGLMasterTab() {
               <Grid item xs={12} md={6}>
                 <FormControl component="fieldset">
                   <FormLabel component="legend">Manual Posting Flag</FormLabel>
-                  <RadioGroup
-                    row
-                    name="manualPosting"
-                    value={cglData.manualPosting}
-                    onChange={handleChange}
-                  >
-                    <FormControlLabel
-                      value="1"
-                      control={<Radio />}
-                      label="Allowed"
-                    />
-                    <FormControlLabel
-                      value="0"
-                      control={<Radio />}
-                      label="Not Allowed"
-                    />
+                  <RadioGroup row name="manualPosting" value={cglData.manualPosting} onChange={handleChange}>
+                    <FormControlLabel value="1" control={<Radio />} label="Allowed" />
+                    <FormControlLabel value="0" control={<Radio />} label="Not Allowed" />
                   </RadioGroup>
                 </FormControl>
               </Grid>
 
               {editingId && (
-                <Grid item>
+                <Grid item xs={12}>
                   <TextField
                     fullWidth
                     label="Status"
-                    value={cglData.status == 1 ? "Active" : "In-Active"}
+                    value={isActive ? "Active" : "In-Active"}
                     disabled
-                    variant="outlined"
-                    sx={{ color: isActive ? "success.main" : "error.main" }}
                   />
                 </Grid>
               )}
             </Grid>
 
-            <Box
-              sx={{
-                mt: 3,
-                display: "flex",
-                gap: 1,
-                justifyContent: "flex-end",
-              }}
-            >
+            <Box sx={{ mt: 3, display: "flex", gap: 1, justifyContent: "flex-end" }}>
               {!editingId && (
                 <Button onClick={handleReset} variant="outlined">
                   Reset
@@ -766,7 +551,7 @@ export default function CGLMasterTab() {
 
               {editingId && (
                 <Button
-                  onClick={() => openBlockDialog(cglData)}
+                  onClick={openBlockConfirm}
                   variant="contained"
                   color="error"
                   startIcon={<BlockIcon />}
@@ -779,20 +564,177 @@ export default function CGLMasterTab() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={blockDialogOpen} onClose={() => setBlockDialogOpen(false)}>
+      {/* Block confirmation dialog (owned by dialog component) */}
+      <Dialog open={blockConfirmOpen} onClose={() => setBlockConfirmOpen(false)}>
         <DialogTitle>Block CGL</DialogTitle>
         <DialogContent>
           <Typography>
-            Are you sure you want to block CGL {selectedCGL?.cglNumber || ""}?
+            Are you sure you want to block CGL {editingId || cglNumber}?
           </Typography>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setBlockDialogOpen(false)}>Cancel</Button>
-          <Button onClick={handleBlock} color="error" variant="contained">
+        <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end", p: 2 }}>
+          <Button onClick={() => setBlockConfirmOpen(false)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={handleBlockConfirm}>
             Block
           </Button>
-        </DialogActions>
+        </Box>
       </Dialog>
+    </>
+  );
+}
+
+// CGLMasterTab.jsx
+import React, { useEffect, useState, useCallback } from "react";
+import { Box, Fab } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import { DataGrid } from "@mui/x-data-grid";
+import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
+import EditIcon from "@mui/icons-material/Edit";
+
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import CustomChip from "../../utils/CustomChip";
+import CGLFormDialog from "./CGLFormDialog";
+
+const ACCOUNT_CLASSIFICATIONS = [
+  { value: "A", label: "Asset" },
+  { value: "L", label: "Liability" },
+  { value: "I", label: "Income" },
+  { value: "E", label: "Expense" },
+  { value: "M", label: "Memo A/c" },
+];
+
+export default function CGLMasterTab() {
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
+
+  const [rows, setRows] = useState([]);
+  const [openDialog, setOpenDialog] = useState(false);
+  const [editRow, setEditRow] = useState(null);
+
+  // load grid rows (main owns listing)
+  const fetchRows = useCallback(async () => {
+    try {
+      const resp = await callApi("/CM/cgls", { requestType: "CGL_CODE" }, "GET");
+      setRows(resp?.data || []);
+    } catch (err) {
+      snackbar(err?.message || "Failed to load CGLs", "error");
+      setRows([]);
+    }
+  }, [callApi, snackbar]);
+
+  useEffect(() => {
+    fetchRows();
+  }, [fetchRows]);
+
+  // when saved in dialog, refresh list
+  const handleSaved = useCallback(() => {
+    fetchRows();
+    setOpenDialog(false);
+  }, [fetchRows]);
+
+  const handleOpenCreate = () => {
+    setEditRow(null);
+    setOpenDialog(true);
+  };
+
+  const handleOpenEdit = (row) => {
+    setEditRow(row);
+    setOpenDialog(true);
+  };
+
+  const columns = [
+    { field: "cglNumber", headerName: "CGL Code", flex: 1 },
+    { field: "description", headerName: "Description", flex: 2 },
+    {
+      field: "acClassification",
+      headerName: "Classification",
+      flex: 1,
+      align: "center",
+      renderCell: (params) => {
+        const found = ACCOUNT_CLASSIFICATIONS.find((x) => x.value === params.row.acClassification);
+        return <CustomChip label={found?.label} variant="outlined" />;
+      },
+    },
+    {
+      field: "defBalType",
+      headerName: "Type",
+      flex: 1,
+      align: "center",
+      renderCell: (params) => {
+        const isD = params.row.defBalType === "D";
+        return (
+          <CustomChip
+            label={isD ? "Debit" : "Credit"}
+            icon={isD ? <TrendingUpIcon /> : <OnlinePredictionIcon />}
+            variant="outlined"
+          />
+        );
+      },
+    },
+    {
+      field: "status",
+      headerName: "Status",
+      flex: 1,
+      align: "center",
+      renderCell: (params) => (
+        <CustomChip label={params.row.status === 1 ? "Active" : "Inactive"} variant="outlined" />
+      ),
+    },
+    {
+      field: "actions",
+      headerName: "Actions",
+      flex: 1,
+      align: "center",
+      renderCell: (params) => (
+        <Box>
+          <button
+            style={{ cursor: "pointer", border: "none", background: "transparent", color: "#1976d2" }}
+            onClick={() => handleOpenEdit(params.row)}
+            title="Edit"
+          >
+            <EditIcon />
+          </button>
+        </Box>
+      ),
+    },
+  ];
+
+  return (
+    <Box sx={{ p: 1 }}>
+      <DataGrid
+        rows={rows}
+        columns={columns}
+        getRowId={(row) => row.cglNumber}
+        disableRowSelectionOnClick
+        pageSizeOptions={[10, 20, 50]}
+        initialState={{
+          pagination: { paginationModel: { pageSize: 10, page: 0 } },
+        }}
+        sx={{ minHeight: 520 }}
+      />
+
+      <Fab
+        color="primary"
+        onClick={handleOpenCreate}
+        sx={{
+          position: "fixed",
+          bottom: 80,
+          right: 40,
+          borderRadius: 1,
+        }}
+        variant="extended"
+      >
+        <AddIcon sx={{ mr: 1 }} /> Create
+      </Fab>
+
+      <CGLFormDialog
+        open={openDialog}
+        onClose={() => setOpenDialog(false)}
+        onSaved={handleSaved}
+        editInitialData={editRow}
+      />
     </Box>
   );
 }
