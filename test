@@ -1,767 +1,192 @@
-import React, {
-  useEffect,
-  useMemo,
-  useCallback,
-  useState,
-  useRef,
-} from "react";
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  Box,
-  Grid,
-  TextField,
-  MenuItem,
-  Paper,
-  Typography,
-  FormControlLabel,
-  Checkbox,
-  FormHelperText,
-  FormControl,
-  FormLabel,
-  RadioGroup,
-  Radio,
-  Button,
-  IconButton,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
-import EditIcon from "@mui/icons-material/Edit";
+import React, { useEffect, useState, useCallback } from "react";
+import { Box, Fab, IconButton, Stack, Tooltip } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
-import BlockIcon from "@mui/icons-material/Block";
-
+import { DataGrid } from "@mui/x-data-grid";
+import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
+import EditIcon from "@mui/icons-material/Edit";
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import CustomChip from "../../utils/CustomChip";
+import CGLDialog from "./CGLDialog";
+import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import TrendingDownIcon from "@mui/icons-material/TrendingDown";
+import DatasetIcon from "@mui/icons-material/Dataset";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import NoteIcon from "@mui/icons-material/Note";
+import LoadingOverlay from "../../utils/LoadingOverlay";
 
 const ACCOUNT_CLASSIFICATIONS = [
-  { value: "A", label: "Asset" },
-  { value: "L", label: "Liability" },
-  { value: "I", label: "Income" },
-  { value: "E", label: "Expense" },
-  { value: "M", label: "Memo A/c" },
+  { value: "A", label: "Asset", icon: <DatasetIcon fontSize="small" /> },
+  {
+    value: "L",
+    label: "Liability",
+    icon: <AccountBalanceWalletIcon fontSize="small" />,
+  },
+  { value: "I", label: "Income", icon: <TrendingUpIcon fontSize="small" /> },
+  { value: "E", label: "Expense", icon: <TrendingDownIcon fontSize="small" /> },
+  { value: "M", label: "Memo A/c", icon: <NoteIcon fontSize="small" /> },
 ];
 
-const initialCGLState = {
-  comp1: "",
-  segmentCode: "",
-  comp2: "",
-  description: "",
-  acClassification: "",
-  balFwd: false,
-  defBalType: "",
-  balCompare: "1",
-  manualPosting: "1",
-  status: "Active",
-  openDate: new Date().toISOString().split("T")[0],
-  closeDate: null,
-};
-
-function classificationFromComp1(comp1Val) {
-  if (!comp1Val || comp1Val.length === 0) return null;
-  const ch = String(comp1Val)[0];
-  if (ch === "1" || ch === "6") return "A"; // Asset
-  if (ch === "2" || ch === "3" || ch === "4") return "L"; // Liability
-  if (ch === "5") return "M"; // Memo
-  if (ch === "7") return "I"; // Income
-  if (ch === "8") return "E"; // Expense
-  return null;
-}
-
-function defBalTypeFromClassification(ac) {
-  switch (ac) {
-    case "A":
-      return "D";
-    case "L":
-      return "C";
-    case "M":
-      return "M";
-    case "I":
-      return "C";
-    case "E":
-      return "D";
-    default:
-      return "";
-  }
-}
-
-export default function CGLFormDialog({
-  open,
-  onClose,
-  onSaved, // callback to parent to refresh list after successful save
-  editInitialData = null, // when editing, parent passes the row object
-}) {
+export default function CGLMasterTab() {
   const { callApi } = useApi();
   const snackbar = useCustomSnackbar();
+  const [isLoading, setIsLoading] = useState(true);
+  const [rows, setRows] = useState([]);
+  const [openDialog, setOpenDialog] = useState(false);
+  const [editRow, setEditRow] = useState(null);
+  const requestType = "CGL_CODE";
 
-  // form state & validation lives here
-  const [cglData, setCglData] = useState(initialCGLState);
-  const [errors, setErrors] = useState({});
-  const [editingId, setEditingId] = useState(null);
-  const [isActive, setIsActive] = useState(false);
-  const [segments, setSegments] = useState([]);
-  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
+  // load grid rows (main owns listing)
+  const fetchRows = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const resp = await callApi(
+        "/CM/cgls",
+        { requestType: "CGL_CODE" },
+        "GET",
+        requestType
+      );
+      setRows(resp?.data || []);
+    } catch (err) {
+      snackbar(err?.message || "Failed to load CGLs", "error");
+      setRows([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [callApi, snackbar]);
 
-  // whether classification was locked by comp1 rule (if true, dropdown disabled)
-  const [classificationLocked, setClassificationLocked] = useState(false);
+  useEffect(() => {
+    fetchRows();
+  }, [fetchRows]);
 
-  // throttle snackbars during typing
-  const snackGateRef = useRef(true);
-  const notifyOnce = (msg, variant = "warning") => {
-    if (!snackGateRef.current) return;
-    snackGateRef.current = false;
-    snackbar(msg, variant);
-    setTimeout(() => (snackGateRef.current = true), 800);
+  const handleSaved = useCallback(() => {
+    fetchRows();
+    setOpenDialog(false);
+  }, [fetchRows]);
+
+  const handleOpenCreate = () => {
+    setEditRow(null);
+    setOpenDialog(true);
   };
 
-  // derived cglNumber
-  const cglNumber = useMemo(() => {
-    return cglData.comp1 && cglData.segmentCode && cglData.comp2
-      ? `${cglData.comp1}${cglData.segmentCode}${String(cglData.comp2).padStart(
-          2,
-          "0"
-        )}`
-      : "";
-  }, [cglData.comp1, cglData.segmentCode, cglData.comp2]);
+  const handleOpenEdit = (row) => {
+    setEditRow(row);
+    setOpenDialog(true);
+  };
 
-  // load segments (dialog owns this API call)
-  const fetchSegments = useCallback(async () => {
-    const resp = await callApi(
-      "/CM/segment-codes",
-      { requestType: "SEGMENT_CODE" },
-      "GET"
-    );
-    setSegments(resp?.data || []);
-  }, [callApi]);
-
-  // when dialog opens for Add or Edit, populate
-  useEffect(() => {
-    if (!open) return;
-    fetchSegments();
-
-    if (editInitialData) {
-      // populate form from editInitialData
-      const comp1Str = String(editInitialData.comp1 ?? "").padStart(4, "0");
-      const comp2Str = String(parseInt(editInitialData.comp2, 10) || "");
-      const mapped = classificationFromComp1(comp1Str);
-
-      const initial = {
-        ...initialCGLState,
-        ...editInitialData,
-        comp1: comp1Str,
-        comp2: comp2Str,
-        segmentCode: editInitialData.segmentCode ?? "",
-        description: editInitialData.description ?? "",
-        balFwd: !!editInitialData.balFwd,
-      };
-
-      // if comp1 determines classification, enforce it and lock dropdown
-      if (mapped) {
-        initial.acClassification = mapped;
-        initial.defBalType = defBalTypeFromClassification(mapped);
-        setClassificationLocked(true);
-      } else {
-        initial.acClassification = editInitialData.acClassification ?? "";
-        initial.defBalType =
-          editInitialData.defBalType || defBalTypeFromClassification(initial.acClassification);
-        setClassificationLocked(false);
-      }
-
-      // Apply balFwd and balCompare rules based on classification
-      const ac = initial.acClassification;
-      if (ac === "A" || ac === "L") {
-        initial.balFwd = true;
-        initial.balCompare = initial.balCompare ?? "1";
-      } else if (ac === "I" || ac === "E") {
-        initial.balFwd = false;
-        initial.balCompare = "0";
-      }
-
-      setCglData(initial);
-      setEditingId(editInitialData.cglNumber);
-      setIsActive(editInitialData.status === 1);
-      setErrors({});
-    } else {
-      // fresh
-      setCglData(initialCGLState);
-      setEditingId(null);
-      setIsActive(false);
-      setErrors({});
-      setClassificationLocked(false);
-    }
-  }, [open, editInitialData, fetchSegments]);
-
-  // whenever acClassification changes we auto-set defBalType and adjust balFwd / balCompare rules
-  useEffect(() => {
-    const ac = cglData.acClassification;
-    if (!ac) return;
-
-    setCglData((prev) => {
-      const newDef = defBalTypeFromClassification(ac);
-      const next = { ...prev, defBalType: newDef };
-
-      // balFwd rules:
-      if (ac === "A" || ac === "L") {
-        next.balFwd = true; // disabled & checked
-      } else if (ac === "I" || ac === "E") {
-        next.balFwd = false; // disabled & unchecked
-      } // else leave balFwd as-is (user can change)
-
-      // balCompare rules:
-      if (ac === "I" || ac === "E") {
-        next.balCompare = "0"; // force exclude
-      }
-
-      return next;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cglData.acClassification]);
-
-  // single-field validator
-  const validateField = useCallback((name, value) => {
-    switch (name) {
-      case "comp1":
-        if (!value) return "Comp1 is required";
-        if (!/^\d{4}$/.test(value)) return "Comp1 must be exactly 4 digits";
-        if (parseInt(value, 10) < 1000) return "Comp1 must be ≥ 1000";
-        return "";
-      case "segmentCode":
-        if (!value) return "Segment code is required";
-        return "";
-      case "comp2":
-        if (!value) return "Comp2 is required";
-        if (!/^\d{1,2}$/.test(value)) return "Comp2 must be 1 or 2 digits";
-        if (parseInt(value, 10) < 1 || parseInt(value, 10) > 99)
-          return "Comp2 must be between 01 and 99";
-        return "";
-      case "description":
-        if (!value) return "Description is required";
-        if (!/^[A-Za-z0-9 /&()\-]+$/.test(value))
-          return "Only letters, digits, spaces, / & ( ) -";
-        return "";
-      case "acClassification":
-        if (!value) return "Account classification is required";
-        return "";
-      // defBalType is auto-set; no user action required so we do not validate it here
-      default:
-        return "";
-    }
-  }, []);
-
-  const isFormValid = useMemo(() => {
-    const fields = [
-      "comp1",
-      "segmentCode",
-      "comp2",
-      "description",
-      "acClassification",
-      // defBalType auto-set: ensure it's non-empty implicitly by checking classification
-    ];
-    return fields.every((f) => !validateField(f, cglData[f]));
-  }, [cglData, validateField]);
-
-  // onChange with live validation + snackbars
-  const handleChange = useCallback(
-    (e) => {
-      const { name, value, type, checked } = e.target;
-
-      // hard-constraints / input blocking
-      if (name === "comp1") {
-        if (!/^\d*$/.test(value)) {
-          notifyOnce("Comp1 accepts digits only");
-          return;
-        }
-        if (value.length > 4) {
-          notifyOnce("Comp1 must be exactly 4 digits");
-          return;
-        }
-      }
-
-      if (name === "comp2") {
-        if (!/^\d*$/.test(value)) {
-          notifyOnce("Comp2 accepts digits only");
-          return;
-        }
-        if (value.length > 2) {
-          notifyOnce("Comp2 max 2 digits");
-          return;
-        }
-      }
-
-      if (name === "description") {
-        if (!/^[A-Za-z0-9 /&()\-]*$/.test(value)) {
-          notifyOnce("Invalid character in Description");
-          return;
-        }
-      }
-
-      // If comp1 changes we must apply classification-from-comp1 rules (Option A)
-      if (name === "comp1") {
-        const newComp1 = value;
-        // update comp1 immediately
-        setCglData((prev) => ({ ...prev, comp1: newComp1 }));
-        // only attempt classification mapping when there's at least 1 char
-        const mapped = classificationFromComp1(newComp1);
-        if (mapped) {
-          // auto-set classification, lock dropdown and set defBalType, balFwd and balCompare accordingly
-          setCglData((prev) => {
-            const def = defBalTypeFromClassification(mapped);
-            const updated = {
-              ...prev,
-              comp1: newComp1,
-              acClassification: mapped,
-              defBalType: def,
-            };
-
-            // balFwd rules
-            if (mapped === "A" || mapped === "L") updated.balFwd = true;
-            else if (mapped === "I" || mapped === "E") updated.balFwd = false;
-
-            // balCompare rules
-            if (mapped === "I" || mapped === "E") updated.balCompare = "0";
-
-            return updated;
-          });
-          setClassificationLocked(true);
-          // clear any classification field error
-          setErrors((prev) => ({ ...prev, comp1: "", acClassification: "" }));
-        } else {
-          // not mapped => unlock dropdown and clear auto classification so user can choose
-          setClassificationLocked(false);
-          setCglData((prev) => ({ ...prev, acClassification: "" }));
-        }
-
-        // validate comp1
-        const err = validateField("comp1", newComp1);
-        setErrors((prev) => ({ ...prev, comp1: err }));
-        return;
-      }
-
-      // For balFwd checkbox toggling (only possible when enabled)
-      if (name === "balFwd") {
-        setCglData((prev) => ({ ...prev, balFwd: checked }));
-        setErrors((prev) => ({ ...prev, balFwd: "" }));
-        return;
-      }
-
-      // For balCompare (radio)
-      if (name === "balCompare") {
-        setCglData((prev) => ({ ...prev, balCompare: value }));
-        setErrors((prev) => ({ ...prev, balCompare: "" }));
-        return;
-      }
-
-      // Normal update for other fields
-      setCglData((prev) => ({
-        ...prev,
-        [name]: type === "checkbox" ? checked : value,
-      }));
-
-      // set per-field error
-      const msg = validateField(name, type === "checkbox" ? checked : value);
-      setErrors((prev) => ({ ...prev, [name]: msg }));
+  const columns = [
+    { field: "cglNumber", headerName: "CGL Code", flex: 1 },
+    { field: "description", headerName: "Description", flex: 2 },
+    {
+      field: "acClassification",
+      headerName: "Account Classification",
+      flex: 1.2,
+      headerAlign: "center",
+      align: "center",
+      renderCell: (params) => {
+        const found = ACCOUNT_CLASSIFICATIONS.find(
+          (x) => x.value === params.row.acClassification
+        );
+        return (
+          <CustomChip
+            label={found.label}
+            icon={found.icon}
+            variant="outlined"
+          />
+        );
+      },
     },
-    [validateField]
-  );
-
-  const validateForm = useCallback(() => {
-    const fields = [
-      "comp1",
-      "segmentCode",
-      "comp2",
-      "description",
-      "acClassification",
-      // defBalType auto-set
-    ];
-    const newErrors = {};
-    fields.forEach((f) => {
-      const msg = validateField(f, cglData[f]);
-      if (msg) newErrors[f] = msg;
-    });
-    setErrors(newErrors);
-    if (Object.keys(newErrors).length) {
-      snackbar("Please fix validation errors", "error");
-      return false;
-    }
-    return true;
-  }, [cglData, validateField, snackbar]);
-
-  // submit — dialog does the API call
-  const handleSubmit = useCallback(
-    async (e) => {
-      e?.preventDefault();
-      if (!validateForm()) return;
-
-      const apiEndpoint = "/CR/create-request";
-      const method = "POST";
-      const changeType = editingId ? "UPDATE" : "ADD";
-      const reqStatus = "P";
-
-      // ensure defBalType present (derived from acClassification)
-      const effectiveDef = defBalTypeFromClassification(cglData.acClassification);
-
-      const innerPayload = {
-        comp1: cglData.comp1,
-        segmentCode: cglData.segmentCode,
-        comp2: cglData.comp2,
-        cglNumber: cglNumber,
-        description: cglData.description,
-        acClassification: cglData.acClassification,
-        balFwd: cglData.balFwd ? 1 : 0,
-        defBalType: effectiveDef,
-        reqStatus,
-        balCompare: cglData.balCompare,
-        manualPosting: cglData.manualPosting,
-      };
-
-      const payloadData = {
-        requestType: "CGL_CODE",
-        changeType,
-        payload: innerPayload,
-      };
-
-      try {
-        const response = await callApi(apiEndpoint, payloadData, method);
-        if (response) {
-          snackbar(
-            editingId ? "CGL updated successfully" : "CGL created successfully",
-            "success"
-          );
-          // tell parent to refresh list
-          onSaved?.();
-          handleClose();
-        } else {
-          snackbar("No response from server", "error");
-        }
-      } catch (error) {
-        snackbar(error?.message || "Request failed", "error");
-      }
+    {
+      field: "status",
+      headerName: "CGL Status",
+      flex: 1,
+      sortable: true,
+      align: "center",
+      headerAlign: "center",
+      renderCell: (params) => (
+        <CustomChip
+          sx={{
+            color: params.row.status == 1 ? "success.dark" : "error.light",
+            "& .MuiChip-icon": {
+              color: params.row.status == "1" ? "success.dark" : "error.light",
+            },
+          }}
+          variant="outlined"
+          icon={<OnlinePredictionIcon />}
+          label={params.row.status == "1" ? "Active" : "In Active"}
+        />
+      ),
     },
-    [callApi, cglData, cglNumber, editingId, onSaved, snackbar, validateForm]
-  );
 
-  const handleReset = useCallback(() => {
-    setCglData(initialCGLState);
-    setEditingId(null);
-    setErrors({});
-    setClassificationLocked(false);
-  }, []);
+    {
+      field: "actions",
+      headerName: "Actions",
+      flex: 0.6,
+      headerAlign: "center",
+      align: "center",
 
-  const handleClose = useCallback(() => {
-    onClose?.();
-    handleReset();
-    setBlockConfirmOpen(false);
-  }, [onClose, handleReset]);
-
-  // block flow — dialog owns the blocking behaviour (local mock here)
-  const openBlockConfirm = useCallback(() => {
-    setBlockConfirmOpen(true);
-  }, []);
-  const handleBlockConfirm = useCallback(async () => {
-    // if your API exists, call it here. For now we just call a simple API shape:
-    try {
-      // example API (adjust per your backend)
-      const payload = {
-        requestType: "CGL_CODE",
-        changeType: "BLOCK",
-        payload: { cglNumber: editingId || cglNumber },
-      };
-      const resp = await callApi("/CR/block-cgl", payload, "POST");
-      if (resp) {
-        snackbar("Blocked successfully", "success");
-        onSaved?.();
-      } else {
-        snackbar("Block failed", "error");
-      }
-    } catch (err) {
-      snackbar(err?.message || "Block request failed", "error");
-    } finally {
-      setBlockConfirmOpen(false);
-      handleClose();
-    }
-  }, [callApi, cglNumber, editingId, onSaved, snackbar, handleClose]);
-
-  // helpers to decide UI disabled state based on current classification
-  const classification = cglData.acClassification;
-  const isBalFwdDisabled = classification === "A" || classification === "L" || classification === "I" || classification === "E";
-  const balFwdChecked = classification === "A" || classification === "L" ? true : classification === "I" || classification === "E" ? false : cglData.balFwd;
-  const isBalCompareDisabled = classification === "I" || classification === "E";
+      renderCell: (params) => (
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          justifyContent="center"
+          sx={{ Height: "100%", width: "100%" }}
+        >
+          <Tooltip title="Approve">
+            <IconButton
+              color="primary"
+              onClick={() => handleOpenEdit(params.row)}
+            >
+              <EditIcon />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
+  ];
 
   return (
-    <>
-      <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
-        <DialogTitle>
-          <Box
-            sx={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <Typography variant="h6" color="primary">
-              {editingId ? "Edit CGL" : "Add New CGL"}
-            </Typography>
-            <IconButton onClick={handleClose}>
-              <CloseIcon />
-            </IconButton>
-          </Box>
-        </DialogTitle>
+    <Box sx={{ p: 1 }}>
+      <DataGrid
+        loading={isLoading}
+        rows={rows}
+        columns={columns}
+        getRowId={(row) => row.cglNumber}
+        disableRowSelectionOnClick
+        pageSizeOptions={[10, 20, 50, 100]}
+        initialState={{
+          pagination: { paginationModel: { pageSize: 10, page: 0 } },
+        }}
+        sx={{
+          minHeight: 520,
+          width: "100%",
+          "& .MuiDataGrid-cell:focus": { outline: "none" },
+        }}
+      />
 
-        <DialogContent>
-          <Box component="form" onSubmit={handleSubmit} sx={{ mt: 2 }}>
-            <Grid container spacing={2}>
-              <Grid item xs={12}>
-                <Paper variant="outlined" sx={{ p: 2, width: "100%" }}>
-                  <Typography variant="body2" color="textSecondary">
-                    CGL Number
-                  </Typography>
-                  <Typography variant="h6">{cglNumber || ""}</Typography>
-                </Paper>
-              </Grid>
-
-              <Grid item xs={12}>
-                <Box display="flex" gap={1}>
-                  <TextField
-                    fullWidth
-                    label="Comp1 *"
-                    name="comp1"
-                    value={cglData.comp1}
-                    onChange={handleChange}
-                    error={!!errors.comp1}
-                    helperText={errors.comp1 || "Exactly 4 digits (≥1000)"}
-                    placeholder="1000 to 9999"
-                    disabled={!!editingId}
-                    inputProps={{ maxLength: 4, inputMode: "numeric" }}
-                  />
-
-                  <TextField
-                    fullWidth
-                    select
-                    label="Segment Code *"
-                    name="segmentCode"
-                    value={cglData.segmentCode}
-                    onChange={handleChange}
-                    error={!!errors.segmentCode}
-                    helperText={errors.segmentCode}
-                    disabled={!!editingId}
-                  >
-                    <MenuItem value="">Select Segment</MenuItem>
-                    {segments.map((segment) => (
-                      <MenuItem
-                        key={segment.segmentCode}
-                        value={segment.segmentCode}
-                      >
-                        {segment.segmentCode} - {segment.description}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-
-                  <TextField
-                    fullWidth
-                    label="Comp2 *"
-                    name="comp2"
-                    value={cglData.comp2}
-                    onChange={handleChange}
-                    error={!!errors.comp2}
-                    helperText={errors.comp2 || "01 - 99"}
-                    placeholder="01-99"
-                    disabled={!!editingId}
-                    inputProps={{ maxLength: 2, inputMode: "numeric" }}
-                  />
-                </Box>
-              </Grid>
-
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Description *"
-                  name="description"
-                  value={cglData.description}
-                  onChange={handleChange}
-                  error={!!errors.description}
-                  inputProps={{ maxLength: 100 }}
-                  helperText={
-                    errors.description ||
-                    "Allowed: letters, numbers, spaces, / & ( ) -"
-                  }
-                  multiline
-                  rows={3}
-                />
-              </Grid>
-
-              <Grid item xs={12}>
-                <Box display="flex" gap={2}>
-                  {/* Account Classification: auto-set & disabled when classificationLocked is true */}
-                  <TextField
-                    select
-                    fullWidth
-                    label="Account Classification *"
-                    name="acClassification"
-                    value={cglData.acClassification}
-                    onChange={handleChange}
-                    error={!!errors.acClassification}
-                    helperText={
-                      classificationLocked
-                        ? "Set by Comp1"
-                        : errors.acClassification || ""
-                    }
-                    disabled={classificationLocked}
-                  >
-                    <MenuItem value="">Select Classification</MenuItem>
-                    {ACCOUNT_CLASSIFICATIONS.map((option) => (
-                      <MenuItem key={option.value} value={option.value}>
-                        {option.label}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-
-                  {/* Default Balance Type is HIDDEN from UI (auto-managed) */}
-                </Box>
-              </Grid>
-
-              <Grid item xs={12}>
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      name="balFwd"
-                      checked={!!balFwdChecked}
-                      onChange={handleChange}
-                      disabled={isBalFwdDisabled}
-                    />
-                  }
-                  label="Balance Carry Forward to next year"
-                />
-                <FormHelperText>
-                  {classification === "I" || classification === "E"
-                    ? "Not applicable for Income/Expense accounts (Unchecked)"
-                    : classification === "A" || classification === "L"
-                    ? "Automatically enabled for Asset/Liability"
-                    : ""}
-                </FormHelperText>
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <FormControl component="fieldset" fullWidth>
-                  <FormLabel component="legend">Balance Compare Flag</FormLabel>
-                  <RadioGroup
-                    row
-                    name="balCompare"
-                    value={cglData.balCompare}
-                    onChange={handleChange}
-                  >
-                    <FormControlLabel
-                      value="1"
-                      control={<Radio />}
-                      label="Include"
-                      disabled={isBalCompareDisabled}
-                    />
-                    <FormControlLabel
-                      value="0"
-                      control={<Radio />}
-                      label="Exclude"
-                      disabled={isBalCompareDisabled}
-                    />
-                  </RadioGroup>
-                  {isBalCompareDisabled && (
-                    <FormHelperText>
-                      Income/Expense accounts forced to Exclude
-                    </FormHelperText>
-                  )}
-                </FormControl>
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <FormControl component="fieldset" fullWidth>
-                  <FormLabel component="legend">Manual Posting Flag</FormLabel>
-                  <RadioGroup
-                    row
-                    name="manualPosting"
-                    value={cglData.manualPosting}
-                    onChange={handleChange}
-                  >
-                    <FormControlLabel
-                      value="1"
-                      control={<Radio />}
-                      label="Allowed"
-                    />
-                    <FormControlLabel
-                      value="0"
-                      control={<Radio />}
-                      label="Not Allowed"
-                    />
-                  </RadioGroup>
-                </FormControl>
-              </Grid>
-
-              {editingId && (
-                <Grid item xs={12}>
-                  <TextField
-                    fullWidth
-                    label="Status"
-                    value={isActive ? "Active" : "In-Active"}
-                    disabled
-                  />
-                </Grid>
-              )}
-            </Grid>
-
-            <Box
-              sx={{
-                mt: 3,
-                display: "flex",
-                gap: 1,
-                justifyContent: "flex-end",
-              }}
-            >
-              {!editingId && (
-                <Button onClick={handleReset} variant="outlined">
-                  Reset
-                </Button>
-              )}
-
-              <Button
-                type="submit"
-                variant="contained"
-                startIcon={editingId ? <EditIcon /> : <AddIcon />}
-                disabled={!isFormValid}
-              >
-                {editingId ? "Update CGL" : "Add CGL"}
-              </Button>
-
-              {editingId && (
-                <Button
-                  onClick={openBlockConfirm}
-                  variant="contained"
-                  color="error"
-                  startIcon={<BlockIcon />}
-                >
-                  Block CGL
-                </Button>
-              )}
-            </Box>
-          </Box>
-        </DialogContent>
-      </Dialog>
-
-      {/* Block confirmation dialog (owned by dialog component) */}
-      <Dialog
-        open={blockConfirmOpen}
-        onClose={() => setBlockConfirmOpen(false)}
+      <Fab
+        color="primary"
+        onClick={handleOpenCreate}
+        sx={{
+          position: "fixed",
+          bottom: 80,
+          right: 40,
+          borderRadius: 1,
+        }}
+        variant="extended"
       >
-        <DialogTitle>Block CGL</DialogTitle>
-        <DialogContent>
-          <Typography>
-            Are you sure you want to block CGL {editingId || cglNumber}?
-          </Typography>
-        </DialogContent>
-        <Box
-          sx={{ display: "flex", gap: 1, justifyContent: "flex-end", p: 2 }}
-        >
-          <Button onClick={() => setBlockConfirmOpen(false)}>Cancel</Button>
-          <Button color="error" variant="contained" onClick={handleBlockConfirm}>
-            Block
-          </Button>
-        </Box>
-      </Dialog>
-    </>
+        <AddIcon sx={{ mr: 1 }} /> Create
+      </Fab>
+
+      <CGLDialog
+        open={openDialog}
+        onClose={() => setOpenDialog(false)}
+        onSaved={handleSaved}
+        editInitialData={editRow}
+        accountClassifications={ACCOUNT_CLASSIFICATIONS}
+      />
+      <LoadingOverlay loading={isLoading}/>
+    </Box>
   );
 }
