@@ -1,192 +1,246 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { Box, Fab, IconButton, Stack, Tooltip } from "@mui/material";
-import AddIcon from "@mui/icons-material/Add";
-import { DataGrid } from "@mui/x-data-grid";
-import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
-import EditIcon from "@mui/icons-material/Edit";
+import { useEffect, useState } from "react";
+import {
+  Box,
+  Typography,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Stack,
+  Button,
+  Card,
+} from "@mui/material";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import { Summarize, CloudDownloadTwoTone } from "@mui/icons-material";
 import useApi from "../../hooks/useApi";
+import dayjs from "dayjs";
+import { useSelector } from "react-redux";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import CustomChip from "../../utils/CustomChip";
-import CGLDialog from "./CGLDialog";
-import TrendingUpIcon from "@mui/icons-material/TrendingUp";
-import TrendingDownIcon from "@mui/icons-material/TrendingDown";
-import DatasetIcon from "@mui/icons-material/Dataset";
-import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
-import NoteIcon from "@mui/icons-material/Note";
-import LoadingOverlay from "../../utils/LoadingOverlay";
 
-const ACCOUNT_CLASSIFICATIONS = [
-  { value: "A", label: "Asset", icon: <DatasetIcon fontSize="small" /> },
-  {
-    value: "L",
-    label: "Liability",
-    icon: <AccountBalanceWalletIcon fontSize="small" />,
-  },
-  { value: "I", label: "Income", icon: <TrendingUpIcon fontSize="small" /> },
-  { value: "E", label: "Expense", icon: <TrendingDownIcon fontSize="small" /> },
-  { value: "M", label: "Memo A/c", icon: <NoteIcon fontSize="small" /> },
-];
-
-export default function CGLMasterTab() {
+export default function GlifReportsNew() {
   const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-  const [isLoading, setIsLoading] = useState(true);
-  const [rows, setRows] = useState([]);
-  const [openDialog, setOpenDialog] = useState(false);
-  const [editRow, setEditRow] = useState(null);
-  const requestType = "CGL_CODE";
+  const showSnackBar = useCustomSnackbar();
+  const user = useSelector((state) => state.auth.user);
+  const [isLoading, setIsLoading] = useState(false);
+  const [repTypes, setRepTypes] = useState([]);
+  const [selectedReport, setReport] = useState("");
+  const [selectedDate, setDate] = useState(null);
+  const minDate = "2025-10-01";
 
-  // load grid rows (main owns listing)
-  const fetchRows = useCallback(async () => {
-    try {
+  //Getting Reports Types list
+  useEffect(() => {
+    async function fetchData() {
       setIsLoading(true);
-      const resp = await callApi(
-        "/CM/cgls",
-        { requestType: "CGL_CODE" },
-        "GET",
-        requestType
+      try {
+        const data = await callApi(
+          "RS/reports/types",
+          { roleId: user.role },
+          // { roleId: 56 },
+          "POST"
+        );
+        setRepTypes(data.data || []);
+      } catch (error) {
+        console.error("Failed to fetch report types:", error);
+      }
+      setIsLoading(false);
+    }
+    fetchData();
+  }, [callApi]);
+
+  const handleSelect = (event) => {
+    setReport(event.target.value);
+  };
+
+  const handleFetchReportData = async () => {
+    if (!selectedReport || !selectedDate) return;
+
+    setIsLoading(true);
+
+    const payload = {
+      fileName: selectedReport,
+      date: selectedDate.format("YYYY-MM-DD"),
+      roleId: user.role,
+    };
+
+    try {
+      const response = await callApi(
+        "/RS/reports/download",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {},
+        false
       );
-      setRows(resp?.data || []);
-    } catch (err) {
-      snackbar(err?.message || "Failed to load CGLs", "error");
-      setRows([]);
+      console.log(response);
+      if (response.data.size > 22) {
+        const contentDisposition = response.headers.get("Content-Disposition");
+        console.log(contentDisposition);
+
+        let filename = "report.bin";
+        if (
+          contentDisposition &&
+          contentDisposition.indexOf("attachment") !== -1
+        ) {
+          const filenameMatch = contentDisposition.match(/filename="(.+?)"/);
+          if (filenameMatch && filenameMatch.length > 1) {
+            filename = filenameMatch[1];
+          }
+        }
+
+        const downloadUrl = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+      } else {
+        showSnackBar(
+          "No reports found matching your current filter criteria",
+          "warning"
+        );
+      }
+    } catch (error) {
+      console.error("Failed to fetch report data:", error);
     } finally {
       setIsLoading(false);
     }
-  }, [callApi, snackbar]);
-
-  useEffect(() => {
-    fetchRows();
-  }, [fetchRows]);
-
-  const handleSaved = useCallback(() => {
-    fetchRows();
-    setOpenDialog(false);
-  }, [fetchRows]);
-
-  const handleOpenCreate = () => {
-    setEditRow(null);
-    setOpenDialog(true);
   };
-
-  const handleOpenEdit = (row) => {
-    setEditRow(row);
-    setOpenDialog(true);
-  };
-
-  const columns = [
-    { field: "cglNumber", headerName: "CGL Code", flex: 1 },
-    { field: "description", headerName: "Description", flex: 2 },
-    {
-      field: "acClassification",
-      headerName: "Account Classification",
-      flex: 1.2,
-      headerAlign: "center",
-      align: "center",
-      renderCell: (params) => {
-        const found = ACCOUNT_CLASSIFICATIONS.find(
-          (x) => x.value === params.row.acClassification
-        );
-        return (
-          <CustomChip
-            label={found.label}
-            icon={found.icon}
-            variant="outlined"
-          />
-        );
-      },
-    },
-    {
-      field: "status",
-      headerName: "CGL Status",
-      flex: 1,
-      sortable: true,
-      align: "center",
-      headerAlign: "center",
-      renderCell: (params) => (
-        <CustomChip
-          sx={{
-            color: params.row.status == 1 ? "success.dark" : "error.light",
-            "& .MuiChip-icon": {
-              color: params.row.status == "1" ? "success.dark" : "error.light",
-            },
-          }}
-          variant="outlined"
-          icon={<OnlinePredictionIcon />}
-          label={params.row.status == "1" ? "Active" : "In Active"}
-        />
-      ),
-    },
-
-    {
-      field: "actions",
-      headerName: "Actions",
-      flex: 0.6,
-      headerAlign: "center",
-      align: "center",
-
-      renderCell: (params) => (
-        <Stack
-          direction="row"
-          spacing={1}
-          alignItems="center"
-          justifyContent="center"
-          sx={{ Height: "100%", width: "100%" }}
-        >
-          <Tooltip title="Approve">
-            <IconButton
-              color="primary"
-              onClick={() => handleOpenEdit(params.row)}
-            >
-              <EditIcon />
-            </IconButton>
-          </Tooltip>
-        </Stack>
-      ),
-    },
-  ];
 
   return (
-    <Box sx={{ p: 1 }}>
-      <DataGrid
-        loading={isLoading}
-        rows={rows}
-        columns={columns}
-        getRowId={(row) => row.cglNumber}
-        disableRowSelectionOnClick
-        pageSizeOptions={[10, 20, 50, 100]}
-        initialState={{
-          pagination: { paginationModel: { pageSize: 10, page: 0 } },
-        }}
-        sx={{
-          minHeight: 520,
-          width: "100%",
-          "& .MuiDataGrid-cell:focus": { outline: "none" },
-        }}
-      />
+    <>
+      <Stack spacing={4}>
+        <Box sx={{ p: 3, width: "100%", mx: "auto" }} elevation={10}>
+          <Stack
+            spacing={3}
+            direction={"column"}
+            alignItems="center"
+            justifyContent="center"
+          >
+            {/* Main Icon with Animation */}
+            <Box
+              sx={{
+                display: "flex",
+                justifyContent: "center",
+                mb: 3,
+              }}
+            >
+              <Summarize
+                sx={{
+                  height: 70,
+                  width: 70,
+                  color: "primary.main",
+                  transition: "transform 0.3s ease-in-out",
+                  "&:hover": {
+                    transform: "translateY(-5px)",
+                  },
+                }}
+              />
+            </Box>
 
-      <Fab
-        color="primary"
-        onClick={handleOpenCreate}
-        sx={{
-          position: "fixed",
-          bottom: 80,
-          right: 40,
-          borderRadius: 1,
-        }}
-        variant="extended"
-      >
-        <AddIcon sx={{ mr: 1 }} /> Create
-      </Fab>
+            {/* Dynamic Heading based on state */}
+            <Typography
+              variant="h5"
+              gutterBottom
+              color="text.primary"
+              fontWeight="bold"
+            >
+              GLIF Report Generation
+            </Typography>
 
-      <CGLDialog
-        open={openDialog}
-        onClose={() => setOpenDialog(false)}
-        onSaved={handleSaved}
-        editInitialData={editRow}
-        accountClassifications={ACCOUNT_CLASSIFICATIONS}
-      />
-      <LoadingOverlay loading={isLoading}/>
-    </Box>
+            {/* Subtitle with clear instructions */}
+            <Typography
+              variant="body1"
+              component="p"
+              gutterBottom
+              color="text.secondary"
+              sx={{ mt: 1 }}
+            >
+              Utilize the required report type and date criteria below to
+              precisely define and retrieve the required reports. The generated
+              reports can be viewed on-screen or downloaded for archival.
+            </Typography>
+
+            <Card sx={{ width: "100%", gap: 2, borderRadius: 3, boxShadow: 6 }}>
+              <Box
+                sx={{
+                  display: "flex",
+                  gap: 2,
+                  px: { xs: 2, md: 4 },
+                  py: { xs: 4, md: 8 },
+                }}
+              >
+                {/* Dropdown Menu */}
+                <FormControl
+                  sx={{
+                    flexBasis: "25%",
+                    minWidth: {
+                      xs: "150px",
+                      md: "250px",
+                    },
+                    flexGrow: 0.8,
+                  }}
+                >
+                  <InputLabel id="menu-select-label">
+                    Select a report
+                  </InputLabel>
+                  <Select
+                    labelId="menu-select-label"
+                    id="menu-select"
+                    value={selectedReport}
+                    label="Select a Report"
+                    onChange={handleSelect}
+                    disabled={repTypes.length == 0}
+                  >
+                    {repTypes.map((item) => (
+                      <MenuItem key={item.reportName} value={item.fileName}>
+                        {item.reportName}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+
+                {/* Date Picker */}
+                <FormControl sx={{ minWidth: "25%", flexGrow: 1 }}>
+                  <LocalizationProvider dateAdapter={AdapterDayjs}>
+                    <DatePicker
+                      label="Select Report Date"
+                      value={selectedDate}
+                      onChange={(newDate) => setDate(newDate)}
+                      maxDate={dayjs()}
+                      minDate={dayjs(minDate)}
+                      disabled={repTypes.length == 0}
+                    />
+                  </LocalizationProvider>
+                </FormControl>
+              </Box>
+              <Box
+                sx={{
+                  width: "100%",
+                  textAlign: "center",
+                  py: { xs: 1.5, md: 3 },
+                }}
+              >
+                <Button
+                  sx={{
+                    height: "50px",
+                    flexShrink: 0,
+                  }}
+                  endIcon={<CloudDownloadTwoTone />}
+                  variant="contained"
+                  onClick={handleFetchReportData}
+                >
+                  Fetch & Download
+                </Button>
+              </Box>
+            </Card>
+          </Stack>
+        </Box>
+      </Stack>
+    </>
   );
 }
