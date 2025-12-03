@@ -1,103 +1,295 @@
-@PostMapping("/download")
-   public ResponseEntity<StreamingResponseBody> downloadReport(
-           @RequestHeader("Authorization") String token,
-           @RequestBody ReportDownloadRequest request) {
-            log.info("REQUEST : {}",request);
-       ReportStreamResponse response = reportService.downloadReportStream(
-               request.getFileName(),
-               request.getDate(),
-               jwtUtil.getUserRoleFromToken(token),
-               jwtUtil.getUserIdFromToken(token)
-       );
-       return ResponseEntity.ok()
-               // This header tells the browser "This is a file download"
-               .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + response.getDownloadFileName() + "\"")
-            //    .header(HttpHeaders.CONTENT_LENGTH , String.valueOf(response.getFileSize()))
-               .contentLength(response.getFileSize())
-               .contentType(MediaType.APPLICATION_OCTET_STREAM)
-               .body(response.getStreamBody());
-   }
+import { useEffect, useState } from "react";
+import {
+  Box,
+  Typography,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Stack,
+  Button,
+  Card,
+  LinearProgress,
+} from "@mui/material";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import { Summarize, CloudDownloadTwoTone } from "@mui/icons-material";
+import useApi from "../../hooks/useApi";
+import dayjs from "dayjs";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-public ReportStreamResponse downloadReportStream(String fileName, LocalDate date, int userRoleId, String userId) {
-        // 1. Authorization Check (Remains the same)
-        boolean isAuthorized = reportTypeRepository.existsByFileNameAndRoles_roleId(fileName, userRoleId);
-        if (!isAuthorized) {
-            log.warn("Access Denied: User {} is not authorized for report {}.", userId, fileName);
-            sendNotification(userId, "Access Denied for report: " + fileName, "/glif-reports", fileName + "_" + date);
-            throw new AccessDeniedException("Access Denied for report: " + fileName);
-        }
+export default function GlifReportsNew() {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const user = useSelector((state) => state.auth.user);
 
-        // 2. Prepare Paths with the CORRECT format "dd-MM-yyyy"
-        String formattedDate = date.format(DateTimeFormatter.ISO_LOCAL_DATE); 
-        Path searchDirectory = new Path(reportsBasePath, formattedDate);
-        String fileNamePrefix = fileName + "_" + date.format(DateTimeFormatter.ofPattern("ddMMyyyy"));
-        log.info("Searching HDFS directory {} for files with prefix '{}'...", searchDirectory, fileNamePrefix);
+  const [isLoading, setIsLoading] = useState(false);
+  const [repTypes, setRepTypes] = useState([]);
+  const [selectedReport, setReport] = useState("");
+  const [selectedDate, setDate] = useState(null);
 
-        // --- PRE-VALIDATION LOGIC ---
-        List<Path> filesToZip;
-        try {
-            filesToZip = findFilesInHdfs(searchDirectory, fileNamePrefix);
-            if (filesToZip.isEmpty()) {
-            log.info("No report files found matching prefix after validation: " + fileNamePrefix);
-            sendNotification(userId, "Requested report is not available for that date.", "/glif-reports", fileName + "_" + date);
-            // Throw a ResourceNotFoundException BEFORE the streaming starts
-            // throw new ResourceNotFoundException("No report files found matching prefix: " + fileNamePrefix);
-        }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+  // 🔹 NEW: streaming progress state
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
 
-        // 3. Define the Streaming Logic
-        StreamingResponseBody streamingBody = outputStream -> {
-            try (ZipOutputStream zipOut = new ZipOutputStream(outputStream)) {
-                if (!hdfsFileSystem.exists(searchDirectory)) {
-                    log.info("Directory not found in HDFS: {}", searchDirectory);
-                    // Throw immediately so a proper HTTP 404 is sent to the client
-                    throw new ResourceNotFoundException("Reports directory not found: " + searchDirectory);
-                }
+  const minDate = "2025-10-01";
 
-                FileStatus[] fileStatuses = hdfsFileSystem.listStatus(searchDirectory);
-                boolean fileFound = false;
-
-                for (FileStatus status : fileStatuses) {
-                    if (!status.isFile()) continue;
-                    String actualFileName = status.getPath().getName();
-
-                    if (actualFileName.startsWith(fileNamePrefix)) {
-                        fileFound = true;
-                        ZipEntry zipEntry = new ZipEntry(actualFileName);
-                        zipOut.putNextEntry(zipEntry);
-
-                        try (FSDataInputStream hdfsStream = hdfsFileSystem.open(status.getPath())) {
-                            StreamUtils.copy(hdfsStream, zipOut);
-                        } finally {
-                            zipOut.closeEntry();
-                        }
-                        log.info("Streamed file {} into zip response.", actualFileName);
-                    }
-                }
-
-                if (!fileFound) {
-                    log.info("No report files found matching prefix: " + fileNamePrefix);
-                    // Throw immediately so a proper HTTP 404 is sent to the client
-                    throw new ResourceNotFoundException("No report files found matching prefix: " + fileNamePrefix);
-                }
-
-                // Notification is only sent AFTER all files are confirmed found and streamed
-                sendNotification(userId, "Report(s) downloaded successfully.", "/glif-reports", fileName + "_" + date);
-
-            } catch (ResourceNotFoundException e) {
-                // If a resource error happens before streaming starts, it's caught here
-                log.error("Resource not found error: {}", e.getMessage());
-                sendNotification(userId, "Requested report is not available.", "/glif-reports", fileName + "_" + date);
-                // Note: The controller must catch this exception to return a proper 404
-            } catch (IOException e) {
-                // If an I/O error happens DURING streaming, the client will see a failed download
-                log.error("Streaming I/O error for user {}: {}", userId, e.getMessage(), e);
-                sendNotification(userId, "Streaming failed due to an I/O error.", "/glif-reports", fileName + "_" + date);
-            }
-        };
-
-        String downloadName = fileName + "_" + formattedDate + ".zip";
-        return new ReportStreamResponse(downloadName, streamingBody);
+  //Getting Reports Types list
+  useEffect(() => {
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        const data = await callApi(
+          "RS/reports/types",
+          { roleId: user.role },
+          "POST"
+        );
+        setRepTypes(data.data || []);
+      } catch (error) {
+        console.error("Failed to fetch report types:", error);
+      }
+      setIsLoading(false);
     }
+    fetchData();
+  }, [callApi, user.role]);
+
+  const handleSelect = (event) => {
+    setReport(event.target.value);
+  };
+
+  const handleFetchReportData = async () => {
+    if (!selectedReport || !selectedDate) return;
+
+    setIsLoading(true);
+    setIsDownloading(true);
+    setDownloadedBytes(0);
+
+    const payload = {
+      fileName: selectedReport,
+      date: selectedDate.format("YYYY-MM-DD"),
+      roleId: user.role,
+    };
+
+    try {
+      const response = await callApi(
+        "/RS/reports/download",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          // ⬇️ axios streaming progress (no total because no Content-Length)
+          onDownloadProgress: (event) => {
+            setIsDownloading(true);
+            if (event && typeof event.loaded === "number") {
+              setDownloadedBytes(event.loaded);
+            }
+          },
+        },
+        false // get full axios response, not only data
+      );
+
+      console.log(response);
+
+      if (response.data && response.data.size > 22) {
+        // axios headers is a plain object, not Headers
+        const contentDisposition =
+          response.headers["content-disposition"] ||
+          response.headers["Content-Disposition"];
+
+        let filename = "report.zip";
+        if (
+          contentDisposition &&
+          contentDisposition.indexOf("attachment") !== -1
+        ) {
+          const filenameMatch = contentDisposition.match(/filename="(.+?)"/);
+          if (filenameMatch && filenameMatch.length > 1) {
+            filename = filenameMatch[1];
+          }
+        }
+
+        const downloadUrl = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+      } else {
+        showSnackBar(
+          "No reports found matching your current filter criteria",
+          "warning"
+        );
+      }
+    } catch (error) {
+      console.error("Failed to fetch report data:", error);
+    } finally {
+      setIsLoading(false);
+      setIsDownloading(false);
+      setDownloadedBytes(0);
+    }
+  };
+
+  const disableInputs = isLoading || isDownloading;
+
+  const downloadedMB =
+    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
+
+  return (
+    <>
+      <Stack spacing={4}>
+        <Box sx={{ p: 3, width: "100%", mx: "auto" }} elevation={10}>
+          <Stack
+            spacing={3}
+            direction={"column"}
+            alignItems="center"
+            justifyContent="center"
+          >
+            {/* Main Icon with Animation */}
+            <Box
+              sx={{
+                display: "flex",
+                justifyContent: "center",
+                mb: 3,
+              }}
+            >
+              <Summarize
+                sx={{
+                  height: 70,
+                  width: 70,
+                  color: "primary.main",
+                  transition: "transform 0.3s ease-in-out",
+                  "&:hover": {
+                    transform: "translateY(-5px)",
+                  },
+                }}
+              />
+            </Box>
+
+            {/* Heading */}
+            <Typography
+              variant="h5"
+              gutterBottom
+              color="text.primary"
+              fontWeight="bold"
+            >
+              GLIF Report Generation
+            </Typography>
+
+            {/* Subtitle */}
+            <Typography
+              variant="body1"
+              component="p"
+              gutterBottom
+              color="text.secondary"
+              sx={{ mt: 1 }}
+            >
+              Utilize the required report type and date criteria below to
+              precisely define and retrieve the required reports. The generated
+              reports can be viewed on-screen or downloaded for archival.
+            </Typography>
+
+            <Card sx={{ width: "100%", gap: 2, borderRadius: 3, boxShadow: 6 }}>
+              <Box
+                sx={{
+                  display: "flex",
+                  gap: 2,
+                  px: { xs: 2, md: 4 },
+                  py: { xs: 4, md: 8 },
+                  flexDirection: { xs: "column", md: "row" },
+                }}
+              >
+                {/* Dropdown Menu */}
+                <FormControl
+                  sx={{
+                    flexBasis: "25%",
+                    minWidth: {
+                      xs: "150px",
+                      md: "250px",
+                    },
+                    flexGrow: 0.8,
+                  }}
+                >
+                  <InputLabel id="menu-select-label">
+                    Select a report
+                  </InputLabel>
+                  <Select
+                    labelId="menu-select-label"
+                    id="menu-select"
+                    value={selectedReport}
+                    label="Select a Report"
+                    onChange={handleSelect}
+                    disabled={repTypes.length === 0 || disableInputs}
+                  >
+                    {repTypes.map((item) => (
+                      <MenuItem key={item.reportName} value={item.fileName}>
+                        {item.reportName}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+
+                {/* Date Picker */}
+                <FormControl sx={{ minWidth: "25%", flexGrow: 1 }}>
+                  <LocalizationProvider dateAdapter={AdapterDayjs}>
+                    <DatePicker
+                      label="Select Report Date"
+                      value={selectedDate}
+                      onChange={(newDate) => setDate(newDate)}
+                      maxDate={dayjs()}
+                      minDate={dayjs(minDate)}
+                      disabled={repTypes.length === 0 || disableInputs}
+                    />
+                  </LocalizationProvider>
+                </FormControl>
+              </Box>
+
+              <Box
+                sx={{
+                  width: "100%",
+                  textAlign: "center",
+                  py: { xs: 1.5, md: 3 },
+                  px: { xs: 2, md: 4 },
+                }}
+              >
+                <Button
+                  sx={{
+                    height: "50px",
+                    flexShrink: 0,
+                    minWidth: 180,
+                  }}
+                  endIcon={<CloudDownloadTwoTone />}
+                  variant="contained"
+                  onClick={handleFetchReportData}
+                  disabled={
+                    disableInputs || !selectedReport || !selectedDate
+                  }
+                >
+                  {isDownloading ? "Downloading..." : "Fetch & Download"}
+                </Button>
+
+                {/* Indeterminate progress while streaming */}
+                {isDownloading && (
+                  <Box sx={{ mt: 2 }}>
+                    <LinearProgress variant="indeterminate" />
+                    <Typography
+                      variant="caption"
+                      sx={{ mt: 0.5, display: "block" }}
+                    >
+                      {downloadedMB
+                        ? `Downloading... ${downloadedMB} MB received`
+                        : "Preparing download..."}
+                    </Typography>
+                  </Box>
+                )}
+              </Box>
+            </Card>
+          </Stack>
+        </Box>
+      </Stack>
+    </>
+  );
+}
