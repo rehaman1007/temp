@@ -1,22 +1,4 @@
- @PostMapping("/download")
-   public ResponseEntity<StreamingResponseBody> downloadReport(
-           @RequestHeader("Authorization") String token,
-           @RequestBody ReportDownloadRequest request) {
-       ReportStreamResponse response = reportService.downloadReportStream(
-               request.getFileName(),
-               request.getDate(),
-               jwtUtil.getUserRoleFromToken(token),
-               jwtUtil.getUserIdFromToken(token)
-       );
-       return ResponseEntity.ok()
-               // This header tells the browser "This is a file download"
-               .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + response.getDownloadFileName() + "\"")
-               .contentType(MediaType.APPLICATION_OCTET_STREAM)
-               .body(response.getStreamBody());
-   }
-   
-   
-   import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Box,
   Typography,
@@ -27,6 +9,7 @@ import {
   Stack,
   Button,
   Card,
+  LinearProgress,        // ⭐ add
 } from "@mui/material";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
@@ -41,10 +24,15 @@ export default function GlifReportsNew() {
   const { callApi } = useApi();
   const showSnackBar = useCustomSnackbar();
   const user = useSelector((state) => state.auth.user);
+
   const [isLoading, setIsLoading] = useState(false);
   const [repTypes, setRepTypes] = useState([]);
   const [selectedReport, setReport] = useState("");
   const [selectedDate, setDate] = useState(null);
+
+  // ⭐ NEW: download progress (0-100, or null = hidden)
+  const [downloadProgress, setDownloadProgress] = useState(null);
+
   const minDate = "2025-10-01";
 
   //Getting Reports Types list
@@ -55,7 +43,6 @@ export default function GlifReportsNew() {
         const data = await callApi(
           "RS/reports/types",
           { roleId: user.role },
-          // { roleId: 56 },
           "POST"
         );
         setRepTypes(data.data || []);
@@ -65,7 +52,7 @@ export default function GlifReportsNew() {
       setIsLoading(false);
     }
     fetchData();
-  }, [callApi]);
+  }, [callApi, user.role]);
 
   const handleSelect = (event) => {
     setReport(event.target.value);
@@ -75,6 +62,7 @@ export default function GlifReportsNew() {
     if (!selectedReport || !selectedDate) return;
 
     setIsLoading(true);
+    setDownloadProgress(0); // show progress bar
 
     const payload = {
       fileName: selectedReport,
@@ -89,10 +77,25 @@ export default function GlifReportsNew() {
         "POST",
         "blob",
         "application/json",
-        {},
-        false
+        {
+          // ⭐ pass download progress handler into axios config
+          onDownloadProgress: (event) => {
+            // event.loaded, event.total
+            if (!event.total) {
+              // backend didn't send Content-Length -> we can't compute %
+              // keep as "indeterminate" progress
+              setDownloadProgress(0);
+              return;
+            }
+            const percent = Math.round((event.loaded * 100) / event.total);
+            setDownloadProgress(percent);
+          },
+        },
+        false // returnDataOnly = false so you get full axios response
       );
+
       console.log(response);
+
       if (response.data.size > 22) {
         const contentDisposition = response.headers.get("Content-Disposition");
         console.log(contentDisposition);
@@ -116,18 +119,27 @@ export default function GlifReportsNew() {
         a.click();
         a.remove();
         window.URL.revokeObjectURL(downloadUrl);
+
+        // ensure it visually completes
+        setDownloadProgress(100);
       } else {
         showSnackBar(
           "No reports found matching your current filter criteria",
           "warning"
         );
+        setDownloadProgress(null);
       }
     } catch (error) {
       console.error("Failed to fetch report data:", error);
+      setDownloadProgress(null);
     } finally {
       setIsLoading(false);
+      // small delay so 100% is visible
+      setTimeout(() => setDownloadProgress(null), 700);
     }
   };
+
+  const isDownloadRunning = isLoading || downloadProgress !== null;
 
   return (
     <>
@@ -160,7 +172,6 @@ export default function GlifReportsNew() {
               />
             </Box>
 
-            {/* Dynamic Heading based on state */}
             <Typography
               variant="h5"
               gutterBottom
@@ -170,7 +181,6 @@ export default function GlifReportsNew() {
               GLIF Report Generation
             </Typography>
 
-            {/* Subtitle with clear instructions */}
             <Typography
               variant="body1"
               component="p"
@@ -190,6 +200,7 @@ export default function GlifReportsNew() {
                   gap: 2,
                   px: { xs: 2, md: 4 },
                   py: { xs: 4, md: 8 },
+                  flexDirection: { xs: "column", md: "row" },
                 }}
               >
                 {/* Dropdown Menu */}
@@ -212,7 +223,7 @@ export default function GlifReportsNew() {
                     value={selectedReport}
                     label="Select a Report"
                     onChange={handleSelect}
-                    disabled={repTypes.length == 0}
+                    disabled={repTypes.length === 0 || isDownloadRunning}
                   >
                     {repTypes.map((item) => (
                       <MenuItem key={item.reportName} value={item.fileName}>
@@ -231,294 +242,62 @@ export default function GlifReportsNew() {
                       onChange={(newDate) => setDate(newDate)}
                       maxDate={dayjs()}
                       minDate={dayjs(minDate)}
-                      disabled={repTypes.length == 0}
+                      disabled={repTypes.length === 0 || isDownloadRunning}
                     />
                   </LocalizationProvider>
                 </FormControl>
               </Box>
+
               <Box
                 sx={{
                   width: "100%",
                   textAlign: "center",
                   py: { xs: 1.5, md: 3 },
-                }}
-              >
-                <Button
-                  sx={{
-                    height: "50px",
-                    flexShrink: 0,
-                  }}
-                  endIcon={<CloudDownloadTwoTone />}
-                  variant="contained"
-                  onClick={handleFetchReportData}
-                >
-                  Fetch & Download
-                </Button>
-              </Box>
-            </Card>
-          </Stack>
-        </Box>
-      </Stack>
-    </>
-  );
-}
-
- @PostMapping("/download")
-   public ResponseEntity<StreamingResponseBody> downloadReport(
-           @RequestHeader("Authorization") String token,
-           @RequestBody ReportDownloadRequest request) {
-       ReportStreamResponse response = reportService.downloadReportStream(
-               request.getFileName(),
-               request.getDate(),
-               jwtUtil.getUserRoleFromToken(token),
-               jwtUtil.getUserIdFromToken(token)
-       );
-       return ResponseEntity.ok()
-               // This header tells the browser "This is a file download"
-               .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + response.getDownloadFileName() + "\"")
-               .contentType(MediaType.APPLICATION_OCTET_STREAM)
-               .body(response.getStreamBody());
-   }
-   
-   
-   import { useEffect, useState } from "react";
-import {
-  Box,
-  Typography,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
-  Stack,
-  Button,
-  Card,
-} from "@mui/material";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import { Summarize, CloudDownloadTwoTone } from "@mui/icons-material";
-import useApi from "../../hooks/useApi";
-import dayjs from "dayjs";
-import { useSelector } from "react-redux";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-
-export default function GlifReportsNew() {
-  const { callApi } = useApi();
-  const showSnackBar = useCustomSnackbar();
-  const user = useSelector((state) => state.auth.user);
-  const [isLoading, setIsLoading] = useState(false);
-  const [repTypes, setRepTypes] = useState([]);
-  const [selectedReport, setReport] = useState("");
-  const [selectedDate, setDate] = useState(null);
-  const minDate = "2025-10-01";
-
-  //Getting Reports Types list
-  useEffect(() => {
-    async function fetchData() {
-      setIsLoading(true);
-      try {
-        const data = await callApi(
-          "RS/reports/types",
-          { roleId: user.role },
-          // { roleId: 56 },
-          "POST"
-        );
-        setRepTypes(data.data || []);
-      } catch (error) {
-        console.error("Failed to fetch report types:", error);
-      }
-      setIsLoading(false);
-    }
-    fetchData();
-  }, [callApi]);
-
-  const handleSelect = (event) => {
-    setReport(event.target.value);
-  };
-
-  const handleFetchReportData = async () => {
-    if (!selectedReport || !selectedDate) return;
-
-    setIsLoading(true);
-
-    const payload = {
-      fileName: selectedReport,
-      date: selectedDate.format("YYYY-MM-DD"),
-      roleId: user.role,
-    };
-
-    try {
-      const response = await callApi(
-        "/RS/reports/download",
-        payload,
-        "POST",
-        "blob",
-        "application/json",
-        {},
-        false
-      );
-      console.log(response);
-      if (response.data.size > 22) {
-        const contentDisposition = response.headers.get("Content-Disposition");
-        console.log(contentDisposition);
-
-        let filename = "report.bin";
-        if (
-          contentDisposition &&
-          contentDisposition.indexOf("attachment") !== -1
-        ) {
-          const filenameMatch = contentDisposition.match(/filename="(.+?)"/);
-          if (filenameMatch && filenameMatch.length > 1) {
-            filename = filenameMatch[1];
-          }
-        }
-
-        const downloadUrl = window.URL.createObjectURL(response.data);
-        const a = document.createElement("a");
-        a.href = downloadUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(downloadUrl);
-      } else {
-        showSnackBar(
-          "No reports found matching your current filter criteria",
-          "warning"
-        );
-      }
-    } catch (error) {
-      console.error("Failed to fetch report data:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  return (
-    <>
-      <Stack spacing={4}>
-        <Box sx={{ p: 3, width: "100%", mx: "auto" }} elevation={10}>
-          <Stack
-            spacing={3}
-            direction={"column"}
-            alignItems="center"
-            justifyContent="center"
-          >
-            {/* Main Icon with Animation */}
-            <Box
-              sx={{
-                display: "flex",
-                justifyContent: "center",
-                mb: 3,
-              }}
-            >
-              <Summarize
-                sx={{
-                  height: 70,
-                  width: 70,
-                  color: "primary.main",
-                  transition: "transform 0.3s ease-in-out",
-                  "&:hover": {
-                    transform: "translateY(-5px)",
-                  },
-                }}
-              />
-            </Box>
-
-            {/* Dynamic Heading based on state */}
-            <Typography
-              variant="h5"
-              gutterBottom
-              color="text.primary"
-              fontWeight="bold"
-            >
-              GLIF Report Generation
-            </Typography>
-
-            {/* Subtitle with clear instructions */}
-            <Typography
-              variant="body1"
-              component="p"
-              gutterBottom
-              color="text.secondary"
-              sx={{ mt: 1 }}
-            >
-              Utilize the required report type and date criteria below to
-              precisely define and retrieve the required reports. The generated
-              reports can be viewed on-screen or downloaded for archival.
-            </Typography>
-
-            <Card sx={{ width: "100%", gap: 2, borderRadius: 3, boxShadow: 6 }}>
-              <Box
-                sx={{
-                  display: "flex",
-                  gap: 2,
                   px: { xs: 2, md: 4 },
-                  py: { xs: 4, md: 8 },
-                }}
-              >
-                {/* Dropdown Menu */}
-                <FormControl
-                  sx={{
-                    flexBasis: "25%",
-                    minWidth: {
-                      xs: "150px",
-                      md: "250px",
-                    },
-                    flexGrow: 0.8,
-                  }}
-                >
-                  <InputLabel id="menu-select-label">
-                    Select a report
-                  </InputLabel>
-                  <Select
-                    labelId="menu-select-label"
-                    id="menu-select"
-                    value={selectedReport}
-                    label="Select a Report"
-                    onChange={handleSelect}
-                    disabled={repTypes.length == 0}
-                  >
-                    {repTypes.map((item) => (
-                      <MenuItem key={item.reportName} value={item.fileName}>
-                        {item.reportName}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                {/* Date Picker */}
-                <FormControl sx={{ minWidth: "25%", flexGrow: 1 }}>
-                  <LocalizationProvider dateAdapter={AdapterDayjs}>
-                    <DatePicker
-                      label="Select Report Date"
-                      value={selectedDate}
-                      onChange={(newDate) => setDate(newDate)}
-                      maxDate={dayjs()}
-                      minDate={dayjs(minDate)}
-                      disabled={repTypes.length == 0}
-                    />
-                  </LocalizationProvider>
-                </FormControl>
-              </Box>
-              <Box
-                sx={{
-                  width: "100%",
-                  textAlign: "center",
-                  py: { xs: 1.5, md: 3 },
                 }}
               >
                 <Button
                   sx={{
                     height: "50px",
                     flexShrink: 0,
+                    minWidth: 180,
                   }}
                   endIcon={<CloudDownloadTwoTone />}
                   variant="contained"
                   onClick={handleFetchReportData}
+                  disabled={
+                    isDownloadRunning || !selectedReport || !selectedDate
+                  }
                 >
-                  Fetch & Download
+                  {downloadProgress !== null
+                    ? `Downloading${
+                        downloadProgress > 0
+                          ? ` ${downloadProgress}%`
+                          : "..."
+                      }`
+                    : "Fetch & Download"}
                 </Button>
+
+                {downloadProgress !== null && (
+                  <Box sx={{ mt: 2 }}>
+                    <LinearProgress
+                      variant={
+                        downloadProgress > 0
+                          ? "determinate"
+                          : "indeterminate"
+                      }
+                      value={downloadProgress || 0}
+                    />
+                    <Typography
+                      variant="caption"
+                      sx={{ mt: 0.5, display: "block" }}
+                    >
+                      {downloadProgress > 0
+                        ? `${downloadProgress}% completed`
+                        : "Preparing download..."}
+                    </Typography>
+                  </Box>
+                )}
               </Box>
             </Card>
           </Stack>
@@ -529,86 +308,40 @@ export default function GlifReportsNew() {
 }
 
 const callApi = useCallback(
-    async (
+  async (
+    url,
+    payload = null,
+    method = "GET",
+    responseType = "json",
+    contentType = "application/json",
+    extraConfig = {},
+    returnDataOnly = true
+  ) => {
+    // ...
+    const config = {
+      method: method.toUpperCase(),
       url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true
-    ) => {
-      const controller = new AbortController();
-      activeRequestsRef.current.add(controller);
-      setLoading(true);
-      setError(null);
+      headers,
+      responseType,
+      withCredentials: true,
+      signal: controller.signal,
+      ...extraConfig,   // ⭐ this line makes onDownloadProgress work
+    };
+    // ...
+    const response = await axios(config);
+    // ...
+  },
+  [navigate]
+);
 
-      try {
-        const headers = {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": contentType,
-          "X-Request-Type": xRequestType,
-        };
-
-        const config = {
-          method: method.toUpperCase(),
-          url,
-          headers,
-          responseType,
-          withCredentials: true,
-          signal: controller.signal,
-          ...extraConfig,
-        };
-
-        // Attach payload depending on method type
-        if (payload !== null) {
-          if (method.toUpperCase() === "GET") {
-            config.params = payload;
-          } else {
-            config.data = payload;
-          }
-        }
-
-        const response = await axios(config);
-
-        console.log(response);
-
-        if (!controller.signal.aborted) {
-          setData(response.data);
-          const returnResponse = returnDataOnly ? response.data : response;
-          return returnResponse; // Return API data directly
-        }
-      } catch (err) {
-        if (err.status === 440) {
-          navigate("/");
-          window.alert("You have logged in another session");
-        }
-
-        if (
-          err.status === 401 &&
-          err.response?.data?.message === "INVALID_TOKEN"
-        ) {
-          navigate("/");
-        }
-
-        if (!axios.isCancel(err) && !controller.signal.aborted) {
-          console.error("API call error:", err);
-          if (err.response.data?.result?.message) {
-            snackbar(err.response.data?.result?.message, "error");
-          } else if (err.response.data?.message) {
-            snackbar(err.response.data?.message, "error");
-          } else {
-            snackbar(err.response.statusText, "error");
-          }
-          setError(err);
-        }
-
-        if (axios.isCancel(err)) throw err;
-      } finally {
-        activeRequestsRef.current.delete(controller);
-        setLoading(false);
-      }
-    },
-    [navigate]
-  );
-
+const response = await callApi(
+  "/RS/reports/download",
+  payload,
+  "POST",
+  "blob",
+  "application/json",
+  {
+    onDownloadProgress: (event) => { /* update state */ },
+  },
+  false
+);
