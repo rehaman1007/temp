@@ -10,47 +10,88 @@ import {
   Button,
   Card,
   LinearProgress,
+  Chip,
+  Divider,
+  Tooltip,
+  Collapse,
+  Grow,
+  Fade,
+  useMediaQuery,
 } from "@mui/material";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import { Summarize, CloudDownloadTwoTone } from "@mui/icons-material";
+import {
+  Summarize,
+  CloudDownloadTwoTone,
+  RefreshRounded,
+  InfoOutlined,
+} from "@mui/icons-material";
 import useApi from "../../hooks/useApi";
 import dayjs from "dayjs";
 import { useSelector } from "react-redux";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { useTheme } from "@mui/material/styles";
 
 export default function GlifReportsNew() {
   const { callApi } = useApi();
   const showSnackBar = useCustomSnackbar();
   const user = useSelector((state) => state.auth.user);
 
+  const theme = useTheme();
+  const isSmall = useMediaQuery(theme.breakpoints.down("md"));
+
   const [isLoading, setIsLoading] = useState(false);
   const [repTypes, setRepTypes] = useState([]);
   const [selectedReport, setReport] = useState("");
   const [selectedDate, setDate] = useState(null);
 
-  // 🔹 NEW: streaming progress state
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadedBytes, setDownloadedBytes] = useState(0);
+  // progress stuff
+  const [downloadProgress, setDownloadProgress] = useState(null); // 0–100 or null
+  const [downloadedBytes, setDownloadedBytes] = useState(0); // for MB display
+
+  const [statusMessage, setStatusMessage] = useState("");
+  const [statusType, setStatusType] = useState("info"); // "info" | "success" | "warning" | "error"
 
   const minDate = "2025-10-01";
 
-  //Getting Reports Types list
+  const isDownloading = downloadProgress !== null;
+  const disableInputs = isLoading || isDownloading;
+
+  const downloadedMB =
+    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
+
+  // ===== Initial Reports Fetch =====
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
+      setStatusMessage("Fetching available GLIF report types…");
+      setStatusType("info");
       try {
         const data = await callApi(
           "RS/reports/types",
           { roleId: user.role },
           "POST"
         );
-        setRepTypes(data.data || []);
+        const list = data?.data || [];
+        setRepTypes(list);
+
+        if (!list.length) {
+          setStatusMessage("No report types are configured for your role.");
+          setStatusType("warning");
+        } else {
+          setStatusMessage(
+            "Select a report and date, then click Fetch & Download."
+          );
+          setStatusType("info");
+        }
       } catch (error) {
         console.error("Failed to fetch report types:", error);
+        setStatusMessage("Failed to load report types. Please try again.");
+        setStatusType("error");
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false);
     }
     fetchData();
   }, [callApi, user.role]);
@@ -59,12 +100,28 @@ export default function GlifReportsNew() {
     setReport(event.target.value);
   };
 
+  const handleResetFilters = () => {
+    setReport("");
+    setDate(null);
+    setDownloadProgress(null);
+    setDownloadedBytes(0);
+    setStatusMessage("Filters reset. Please select a report and date.");
+    setStatusType("info");
+  };
+
   const handleFetchReportData = async () => {
-    if (!selectedReport || !selectedDate) return;
+    if (!selectedReport || !selectedDate) {
+      showSnackBar("Please select both report type and date.", "warning");
+      setStatusMessage("Select both report type and date before downloading.");
+      setStatusType("warning");
+      return;
+    }
 
     setIsLoading(true);
-    setIsDownloading(true);
+    setDownloadProgress(0);
     setDownloadedBytes(0);
+    setStatusMessage("Preparing your report download…");
+    setStatusType("info");
 
     const payload = {
       fileName: selectedReport,
@@ -80,21 +137,30 @@ export default function GlifReportsNew() {
         "blob",
         "application/json",
         {
-          // ⬇️ axios streaming progress (no total because no Content-Length)
+          // axios streaming progress
           onDownloadProgress: (event) => {
-            setIsDownloading(true);
-            if (event && typeof event.loaded === "number") {
+            if (!event) return;
+
+            if (typeof event.loaded === "number") {
               setDownloadedBytes(event.loaded);
+            }
+
+            // No Content-Length -> total might be 0 in streaming
+            if (event.total && event.total > 0) {
+              const percent = Math.round((event.loaded * 100) / event.total);
+              setDownloadProgress(percent);
+            } else {
+              // keep 0 to represent "indeterminate"
+              setDownloadProgress(0);
             }
           },
         },
-        false // get full axios response, not only data
+        false // get full axios response
       );
 
-      console.log(response);
+      console.log("Download response:", response);
 
       if (response.data && response.data.size > 22) {
-        // axios headers is a plain object, not Headers
         const contentDisposition =
           response.headers["content-disposition"] ||
           response.headers["Content-Disposition"];
@@ -118,100 +184,188 @@ export default function GlifReportsNew() {
         a.click();
         a.remove();
         window.URL.revokeObjectURL(downloadUrl);
+
+        setDownloadProgress(100);
+        setStatusMessage("Report downloaded successfully.");
+        setStatusType("success");
       } else {
         showSnackBar(
           "No reports found matching your current filter criteria",
           "warning"
         );
+        setDownloadProgress(null);
+        setStatusMessage(
+          "No reports available for the selected type and date."
+        );
+        setStatusType("warning");
       }
     } catch (error) {
       console.error("Failed to fetch report data:", error);
+      setDownloadProgress(null);
+      setStatusMessage("Download failed due to a network or server error.");
+      setStatusType("error");
+      showSnackBar("Download failed. Please try again.", "error");
     } finally {
       setIsLoading(false);
-      setIsDownloading(false);
-      setDownloadedBytes(0);
+      // let the 100% state show briefly then reset only progress
+      setTimeout(() => {
+        if (downloadProgress === 100) {
+          setDownloadProgress(null);
+          setDownloadedBytes(0);
+        }
+      }, 800);
     }
   };
 
-  const disableInputs = isLoading || isDownloading;
-
-  const downloadedMB =
-    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
-
   return (
-    <>
-      <Stack spacing={4}>
-        <Box sx={{ p: 3, width: "100%", mx: "auto" }} elevation={10}>
-          <Stack
-            spacing={3}
-            direction={"column"}
-            alignItems="center"
-            justifyContent="center"
+    <Box
+      sx={{
+        minHeight: "100vh",
+        px: { xs: 2, md: 4 },
+        py: { xs: 4, md: 6 },
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        // subtle background
+        backgroundImage: (theme) =>
+          theme.palette.mode === "light"
+            ? "linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 50%, #fff8e1 100%)"
+            : "linear-gradient(135deg, #1a237e 0%, #4a148c 50%, #263238 100%)",
+      }}
+    >
+      <Grow in timeout={500}>
+        <Card
+          sx={{
+            width: "100%",
+            maxWidth: 960,
+            borderRadius: 4,
+            boxShadow: 10,
+            overflow: "hidden",
+          }}
+        >
+          {/* Header area */}
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+              px: { xs: 3, md: 4 },
+              py: { xs: 2.5, md: 3 },
+              background:
+                theme.palette.mode === "light"
+                  ? "linear-gradient(90deg, #1976d2 0%, #7b1fa2 50%, #ff8f00 100%)"
+                  : "linear-gradient(90deg, #0d47a1 0%, #6a1b9a 50%, #ff6f00 100%)",
+              color: "common.white",
+            }}
           >
-            {/* Main Icon with Animation */}
             <Box
               sx={{
+                borderRadius: "50%",
+                p: 1.5,
+                bgcolor: "rgba(255,255,255,0.12)",
                 display: "flex",
-                justifyContent: "center",
-                mb: 3,
               }}
             >
-              <Summarize
-                sx={{
-                  height: 70,
-                  width: 70,
-                  color: "primary.main",
-                  transition: "transform 0.3s ease-in-out",
-                  "&:hover": {
-                    transform: "translateY(-5px)",
-                  },
-                }}
-              />
+              <Summarize sx={{ fontSize: 40 }} />
             </Box>
+            <Box sx={{ flex: 1 }}>
+              <Typography
+                variant={isSmall ? "h6" : "h5"}
+                fontWeight="bold"
+                sx={{ letterSpacing: 0.5 }}
+              >
+                GLIF Report Generation Console
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ opacity: 0.9, mt: 0.5, maxWidth: 600 }}
+              >
+                Choose a report type and date to generate and download GLIF
+                reports on-demand with streaming delivery.
+              </Typography>
+            </Box>
+            <Tooltip title="Reset filters">
+              <span>
+                <Button
+                  size="small"
+                  startIcon={<RefreshRounded />}
+                  onClick={handleResetFilters}
+                  disabled={disableInputs && !selectedReport && !selectedDate}
+                  sx={{
+                    borderRadius: 999,
+                    textTransform: "none",
+                    bgcolor: "rgba(255,255,255,0.12)",
+                    color: "common.white",
+                    "&:hover": {
+                      bgcolor: "rgba(255,255,255,0.24)",
+                    },
+                  }}
+                >
+                  Reset
+                </Button>
+              </span>
+            </Tooltip>
+          </Box>
 
-            {/* Heading */}
-            <Typography
-              variant="h5"
-              gutterBottom
-              color="text.primary"
-              fontWeight="bold"
-            >
-              GLIF Report Generation
-            </Typography>
-
-            {/* Subtitle */}
-            <Typography
-              variant="body1"
-              component="p"
-              gutterBottom
-              color="text.secondary"
-              sx={{ mt: 1 }}
-            >
-              Utilize the required report type and date criteria below to
-              precisely define and retrieve the required reports. The generated
-              reports can be viewed on-screen or downloaded for archival.
-            </Typography>
-
-            <Card sx={{ width: "100%", gap: 2, borderRadius: 3, boxShadow: 6 }}>
+          {/* Body */}
+          <Box sx={{ p: { xs: 3, md: 4 } }}>
+            {/* Status strip */}
+            <Fade in={!!statusMessage}>
               <Box
                 sx={{
+                  mb: 3,
                   display: "flex",
-                  gap: 2,
-                  px: { xs: 2, md: 4 },
-                  py: { xs: 4, md: 8 },
-                  flexDirection: { xs: "column", md: "row" },
+                  alignItems: "center",
+                  gap: 1.5,
+                  p: 1.5,
+                  borderRadius: 2,
+                  bgcolor:
+                    statusType === "success"
+                      ? "success.light"
+                      : statusType === "warning"
+                      ? "warning.light"
+                      : statusType === "error"
+                      ? "error.light"
+                      : "info.light",
+                  color:
+                    statusType === "success"
+                      ? "success.contrastText"
+                      : statusType === "warning"
+                      ? "warning.contrastText"
+                      : statusType === "error"
+                      ? "error.contrastText"
+                      : "info.contrastText",
                 }}
               >
+                <InfoOutlined fontSize="small" />
+                <Typography variant="body2">{statusMessage}</Typography>
+              </Box>
+            </Fade>
+
+            {/* Steps description */}
+            <Stack
+              direction={isSmall ? "column" : "row"}
+              spacing={2}
+              sx={{ mb: 3 }}
+            >
+              <Chip label="Step 1: Select report" color="primary" variant="outlined" />
+              <Chip label="Step 2: Choose date" color="secondary" variant="outlined" />
+              <Chip label="Step 3: Fetch & Download" color="warning" variant="outlined" />
+            </Stack>
+
+            {/* Main controls */}
+            <Stack
+              spacing={3}
+              direction={isSmall ? "column" : "row"}
+              alignItems={isSmall ? "stretch" : "flex-start"}
+            >
+              {/* Left column: filters */}
+              <Stack spacing={2} flex={1.2}>
                 {/* Dropdown Menu */}
                 <FormControl
-                  sx={{
-                    flexBasis: "25%",
-                    minWidth: {
-                      xs: "150px",
-                      md: "250px",
-                    },
-                    flexGrow: 0.8,
-                  }}
+                  fullWidth
+                  sx={{ minWidth: 220 }}
+                  disabled={repTypes.length === 0 || disableInputs}
                 >
                   <InputLabel id="menu-select-label">
                     Select a report
@@ -220,9 +374,8 @@ export default function GlifReportsNew() {
                     labelId="menu-select-label"
                     id="menu-select"
                     value={selectedReport}
-                    label="Select a Report"
+                    label="Select a report"
                     onChange={handleSelect}
-                    disabled={repTypes.length === 0 || disableInputs}
                   >
                     {repTypes.map((item) => (
                       <MenuItem key={item.reportName} value={item.fileName}>
@@ -233,63 +386,129 @@ export default function GlifReportsNew() {
                 </FormControl>
 
                 {/* Date Picker */}
-                <FormControl sx={{ minWidth: "25%", flexGrow: 1 }}>
+                <FormControl fullWidth disabled={repTypes.length === 0 || disableInputs}>
                   <LocalizationProvider dateAdapter={AdapterDayjs}>
                     <DatePicker
-                      label="Select Report Date"
+                      label="Select report date"
                       value={selectedDate}
                       onChange={(newDate) => setDate(newDate)}
                       maxDate={dayjs()}
                       minDate={dayjs(minDate)}
-                      disabled={repTypes.length === 0 || disableInputs}
+                      slotProps={{
+                        textField: {
+                          fullWidth: true,
+                        },
+                      }}
                     />
                   </LocalizationProvider>
                 </FormControl>
-              </Box>
+              </Stack>
 
-              <Box
+              {/* Right column: summary + action */}
+              <Stack
+                spacing={2}
+                flex={1}
                 sx={{
-                  width: "100%",
-                  textAlign: "center",
-                  py: { xs: 1.5, md: 3 },
-                  px: { xs: 2, md: 4 },
+                  borderRadius: 3,
+                  border: `1px dashed ${theme.palette.divider}`,
+                  p: 2.5,
+                  bgcolor: theme.palette.action.hover,
                 }}
               >
-                <Button
-                  sx={{
-                    height: "50px",
-                    flexShrink: 0,
-                    minWidth: 180,
-                  }}
-                  endIcon={<CloudDownloadTwoTone />}
-                  variant="contained"
-                  onClick={handleFetchReportData}
-                  disabled={
-                    disableInputs || !selectedReport || !selectedDate
-                  }
-                >
-                  {isDownloading ? "Downloading..." : "Fetch & Download"}
-                </Button>
+                <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                  Current selection
+                </Typography>
+                <Divider sx={{ mb: 1.5 }} />
 
-                {/* Indeterminate progress while streaming */}
-                {isDownloading && (
+                <Stack spacing={1}>
+                  <Typography variant="body2" color="text.secondary">
+                    Report type
+                  </Typography>
+                  <Typography variant="body1" fontWeight={500}>
+                    {selectedReport
+                      ? repTypes.find((r) => r.fileName === selectedReport)
+                          ?.reportName || selectedReport
+                      : "No report selected"}
+                  </Typography>
+
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mt: 2 }}
+                  >
+                    Report date
+                  </Typography>
+                  <Typography variant="body1" fontWeight={500}>
+                    {selectedDate
+                      ? selectedDate.format("DD MMM YYYY")
+                      : "No date selected"}
+                  </Typography>
+                </Stack>
+
+                <Box sx={{ mt: 2 }}>
+                  <Tooltip
+                    title={
+                      !selectedReport || !selectedDate
+                        ? "Select both report and date to enable download"
+                        : "Download the generated report"
+                    }
+                  >
+                    <span>
+                      <Button
+                        sx={{
+                          height: 48,
+                          borderRadius: 999,
+                          px: 3,
+                          width: "100%",
+                        }}
+                        endIcon={<CloudDownloadTwoTone />}
+                        variant="contained"
+                        onClick={handleFetchReportData}
+                        disabled={
+                          disableInputs ||
+                          !selectedReport ||
+                          !selectedDate
+                        }
+                      >
+                        {isDownloading
+                          ? downloadProgress && downloadProgress > 0
+                            ? `Downloading… ${downloadProgress}%`
+                            : "Downloading…"
+                          : "Fetch & Download"}
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </Box>
+
+                {/* Progress section */}
+                <Collapse in={isDownloading} unmountOnExit>
                   <Box sx={{ mt: 2 }}>
-                    <LinearProgress variant="indeterminate" />
+                    <LinearProgress
+                      variant={
+                        downloadProgress && downloadProgress > 0
+                          ? "determinate"
+                          : "indeterminate"
+                      }
+                      value={downloadProgress || 0}
+                    />
                     <Typography
                       variant="caption"
-                      sx={{ mt: 0.5, display: "block" }}
+                      sx={{ mt: 0.75, display: "block" }}
+                      color="text.secondary"
                     >
-                      {downloadedMB
-                        ? `Downloading... ${downloadedMB} MB received`
-                        : "Preparing download..."}
+                      {downloadProgress && downloadProgress > 0
+                        ? `${downloadProgress}% completed`
+                        : downloadedMB
+                        ? `Streaming… ${downloadedMB} MB received`
+                        : "Streaming in progress…"}
                     </Typography>
                   </Box>
-                )}
-              </Box>
-            </Card>
-          </Stack>
-        </Box>
-      </Stack>
-    </>
+                </Collapse>
+              </Stack>
+            </Stack>
+          </Box>
+        </Card>
+      </Grow>
+    </Box>
   );
 }
