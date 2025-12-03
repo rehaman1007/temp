@@ -1,3 +1,31 @@
+@PostMapping("/download")
+public ResponseEntity<StreamingResponseBody> downloadReport(
+        @RequestHeader("Authorization") String token,
+        @RequestBody ReportDownloadRequest request) {
+
+    ReportStreamResponse response = reportService.downloadReportStream(
+            request.getFileName(),
+            request.getDate(),
+            jwtUtil.getUserRoleFromToken(token),
+            jwtUtil.getUserIdFromToken(token)
+    );
+
+    // make sure reportService fills this:
+    // - response.getDownloadFileName()
+    // - response.getStreamBody()
+    // - response.getFileSize()  (size in bytes, long)
+
+    return ResponseEntity.ok()
+            .header(
+                HttpHeaders.CONTENT_DISPOSITION,
+                "attachment; filename=\"" + response.getDownloadFileName() + "\""
+            )
+            .contentType(MediaType.APPLICATION_OCTET_STREAM)
+            // ⭐ this sets Content-Length header
+            .contentLength(response.getFileSize())
+            .body(response.getStreamBody());
+}
+
 import { useEffect, useState } from "react";
 import {
   Box,
@@ -9,7 +37,7 @@ import {
   Stack,
   Button,
   Card,
-  LinearProgress,        // ⭐ add
+  LinearProgress,
 } from "@mui/material";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
@@ -29,13 +57,9 @@ export default function GlifReportsNew() {
   const [repTypes, setRepTypes] = useState([]);
   const [selectedReport, setReport] = useState("");
   const [selectedDate, setDate] = useState(null);
-
-  // ⭐ NEW: download progress (0-100, or null = hidden)
-  const [downloadProgress, setDownloadProgress] = useState(null);
-
+  const [downloadProgress, setDownloadProgress] = useState(null); // 0–100 or null
   const minDate = "2025-10-01";
 
-  //Getting Reports Types list
   useEffect(() => {
     async function fetchData() {
       setIsLoading(true);
@@ -62,7 +86,7 @@ export default function GlifReportsNew() {
     if (!selectedReport || !selectedDate) return;
 
     setIsLoading(true);
-    setDownloadProgress(0); // show progress bar
+    setDownloadProgress(0); // show bar
 
     const payload = {
       fileName: selectedReport,
@@ -78,12 +102,10 @@ export default function GlifReportsNew() {
         "blob",
         "application/json",
         {
-          // ⭐ pass download progress handler into axios config
+          // goes into axios config (thanks to ...extraConfig)
           onDownloadProgress: (event) => {
-            // event.loaded, event.total
             if (!event.total) {
-              // backend didn't send Content-Length -> we can't compute %
-              // keep as "indeterminate" progress
+              // no Content-Length -> keep indeterminate
               setDownloadProgress(0);
               return;
             }
@@ -91,14 +113,17 @@ export default function GlifReportsNew() {
             setDownloadProgress(percent);
           },
         },
-        false // returnDataOnly = false so you get full axios response
+        false // return full axios response
       );
 
       console.log(response);
 
-      if (response.data.size > 22) {
-        const contentDisposition = response.headers.get("Content-Disposition");
-        console.log(contentDisposition);
+      // response.data is a Blob because responseType = 'blob'
+      if (response.data && response.data.size > 22) {
+        // axios headers is a plain object, NOT a Headers instance
+        const contentDisposition =
+          response.headers["content-disposition"] ||
+          response.headers["Content-Disposition"];
 
         let filename = "report.bin";
         if (
@@ -120,7 +145,6 @@ export default function GlifReportsNew() {
         a.remove();
         window.URL.revokeObjectURL(downloadUrl);
 
-        // ensure it visually completes
         setDownloadProgress(100);
       } else {
         showSnackBar(
@@ -134,12 +158,12 @@ export default function GlifReportsNew() {
       setDownloadProgress(null);
     } finally {
       setIsLoading(false);
-      // small delay so 100% is visible
+      // let 100% stay visible briefly before hiding
       setTimeout(() => setDownloadProgress(null), 700);
     }
   };
 
-  const isDownloadRunning = isLoading || downloadProgress !== null;
+  const isDownloadRunning = downloadProgress !== null;
 
   return (
     <>
@@ -151,7 +175,6 @@ export default function GlifReportsNew() {
             alignItems="center"
             justifyContent="center"
           >
-            {/* Main Icon with Animation */}
             <Box
               sx={{
                 display: "flex",
@@ -203,7 +226,6 @@ export default function GlifReportsNew() {
                   flexDirection: { xs: "column", md: "row" },
                 }}
               >
-                {/* Dropdown Menu */}
                 <FormControl
                   sx={{
                     flexBasis: "25%",
@@ -233,7 +255,6 @@ export default function GlifReportsNew() {
                   </Select>
                 </FormControl>
 
-                {/* Date Picker */}
                 <FormControl sx={{ minWidth: "25%", flexGrow: 1 }}>
                   <LocalizationProvider dateAdapter={AdapterDayjs}>
                     <DatePicker
@@ -306,42 +327,3 @@ export default function GlifReportsNew() {
     </>
   );
 }
-
-const callApi = useCallback(
-  async (
-    url,
-    payload = null,
-    method = "GET",
-    responseType = "json",
-    contentType = "application/json",
-    extraConfig = {},
-    returnDataOnly = true
-  ) => {
-    // ...
-    const config = {
-      method: method.toUpperCase(),
-      url,
-      headers,
-      responseType,
-      withCredentials: true,
-      signal: controller.signal,
-      ...extraConfig,   // ⭐ this line makes onDownloadProgress work
-    };
-    // ...
-    const response = await axios(config);
-    // ...
-  },
-  [navigate]
-);
-
-const response = await callApi(
-  "/RS/reports/download",
-  payload,
-  "POST",
-  "blob",
-  "application/json",
-  {
-    onDownloadProgress: (event) => { /* update state */ },
-  },
-  false
-);
