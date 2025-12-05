@@ -8,6 +8,7 @@ import {
   Typography,
   Grid,
   Stack,
+  Divider,
 } from "@mui/material";
 import useApi from "../../hooks/useApi";
 
@@ -47,17 +48,75 @@ const ACCOUNT_CLASSIFICATIONS = {
   M: { label: "Memo A/c", icon: <NoteIcon fontSize="small" /> },
 };
 
+// Allowed characters for text search:
+// - letters, digits, space, -, &, /, ., ,, (, )
+const TEXT_PATTERN = /^[A-Za-z0-9\s\-&/.,()]*$/;
+
+function validateSearch(value) {
+  const raw = value || "";
+  const trimmedStart = raw.trimStart();
+
+  if (!trimmedStart) {
+    return { error: "", type: null };
+  }
+
+  const firstChar = trimmedStart.charAt(0);
+  const startsWithDigit = /\d/.test(firstChar);
+
+  if (startsWithDigit) {
+    // NUMBER MODE
+    const digitsOnly = raw.replace(/\s/g, "");
+    if (!/^\d*$/.test(digitsOnly)) {
+      return {
+        error: "When starting with a number, only digits are allowed.",
+        type: "number",
+      };
+    }
+    if (digitsOnly.length > 10) {
+      return {
+        error: "Maximum 10 digits allowed for CGL number.",
+        type: "number",
+      };
+    }
+    return { error: "", type: "number" };
+  }
+
+  // TEXT MODE
+  if (raw.length > 30) {
+    return {
+      error: "Maximum 30 characters allowed for description search.",
+      type: "text",
+    };
+  }
+
+  if (!TEXT_PATTERN.test(raw)) {
+    return {
+      error:
+        "Only letters, numbers, spaces and - & / . , ( ) are allowed for text.",
+      type: "text",
+    };
+  }
+
+  return { error: "", type: "text" };
+}
+
 export default function CglView() {
   const { callApi } = useApi();
 
-  const [searchText, setSearchText] = useState("");
+  // What user is typing
+  const [inputValue, setInputValue] = useState("");
+  // Last valid value used for API calls
+  const [searchValue, setSearchValue] = useState("");
   const [options, setOptions] = useState([]);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  // ---- Trigger Search ----
+  const [inputError, setInputError] = useState("");
+  const [inputType, setInputType] = useState(null);
+
+  // ---- Trigger Search when searchValue changes ----
   useEffect(() => {
-    const text = searchText.trim();
+    const text = searchValue.trim();
 
     if (text.length < 3) {
       setOptions([]);
@@ -81,252 +140,375 @@ export default function CglView() {
     };
 
     fetch();
-    return () => (cancelled = true);
-  }, [searchText, callApi]);
+    return () => {
+      cancelled = true;
+    };
+  }, [searchValue, callApi]);
 
   const classification = selected
     ? ACCOUNT_CLASSIFICATIONS[selected.acClassification]
     : null;
+
+  // Handle typing + validation
+  const handleInputChange = (_, value) => {
+    setInputValue(value);
+
+    const { error, type } = validateSearch(value);
+    setInputError(error);
+    setInputType(type);
+
+    // Only update searchValue (which triggers API) when input is valid
+    if (!error) {
+      setSearchValue(value);
+    }
+  };
+
+  const helperText = (() => {
+    if (inputError) return inputError;
+
+    if (!inputValue) return "Type CGL number (up to 10 digits) or description.";
+    if (inputValue.trim().length < 3)
+      return "Type at least 3 characters to start searching.";
+    if (inputType === "number") return "Searching by CGL number.";
+    if (inputType === "text") return "Searching by CGL description.";
+    return "";
+  })();
 
   return (
     <Box
       sx={{
         p: 3,
         display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
+        justifyContent: "center",
+        bgcolor: (theme) =>
+          theme.palette.mode === "light" ? "#f5f5f7" : "background.default",
       }}
     >
-      {/* SEARCH */}
-      <Box sx={{ width: "50%", minWidth: "50%", mb: 3 }}>
-        <Autocomplete
-          fullWidth
-          value={selected}
-          loading={loading}
-          options={options}
-          onChange={(_, v) => setSelected(v)}
-          inputValue={searchText}
-          onInputChange={(_, v) => setSearchText(v)}
-          getOptionLabel={(o) => (o ? `${o.cglNumber} - ${o.description}` : "")}
-          noOptionsText={
-            searchText.length < 3
-              ? "Type at least 3 characters..."
-              : "No CGL's found"
-          }
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              label="Search CGL by Number or Description"
-              placeholder="Eg: 1234567890 or abcd"
-              InputProps={{
-                ...params.InputProps,
-                endAdornment: (
-                  <>
-                    {loading && <CircularProgress size={18} />}
-                    {params.InputProps.endAdornment}
-                  </>
-                ),
-              }}
-            />
-          )}
-        />
-      </Box>
+      <Box sx={{ width: "100%", maxWidth: 1200 }}>
+        {/* PAGE HEADING */}
+        <Box sx={{ mb: 2 }}>
+          <Typography variant="h5" sx={{ fontWeight: 700, mb: 0.5 }}>
+            CGL Master Lookup
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Search CGL by number or description and view key account details in
+            a clean, readable layout.
+          </Typography>
+        </Box>
 
-      {/* DETAILS */}
-      <Card sx={{ width: "75%", maxWidth: 1000, p: 3 }}>
-        {!selected ? (
-          <Box>
-            <Stack height="100%" alignItems="center" justifyContent="center">
-              <InfoIcon sx={{ fontSize: 40, color: "text.secondary", mb: 2 }} />
-              <Typography>
-                No CGL selected, Kindly select CGL for showing details
-              </Typography>
-            </Stack>
-          </Box>
-        ) : (
-          <Box sx={{ m: 2, p: 2 }}>
-            <Typography
-              variant="h3"
-              sx={{
-                fontWeight: 700,
-                color: "text.secondary",
-                textAlign: "center",
-                mb: 3,
-                pb: 2,
-              }}
-            >
-              CGL Details
-            </Typography>
-            <Grid container spacing={3}>
-              {/* ROW 1 */}
-              <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+        {/* SEARCH CARD */}
+        <Card
+          sx={{
+            p: 2.5,
+            mb: 3,
+            display: "flex",
+            flexDirection: "column",
+            gap: 1,
+          }}
+        >
+          <Typography
+            variant="subtitle2"
+            sx={{ fontWeight: 600, color: "text.secondary", mb: 0.5 }}
+          >
+            Search
+          </Typography>
+          <Autocomplete
+            fullWidth
+            value={selected}
+            loading={loading}
+            options={options}
+            onChange={(_, v) => setSelected(v)}
+            inputValue={inputValue}
+            onInputChange={handleInputChange}
+            getOptionLabel={(o) =>
+              o ? `${o.cglNumber} - ${o.description}` : ""
+            }
+            noOptionsText={
+              inputValue.trim().length < 3
+                ? "Type at least 3 characters..."
+                : "No CGLs found for given input"
+            }
+            // Improve dropdown layering and look
+            slotProps={{
+              paper: {
+                elevation: 3,
+              },
+              popper: {
+                sx: {
+                  zIndex: (theme) => theme.zIndex.modal + 1,
+                },
+              },
+            }}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Search CGL by Number or Description"
+                placeholder="e.g. 1234567890 or Savings Account"
+                size="small"
+                error={Boolean(inputError)}
+                helperText={helperText}
+                InputProps={{
+                  ...params.InputProps,
+                  endAdornment: (
+                    <>
+                      {loading && <CircularProgress size={18} />}
+                      {params.InputProps.endAdornment}
+                    </>
+                  ),
+                }}
+              />
+            )}
+          />
+        </Card>
+
+        {/* DETAILS CARD */}
+        <Card sx={{ p: 3 }}>
+          {!selected ? (
+            <Box sx={{ minHeight: 220 }}>
+              <Stack
+                height="100%"
+                alignItems="center"
+                justifyContent="center"
+                spacing={1.5}
+              >
+                <InfoIcon
+                  sx={{ fontSize: 40, color: "text.secondary", mb: 0.5 }}
+                />
+                <Typography variant="subtitle1">
+                  No CGL selected yet
+                </Typography>
                 <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary" }}
+                  variant="body2"
+                  color="text.secondary"
+                  textAlign="center"
                 >
-                  CGL Number
+                  Start typing in the search box above and pick a CGL to view
+                  its complete details.
                 </Typography>
-                <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                  {selected.cglNumber}
-                </Typography>
-              </Grid>
+              </Stack>
+            </Box>
+          ) : (
+            <Box>
+              <Box
+                sx={{
+                  mb: 2,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: 1,
+                }}
+              >
+                <Box>
+                  <Typography
+                    variant="h6"
+                    sx={{ fontWeight: 700, mb: 0.5, letterSpacing: 0.2 }}
+                  >
+                    CGL Details
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {selected.cglNumber} — {selected.description}
+                  </Typography>
+                </Box>
 
-              <Grid size={{ xs: 12, sm: 6, md: 5 }}>
-                <Box sx={{ width: "100%" }}>
+                {classification && (
+                  <CustomChip
+                    label={classification.label}
+                    icon={classification.icon}
+                    variant="outlined"
+                  />
+                )}
+              </Box>
+
+              <Divider sx={{ mb: 2 }} />
+
+              <Grid container spacing={3}>
+                {/* ROW 1 */}
+                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
                   <Typography
                     variant="subtitle2"
-                    sx={{ fontWeight: 700, color: "text.secondary" }}
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    CGL Number
+                  </Typography>
+                  <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                    {selected.cglNumber}
+                  </Typography>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
                     CGL Description
                   </Typography>
-                  <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                    {selected.description}
-                  </Typography>
-                </Box>
-              </Grid>
+                  <Typography variant="body1">{selected.description}</Typography>
+                </Grid>
 
-              <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.5 }}
-                >
-                  Account Classification
-                </Typography>
-                {classification && (
-                  <>
+                <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Account Classification
+                  </Typography>
+                  {classification && (
+                    <Box sx={{ mt: 0.5 }}>
+                      <CustomChip
+                        label={classification.label}
+                        icon={classification.icon}
+                        variant="outlined"
+                      />
+                    </Box>
+                  )}
+                </Grid>
+
+                {/* ROW 2 */}
+                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Comp1
+                  </Typography>
+                  <Typography variant="body2">
+                    {selected.comp1 || "—"}
+                  </Typography>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Segment
+                  </Typography>
+                  <Typography variant="body2">
+                    {selected.segmentCode || "—"}{" "}
+                    {selected.segmentDescription
+                      ? `- ${selected.segmentDescription}`
+                      : ""}
+                  </Typography>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Comp2
+                  </Typography>
+                  <Typography variant="body2">
+                    {selected.comp2 || "—"}
+                  </Typography>
+                </Grid>
+
+                {/* ROW 3 */}
+                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Balance Compare
+                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
                     <CustomChip
-                      label={classification.label}
-                      icon={classification.icon}
+                      label={
+                        selected.balcompare === 1 ? "Include" : "Exclude"
+                      }
+                      icon={
+                        selected.balcompare === 1 ? (
+                          <BookmarkAddedIcon />
+                        ) : (
+                          <BookmarkRemoveIcon />
+                        )
+                      }
+                      color="default"
                       variant="outlined"
                     />
-                  </>
-                )}
-              </Grid>
+                  </Box>
+                </Grid>
 
-              {/* ROW 2 */}
-              <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Comp1
-                </Typography>
-                <Typography>{selected.comp1}</Typography>
-              </Grid>
+                <Grid size={{ xs: 12, sm: 6, md: 5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Manual Posting
+                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={
+                        selected.manualPosting === 1
+                          ? "Allowed"
+                          : "Not Allowed"
+                      }
+                      icon={
+                        selected.manualPosting === 1 ? (
+                          <GppGoodIcon />
+                        ) : (
+                          <GppBadIcon />
+                        )
+                      }
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
+                </Grid>
 
-              <Grid size={{ xs: 12, sm: 6, md: 5 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Segment
-                </Typography>
-                <Typography>
-                  {selected.segmentCode}{" "}
-                  {selected.segmentDescription
-                    ? `- ${selected.segmentDescription}`
-                    : ""}
-                </Typography>
-              </Grid>
+                <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Balance Forward
+                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.balFwd === 1 ? "Yes" : "No"}
+                      icon={
+                        selected.balFwd === 1 ? (
+                          <CheckCircleIcon />
+                        ) : (
+                          <CancelIcon />
+                        )
+                      }
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
+                </Grid>
 
-              <Grid size={{ xs: 12, sm: 6, md: 2 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Comp2
-                </Typography>
-                <Typography>{selected.comp2}</Typography>
-              </Grid>
+                {/* ROW 4 */}
+                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Open Date
+                  </Typography>
+                  <Typography variant="body2">
+                    {selected.openDate || "NA"}
+                  </Typography>
+                </Grid>
 
-              {/* ROW 3 */}
-              <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Balance Compare
-                </Typography>
-                <CustomChip
-                  label={selected.balcompare === 1 ? "Include" : "Exclude"}
-                  icon={
-                    selected.balcompare === 1 ? (
-                      <BookmarkAddedIcon />
-                    ) : (
-                      <BookmarkRemoveIcon />
-                    )
-                  }
-                  color={"default"}
-                  variant="outlined"
-                />
+                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Close Date
+                  </Typography>
+                  <Typography variant="body2">
+                    {selected.closeDate || "NA"}
+                  </Typography>
+                </Grid>
               </Grid>
-
-              <Grid size={{ xs: 12, sm: 6, md: 5 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Manual Posting
-                </Typography>
-                <Typography></Typography>
-                <CustomChip
-                  label={
-                    selected.manualPosting === 1 ? "Allowed" : "Not Allowed"
-                  }
-                  icon={
-                    selected.manualPosting === 1 ? (
-                      <GppGoodIcon />
-                    ) : (
-                      <GppBadIcon />
-                    )
-                  }
-                  color={"default"}
-                  variant="outlined"
-                />
-              </Grid>
-
-              <Grid size={{ xs: 12, sm: 6, md: 2 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Balance Forward
-                </Typography>
-                {/* <Typography>{selected.balFwd === 1 ? "Yes" : "No"}</Typography> */}
-                <CustomChip
-                  label={selected.balFwd === 1 ? "Yes" : "No"}
-                  icon={
-                    selected.balFwd === 1 ? <CheckCircleIcon /> : <CancelIcon />
-                  }
-                  color={"default"}
-                  variant="outlined"
-                />
-              </Grid>
-
-              {/* ROW 4 */}
-              <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Open Date
-                </Typography>
-                <Typography>{selected.openDate || "NA"}</Typography>
-              </Grid>
-
-              <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{ fontWeight: 700, color: "text.secondary", mb: 0.4 }}
-                >
-                  Close Date
-                </Typography>
-                <Typography>{selected.closeDate || "NA"}</Typography>
-              </Grid>
-            </Grid>
-          </Box>
-        )}
-      </Card>
+            </Box>
+          )}
+        </Card>
+      </Box>
     </Box>
   );
 }
