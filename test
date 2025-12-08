@@ -26,93 +26,39 @@ import BookmarkRemoveIcon from "@mui/icons-material/BookmarkRemove";
 import GppGoodIcon from "@mui/icons-material/GppGood";
 import GppBadIcon from "@mui/icons-material/GppBad";
 import CustomChip from "../../utils/CustomChip";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import dayjs from "dayjs";
+import customParseFormat from "dayjs/plugin/customParseFormat";
+import advancedFormat from "dayjs/plugin/advancedFormat";
 
-// Classification lookup
-const ACCOUNT_CLASSIFICATIONS = {
-  A: {
-    label: "Asset",
-    icon: <DatasetIcon fontSize="small" />,
-  },
-  L: {
-    label: "Liability",
-    icon: <AccountBalanceWalletIcon fontSize="small" />,
-  },
-  I: {
-    label: "Income",
-    icon: <TrendingUpIcon fontSize="small" />,
-  },
-  E: {
-    label: "Expense",
-    icon: <TrendingDownIcon fontSize="small" />,
-  },
-  M: { label: "Memo A/c", icon: <NoteIcon fontSize="small" /> },
+dayjs.extend(customParseFormat);
+dayjs.extend(advancedFormat);
+
+const formatDateDayjs = (dateString) => {
+  console.log("dateString >", dateString);
+  if (!dateString) {
+    console.log("Input dateString is empty.");
+    return "NA";
+  }
+
+  const dayjsObject = dayjs(dateString, "DD/MM/YYYY");
+
+  if (!dayjsObject.isValid()) {
+    console.error("Failed to parse date");
+    return "NA";
+  }
+  const formattedDate = dayjsObject.format("Do MMMM, YYYY");
+  console.log(formattedDate);
+  return formattedDate;
 };
-
-// Allowed characters for text search:
-// - letters, digits, space, -, &, /, ., ,, (, )
-const TEXT_PATTERN = /^[A-Za-z0-9\s\-&/.,()]*$/;
-
-function validateSearch(value) {
-  const raw = value || "";
-  const trimmedStart = raw.trimStart();
-
-  if (!trimmedStart) {
-    return { error: "", type: null };
-  }
-
-  const firstChar = trimmedStart.charAt(0);
-  const startsWithDigit = /\d/.test(firstChar);
-
-  if (startsWithDigit) {
-    // NUMBER MODE
-    const digitsOnly = raw.replace(/\s/g, "");
-    if (!/^\d*$/.test(digitsOnly)) {
-      return {
-        error: "When starting with a number, only digits are allowed.",
-        type: "number",
-      };
-    }
-    if (digitsOnly.length > 10) {
-      return {
-        error: "Maximum 10 digits allowed for CGL number.",
-        type: "number",
-      };
-    }
-    return { error: "", type: "number" };
-  }
-
-  // TEXT MODE
-  if (raw.length > 30) {
-    return {
-      error: "Maximum 30 characters allowed for description search.",
-      type: "text",
-    };
-  }
-
-  if (!TEXT_PATTERN.test(raw)) {
-    return {
-      error:
-        "Only letters, numbers, spaces and - & / . , ( ) are allowed for text.",
-      type: "text",
-    };
-  }
-
-  return { error: "", type: "text" };
-}
 
 export default function CglView() {
   const { callApi } = useApi();
-
-  // What user is typing
-  const [inputValue, setInputValue] = useState("");
-  // Last valid value used for API calls
+  const showSnackBar = useCustomSnackbar();
   const [searchValue, setSearchValue] = useState("");
   const [options, setOptions] = useState([]);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(false);
-
-  const [inputError, setInputError] = useState("");
-  const [inputType, setInputType] = useState(null);
 
   // ---- Trigger Search when searchValue changes ----
   useEffect(() => {
@@ -123,56 +69,50 @@ export default function CglView() {
       return;
     }
 
-    let cancelled = false;
-
     const fetch = async () => {
       try {
         setLoading(true);
         const res = await callApi(
-          "/CM/cglWithSegment",
-          { cglNumb: text, cglDesc: text },
+          "/CM/viewBranch",
+          //   { branchCodeOrName: text },
+          { branchCodeOrName: text },
           "GET"
         );
-        if (!cancelled) setOptions(res?.data?.data || []);
+        setOptions(res?.data || []);
+      } catch (error) {
+        console.log("Something went wrong while fetching Branch", error);
+        showSnackBar(
+          "Something went wrong while fetching Branch's, Kindly try again after sometime",
+          "warning"
+        );
       } finally {
-        if (!cancelled) setLoading(false);
+        setLoading(false);
       }
     };
 
     fetch();
-    return () => {
-      cancelled = true;
-    };
-  }, [searchValue, callApi]);
+  }, [searchValue, callApi, showSnackBar]);
 
-  const classification = selected
-    ? ACCOUNT_CLASSIFICATIONS[selected.acClassification]
-    : null;
-
-  // Handle typing + validation
   const handleInputChange = (_, value) => {
-    setInputValue(value);
-
-    const { error, type } = validateSearch(value);
-    setInputError(error);
-    setInputType(type);
-
-    // Only update searchValue (which triggers API) when input is valid
-    if (!error) {
-      setSearchValue(value);
-    }
+    console.log("value >", value);
+    setSearchValue(value);
   };
 
-  const helperText = (() => {
-    if (inputError) return inputError;
+  const formatAddressString = (selected) => {
+    const parts = [];
 
-    if (!inputValue) return "Type CGL number (up to 10 digits) or description.";
-    if (inputValue.trim().length < 3)
-      return "Type at least 3 characters to start searching.";
-    if (inputType === "number") return "Searching by CGL number.";
-    if (inputType === "text") return "Searching by CGL description.";
-    return "";
-  })();
+    if (selected && selected.address) {
+      parts.push(selected.address.trim());
+    }
+    if (selected && selected.branchCity) {
+      parts.push(selected.branchCity.trim());
+    }
+    if (selected && selected.pinCode) {
+      parts.push(selected.pinCode.trim());
+    }
+    const finalString = parts.join(", ");
+    return finalString || "NA";
+  };
 
   return (
     <Box
@@ -180,18 +120,16 @@ export default function CglView() {
         p: 3,
         display: "flex",
         justifyContent: "center",
-        bgcolor: (theme) =>
-          theme.palette.mode === "light" ? "#f5f5f7" : "background.default",
       }}
     >
       <Box sx={{ width: "100%", maxWidth: 1200 }}>
         {/* PAGE HEADING */}
         <Box sx={{ mb: 2 }}>
           <Typography variant="h5" sx={{ fontWeight: 700, mb: 0.5 }}>
-            CGL Master Lookup
+            Branch Master Lookup
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Search CGL by number or description and view key account details in
+          <Typography variant="body1" color="text.secondary">
+            Search Branch by number or its name and view key account details in
             a clean, readable layout.
           </Typography>
         </Box>
@@ -207,10 +145,10 @@ export default function CglView() {
           }}
         >
           <Typography
-            variant="subtitle2"
+            variant="h5"
             sx={{ fontWeight: 600, color: "text.secondary", mb: 0.5 }}
           >
-            Search
+            Search Branch
           </Typography>
           <Autocomplete
             fullWidth
@@ -218,15 +156,15 @@ export default function CglView() {
             loading={loading}
             options={options}
             onChange={(_, v) => setSelected(v)}
-            inputValue={inputValue}
+            searchValue={searchValue}
             onInputChange={handleInputChange}
             getOptionLabel={(o) =>
-              o ? `${o.cglNumber} - ${o.description}` : ""
+              o ? `${o.branchCode} - ${o.branchName}` : ""
             }
             noOptionsText={
-              inputValue.trim().length < 3
+              searchValue.trim().length < 3
                 ? "Type at least 3 characters..."
-                : "No CGLs found for given input"
+                : "No Branch's found for given input"
             }
             // Improve dropdown layering and look
             slotProps={{
@@ -242,11 +180,9 @@ export default function CglView() {
             renderInput={(params) => (
               <TextField
                 {...params}
-                label="Search CGL by Number or Description"
-                placeholder="e.g. 1234567890 or Savings Account"
+                label="Search Branch by Number or Description"
+                placeholder="e.g. 12345 or abcd"
                 size="small"
-                error={Boolean(inputError)}
-                helperText={helperText}
                 InputProps={{
                   ...params.InputProps,
                   endAdornment: (
@@ -264,7 +200,12 @@ export default function CglView() {
         {/* DETAILS CARD */}
         <Card sx={{ p: 3 }}>
           {!selected ? (
-            <Box sx={{ minHeight: 220 }}>
+            <Box
+              display="flex"
+              alignItems="center"
+              justifyContent="center"
+              sx={{ minHeight: 220 }}
+            >
               <Stack
                 height="100%"
                 alignItems="center"
@@ -275,14 +216,14 @@ export default function CglView() {
                   sx={{ fontSize: 40, color: "text.secondary", mb: 0.5 }}
                 />
                 <Typography variant="subtitle1">
-                  No CGL selected yet
+                  No Branch selected yet
                 </Typography>
                 <Typography
-                  variant="body2"
+                  variant="body1"
                   color="text.secondary"
                   textAlign="center"
                 >
-                  Start typing in the search box above and pick a CGL to view
+                  Start typing in the search box above and pick a Branch to view
                   its complete details.
                 </Typography>
               </Stack>
@@ -304,46 +245,56 @@ export default function CglView() {
                     variant="h6"
                     sx={{ fontWeight: 700, mb: 0.5, letterSpacing: 0.2 }}
                   >
-                    CGL Details
+                    Branch Details
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    {selected.cglNumber} — {selected.description}
+                  <Typography variant="body1" color="text.secondary">
+                    {selected.branchCode} — {selected.branchName}
                   </Typography>
                 </Box>
 
-                {classification && (
-                  <CustomChip
-                    label={classification.label}
-                    icon={classification.icon}
-                    variant="outlined"
-                  />
-                )}
+                <CustomChip
+                  label={selected.status == true ? "Active" : "Inactive"}
+                  variant="outlined"
+                />
               </Box>
 
               <Divider sx={{ mb: 2 }} />
 
               <Grid container spacing={3}>
                 {/* ROW 1 */}
-                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                <Grid size={{ xs: 12, sm: 6, md: 2 }}>
                   <Typography
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    CGL Number
+                    Branch Number
                   </Typography>
                   <Typography variant="body1" sx={{ fontWeight: 600 }}>
-                    {selected.cglNumber}
+                    {selected.branchCode}
                   </Typography>
                 </Grid>
 
-                <Grid size={{ xs: 12, sm: 6, md: 5 }}>
+                <Grid size={{ xs: 12, sm: 6, md: 3.5 }}>
                   <Typography
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    CGL Description
+                    Branch Name
                   </Typography>
-                  <Typography variant="body1">{selected.description}</Typography>
+                  <Typography variant="body1">{selected.branchName}</Typography>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 3.5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch Circle
+                  </Typography>
+                  <Typography variant="body1">
+                    {selected.circleCode || "—"}{" "}
+                    {selected.circleName ? `- ${selected.circleName}` : ""}
+                  </Typography>
                 </Grid>
 
                 <Grid size={{ xs: 12, sm: 6, md: 3 }}>
@@ -351,45 +302,61 @@ export default function CglView() {
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    Account Classification
+                    Branch State
                   </Typography>
-                  {classification && (
-                    <Box sx={{ mt: 0.5 }}>
-                      <CustomChip
-                        label={classification.label}
-                        icon={classification.icon}
-                        variant="outlined"
-                      />
-                    </Box>
-                  )}
+                  <Typography variant="body1">
+                    {selected.stateCode || "—"}{" "}
+                    {selected.stateName ? `- ${selected.stateName}` : ""}
+                  </Typography>
                 </Grid>
 
                 {/* ROW 2 */}
-                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                <Grid size={{ xs: 12, sm: 6, md: 2 }}>
                   <Typography
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    Comp1
+                    NMR Code
                   </Typography>
-                  <Typography variant="body2">
-                    {selected.comp1 || "—"}
-                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.nmrCode || "NA"}
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
                 </Grid>
 
-                <Grid size={{ xs: 12, sm: 6, md: 5 }}>
+                <Grid size={{ xs: 12, sm: 6, md: 3.5 }}>
                   <Typography
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    Segment
+                    Branch mail
                   </Typography>
-                  <Typography variant="body2">
-                    {selected.segmentCode || "—"}{" "}
-                    {selected.segmentDescription
-                      ? `- ${selected.segmentDescription}`
-                      : ""}
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.emailId || "NA"}
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 3.5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch Phone
                   </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.phoneNumber || "NA"}
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
                 </Grid>
 
                 <Grid size={{ xs: 12, sm: 6, md: 3 }}>
@@ -397,112 +364,146 @@ export default function CglView() {
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    Comp2
+                    Branch Status
                   </Typography>
-                  <Typography variant="body2">
-                    {selected.comp2 || "—"}
-                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.status === true ? "Active" : "Inactive"}
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
                 </Grid>
 
                 {/* ROW 3 */}
-                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                <Grid size={{ xs: 12, sm: 6, md: 12 }}>
                   <Typography
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    Balance Compare
+                    Branch Address
                   </Typography>
                   <Box sx={{ mt: 0.5 }}>
-                    <CustomChip
-                      label={
-                        selected.balcompare === 1 ? "Include" : "Exclude"
-                      }
-                      icon={
-                        selected.balcompare === 1 ? (
-                          <BookmarkAddedIcon />
-                        ) : (
-                          <BookmarkRemoveIcon />
-                        )
-                      }
-                      color="default"
-                      variant="outlined"
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid size={{ xs: 12, sm: 6, md: 5 }}>
-                  <Typography
-                    variant="subtitle2"
-                    sx={{ fontWeight: 600, color: "text.secondary" }}
-                  >
-                    Manual Posting
-                  </Typography>
-                  <Box sx={{ mt: 0.5 }}>
-                    <CustomChip
-                      label={
-                        selected.manualPosting === 1
-                          ? "Allowed"
-                          : "Not Allowed"
-                      }
-                      icon={
-                        selected.manualPosting === 1 ? (
-                          <GppGoodIcon />
-                        ) : (
-                          <GppBadIcon />
-                        )
-                      }
-                      color="default"
-                      variant="outlined"
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-                  <Typography
-                    variant="subtitle2"
-                    sx={{ fontWeight: 600, color: "text.secondary" }}
-                  >
-                    Balance Forward
-                  </Typography>
-                  <Box sx={{ mt: 0.5 }}>
-                    <CustomChip
-                      label={selected.balFwd === 1 ? "Yes" : "No"}
-                      icon={
-                        selected.balFwd === 1 ? (
-                          <CheckCircleIcon />
-                        ) : (
-                          <CancelIcon />
-                        )
-                      }
-                      color="default"
-                      variant="outlined"
-                    />
+                    <Typography variant="body1">
+                      {formatAddressString(selected)}
+                    </Typography>
                   </Box>
                 </Grid>
 
                 {/* ROW 4 */}
-                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                <Grid size={{ xs: 12, sm: 6, md: 2 }}>
                   <Typography
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    Open Date
+                    Branch Open Date
                   </Typography>
-                  <Typography variant="body2">
-                    {selected.openDate || "NA"}
+                  <Typography variant="body1">
+                    {formatDateDayjs(selected.openDate)}
                   </Typography>
                 </Grid>
 
-                <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                <Grid size={{ xs: 12, sm: 6, md: 3.5 }}>
                   <Typography
                     variant="subtitle2"
                     sx={{ fontWeight: 600, color: "text.secondary" }}
                   >
-                    Close Date
+                    Branch Close Date
                   </Typography>
-                  <Typography variant="body2">
-                    {selected.closeDate || "NA"}
+                  <Typography variant="body1">
+                    {formatDateDayjs(selected.closeDate)}
                   </Typography>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 3.5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch Merged with
+                  </Typography>
+                  <Typography variant="body1">
+                    {selected.mergedWithBranch || "NA"}
+                  </Typography>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch Merge Date
+                  </Typography>
+                  <Typography variant="body1">
+                    {formatDateDayjs(selected.mergeDate)}
+                  </Typography>
+                </Grid>
+
+                {/* ROW 5 */}
+                <Grid size={{ xs: 6, sm: 6, md: 2 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch CPC
+                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.cpcFlag || "NA"}
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
+                </Grid>
+
+                <Grid size={{ xs: 6, sm: 6, md: 3.5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch Food Credit
+                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.foodCreditFlag ? "Yes" : "No"}
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 3.5 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch currChest
+                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={selected.currChestFlag ? "Yes" : "No"}
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
+                </Grid>
+
+                <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ fontWeight: 600, color: "text.secondary" }}
+                  >
+                    Branch Type
+                  </Typography>
+                  <Box sx={{ mt: 0.5 }}>
+                    <CustomChip
+                      label={
+                        selected.branchType == "A" ? "Automated" : "Manual"
+                      }
+                      color="default"
+                      variant="outlined"
+                    />
+                  </Box>
                 </Grid>
               </Grid>
             </Box>
