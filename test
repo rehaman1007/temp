@@ -1,144 +1,258 @@
-// useNotifications.js
-import { useState, useEffect, useCallback } from "react";
-import useApi from "./useApi";
-import useStreamApi from "./useStreamApi";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
+import React, { useMemo, useState, useCallback } from "react";
+import { Box, Paper, Typography } from "@mui/material";
+import { Outlet } from "react-router-dom";
+import { useSelector } from "react-redux";
 
-const BASE_URL = "/NS/notifications";
+import LayoutHeader from "../components/LayoutHeader";
+import SideBar from "../components/SideBar/SideBar";
+import { getParentMenu } from "../utils/CommonUtilities";
+import { getIconComponent } from "../utils/IconUtils";
+import useNavigateToPage from "../hooks/useNavigateToPage";
 
-const useNotifications = () => {
-  const { callApi } = useApi();
-  const { showSnackbar } = useCustomSnackbar();
-  const { startStream, stopStream, lastMessage, connected } = useStreamApi();
+const drawerWidth = 270;
 
-  const [pageNumber, setPageNumber] = useState(0);
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const [popNotification, setPopNotification] = useState(null);
-  const size = 10;
+const CommonLayout = () => {
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
+  const menus = useSelector((state) => state.menus.menus);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
-  /** --- Fetch unread count --- **/
-  const fetchUnreadCount = useCallback(async () => {
-    try {
-      const data = await callApi(`${BASE_URL}/unread-count`);
-      if (data?.count !== undefined) setUnreadCount(data.count);
-    } catch (err) {
-      console.error("Failed to fetch unread count:", err);
-    }
-  }, [callApi]);
+  const { navigateToPage } = useNavigateToPage();
 
-  /** --- Fetch notification history (paged) --- **/
-  const fetchHistory = useCallback(
-    async (page = 0) => {
-      try {
-        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
-        const newItems = data?.content || [];
-
-        setNotifications((prev) =>
-          page === 0 ? newItems : [...prev, ...newItems]
-        );
-        setHasMore(!data?.last);
-        setPageNumber(page);
-      } catch (err) {
-        console.error("Failed to fetch notifications:", err);
-      }
-    },
-    [callApi, size]
-  );
-
-  /** --- Mark as read --- **/
-  const markAsRead = useCallback(
-    async (id) => {
-      try {
-        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
-        if (response) {
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-          );
-          setUnreadCount((prev) => Math.max(prev - 1, 0));
-        } else {
-          showSnackbar("Failed to mark as read", "error");
-        }
-      } catch (err) {
-        console.error("Mark as read failed:", err);
-      }
-    },
-    [callApi, showSnackbar]
-  );
-
-  /** --- Mark all as read --- **/
-  const markAllAsRead = useCallback(async () => {
-    try {
-      const response = await callApi(`${BASE_URL}/read-all`, {}, "POST");
-      if (response) {
-        setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-        setUnreadCount(0);
-      } else {
-        showSnackbar("Failed to mark all notifications as read", "error");
-      }
-    } catch (err) {
-      console.error("Mark all as read failed:", err);
-    }
-  }, [callApi, showSnackbar]);
-
-  /** --- SSE stream + initial load (run once, not on each menu change) --- **/
-  useEffect(() => {
-    // Initial load
-    fetchUnreadCount();
-    fetchHistory(0); // first page
-
-    // Start live stream
-    startStream(`${BASE_URL}/stream`, {
-      onMessage: (newNotification) => {
-        console.log("newNotification >", newNotification);
-      },
-    });
-
-    // Cleanup on unmount
-    return () => {
-      stopStream();
-    };
-    // We intentionally do NOT add fetchUnreadCount / fetchHistory to deps,
-    // to avoid re-running this effect on every callApi/xRequestType/menu change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startStream, stopStream]);
-
-  /** --- Show popup for 5 seconds --- **/
-  const triggerPopup = useCallback((notif) => {
-    setPopNotification(notif);
-    if (triggerPopup.timer) clearTimeout(triggerPopup.timer);
-    triggerPopup.timer = setTimeout(() => setPopNotification(null), 5000);
+  const handleDrawerToggle = useCallback(() => {
+    setMobileOpen((prev) => !prev);
   }, []);
 
-  /** --- When new message arrives via SSE --- **/
-  useEffect(() => {
-    if (lastMessage) {
-      setNotifications((prev) => [lastMessage, ...prev]);
-      setUnreadCount((prev) => prev + 1);
-      triggerPopup(lastMessage);
+  const title = useMemo(() => {
+    if (!selectedMenuItem) return "";
+
+    if (Object.hasOwn(selectedMenuItem, "hasChildren")) {
+      // Top-level menu
+      return selectedMenuItem.title;
     }
-  }, [lastMessage, triggerPopup]);
 
-  /** --- Pagination helper --- **/
-  const loadMore = useCallback(() => {
-    if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, fetchHistory, pageNumber]);
+    const parentMenu = getParentMenu(selectedMenuItem, menus);
 
-  return {
-    connected,
-    notifications,
-    unreadCount,
-    fetchUnreadCount,
-    fetchHistory,
-    markAsRead,
-    markAllAsRead,
-    stopStream,
-    loadMore,
-    hasMore,
-    popNotification,
-    setPopNotification,
-  };
+    if (!parentMenu) return selectedMenuItem.title;
+
+    return `${parentMenu.title} > ${selectedMenuItem.title}`;
+  }, [menus, selectedMenuItem]);
+
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        minHeight: "100vh",
+      }}
+    >
+      {/* Header */}
+      <LayoutHeader
+        drawerWidth={drawerWidth}
+        title={title}
+        navigateToPage={navigateToPage}
+        handleDrawerToggle={handleDrawerToggle}
+      />
+
+      {/* Sidebar */}
+      <SideBar
+        drawerWidth={drawerWidth}
+        getIconComponent={getIconComponent}
+        mobileOpen={mobileOpen}
+        handleDrawerToggle={handleDrawerToggle}
+      />
+
+      {/* Main Content */}
+      <Box
+        component="main"
+        sx={{
+          flexGrow: 1,
+          width: { xs: "100%", md: `calc(100% - ${drawerWidth}px)` },
+          p: 3,
+          pt: 11,
+          minHeight: "calc(100vh - 88px)",
+        }}
+      >
+        <Box>
+          <Paper
+            elevation={2}
+            sx={{
+              p: 2,
+              mb: 4,
+              borderRadius: 1,
+            }}
+          >
+            <Typography
+              variant="h4"
+              color="textPrimary"
+              sx={{
+                fontWeight: 700,
+                letterSpacing: "-0.02em",
+              }}
+            >
+              {title}
+            </Typography>
+          </Paper>
+
+          <Box>
+            <Outlet />
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+  );
 };
 
-export default useNotifications;
+export default CommonLayout;
+
+import React, { useState } from "react";
+import {
+  Avatar,
+  Badge,
+  Box,
+  IconButton,
+  Toolbar,
+  Typography,
+  useTheme,
+  useMediaQuery,
+} from "@mui/material";
+import { Notifications, Menu as MenuIcon } from "@mui/icons-material";
+import { useSelector } from "react-redux";
+
+import { userAvatarCreator } from "../utils/userUtilities";
+import NotificationDrawer from "./NotificationDrawer";
+import ProfileDrawer from "./ProfileDrawer";
+import SearchBar from "./search/SearchBar";
+import fLogo from "../assets/Logos/Fincore_transperent.svg";
+import useNotifications from "../hooks/useNotifications";
+import NotificationPopup from "./NotificationPopup";
+
+const LayoutHeader = ({
+  drawerWidth,
+  title, // currently not shown (commented in JSX), but kept for future
+  navigateToPage,
+  handleDrawerToggle,
+}) => {
+  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
+  const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
+
+  const {
+    notifications,
+    markAsRead,
+    markAllAsRead,
+    loadMore,
+    hasMore,
+    unreadCount,
+    popNotification,
+    setPopNotification,
+  } = useNotifications();
+
+  const user = useSelector((state) => state.auth.user);
+  const theme = useTheme();
+  const isSmallScreen = useMediaQuery(theme.breakpoints.down("lg"));
+
+  return (
+    <Box
+      position="fixed"
+      sx={{
+        width: { xs: "100%", lg: `calc(100% - ${drawerWidth}px)` },
+        right: 0,
+        top: 0,
+        zIndex: 1200,
+        background:
+          "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
+      }}
+    >
+      <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
+        {/* Left side section */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          {isSmallScreen && (
+            <IconButton
+              onClick={handleDrawerToggle}
+              sx={{ color: "text.primary" }}
+            >
+              <MenuIcon />
+            </IconButton>
+          )}
+
+          {isSmallScreen && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <img src={fLogo} alt="Logo" style={{ width: 40, height: 40 }} />
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                FinCore
+              </Typography>
+            </Box>
+          )}
+
+          {/* If you want page title in header (desktop), uncomment this:
+          {!isSmallScreen && (
+            <Typography
+              variant="h6"
+              color="textPrimary"
+              sx={{ fontWeight: 600 }}
+            >
+              {title}
+            </Typography>
+          )} */}
+        </Box>
+
+        {/* Right side section */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <SearchBar navigateToPage={navigateToPage} />
+
+          <IconButton
+            color="inherit"
+            onClick={() => setNotificationDrawerOpen(true)}
+          >
+            {unreadCount > 0 ? (
+              <Badge badgeContent={unreadCount || ""} color="error">
+                <Notifications />
+              </Badge>
+            ) : (
+              <Notifications />
+            )}
+          </IconButton>
+
+          <Avatar
+            onClick={() => setProfileDrawerOpen(true)}
+            sx={{
+              width: 32,
+              height: 32,
+              color: "primary.contrastText",
+              backgroundColor: "primary.main",
+              cursor: "pointer",
+              ml: 1,
+            }}
+          >
+            {userAvatarCreator(user)}
+          </Avatar>
+        </Box>
+      </Toolbar>
+
+      <NotificationDrawer
+        notificationDrawerOpen={notificationDrawerOpen}
+        setNotificationDrawerOpen={setNotificationDrawerOpen}
+        notifications={notifications}
+        markAsRead={markAsRead}
+        markAllAsRead={markAllAsRead}
+        loadMore={loadMore}
+        hasMore={hasMore}
+      />
+
+      <ProfileDrawer
+        profileDrawerOpen={profileDrawerOpen}
+        setProfileDrawerOpen={setProfileDrawerOpen}
+      />
+
+      {popNotification && (
+        <NotificationPopup
+          popup={popNotification}
+          handleNotificationClick={() => {
+            setNotificationDrawerOpen(true);
+            setPopNotification(null);
+          }}
+        />
+      )}
+    </Box>
+  );
+};
+
+export default React.memo(LayoutHeader);
