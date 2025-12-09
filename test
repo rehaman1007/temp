@@ -1,100 +1,102 @@
-/**
-   * Generic API caller
-   * @param {string} url - API endpoint
-   * @param {object|null} payload - Request body or query params
-   * @param {string} method - HTTP method (GET, POST, PUT, PATCH, DELETE)
-   * @param {string} responseType - Axios response type
-   * @param {string} contentType - Content-Type header
-   * @param {object} extraConfig - Additional axios config
-   * @param {boolean} returnDataOnly - for returning only response data or whole response (with headers)
-   */
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true
-    ) => {
-      let parts = url.split("/");
-      const service = parts[1];
-      let resolved = resolveConfig(`/${service}`);
-      // resolved = resolved.replace(/^\//, "");
-      parts[1] = resolved;
-      const Final_Url = /* "/" + */ parts.slice(1).join("/");
+const callApi = useCallback(
+  async (
+    url,
+    payload = null,
+    method = "GET",
+    responseType = "json",
+    contentType = "application/json",
+    extraConfig = {},
+    returnDataOnly = true
+  ) => {
+    // Build final URL using service resolution
+    const parts = url.split("/");
+    const service = parts[1];
+    const resolved = resolveConfig(`/${service}`);
+    parts[1] = resolved;
+    const Final_Url = parts.slice(1).join("/");
 
-      const controller = new AbortController();
-      activeRequestsRef.current.add(controller);
-      setLoading(true);
-      setError(null);
+    const controller = new AbortController();
+    activeRequestsRef.current.add(controller);
 
-      console.log("selectedMenuItem >>", selectedMenuItem);
-      console.log("xRequestType >>", xRequestType);
-      try {
-        const headers = {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": contentType,
-          "X-Request-Type": xRequestType,
-        };
+    setLoading(true);
+    setError(null);
 
-        const config = {
-          method: method.toUpperCase(),
-          url: Final_Url,
-          headers,
-          responseType,
-          withCredentials: true,
-          signal: controller.signal,
-          ...extraConfig,
-        };
+    try {
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": contentType,
+        "X-Request-Type": xRequestType,
+      };
 
-        // Attach payload depending on method type
-        if (payload !== null) {
-          if (method.toUpperCase() === "GET") {
-            config.params = payload;
-          } else {
-            config.data = payload;
-          }
+      const config = {
+        method: method.toUpperCase(),
+        url: Final_Url,
+        headers,
+        responseType,
+        withCredentials: true,
+        signal: controller.signal,
+        ...extraConfig,
+      };
+
+      // Attach payload depending on method type
+      if (payload !== null) {
+        if (method.toUpperCase() === "GET") {
+          config.params = payload;
+        } else {
+          config.data = payload;
         }
-
-        const response = await axios(config);
-
-        if (!controller.signal.aborted) {
-          setData(response.data);
-          const returnResponse = returnDataOnly ? response.data : response;
-          return returnResponse; // Return API data directly
-        }
-      } catch (err) {
-        if (err.status === 440) {
-          navigate("/");
-          window.alert("You have logged in another session");
-        }
-
-        if (
-          err.status === 401 &&
-          err.response?.data?.message === "INVALID_TOKEN"
-        ) {
-          navigate("/");
-        }
-
-        if (!axios.isCancel(err) && !controller.signal.aborted) {
-          console.error("API call error:", err);
-          if (err.response.data?.result?.message) {
-            snackbar(err.response.data?.result?.message, "error");
-          } else if (err.response.data?.message) {
-            snackbar(err.response.data?.message, "error");
-          } else {
-            snackbar(err.response.statusText, "error");
-          }
-          setError(err);
-        }
-
-        if (axios.isCancel(err)) throw err;
-      } finally {
-        activeRequestsRef.current.delete(controller);
-        setLoading(false);
       }
-    },
-    [navigate, selectedMenuItem, snackbar, token, xRequestType]
-  );
+
+      const response = await axios(config);
+
+      if (!controller.signal.aborted) {
+        setData(response.data);
+        return returnDataOnly ? response.data : response;
+      }
+    } catch (err) {
+      // Axios error structure: err.response?.status
+      const status = err.response?.status;
+
+      // Session / auth handling
+      if (status === 440) {
+        navigate("/");
+        window.alert("You have logged in another session");
+      }
+
+      if (
+        status === 401 &&
+        err.response?.data?.message === "INVALID_TOKEN"
+      ) {
+        navigate("/");
+      }
+
+      // Ignore cancellation
+      if (!axios.isCancel(err) && !controller.signal.aborted) {
+        console.error("API call error:", err);
+
+        const apiMessage =
+          err.response?.data?.result?.message ||
+          err.response?.data?.message ||
+          err.response?.statusText ||
+          "Something went wrong";
+
+        snackbar(apiMessage, "error");
+        setError(err);
+      }
+
+      if (axios.isCancel(err)) {
+        // Let caller handle cancellation if they care
+        throw err;
+      }
+    } finally {
+      activeRequestsRef.current.delete(controller);
+      setLoading(false);
+    }
+  },
+  // PRECISE dependencies:
+  // - navigate: from react-router (stable)
+  // - snackbar: from your hook/context
+  // - token: auth token used in headers
+  // - xRequestType: header value
+  [navigate, snackbar, token, xRequestType]
+);
