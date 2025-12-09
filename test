@@ -1,3 +1,4 @@
+// useNotifications.js
 import { useState, useEffect, useCallback } from "react";
 import useApi from "./useApi";
 import useStreamApi from "./useStreamApi";
@@ -33,14 +34,17 @@ const useNotifications = () => {
       try {
         const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
         const newItems = data?.content || [];
-        setNotifications((prev) => [...prev, ...newItems]);
+
+        setNotifications((prev) =>
+          page === 0 ? newItems : [...prev, ...newItems]
+        );
         setHasMore(!data?.last);
         setPageNumber(page);
       } catch (err) {
         console.error("Failed to fetch notifications:", err);
       }
     },
-    [callApi, size, showSnackbar]
+    [callApi, size]
   );
 
   /** --- Mark as read --- **/
@@ -52,7 +56,7 @@ const useNotifications = () => {
           setNotifications((prev) =>
             prev.map((n) => (n.id === id ? { ...n, read: true } : n))
           );
-          setUnreadCount((prev) => prev - 1);
+          setUnreadCount((prev) => Math.max(prev - 1, 0));
         } else {
           showSnackbar("Failed to mark as read", "error");
         }
@@ -63,7 +67,7 @@ const useNotifications = () => {
     [callApi, showSnackbar]
   );
 
-  /** --- Mark as read --- **/
+  /** --- Mark all as read --- **/
   const markAllAsRead = useCallback(async () => {
     try {
       const response = await callApi(`${BASE_URL}/read-all`, {}, "POST");
@@ -74,32 +78,40 @@ const useNotifications = () => {
         showSnackbar("Failed to mark all notifications as read", "error");
       }
     } catch (err) {
-      console.error("Mark as read failed:", err);
+      console.error("Mark all as read failed:", err);
     }
   }, [callApi, showSnackbar]);
 
-  /** --- SSE stream: receive live notifications --- **/
+  /** --- SSE stream + initial load (run once, not on each menu change) --- **/
   useEffect(() => {
+    // Initial load
     fetchUnreadCount();
-    fetchHistory(0); // load first page
+    fetchHistory(0); // first page
 
+    // Start live stream
     startStream(`${BASE_URL}/stream`, {
       onMessage: (newNotification) => {
         console.log("newNotification >", newNotification);
       },
     });
 
-    return () => stopStream();
-  }, [fetchUnreadCount, fetchHistory, startStream, stopStream]);
+    // Cleanup on unmount
+    return () => {
+      stopStream();
+    };
+    // We intentionally do NOT add fetchUnreadCount / fetchHistory to deps,
+    // to avoid re-running this effect on every callApi/xRequestType/menu change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startStream, stopStream]);
 
-  /** --- Show popup for 4 seconds --- **/
+  /** --- Show popup for 5 seconds --- **/
   const triggerPopup = useCallback((notif) => {
     setPopNotification(notif);
     if (triggerPopup.timer) clearTimeout(triggerPopup.timer);
     triggerPopup.timer = setTimeout(() => setPopNotification(null), 5000);
   }, []);
 
-  /** --- When new message arrives externally --- **/
+  /** --- When new message arrives via SSE --- **/
   useEffect(() => {
     if (lastMessage) {
       setNotifications((prev) => [lastMessage, ...prev]);
