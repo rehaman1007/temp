@@ -1,210 +1,132 @@
-// useApi.js
-import {
-  useEffect,
-  useRef,
-  useState,
-  useCallback,
-  useMemo,
-} from "react";
-import axios from "axios";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useState, useEffect, useCallback } from "react";
+import useApi from "./useApi";
+import useStreamApi from "./useStreamApi";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
-import { useSelector } from "react-redux";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { convertToKebabCase } from "../utils/CommonUtilities";
 
-const useApi = () => {
-  const [data, setData] = useState(null); // Store API response data
-  const [error, setError] = useState(null); // Store error info
-  const [loading, setLoading] = useState(false); // Loading state
+const BASE_URL = "/NS/notifications";
 
-  const navigate = useNavigate();
-  const location = useLocation();
-  const snackbar = useCustomSnackbar();
+const useNotifications = () => {
+  const { callApi } = useApi();
+  const { showSnackbar } = useCustomSnackbar();
+  const { startStream, stopStream, lastMessage, connected } = useStreamApi();
 
-  const token = useSelector((state) => state.auth.token);
-  const menus = useSelector((s) => s.menus.menus);
-  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+  const [pageNumber, setPageNumber] = useState(0);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [popNotification, setPopNotification] = useState(null);
+  const size = 10;
 
-  // Keep track of active requests for cancellation
-  const activeRequestsRef = useRef(new Set());
-
-  /** Refresh token handler (if required) */
-  const refreshToken = async () => {
+  /** --- Fetch unread count --- **/
+  const fetchUnreadCount = useCallback(async () => {
     try {
-      await axios.post(
-        `${resolveConfig("/LS") ?? ""}/refresh-token`,
-        {},
-        { withCredentials: true }
-      );
+      const data = await callApi(`${BASE_URL}/unread-count`);
+      if (data?.count !== undefined) setUnreadCount(data.count);
     } catch (err) {
-      console.error("Token refresh failed", err);
+      console.error("Failed to fetch unread count:", err);
     }
-  };
+  }, [callApi]);
 
-  /** Cancel all ongoing requests */
-  const cancelAllRequests = () => {
-    activeRequestsRef.current.forEach((controller) => {
-      if (controller && !controller.signal.aborted) {
-        controller.abort();
-      }
-    });
-    activeRequestsRef.current.clear();
-    setLoading(false);
-  };
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => cancelAllRequests();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /** Find menu item from route (same idea as in Sidebar) */
-  const findMenuItem = useCallback((items, route) => {
-    if (!items || !items.length) return null;
-
-    for (const item of items) {
-      // Direct route match
-      if (item.route === route) return item;
-
-      // Children / nested routes
-      if (item.children && item.children.length > 0) {
-        const isSubmenuSelectionPage = route.includes("/choose-option");
-
-        if (isSubmenuSelectionPage) {
-          const prefix = "/choose-option/";
-          const startIndex = route.indexOf(prefix) + prefix.length;
-          const parameter = route.substring(startIndex);
-          if (parameter === convertToKebabCase(item.title)) {
-            return item;
-          }
-        }
-
-        const childMatch = findMenuItem(item.children, route);
-        if (childMatch) return childMatch;
-      }
-    }
-
-    return null;
-  }, []);
-
-  /** Current menu from route (for latest screen) */
-  const currentMenuFromRoute = useMemo(() => {
-    if (!menus || !menus.length) return null;
-    return findMenuItem(menus, location.pathname);
-  }, [menus, location.pathname, findMenuItem]);
-
-  /** X-Request-Type – always try to use the route-based menu first */
-  const xRequestType = useMemo(() => {
-    return (
-      currentMenuFromRoute?.requestType ||
-      selectedMenuItem?.requestType ||
-      "*"
-    );
-  }, [currentMenuFromRoute, selectedMenuItem]);
-
-  /** Generic API caller */
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true
-    ) => {
-      // Build final URL using service resolution
-      const parts = url.split("/");
-      const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
-      parts[1] = resolved;
-      const Final_Url = parts.slice(1).join("/");
-
-      const controller = new AbortController();
-      activeRequestsRef.current.add(controller);
-
-      setLoading(true);
-      setError(null);
-
-      // Debug logs – you can remove once verified
-      console.log("Redux selectedMenuItem ID   >>", selectedMenuItem?.id);
-      console.log("Redux selectedMenuItem title>>", selectedMenuItem?.title);
-      console.log("Route-based menu ID         >>", currentMenuFromRoute?.id);
-      console.log("Route-based menu title      >>", currentMenuFromRoute?.title);
-      console.log("X-Request-Type header       >>", xRequestType);
-
+  /** --- Fetch notification history (paged) --- **/
+  const fetchHistory = useCallback(
+    async (page = 0) => {
       try {
-        const headers = {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": contentType,
-          "X-Request-Type": xRequestType,
-        };
-
-        const config = {
-          method: method.toUpperCase(),
-          url: Final_Url,
-          headers,
-          responseType,
-          withCredentials: true,
-          signal: controller.signal,
-          ...extraConfig,
-        };
-
-        // Attach payload depending on method type
-        if (payload !== null) {
-          if (method.toUpperCase() === "GET") {
-            config.params = payload;
-          } else {
-            config.data = payload;
-          }
-        }
-
-        const response = await axios(config);
-
-        if (!controller.signal.aborted) {
-          setData(response.data);
-          return returnDataOnly ? response.data : response;
-        }
+        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
+        const newItems = data?.content || [];
+        setNotifications((prev) => [...prev, ...newItems]);
+        setHasMore(!data?.last);
+        setPageNumber(page);
       } catch (err) {
-        const status = err.response?.status;
-
-        if (status === 440) {
-          navigate("/");
-          window.alert("You have logged in another session");
-        }
-
-        if (status === 401 && err.response?.data?.message === "INVALID_TOKEN") {
-          navigate("/");
-        }
-
-        if (!axios.isCancel(err) && !controller.signal.aborted) {
-          console.error("API call error:", err);
-
-          const apiMessage =
-            err.response?.data?.result?.message ||
-            err.response?.data?.message ||
-            err.response?.statusText ||
-            "Something went wrong";
-
-          snackbar(apiMessage, "error");
-          setError(err);
-        }
-
-        if (axios.isCancel(err)) {
-          // Let caller handle cancellation if they care
-          throw err;
-        }
-      } finally {
-        activeRequestsRef.current.delete(controller);
-        setLoading(false);
+        console.error("Failed to fetch notifications:", err);
       }
     },
-    // 🔥 Precise deps: callApi only changes when these change
-    [navigate, snackbar, token, xRequestType]
+    [callApi, size, showSnackbar]
   );
 
-  return { data, error, loading, callApi, cancelAllRequests, refreshToken };
+  /** --- Mark as read --- **/
+  const markAsRead = useCallback(
+    async (id) => {
+      try {
+        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
+        if (response) {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id ? { ...n, read: true } : n))
+          );
+          setUnreadCount((prev) => prev - 1);
+        } else {
+          showSnackbar("Failed to mark as read", "error");
+        }
+      } catch (err) {
+        console.error("Mark as read failed:", err);
+      }
+    },
+    [callApi, showSnackbar]
+  );
+
+  /** --- Mark as read --- **/
+  const markAllAsRead = useCallback(async () => {
+    try {
+      const response = await callApi(`${BASE_URL}/read-all`, {}, "POST");
+      if (response) {
+        setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+        setUnreadCount(0);
+      } else {
+        showSnackbar("Failed to mark all notifications as read", "error");
+      }
+    } catch (err) {
+      console.error("Mark as read failed:", err);
+    }
+  }, [callApi, showSnackbar]);
+
+  /** --- SSE stream: receive live notifications --- **/
+  useEffect(() => {
+    fetchUnreadCount();
+    fetchHistory(0); // load first page
+
+    startStream(`${BASE_URL}/stream`, {
+      onMessage: (newNotification) => {
+        console.log("newNotification >", newNotification);
+      },
+    });
+
+    return () => stopStream();
+  }, [fetchUnreadCount, fetchHistory, startStream, stopStream]);
+
+  /** --- Show popup for 4 seconds --- **/
+  const triggerPopup = useCallback((notif) => {
+    setPopNotification(notif);
+    if (triggerPopup.timer) clearTimeout(triggerPopup.timer);
+    triggerPopup.timer = setTimeout(() => setPopNotification(null), 5000);
+  }, []);
+
+  /** --- When new message arrives externally --- **/
+  useEffect(() => {
+    if (lastMessage) {
+      setNotifications((prev) => [lastMessage, ...prev]);
+      setUnreadCount((prev) => prev + 1);
+      triggerPopup(lastMessage);
+    }
+  }, [lastMessage, triggerPopup]);
+
+  /** --- Pagination helper --- **/
+  const loadMore = useCallback(() => {
+    if (hasMore) fetchHistory(pageNumber + 1);
+  }, [hasMore, fetchHistory, pageNumber]);
+
+  return {
+    connected,
+    notifications,
+    unreadCount,
+    fetchUnreadCount,
+    fetchHistory,
+    markAsRead,
+    markAllAsRead,
+    stopStream,
+    loadMore,
+    hasMore,
+    popNotification,
+    setPopNotification,
+  };
 };
 
-export default useApi;
+export default useNotifications;
