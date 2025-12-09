@@ -1,234 +1,100 @@
-import React, { useCallback, useEffect } from "react";
-import {
-  Box,
-  Button,
-  Card,
-  CardContent,
-  Drawer,
-  List,
-  ListItem,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
-  Typography,
-  useMediaQuery,
-  useTheme,
-} from "@mui/material";
-import { useLocation } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
-import { setSelectedMenuItem } from "../../app/slices/menuSlice";
-import fLogo from "../../assets/Logos/Fincore_transperent.svg";
-import useNavigateToPage from "../../hooks/useNavigateToPage";
-import { convertToKebabCase } from "../../utils/CommonUtilities";
+/**
+   * Generic API caller
+   * @param {string} url - API endpoint
+   * @param {object|null} payload - Request body or query params
+   * @param {string} method - HTTP method (GET, POST, PUT, PATCH, DELETE)
+   * @param {string} responseType - Axios response type
+   * @param {string} contentType - Content-Type header
+   * @param {object} extraConfig - Additional axios config
+   * @param {boolean} returnDataOnly - for returning only response data or whole response (with headers)
+   */
+  const callApi = useCallback(
+    async (
+      url,
+      payload = null,
+      method = "GET",
+      responseType = "json",
+      contentType = "application/json",
+      extraConfig = {},
+      returnDataOnly = true
+    ) => {
+      let parts = url.split("/");
+      const service = parts[1];
+      let resolved = resolveConfig(`/${service}`);
+      // resolved = resolved.replace(/^\//, "");
+      parts[1] = resolved;
+      const Final_Url = /* "/" + */ parts.slice(1).join("/");
 
-// ====== Memoized Menu Item ======
-const MemoizedMenuItem = React.memo(
-  ({ item, selectedMenuItem, getIconComponent, onClick }) => {
-    const IconComponent = getIconComponent(item.icon);
+      const controller = new AbortController();
+      activeRequestsRef.current.add(controller);
+      setLoading(true);
+      setError(null);
 
-    const selectedOption =
-      selectedMenuItem?.id === item.id ||
-      item?.children?.some(
-        (suboption) => suboption.id === selectedMenuItem?.id
-      );
+      console.log("selectedMenuItem >>", selectedMenuItem);
+      console.log("xRequestType >>", xRequestType);
+      try {
+        const headers = {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": contentType,
+          "X-Request-Type": xRequestType,
+        };
 
-    return (
-      <ListItem disablePadding>
-        <ListItemButton selected={selectedOption} onClick={() => onClick(item)}>
-          <ListItemIcon sx={{ minWidth: 40 }}>
-            <IconComponent />
-          </ListItemIcon>
-          <ListItemText
-            primary={item.title}
-            sx={{
-              "& .MuiTypography-root": {
-                fontWeight: selectedOption ? 600 : 400,
-                color: selectedOption ? "primary.main" : "text.primary",
-              },
-            }}
-          />
-        </ListItemButton>
-      </ListItem>
-    );
-  }
-);
+        const config = {
+          method: method.toUpperCase(),
+          url: Final_Url,
+          headers,
+          responseType,
+          withCredentials: true,
+          signal: controller.signal,
+          ...extraConfig,
+        };
 
-// ====== Drawer Header ======
-const DrawerHeader = React.memo(() => (
-  <Box
-    sx={{
-      p: 2,
-      borderBottom: "1px solid #E2E8F0",
-      display: "flex",
-      alignItems: "center",
-      gap: 2,
-    }}
-  >
-    <img src={fLogo} alt="Logo" style={{ width: 50, height: 50 }} />
-    <Box>
-      <Typography variant="h6" sx={{ fontWeight: 700 }}>
-        FinCore
-      </Typography>
-      <Typography variant="caption" color="text.secondary">
-        Empowering Data
-      </Typography>
-    </Box>
-  </Box>
-));
-
-// ====== Main Sidebar Component ======
-const SideBar = ({
-  drawerWidth,
-  getIconComponent,
-  mobileOpen,
-  handleDrawerToggle,
-}) => {
-  const location = useLocation();
-  const dispatch = useDispatch();
-  const menus = useSelector((state) => state.menus.menus);
-  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
-  const { navigateToPage } = useNavigateToPage();
-
-  const theme = useTheme();
-  const isSmallScreen = useMediaQuery(theme.breakpoints.down("lg"));
-
-  // Recursive function to find menu item based on route
-  const findMenuItem = useCallback((items, route) => {
-    for (const item of items) {
-      // Direct route match
-      if (item.route === route) return item;
-
-      // Check children
-      if (item.children && item.children.length > 0) {
-        const isSubmenuSelectionPage = route.includes("/choose-option");
-
-        if (isSubmenuSelectionPage) {
-          const prefix = "/choose-option/";
-          const startIndex = route.indexOf(prefix) + prefix.length;
-          const parameter = route.substring(startIndex);
-          if (parameter === convertToKebabCase(item.title)) {
-            return item;
+        // Attach payload depending on method type
+        if (payload !== null) {
+          if (method.toUpperCase() === "GET") {
+            config.params = payload;
+          } else {
+            config.data = payload;
           }
         }
 
-        const childMatch = findMenuItem(item.children, route);
-        if (childMatch) return childMatch;
+        const response = await axios(config);
+
+        if (!controller.signal.aborted) {
+          setData(response.data);
+          const returnResponse = returnDataOnly ? response.data : response;
+          return returnResponse; // Return API data directly
+        }
+      } catch (err) {
+        if (err.status === 440) {
+          navigate("/");
+          window.alert("You have logged in another session");
+        }
+
+        if (
+          err.status === 401 &&
+          err.response?.data?.message === "INVALID_TOKEN"
+        ) {
+          navigate("/");
+        }
+
+        if (!axios.isCancel(err) && !controller.signal.aborted) {
+          console.error("API call error:", err);
+          if (err.response.data?.result?.message) {
+            snackbar(err.response.data?.result?.message, "error");
+          } else if (err.response.data?.message) {
+            snackbar(err.response.data?.message, "error");
+          } else {
+            snackbar(err.response.statusText, "error");
+          }
+          setError(err);
+        }
+
+        if (axios.isCancel(err)) throw err;
+      } finally {
+        activeRequestsRef.current.delete(controller);
+        setLoading(false);
       }
-    }
-    return null;
-  }, []);
-
-  // Sync selectedMenuItem with URL (reload / direct URL / back-forward navigation)
-  useEffect(() => {
-    if (menus.length > 0) {
-      const foundItem = findMenuItem(menus, location.pathname);
-
-      if (foundItem && foundItem?.route !== selectedMenuItem?.route) {
-        dispatch(setSelectedMenuItem(foundItem));
-      }
-    }
-  }, [dispatch, findMenuItem, location.pathname, menus, selectedMenuItem]);
-
-  // Handle menu click - FIX: update Redux immediately here
-  const handleMenuClick = (item) => {
-    // Update selected item instantly (no 1-step lag)
-    dispatch(setSelectedMenuItem(item));
-
-    // Navigate to route
-    navigateToPage(item);
-
-    // Close drawer on small screens
-    if (isSmallScreen) {
-      handleDrawerToggle();
-    }
-  };
-
-  const drawerContent = (
-    <Box sx={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <DrawerHeader />
-
-      <Box sx={{ flexGrow: 1, overflow: "auto" }}>
-        <List sx={{ py: 1 }}>
-          {menus.length > 0 ? (
-            menus.map((item) => (
-              <MemoizedMenuItem
-                key={item.id}
-                item={item}
-                selectedMenuItem={selectedMenuItem}
-                getIconComponent={getIconComponent}
-                onClick={handleMenuClick}
-              />
-            ))
-          ) : (
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              sx={{ textAlign: "center", mt: 3 }}
-            >
-              No menu available
-            </Typography>
-          )}
-        </List>
-      </Box>
-
-      <Box sx={{ p: 2, borderTop: "1px solid #E2E8F0" }}>
-        <Card>
-          <CardContent sx={{ p: 2 }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
-              Need Help?
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              Contact our support team
-            </Typography>
-            <Button size="small" variant="contained" fullWidth>
-              Connect to SCORE
-            </Button>
-          </CardContent>
-        </Card>
-      </Box>
-    </Box>
+    },
+    [navigate, selectedMenuItem, snackbar, token, xRequestType]
   );
-
-  return (
-    <Box
-      component="nav"
-      sx={{ width: { lg: drawerWidth }, flexShrink: { lg: 0 } }}
-    >
-      {/* Temporary Drawer for small screens */}
-      <Drawer
-        variant="temporary"
-        open={mobileOpen}
-        onClose={handleDrawerToggle}
-        ModalProps={{ keepMounted: true }}
-        sx={{
-          display: { xs: "block", lg: "none" },
-          "& .MuiDrawer-paper": {
-            width: drawerWidth,
-            backgroundColor: (theme) => theme.palette.background.paper,
-          },
-        }}
-      >
-        {drawerContent}
-      </Drawer>
-
-      {/* Permanent Drawer for large screens */}
-      <Drawer
-        variant="permanent"
-        sx={{
-          display: { xs: "none", lg: "block" },
-          "& .MuiDrawer-paper": {
-            width: drawerWidth,
-            boxSizing: "border-box",
-            display: "flex",
-            flexDirection: "column",
-          },
-        }}
-        open
-      >
-        {drawerContent}
-      </Drawer>
-    </Box>
-  );
-};
-
-export default React.memo(SideBar);
