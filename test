@@ -1,134 +1,314 @@
-// src/utils/buildDashboardConfig.js
+// src/pages/DashboardPage.jsx
 
-const labelMap = {
-  BRANCH: "Branch",
-  CURRENCY: "Currency",
-  ROLE_MANAGEMENT: "Role Management",
-  SEGMENT: "Segment",
-  CGL: "CGL",
-  STATE: "State",
-  USER_MANAGEMENT: "User Management",
-  CALENDER: "Calendar",
-  CIRCLE: "Circle"
+import React, { useEffect, useState } from "react";
+import {
+  Box,
+  Card,
+  CardContent,
+  Typography,
+  Stack,
+  Chip,
+  List,
+  ListItem,
+  ListItemText,
+  Divider
+} from "@mui/material";
+import Grid from "@mui/material/Unstable_Grid2";
+
+import {
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend
+} from "recharts";
+
+import { buildDashboardConfig } from "../utils/buildDashboardConfig";
+import useApi from "../hooks/useApi"; // your hook
+
+// Simple color arrays for charts
+const COLORS = ["#8884d8", "#82ca9d", "#ffc658", "#ff7f50", "#00bcd4"];
+
+function getSeverityColor(severity) {
+  switch (severity) {
+    case "WARN":
+      return "warning";
+    case "ERROR":
+      return "error";
+    case "INFO":
+    default:
+      return "info";
+  }
+}
+
+const DashboardPage = () => {
+  const api = useApi();
+  const [rawData, setRawData] = useState(null);
+  const [config, setConfig] = useState({ sections: [] });
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      try {
+        const res = await api.get("/dashboard"); // adjust URL
+        if (res.data && res.data.success) {
+          setRawData(res.data.data);
+          setConfig(buildDashboardConfig(res.data.data));
+        }
+      } catch (e) {
+        console.error("Failed to load dashboard", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [api]);
+
+  if (loading || !rawData) {
+    return (
+      <Box p={3}>
+        <Typography variant="body1">Loading dashboard…</Typography>
+      </Box>
+    );
+  }
+
+  return (
+    <Box p={3}>
+      {/* HEADER */}
+      <Stack direction="row" justifyContent="space-between" mb={3}>
+        <Typography variant="h5" fontWeight={600}>
+          Welcome to FinCore
+        </Typography>
+        <Chip label={rawData.viewType || "EXECUTOR_VIEW"} variant="outlined" />
+      </Stack>
+
+      {/* SECTIONS */}
+      {config.sections.map((section) => (
+        <Box key={section.id} mb={3}>
+          {section.title && (
+            <Typography variant="subtitle1" fontWeight={600} mb={1}>
+              {section.title}
+            </Typography>
+          )}
+
+          <Grid container spacing={2}>
+            {section.widgets.map((w) => (
+              <Grid key={w.id} xs={12} md={section.widgets.length > 1 ? 6 : 12} lg={3}>
+                <Card
+                  variant="outlined"
+                  sx={{ borderRadius: 3, height: "100%", minHeight: 240 }}
+                >
+                  <CardContent sx={{ height: "100%" }}>
+                    {w.title && (
+                      <Typography
+                        variant="subtitle2"
+                        fontWeight={600}
+                        mb={1}
+                      >
+                        {w.title}
+                      </Typography>
+                    )}
+
+                    <Box sx={{ height: "85%" }}>
+                      {renderWidget(w)}
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
+            ))}
+          </Grid>
+        </Box>
+      ))}
+    </Box>
+  );
 };
 
-export function buildDashboardConfig(apiData) {
-  if (!apiData || !apiData.stats) return { sections: [] };
+function renderWidget(widget) {
+  const { type, data } = widget;
 
-  const { stats, announcements = [], recentActivity = [] } = apiData;
+  if (type === "stat") {
+    return (
+      <Stack spacing={1} justifyContent="center" sx={{ height: "100%" }}>
+        <Typography variant="h3">{data.value}</Typography>
+        {data.secondary && data.secondary.length > 0 && (
+          <Box>
+            {data.secondary.map((s) => (
+              <Typography
+                key={s.label}
+                variant="caption"
+                display="block"
+                color="text.secondary"
+              >
+                {s.label}: <strong>{s.value}</strong>
+              </Typography>
+            ))}
+          </Box>
+        )}
+      </Stack>
+    );
+  }
 
-  const pendingForMeDetailsArr = Object.entries(stats.pendingForMeDetails || {}).map(
-    ([key, value]) => ({
-      label: labelMap[key] || key,
-      value
-    })
-  );
+  if (type === "pie") {
+    if (!data || data.length === 0) {
+      return <EmptyState text="No data" />;
+    }
+    return (
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={data}
+            dataKey="value"
+            nameKey="label"
+            outerRadius="80%"
+            label
+          >
+            {data.map((entry, index) => (
+              <Cell
+                key={`cell-${index}`}
+                fill={COLORS[index % COLORS.length]}
+              />
+            ))}
+          </Pie>
+          <Tooltip />
+        </PieChart>
+      </ResponsiveContainer>
+    );
+  }
 
-  const myPendingDetailsArr = Object.entries(stats.myPendingDetails || {}).map(
-    ([key, value]) => ({
-      label: labelMap[key] || key,
-      value
-    })
-  );
+  if (type === "bar") {
+    if (!data || data.length === 0) {
+      return <EmptyState text="No data" />;
+    }
+    return (
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data}>
+          <XAxis dataKey="module" />
+          <YAxis />
+          <Tooltip />
+          <Legend />
+          <Bar dataKey="pending" name="Pending" />
+          <Bar dataKey="approved" name="Approved" />
+          <Bar dataKey="rejected" name="Rejected" />
+        </BarChart>
+      </ResponsiveContainer>
+    );
+  }
 
-  const modules = new Set([
-    ...Object.keys(stats.myPendingDetails || {}),
-    ...Object.keys(stats.myApprovedDetails || {}),
-    ...Object.keys(stats.myRejectedDetails || {})
-  ]);
+  if (type === "list-announcements") {
+    if (!data || data.length === 0) {
+      return <EmptyState text="No announcements" />;
+    }
+    return (
+      <List dense sx={{ maxHeight: "100%", overflow: "auto" }}>
+        {data.map((a, idx) => (
+          <React.Fragment key={a.id}>
+            {idx > 0 && <Divider component="li" />}
+            <ListItem alignItems="flex-start">
+              <ListItemText
+                primary={
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Typography variant="body2" fontWeight={600}>
+                      {a.title}
+                    </Typography>
+                    <Chip
+                      label={a.severity}
+                      size="small"
+                      color={getSeverityColor(a.severity)}
+                      variant="outlined"
+                    />
+                  </Stack>
+                }
+                secondary={
+                  <>
+                    <Typography
+                      component="span"
+                      variant="caption"
+                      color="text.secondary"
+                      display="block"
+                    >
+                      {a.date}
+                    </Typography>
+                    <Typography variant="body2">{a.message}</Typography>
+                  </>
+                }
+              />
+            </ListItem>
+          </React.Fragment>
+        ))}
+      </List>
+    );
+  }
 
-  const barData = Array.from(modules).map((m) => ({
-    module: labelMap[m] || m,
-    pending: (stats.myPendingDetails && stats.myPendingDetails[m]) || 0,
-    approved: (stats.myApprovedDetails && stats.myApprovedDetails[m]) || 0,
-    rejected: (stats.myRejectedDetails && stats.myRejectedDetails[m]) || 0
-  }));
+  if (type === "list-activity") {
+    if (!data || data.length === 0) {
+      return <EmptyState text="No recent activity" />;
+    }
+    return (
+      <List dense sx={{ maxHeight: "100%", overflow: "auto" }}>
+        {data.slice(0, 10).map((a, idx) => (
+          <React.Fragment key={a.timestamp + idx}>
+            {idx > 0 && <Divider component="li" />}
+            <ListItem alignItems="flex-start">
+              <ListItemText
+                primary={
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Typography variant="body2" fontWeight={600}>
+                      {a.action}
+                    </Typography>
+                    <Chip
+                      label={a.status}
+                      size="small"
+                      color={
+                        a.status === "PENDING"
+                          ? "warning"
+                          : a.status === "REJECTED"
+                          ? "error"
+                          : "success"
+                      }
+                      variant="outlined"
+                    />
+                  </Stack>
+                }
+                secondary={
+                  <>
+                    <Typography
+                      component="span"
+                      variant="caption"
+                      color="text.secondary"
+                      display="block"
+                    >
+                      {a.displayTime}
+                    </Typography>
+                    <Typography variant="body2">{a.details}</Typography>
+                  </>
+                }
+              />
+            </ListItem>
+          </React.Fragment>
+        ))}
+      </List>
+    );
+  }
 
-  return {
-    sections: [
-      // Overview
-      {
-        id: "overview",
-        title: "My Overview",
-        widgets: [
-          {
-            id: "totalPending",
-            title: "Total Pending Requests",
-            type: "stat",
-            data: {
-              value: stats.totalPending,
-              secondary: [
-                { label: "Approved", value: stats.totalApproved },
-                { label: "Rejected", value: stats.totalRejected }
-              ]
-            }
-          },
-          {
-            id: "myPending",
-            title: "My Pending",
-            type: "stat",
-            data: {
-              value: stats.myPending,
-              secondary: myPendingDetailsArr
-            }
-          },
-          {
-            id: "pendingForMe",
-            title: "Pending For Me",
-            type: "stat",
-            data: {
-              value: stats.pendingForMe,
-              secondary: pendingForMeDetailsArr
-            }
-          }
-        ]
-      },
-
-      // My pending by module
-      {
-        id: "myPendingByModule",
-        title: "My Pending by Module",
-        widgets: [
-          {
-            id: "myPendingPie",
-            title: "Pending by Module",
-            type: "pie",
-            data: myPendingDetailsArr
-          },
-          {
-            id: "myStatusByModule",
-            title: "Pending vs Approved vs Rejected",
-            type: "bar",
-            data: barData
-          }
-        ]
-      },
-
-      // Announcements
-      {
-        id: "announcements",
-        title: "Announcements",
-        widgets: [
-          {
-            id: "annList",
-            type: "list-announcements",
-            data: announcements
-          }
-        ]
-      },
-
-      // Recent activity
-      {
-        id: "recentActivity",
-        title: "Recent Activity",
-        widgets: [
-          {
-            id: "activityList",
-            type: "list-activity",
-            data: recentActivity
-          }
-        ]
-      }
-    ]
-  };
+  return <EmptyState text={`Unknown widget type: ${type}`} />;
 }
+
+const EmptyState = ({ text }) => (
+  <Stack
+    alignItems="center"
+    justifyContent="center"
+    sx={{ height: "100%" }}
+  >
+    <Typography variant="caption" color="text.secondary">
+      {text}
+    </Typography>
+  </Stack>
+);
+
+export default DashboardPage;
