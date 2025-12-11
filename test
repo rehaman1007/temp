@@ -1,5 +1,4 @@
-// src/components/DashboardRecentActivity.jsx
-import React from "react";
+import React, { useMemo } from "react";
 import {
   Box,
   Card,
@@ -12,21 +11,24 @@ import {
   Divider,
   Chip,
   Avatar,
-  IconButton,
 } from "@mui/material";
+
 import HistoryIcon from "@mui/icons-material/History";
-import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
 import DoneIcon from "@mui/icons-material/Done";
 import CloseIcon from "@mui/icons-material/Close";
 import HourglassBottomIcon from "@mui/icons-material/HourglassBottom";
-import PersonIcon from "@mui/icons-material/Person";
-import RequestQuoteIcon from "@mui/icons-material/RequestQuote";
+import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
+import * as MUIIcons from "@mui/icons-material";
+
+import { useSelector } from "react-redux";
 import CustomChip from "../../../utils/CustomChip";
 
-/** Small Empty state used in list fallbacks */
-function EmptyState({ text = "No items" }) {
+/* ---------------------------------------------------------
+   Empty State
+--------------------------------------------------------- */
+function EmptyState({ text = "No activity" }) {
   return (
-    <Box sx={{ py: 3, textAlign: "center" }}>
+    <Box sx={{ py: 3, textAlign: "center", opacity: 0.7 }}>
       <Typography variant="body2" color="text.secondary">
         {text}
       </Typography>
@@ -34,26 +36,26 @@ function EmptyState({ text = "No items" }) {
   );
 }
 
-/** map status to chip config */
+/* ---------------------------------------------------------
+   Status Chip Logic
+--------------------------------------------------------- */
 const getStatusConfig = (status) => {
   const key = (status || "").toUpperCase();
   switch (key) {
     case "PENDING":
-      return { color: "warning", label: "PENDING", icon: <HourglassBottomIcon fontSize="small" /> };
+      return { icon: <HourglassBottomIcon fontSize="small" />, color: "warning", label: "Pending" };
     case "APPROVED":
-      return { color: "success", label: "APPROVED", icon: <DoneIcon fontSize="small" /> };
+      return { icon: <DoneIcon fontSize="small" />, color: "success", label: "Approved" };
     case "REJECTED":
-      return { color: "error", label: "REJECTED", icon: <CloseIcon fontSize="small" /> };
+      return { icon: <CloseIcon fontSize="small" />, color: "error", label: "Rejected" };
     default:
-      return { color: "default", label: key || "UNKNOWN", icon: null };
+      return { icon: <MoreHorizIcon fontSize="small" />, color: "default", label: key || "Unknown" };
   }
 };
 
-/** fallback-safe chip renderer: try CustomChip, else MUI Chip */
 const RenderChip = ({ status }) => {
   const cfg = getStatusConfig(status);
   try {
-    // prefer CustomChip if available and supports icon prop
     return (
       <CustomChip
         label={cfg.label}
@@ -64,7 +66,7 @@ const RenderChip = ({ status }) => {
         sx={{ fontWeight: 700 }}
       />
     );
-  } catch (e) {
+  } catch {
     return (
       <Chip
         label={cfg.label}
@@ -78,21 +80,67 @@ const RenderChip = ({ status }) => {
   }
 };
 
-/** pick icon for action for avatar */
-function actionIcon(action) {
-  if (!action) return <MoreHorizIcon />;
-  const a = action.toLowerCase();
-  if (a.includes("user")) return <PersonIcon />;
-  if (a.includes("request") || a.includes("raised") || a.includes("modify")) return <RequestQuoteIcon />;
-  return <MoreHorizIcon />;
+/* ---------------------------------------------------------
+   useMenuIcon – Dynamically pick icon from Redux menu list
+--------------------------------------------------------- */
+function useMenuIcon(title) {
+  const menuItems = useSelector((state) => state.menu?.items || []);
+
+  return useMemo(() => {
+    if (!title) return <MoreHorizIcon fontSize="small" />;
+
+    const normalize = (str) => (str || "").trim().toLowerCase();
+
+    const t = normalize(title);
+
+    // Try direct match
+    let found =
+      menuItems.find((m) => normalize(m.title) === t) ||
+      menuItems.find((m) => normalize(m.label) === t);
+
+    // Fallback: contains
+    if (!found) {
+      found =
+        menuItems.find((m) => normalize(m.title).includes(t)) ||
+        menuItems.find((m) => t.includes(normalize(m.title)));
+    }
+
+    // Absolute fallback: keyword match
+    if (!found) {
+      const parts = t.split(/\s+/);
+      found = menuItems.find((m) =>
+        parts.some((p) => normalize(m.title || "").includes(p))
+      );
+    }
+
+    if (!found) return <MoreHorizIcon fontSize="small" />;
+
+    const iconName = found.iconName || found.icon || found.iconKey;
+
+    if (!iconName) return <MoreHorizIcon fontSize="small" />;
+
+    const IconComp =
+      MUIIcons[iconName] ||
+      MUIIcons[`${iconName}Outlined`] ||
+      MUIIcons[`${iconName}Rounded`];
+
+    return IconComp ? <IconComp fontSize="small" /> : <MoreHorizIcon fontSize="small" />;
+  }, [title, menuItems]);
 }
 
-/** simple relative time helper (best-effort) */
+/* ---------------------------------------------------------
+   Relative Time Helper
+--------------------------------------------------------- */
 function relativeTime(tsOrDisplay) {
   try {
-    const date = typeof tsOrDisplay === "number" ? new Date(tsOrDisplay) : new Date(Date.parse(tsOrDisplay));
-    if (isNaN(date)) return "";
-    const diff = Date.now() - date.getTime();
+    const d =
+      typeof tsOrDisplay === "number"
+        ? new Date(tsOrDisplay)
+        : new Date(tsOrDisplay);
+
+    if (isNaN(d.getTime())) return "";
+
+    const diff = Date.now() - d.getTime();
     const sec = Math.floor(diff / 1000);
     if (sec < 60) return `${sec}s ago`;
     const min = Math.floor(sec / 60);
@@ -101,23 +149,23 @@ function relativeTime(tsOrDisplay) {
     if (hr < 24) return `${hr}h ago`;
     const days = Math.floor(hr / 24);
     if (days < 7) return `${days}d ago`;
-    return date.toLocaleDateString();
+
+    return d.toLocaleDateString();
   } catch {
     return "";
   }
 }
 
-/**
- * DashboardRecentActivity
- * Props:
- *  - recentActivity: array of { action, displayTime, timestamp, details, status, user, source }
- */
+/* ---------------------------------------------------------
+   MAIN COMPONENT
+--------------------------------------------------------- */
 export const DashboardRecentActivity = ({ recentActivity = [] }) => {
   const items = (recentActivity || []).slice(0, 20);
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 3 }}>
       <CardContent>
+        {/* Header */}
         <Stack direction="row" spacing={1} alignItems="center" mb={1}>
           <Box
             sx={{
@@ -138,60 +186,86 @@ export const DashboardRecentActivity = ({ recentActivity = [] }) => {
           </Typography>
         </Stack>
 
+        {/* LIST */}
         <List
           dense
           sx={{
             minHeight: 320,
             maxHeight: 320,
-            width: "100%",
             overflow: "auto",
           }}
         >
           {items.length === 0 && <EmptyState text="No activity" />}
 
           {items.map((r, idx) => {
-            const key = `${r.timestamp ?? r.displayTime ?? idx}-${idx}`;
-            const rel = relativeTime(r.timestamp ?? r.displayTime);
+            const icon = useMenuIcon(r.action);
+            const relTime = relativeTime(r.timestamp || r.displayTime);
+
             return (
-              <Box key={key}>
+              <Box key={r.timestamp + idx}>
                 {idx > 0 && <Divider component="li" />}
-                <ListItem alignItems="flex-start" sx={{ py: 1.25 }}>
-                  <Box sx={{ display: "flex", width: "100%", alignItems: "flex-start", gap: 2 }}>
-                    {/* left: avatar + title */}
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 0 }}>
-                      <Avatar sx={{ bgcolor: "rgba(0,0,0,0.06)", width: 36, height: 36 }}>
-                        {actionIcon(r.action)}
+
+                <ListItem
+                  alignItems="flex-start"
+                  sx={{
+                    py: 1.4,
+                    "&:hover": { bgcolor: "rgba(0,0,0,0.03)" },
+                  }}
+                >
+                  <Box sx={{ display: "flex", width: "100%" }}>
+                    {/* LEFT: Icon + Title */}
+                    <Stack direction="row" spacing={1.5} alignItems="flex-start">
+                      <Avatar
+                        sx={{
+                          bgcolor: "rgba(0,0,0,0.06)",
+                          width: 36,
+                          height: 36,
+                        }}
+                      >
+                        {icon}
                       </Avatar>
+
                       <Box sx={{ minWidth: 0 }}>
                         <Typography
                           variant="body2"
                           fontWeight={700}
-                          sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          sx={{
+                            overflow: "hidden",
+                            whiteSpace: "nowrap",
+                            textOverflow: "ellipsis",
+                            maxWidth: "200px",
+                          }}
                         >
                           {r.action}
                         </Typography>
+
                         <Typography variant="caption" color="text.secondary">
-                          {r.user ? `By ${r.user}` : ""} {rel ? ` • ${rel}` : ""}
+                          {relTime}
+                          {r.user ? ` • ${r.user}` : ""}
                         </Typography>
                       </Box>
-                    </Box>
+                    </Stack>
 
-                    {/* right: chip aligned to end */}
-                    <Box sx={{ marginLeft: "auto", flexShrink: 0 }}>
+                    {/* RIGHT: CHIP */}
+                    <Box sx={{ marginLeft: "auto", pt: 0.7 }}>
                       <RenderChip status={r.status} />
                     </Box>
                   </Box>
-
-                  {/* details below spanning full width */}
-                  <Box sx={{ width: "100%", mt: 1, pl: "52px" }}>
-                    <Typography variant="body2">{r.details}</Typography>
-                    {r.source && (
-                      <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
-                        {r.source}
-                      </Typography>
-                    )}
-                  </Box>
                 </ListItem>
+
+                {/* DETAILS */}
+                <Box sx={{ pl: 7, pb: 1 }}>
+                  <Typography variant="body2">{r.details}</Typography>
+                  {r.source && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ mt: 0.5, display: "block" }}
+                    >
+                      Source: {r.source}
+                    </Typography>
+                  )}
+                </Box>
               </Box>
             );
           })}
