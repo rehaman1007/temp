@@ -1,139 +1,8 @@
-// ⬇️ SAME IMPORTS — unchanged
-import React, {
-  useEffect,
-  useMemo,
-  useCallback,
-  useState,
-  useRef,
-} from "react";
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  Box,
-  Grid,
-  TextField,
-  MenuItem,
-  Typography,
-  FormControlLabel,
-  Checkbox,
-  FormHelperText,
-  FormControl,
-  FormLabel,
-  RadioGroup,
-  Radio,
-  Button,
-  IconButton,
-  Divider,
-  DialogActions,
-  Card,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
-import EditIcon from "@mui/icons-material/Edit";
-import AddIcon from "@mui/icons-material/Add";
-import BlockIcon from "@mui/icons-material/Block";
-import LockOpenIcon from "@mui/icons-material/LockOpen";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import LoadingOverlay from "../../utils/LoadingOverlay";
-import _ from "lodash";
-
-/* -------------------- CONSTANTS -------------------- */
-
-const initialCGLState = {
-  comp1: "",
-  segmentCode: "",
-  comp2: "",
-  description: "",
-  acClassification: "",
-  balFwd: false,
-  defBalType: "",
-  balCompare: "1",
-  manualPosting: "1",
-  status: "Active",
-  openDate: new Date().toISOString().split("T")[0],
-  closeDate: null,
-};
-
-function classificationFromComp1(comp1Val) {
-  if (!comp1Val) return null;
-  const ch = String(comp1Val)[0];
-  if (ch === "1" || ch === "6") return "A";
-  if (["2", "3", "4"].includes(ch)) return "L";
-  if (ch === "5") return "M";
-  if (ch === "7") return "I";
-  if (ch === "8") return "E";
-  return null;
-}
-
-function defBalTypeFromClassification(ac) {
-  switch (ac) {
-    case "A":
-      return "D";
-    case "L":
-      return "C";
-    case "M":
-      return "M";
-    case "I":
-      return "C";
-    case "E":
-      return "D";
-    default:
-      return "";
-  }
-}
-
-const descRegex = /^[A-Za-z0-9 .,"<>/&()=_-]*$/;
-
-/* -------------------- COMPONENT -------------------- */
-
-export default function CGLDialog({
-  open,
-  onClose,
-  onSaved,
-  editInitialData = null,
-  accountClassifications = [],
-  permissions = {},
-}) {
-  const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-
-  const [cglData, setCglData] = useState(initialCGLState);
-  const [errors, setErrors] = useState({});
-  const [editingId, setEditingId] = useState(null);
-  const [loadOverlay, setLoadOverlay] = useState(false);
-  const [segments, setSegments] = useState([]);
-  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
-  const [classificationLocked, setClassificationLocked] = useState(false);
-
-  /* -------------------- SNACK GATE -------------------- */
-
-  const snackGateRef = useRef(true);
-  const notifyOnce = (msg, variant = "warning") => {
-    if (!snackGateRef.current) return;
-    snackGateRef.current = false;
-    snackbar(msg, variant);
-    setTimeout(() => (snackGateRef.current = true), 800);
-  };
-
-  /* -------------------- DERIVED -------------------- */
-
-  const cglNumber = useMemo(() => {
-    return cglData.comp1 && cglData.segmentCode && cglData.comp2
-      ? `${cglData.comp1}${cglData.segmentCode}${String(cglData.comp2).padStart(
-          2,
-          "0"
-        )}`
-      : "";
-  }, [cglData]);
-
-  /* -------------------- HANDLE CHANGE (FIXED) -------------------- */
-
-  const handleChange = useCallback(
+const handleChange = useCallback(
     (e) => {
       const { name, value, type, checked } = e.target;
 
-      /* ---------- COMP1 LOGIC (FIX HERE) ---------- */
+      // hard-constraints / input blocking
       if (name === "comp1") {
         if (!/^\d*$/.test(value)) {
           notifyOnce("Comp1 accepts digits only");
@@ -143,62 +12,84 @@ export default function CGLDialog({
           notifyOnce("Comp1 must be exactly 4 digits");
           return;
         }
+      }
 
-        // 🔥 WHEN CLEARED — RESET ALL DEPENDENTS
-        if (value === "") {
-          setCglData((prev) => ({
-            ...prev,
-            comp1: "",
-            acClassification: "",
-            defBalType: "",
-            balFwd: false,
-            balCompare: "1",
-          }));
-          setClassificationLocked(false);
-          setErrors((prev) => ({
-            ...prev,
-            comp1: "Comp1 is required",
-            acClassification: "",
-          }));
+      if (name === "comp2") {
+        if (!/^\d*$/.test(value)) {
+          notifyOnce("Comp2 accepts numbers only");
           return;
         }
+        if (value.length > 2) {
+          notifyOnce("Comp2 should be 2 digits");
+          return;
+        }
+      }
 
-        const mapped = classificationFromComp1(value);
+      if (name === "description") {
+        if (!descRegex.test(value)) {
+          notifyOnce("Invalid character in Description");
+          return;
+        }
+      }
 
-        setCglData((prev) => {
-          const next = { ...prev, comp1: value };
+      if (name === "comp1") {
+        const newComp1 = value;
+        setCglData((prev) => ({ ...prev, comp1: newComp1 }));
+        const mapped = classificationFromComp1(newComp1);
+        if (mapped) {
+          setCglData((prev) => {
+            const def = defBalTypeFromClassification(mapped);
+            const updated = {
+              ...prev,
+              comp1: newComp1,
+              acClassification: mapped,
+              defBalType: def,
+            };
 
-          if (mapped) {
-            next.acClassification = mapped;
-            next.defBalType = defBalTypeFromClassification(mapped);
+            if (mapped === "A" || mapped === "L") updated.balFwd = true;
+            else if (mapped === "I" || mapped === "E") updated.balFwd = false;
 
-            if (mapped === "A" || mapped === "L") next.balFwd = true;
-            else if (mapped === "I" || mapped === "E") next.balFwd = false;
+            if (mapped === "I" || mapped === "E") updated.balCompare = "0";
 
-            if (mapped === "I" || mapped === "E") next.balCompare = "0";
-          }
+            return updated;
+          });
+          setClassificationLocked(true);
 
-          return next;
-        });
+          setErrors((prev) => ({ ...prev, comp1: "", acClassification: "" }));
+        } else {
+          setClassificationLocked(false);
+          setCglData((prev) => ({ ...prev, acClassification: "" }));
+        }
 
-        setClassificationLocked(!!mapped);
-        setErrors((prev) => ({ ...prev, comp1: "" }));
+        // validate comp1
+        const err = validateField("comp1", newComp1);
+        setErrors((prev) => ({ ...prev, comp1: err }));
         return;
       }
 
-      /* ---------- OTHER FIELDS ---------- */
+      // For balFwd checkbox toggling (only possible when enabled)
+      if (name === "balFwd") {
+        setCglData((prev) => ({ ...prev, balFwd: checked }));
+        setErrors((prev) => ({ ...prev, balFwd: "" }));
+        return;
+      }
+
+      // For balCompare (radio)
+      if (name === "balCompare") {
+        setCglData((prev) => ({ ...prev, balCompare: value }));
+        setErrors((prev) => ({ ...prev, balCompare: "" }));
+        return;
+      }
+
+      // Normal update for other fields
       setCglData((prev) => ({
         ...prev,
         [name]: type === "checkbox" ? checked : value,
       }));
+
+      // set per-field error
+      const msg = validateField(name, type === "checkbox" ? checked : value);
+      setErrors((prev) => ({ ...prev, [name]: msg }));
     },
-    [notifyOnce]
+    [cglData, notifyOnce, validateField]
   );
-
-  /* -------------------- UI (UNCHANGED) -------------------- */
-
-  // ⬇️ Everything below this point is UNCHANGED from your original
-  // Dialog JSX, submit logic, validation, block flow, etc.
-  // (Intentionally kept intact per your requirement)
-
-  // ⬇️ ... UI code remains exactly the same ...
