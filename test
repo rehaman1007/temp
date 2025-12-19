@@ -1,185 +1,112 @@
-export default App;
-
-
-import React, { useMemo, Suspense } from "react";
-import { createBrowserRouter, RouterProvider } from "react-router-dom";
-import { useSelector } from "react-redux";
-import PrivateRouter from "./PrivateRouter";
-// Page Components
-import Login from "../features/auth/pages/Login";
-import Home from "../pages/Home";
-import NotFound from "../pages/NotFound";
-import ServerError from "../pages/ServerError";
-import { generateRouteObjects } from "./RouteGenerator";
-import CommonLayout from "../layout/CommonLayout";
-import SubmenuSelectionPage from "../pages/SubmenuSelectionPage";
-import ReportBuilder from "../features/reportBuilder/ReportBuilder.page";
-import { Box } from "@mui/material";
-import FullscreenLayout from "../layout/FullscreenLayout";
-
-// A fallback component for suspense
-const PageLoader = () => <div>Loading Page...</div>;
-
-const DynamicLayout = () => {
-  const isComponentFullscreen = useSelector(
-    (state) => state.ui.isComponentFullscreen
-  );
-
-  return !isComponentFullscreen ? <CommonLayout /> : <FullscreenLayout />;
-};
-
-const AppRouter = () => {
-  const menus = useSelector((state) => state.menus.menus);
-
-  const router = useMemo(() => {
-    // Generate the dynamic routes from the menu data
-    const dynamicRoutes = generateRouteObjects(menus || []);
-
-    // Define the entire application route structure as an array of objects
-    const routeConfig = [
-      {
-        path: "/",
-        element: <Login />,
-
-        errorElement: <ServerError />, // Top-level error boundary
-      },
-      {
-        path: "/server-error",
-        element: <ServerError />,
-      },
-      // This is the protected section of app
-      {
-        element: <PrivateRouter />,
-        children: [
-          {
-            element: <DynamicLayout />,
-            children: [
-              { path: "/home", element: <Home /> },
-              {
-                path: "/choose-option/:mainMenuTitle",
-                element: <SubmenuSelectionPage />,
-              },
-              ...dynamicRoutes,
-            ],
-          },
-        ].filter(Boolean),
-      },
-
-      {
-        path: "*",
-        element: <NotFound />,
-      },
-    ];
-
-    return createBrowserRouter(routeConfig);
-  }, [menus]); // The router will only be recreated if the 'menus' data changes
-
-  return (
-    <Suspense fallback={<PageLoader />}>
-      <RouterProvider router={router} />
-    </Suspense>
-  );
-};
-
-export default AppRouter;
 // useApi.js
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import axios from "axios";
 import { useLocation, useNavigate } from "react-router-dom";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
-import { useSelector } from "react-redux";
+import { useSelector, useDispatch } from "react-redux";
 import { resolveConfig } from "../config/EnvironmentConfig";
 import { convertToKebabCase } from "../utils/CommonUtilities";
+// import { setToken, logout } from "../store/authSlice"; // if exists
 
 const useApi = () => {
-  const [data, setData] = useState(null); // Store API response data
-  const [error, setError] = useState(null); // Store error info
-  const [loading, setLoading] = useState(false); // Loading state
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
   const navigate = useNavigate();
   const location = useLocation();
   const snackbar = useCustomSnackbar();
+  const dispatch = useDispatch();
 
   const token = useSelector((state) => state.auth.token);
   const menus = useSelector((s) => s.menus.menus);
   const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
 
-  // Keep track of active requests for cancellation
+  /** -------------------- Refs -------------------- */
   const activeRequestsRef = useRef(new Set());
+  const isRefreshingRef = useRef(false);
+  const refreshQueueRef = useRef([]);
 
-  /** Refresh token handler (if required) */
-  const refreshToken = async () => {
-    try {
-      await axios.post(
-        `${resolveConfig("/LS") ?? ""}/refresh-token`,
-        {},
-        { withCredentials: true }
-      );
-    } catch (err) {
-      console.error("Token refresh failed", err);
-    }
-  };
-
-  /** Cancel all ongoing requests */
+  /** -------------------- Cancel Requests -------------------- */
   const cancelAllRequests = () => {
     activeRequestsRef.current.forEach((controller) => {
-      if (controller && !controller.signal.aborted) {
-        controller.abort();
-      }
+      if (!controller.signal.aborted) controller.abort();
     });
     activeRequestsRef.current.clear();
     setLoading(false);
   };
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => cancelAllRequests();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => () => cancelAllRequests(), []);
 
-  /** Find menu item from route (same idea as in Sidebar) */
-  const findMenuItem = useCallback((items, route) => {
-    if (!items || !items.length) return null;
-
-    for (const item of items) {
-      // Direct route match
-      if (item.route === route) return item;
-
-      // Children / nested routes
-      if (item.children && item.children.length > 0) {
-        const isSubmenuSelectionPage = route.includes("/choose-option");
-
-        if (isSubmenuSelectionPage) {
-          const prefix = "/choose-option/";
-          const startIndex = route.indexOf(prefix) + prefix.length;
-          const parameter = route.substring(startIndex);
-          if (parameter === convertToKebabCase(item.title)) {
-            return item;
-          }
-        }
-
-        const childMatch = findMenuItem(item.children, route);
-        if (childMatch) return childMatch;
-      }
+  /** -------------------- Refresh Token -------------------- */
+  const refreshToken = async () => {
+    if (isRefreshingRef.current) {
+      return new Promise((resolve, reject) => {
+        refreshQueueRef.current.push({ resolve, reject });
+      });
     }
 
+    isRefreshingRef.current = true;
+
+    try {
+      const res = await axios.post(
+        `${resolveConfig("/LS") ?? ""}/refresh-token`,
+        {},
+        { withCredentials: true }
+      );
+
+      const newToken = res.data?.accessToken;
+
+      if (!newToken) throw new Error("No access token received");
+
+      // dispatch(setToken(newToken));
+
+      refreshQueueRef.current.forEach(p => p.resolve(newToken));
+      refreshQueueRef.current = [];
+
+      return newToken;
+    } catch (err) {
+      refreshQueueRef.current.forEach(p => p.reject(err));
+      refreshQueueRef.current = [];
+      throw err;
+    } finally {
+      isRefreshingRef.current = false;
+    }
+  };
+
+  /** -------------------- Menu Resolver -------------------- */
+  const findMenuItem = useCallback((items, route) => {
+    if (!items?.length) return null;
+
+    for (const item of items) {
+      if (item.route === route) return item;
+
+      if (item.children?.length) {
+        if (route.includes("/choose-option/")) {
+          const param = route.split("/choose-option/")[1];
+          if (param === convertToKebabCase(item.title)) return item;
+        }
+
+        const found = findMenuItem(item.children, route);
+        if (found) return found;
+      }
+    }
     return null;
   }, []);
 
-  /** Current menu from route (for latest screen) */
   const currentMenuFromRoute = useMemo(() => {
-    if (!menus || !menus.length) return null;
     return findMenuItem(menus, location.pathname);
   }, [menus, location.pathname, findMenuItem]);
 
-  /** X-Request-Type – always try to use the route-based menu first */
-  const xRequestType = useMemo(() => {
-    return (
-      currentMenuFromRoute?.requestType || selectedMenuItem?.requestType || "*"
-    );
-  }, [currentMenuFromRoute, selectedMenuItem]);
+  const xRequestType = useMemo(
+    () =>
+      currentMenuFromRoute?.requestType ||
+      selectedMenuItem?.requestType ||
+      "*",
+    [currentMenuFromRoute, selectedMenuItem]
+  );
 
-
+  /** -------------------- Main API Caller -------------------- */
   const callApi = useCallback(
     async (
       url,
@@ -190,11 +117,9 @@ const useApi = () => {
       extraConfig = {},
       returnDataOnly = true
     ) => {
-      // Build final URL using service resolution
       const parts = url.split("/");
       const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
-      parts[1] = resolved;
+      parts[1] = resolveConfig(`/${service}`);
       const Final_Url = parts.slice(1).join("/");
 
       const controller = new AbortController();
@@ -204,88 +129,97 @@ const useApi = () => {
       setError(null);
 
       try {
-        const headers = {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": contentType,
-          "X-Request-Type": xRequestType,
-        };
-
         const config = {
-          method: method.toUpperCase(),
+          method,
           url: Final_Url,
-          headers,
           responseType,
           withCredentials: true,
           signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": contentType,
+            "X-Request-Type": xRequestType,
+            ...(extraConfig.headers || {}),
+          },
           ...extraConfig,
         };
 
-        // Attach payload depending on method type
-        if (payload !== null) {
-          if (method.toUpperCase() === "GET") {
-            config.params = payload;
-          } else {
-            config.data = payload;
-          }
+        if (payload) {
+          method === "GET"
+            ? (config.params = payload)
+            : (config.data = payload);
         }
 
         const response = await axios(config);
-        console.log(response);
+        setData(response.data);
 
-        if (!controller.signal.aborted) {
-          if (response.data.status === 440) {
-            console.error("You have logged in another session");
-            navigate("/");
-          }
-
-          if (response?.data?.status === 401) {
-            console.error("You have to login again as the session is expired");
-            navigate("/");
-          }
-
-          setData(response.data);
-          return returnDataOnly ? response.data : response;
-        }
+        return returnDataOnly ? response.data : response;
       } catch (err) {
         const status = err.response?.status;
+        const errorCode = err.response?.data?.errorCode;
 
+        /** 🔴 Concurrent Login */
         if (status === 440) {
-          console.error("You have logged in another session");
           navigate("/");
+          return;
         }
 
-        // if (status === 401) {
-        //   console.error("You have to login again as the session is expired");
-        //   navigate("/");
-        // }
+        /** 🟠 Token Expired */
+        if (
+          status === 401 &&
+          errorCode === "TOKEN_EXPIRED" &&
+          !extraConfig.__isRetry
+        ) {
+          try {
+            const newToken = await refreshToken();
 
-        if (!axios.isCancel(err) && !controller.signal.aborted) {
-          console.error("API call error:", err);
+            return await callApi(
+              url,
+              payload,
+              method,
+              responseType,
+              contentType,
+              {
+                ...extraConfig,
+                __isRetry: true,
+                headers: {
+                  ...(extraConfig.headers || {}),
+                  Authorization: `Bearer ${newToken}`,
+                },
+              },
+              returnDataOnly
+            );
+          } catch {
+            navigate("/");
+            return;
+          }
+        }
 
-          const apiMessage =
-            err.response?.data?.result?.message ||
+        /** ❌ Other 401 */
+        if (status === 401) {
+          navigate("/");
+          return;
+        }
+
+        if (!axios.isCancel(err)) {
+          const msg =
             err.response?.data?.message ||
             err.response?.statusText ||
             "Something went wrong";
-
-          snackbar(apiMessage, "error");
+          snackbar(msg, "error");
           setError(err);
         }
 
-        if (axios.isCancel(err)) {
-          // Let caller handle cancellation if they care
-          throw err;
-        }
+        throw err;
       } finally {
         activeRequestsRef.current.delete(controller);
         setLoading(false);
       }
     },
-    // Precise deps: callApi only changes when these change
-    [navigate, snackbar, token, xRequestType]
+    [token, xRequestType, navigate, snackbar]
   );
 
-  return { data, error, loading, callApi, cancelAllRequests, refreshToken };
+  return { data, error, loading, callApi, cancelAllRequests };
 };
 
 export default useApi;
