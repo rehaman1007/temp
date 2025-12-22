@@ -1,292 +1,56 @@
-// store/authSlice.js
-import { createSlice } from "@reduxjs/toolkit";
-
-const authSlice = createSlice({
-  name: "auth",
-  initialState: {
-    token: null,
-    isAuthenticated: false,
-    sessionError: null // "expired" | "concurrent"
-  },
-  reducers: {
-    setToken: (state, action) => {
-      state.token = action.payload;
-      state.isAuthenticated = true;
-      state.sessionError = null;
-    },
-    sessionExpired: (state) => {
-      state.token = null;
-      state.isAuthenticated = false;
-      state.sessionError = "expired";
-    },
-    concurrentLogin: (state) => {
-      state.token = null;
-      state.isAuthenticated = false;
-      state.sessionError = "concurrent";
-    },
-    logout: (state) => {
-      state.token = null;
-      state.isAuthenticated = false;
-      state.sessionError = null;
-    }
-  }
-});
-
-export const {
-  setToken,
-  sessionExpired,
-  concurrentLogin,
-  logout
-} = authSlice.actions;
-
-export default authSlice.reducer;
-
-// api/authService.js
-import axios from "axios";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import store from "../store";
-import { setToken, sessionExpired } from "../store/authSlice";
-
-export const silentRefresh = async () => {
-  try {
-    const res = await axios.post(
-      `${resolveConfig("/LS")}/refresh-token`,
-      {},
-      { withCredentials: true }
-    );
-
-    if (res.data?.token) {
-      store.dispatch(setToken(res.data.token));
-      return true;
-    }
-
-    throw new Error("No token returned");
-  } catch (err) {
-    store.dispatch(sessionExpired());
-    return false;
-  }
-};
-
-// api/apiClient.js
-import axios from "axios";
-import store from "../store";
+import "./App.css";
+import AppRouter from "./routes/AppRouter";
 import {
-  setToken,
-  sessionExpired,
-  concurrentLogin
-} from "../store/authSlice";
-import { silentRefresh } from "./authService";
+  Box,
+  CssBaseline,
+  StyledEngineProvider,
+  ThemeProvider,
+  useColorScheme,
+} from "@mui/material";
+import { useEffect } from "react";
+import { SnackbarProviderComponent } from "./utils/SnackbarContext";
+import GlobalBackground from "./theme/GlobalBackground";
+import AppTheme from "./theme/AppTheme";
 
-let isRefreshing = false;
-let failedQueue = [];
+// component to handle color scheme logic
+const ColorSchemeInitializer = () => {
+  const { mode, setMode } = useColorScheme();
 
-const processQueue = (error, token = null) => {
-  failedQueue.forEach(p => (error ? p.reject(error) : p.resolve(token)));
-  failedQueue = [];
+  useEffect(() => {
+    // Only log and set mode if it's not undefined
+    if (mode === "system" || mode === undefined) {
+      setMode("light");
+    }
+    console.log("Current color scheme :: ", mode);
+  }, [mode, setMode]);
+
+  // This component doesn't render anything visible, it just manages the state
+  return null;
 };
 
-const apiClient = axios.create({
-  withCredentials: true
-});
-
-/** REQUEST */
-apiClient.interceptors.request.use(config => {
-  const token = store.getState().auth.token;
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
-
-/** RESPONSE */
-apiClient.interceptors.response.use(
-  res => res,
-  async err => {
-    const originalRequest = err.config;
-    const status = err.response?.status;
-
-    /** 🔥 CONCURRENT LOGIN */
-    if (status === 440) {
-      store.dispatch(concurrentLogin());
-      localStorage.setItem("logout", Date.now());
-      return Promise.reject(err);
-    }
-
-    /** 🔁 ACCESS TOKEN EXPIRED */
-    if (status === 401 && !originalRequest._retry) {
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
-        }).then(token => {
-          originalRequest.headers.Authorization = `Bearer ${token}`;
-          return apiClient(originalRequest);
-        });
-      }
-
-      originalRequest._retry = true;
-      isRefreshing = true;
-
-      const success = await silentRefresh();
-
-      if (!success) {
-        processQueue(new Error("Session expired"), null);
-        return Promise.reject(err);
-      }
-
-      const newToken = store.getState().auth.token;
-      processQueue(null, newToken);
-
-      originalRequest.headers.Authorization = `Bearer ${newToken}`;
-      isRefreshing = false;
-      return apiClient(originalRequest);
-    }
-
-    return Promise.reject(err);
-  }
-);
-
-export default apiClient;
-
-// hooks/useApi.js
-import { useState, useRef, useEffect, useCallback } from "react";
-import apiClient from "../api/apiClient";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-
-const useApi = () => {
-  const [loading, setLoading] = useState(false);
-  const snackbar = useCustomSnackbar();
-  const controllers = useRef(new Set());
-
-  const cancelAllRequests = () => {
-    controllers.current.forEach(c => c.abort());
-    controllers.current.clear();
-  };
-
-  useEffect(() => cancelAllRequests, []);
-
-  const callApi = useCallback(async (
-    url,
-    payload = null,
-    method = "GET",
-    config = {}
-  ) => {
-    const controller = new AbortController();
-    controllers.current.add(controller);
-    setLoading(true);
-
-    try {
-      const res = await apiClient({
-        url,
-        method,
-        signal: controller.signal,
-        ...(payload && (method === "GET"
-          ? { params: payload }
-          : { data: payload })),
-        ...config
-      });
-
-      return res.data;
-    } catch (err) {
-      if (!controller.signal.aborted) {
-        snackbar(
-          err.response?.data?.message || "Something went wrong",
-          "error"
-        );
-      }
-      throw err;
-    } finally {
-      controllers.current.delete(controller);
-      setLoading(false);
-    }
-  }, [snackbar]);
-
-  return { callApi, loading, cancelAllRequests };
-};
-
-export default useApi;
-
-import { Dialog, DialogTitle, DialogActions, Button } from "@mui/material";
-import { useDispatch } from "react-redux";
-import { logout } from "../../store/authSlice";
-
-export default function SessionExpiredDialog({ open }) {
-  const dispatch = useDispatch();
+function App() {
 
   return (
-    <Dialog open={open}>
-      <DialogTitle>
-        Session expired. Please login again.
-      </DialogTitle>
-      <DialogActions>
-        <Button
-          onClick={() => {
-            dispatch(logout());
-            window.location.href = "/";
-          }}
-        >
-          Login
-        </Button>
-      </DialogActions>
-    </Dialog>
+    <>
+      <AppTheme>
+        <StyledEngineProvider enableCssLayer>
+          <ColorSchemeInitializer />
+          <CssBaseline enableColorScheme />
+          <GlobalBackground />
+          <Box
+            sx={{
+              transition:
+                "background-color 0.6s ease, color 0.6s ease, filter 0.6s ease",
+            }}
+          >
+            <SnackbarProviderComponent>
+              <AppRouter />
+            </SnackbarProviderComponent>
+          </Box>
+        </StyledEngineProvider>
+      </AppTheme>
+    </>
   );
 }
 
-import { Dialog, DialogTitle, DialogActions, Button } from "@mui/material";
-import { useDispatch } from "react-redux";
-import { logout } from "../../store/authSlice";
-
-export default function ConcurrentLoginDialog({ open }) {
-  const dispatch = useDispatch();
-
-  return (
-    <Dialog open={open}>
-      <DialogTitle>
-        Your account was logged in from another device.
-      </DialogTitle>
-      <DialogActions>
-        <Button
-          color="error"
-          onClick={() => {
-            dispatch(logout());
-            window.location.href = "/";
-          }}
-        >
-          OK
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
-import { useEffect, useState } from "react";
-import { silentRefresh } from "../api/authService";
-
-export default function AuthBootstrap({ children }) {
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    silentRefresh().finally(() => setReady(true));
-  }, []);
-
-  if (!ready) return null; // or loader
-  return children;
-}
-
-
-import { useEffect, useState } from "react";
-import { silentRefresh } from "../api/authService";
-
-export default function AuthBootstrap({ children }) {
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    silentRefresh().finally(() => setReady(true));
-  }, []);
-
-  if (!ready) return null; // or loader
-  return children;
-}
-
-window.addEventListener("storage", (e) => {
-  if (e.key === "logout") {
-    window.location.href = "/";
-  }
-});
+export default App;
