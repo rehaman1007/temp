@@ -1,211 +1,292 @@
-// useApi.js
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+// store/authSlice.js
+import { createSlice } from "@reduxjs/toolkit";
+
+const authSlice = createSlice({
+  name: "auth",
+  initialState: {
+    token: null,
+    isAuthenticated: false,
+    sessionError: null // "expired" | "concurrent"
+  },
+  reducers: {
+    setToken: (state, action) => {
+      state.token = action.payload;
+      state.isAuthenticated = true;
+      state.sessionError = null;
+    },
+    sessionExpired: (state) => {
+      state.token = null;
+      state.isAuthenticated = false;
+      state.sessionError = "expired";
+    },
+    concurrentLogin: (state) => {
+      state.token = null;
+      state.isAuthenticated = false;
+      state.sessionError = "concurrent";
+    },
+    logout: (state) => {
+      state.token = null;
+      state.isAuthenticated = false;
+      state.sessionError = null;
+    }
+  }
+});
+
+export const {
+  setToken,
+  sessionExpired,
+  concurrentLogin,
+  logout
+} = authSlice.actions;
+
+export default authSlice.reducer;
+
+// api/authService.js
 import axios from "axios";
-import { useLocation, useNavigate } from "react-router-dom";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-import { useSelector } from "react-redux";
 import { resolveConfig } from "../config/EnvironmentConfig";
-import { convertToKebabCase } from "../utils/CommonUtilities";
+import store from "../store";
+import { setToken, sessionExpired } from "../store/authSlice";
+
+export const silentRefresh = async () => {
+  try {
+    const res = await axios.post(
+      `${resolveConfig("/LS")}/refresh-token`,
+      {},
+      { withCredentials: true }
+    );
+
+    if (res.data?.token) {
+      store.dispatch(setToken(res.data.token));
+      return true;
+    }
+
+    throw new Error("No token returned");
+  } catch (err) {
+    store.dispatch(sessionExpired());
+    return false;
+  }
+};
+
+// api/apiClient.js
+import axios from "axios";
+import store from "../store";
+import {
+  setToken,
+  sessionExpired,
+  concurrentLogin
+} from "../store/authSlice";
+import { silentRefresh } from "./authService";
+
+let isRefreshing = false;
+let failedQueue = [];
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach(p => (error ? p.reject(error) : p.resolve(token)));
+  failedQueue = [];
+};
+
+const apiClient = axios.create({
+  withCredentials: true
+});
+
+/** REQUEST */
+apiClient.interceptors.request.use(config => {
+  const token = store.getState().auth.token;
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+/** RESPONSE */
+apiClient.interceptors.response.use(
+  res => res,
+  async err => {
+    const originalRequest = err.config;
+    const status = err.response?.status;
+
+    /** 🔥 CONCURRENT LOGIN */
+    if (status === 440) {
+      store.dispatch(concurrentLogin());
+      localStorage.setItem("logout", Date.now());
+      return Promise.reject(err);
+    }
+
+    /** 🔁 ACCESS TOKEN EXPIRED */
+    if (status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        }).then(token => {
+          originalRequest.headers.Authorization = `Bearer ${token}`;
+          return apiClient(originalRequest);
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      const success = await silentRefresh();
+
+      if (!success) {
+        processQueue(new Error("Session expired"), null);
+        return Promise.reject(err);
+      }
+
+      const newToken = store.getState().auth.token;
+      processQueue(null, newToken);
+
+      originalRequest.headers.Authorization = `Bearer ${newToken}`;
+      isRefreshing = false;
+      return apiClient(originalRequest);
+    }
+
+    return Promise.reject(err);
+  }
+);
+
+export default apiClient;
+
+// hooks/useApi.js
+import { useState, useRef, useEffect, useCallback } from "react";
+import apiClient from "../api/apiClient";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
 
 const useApi = () => {
-  const [data, setData] = useState(null); // Store API response data
-  const [error, setError] = useState(null); // Store error info
-  const [loading, setLoading] = useState(false); // Loading state
-
-  const navigate = useNavigate();
-  const location = useLocation();
+  const [loading, setLoading] = useState(false);
   const snackbar = useCustomSnackbar();
+  const controllers = useRef(new Set());
 
-  const token = useSelector((state) => state.auth.token);
-  const menus = useSelector((s) => s.menus.menus);
-  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
-
-  // Keep track of active requests for cancellation
-  const activeRequestsRef = useRef(new Set());
-
-  /** Refresh token handler (if required) */
-  const refreshToken = async () => {
-    try {
-      await axios.post(
-        `${resolveConfig("/LS") ?? ""}/refresh-token`,
-        {},
-        { withCredentials: true }
-      );
-    } catch (err) {
-      console.error("Token refresh failed", err);
-    }
-  };
-
-  /** Cancel all ongoing requests */
   const cancelAllRequests = () => {
-    activeRequestsRef.current.forEach((controller) => {
-      if (controller && !controller.signal.aborted) {
-        controller.abort();
-      }
-    });
-    activeRequestsRef.current.clear();
-    setLoading(false);
+    controllers.current.forEach(c => c.abort());
+    controllers.current.clear();
   };
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => cancelAllRequests();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => cancelAllRequests, []);
 
-  /** Find menu item from route (same idea as in Sidebar) */
-  const findMenuItem = useCallback((items, route) => {
-    if (!items || !items.length) return null;
+  const callApi = useCallback(async (
+    url,
+    payload = null,
+    method = "GET",
+    config = {}
+  ) => {
+    const controller = new AbortController();
+    controllers.current.add(controller);
+    setLoading(true);
 
-    for (const item of items) {
-      // Direct route match
-      if (item.route === route) return item;
+    try {
+      const res = await apiClient({
+        url,
+        method,
+        signal: controller.signal,
+        ...(payload && (method === "GET"
+          ? { params: payload }
+          : { data: payload })),
+        ...config
+      });
 
-      // Children / nested routes
-      if (item.children && item.children.length > 0) {
-        const isSubmenuSelectionPage = route.includes("/choose-option");
-
-        if (isSubmenuSelectionPage) {
-          const prefix = "/choose-option/";
-          const startIndex = route.indexOf(prefix) + prefix.length;
-          const parameter = route.substring(startIndex);
-          if (parameter === convertToKebabCase(item.title)) {
-            return item;
-          }
-        }
-
-        const childMatch = findMenuItem(item.children, route);
-        if (childMatch) return childMatch;
+      return res.data;
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        snackbar(
+          err.response?.data?.message || "Something went wrong",
+          "error"
+        );
       }
+      throw err;
+    } finally {
+      controllers.current.delete(controller);
+      setLoading(false);
     }
+  }, [snackbar]);
 
-    return null;
-  }, []);
-
-  /** Current menu from route (for latest screen) */
-  const currentMenuFromRoute = useMemo(() => {
-    if (!menus || !menus.length) return null;
-    return findMenuItem(menus, location.pathname);
-  }, [menus, location.pathname, findMenuItem]);
-
-  /** X-Request-Type – always try to use the route-based menu first */
-  const xRequestType = useMemo(() => {
-    return (
-      currentMenuFromRoute?.requestType || selectedMenuItem?.requestType || "*"
-    );
-  }, [currentMenuFromRoute, selectedMenuItem]);
-
-
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true
-    ) => {
-      // Build final URL using service resolution
-      console.log("url >", url);
-      const parts = url.split("/");
-      const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
-      parts[1] = resolved;
-      const Final_Url = parts.slice(1).join("/");
-
-      const controller = new AbortController();
-      activeRequestsRef.current.add(controller);
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const headers = {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": contentType,
-          "X-Request-Type": xRequestType,
-        };
-
-        const config = {
-          method: method.toUpperCase(),
-          url: Final_Url,
-          headers,
-          responseType,
-          withCredentials: true,
-          signal: controller.signal,
-          ...extraConfig,
-        };
-
-        // Attach payload depending on method type
-        if (payload !== null) {
-          if (method.toUpperCase() === "GET") {
-            config.params = payload;
-          } else {
-            config.data = payload;
-          }
-        }
-
-        const response = await axios(config);
-        // console.log(response);
-
-        if (!controller.signal.aborted) {
-          if (response.data.status === 440) {
-            console.error("You have logged in another session");
-            navigate("/");
-          }
-
-          if (response?.data?.status === 401) {
-            console.error("You have to login again as the session is expired");
-            navigate("/");
-          }
-
-          setData(response.data);
-          return returnDataOnly ? response.data : response;
-        }
-      } catch (err) {
-        const status = err.response?.status;
-
-        if (status === 440) {
-          console.error("You have logged in another session");
-          navigate("/");
-        }
-
-        // if (status === 401) {
-        //   console.error("You have to login again as the session is expired");
-        //   navigate("/");
-        // }
-
-        if (!axios.isCancel(err) && !controller.signal.aborted) {
-          console.error("API call error:", err);
-
-          const apiMessage =
-            err.response?.data?.result?.message ||
-            err.response?.data?.message ||
-            err.response?.statusText ||
-            "Something went wrong";
-
-          snackbar(apiMessage, "error");
-          setError(err);
-        }
-
-        if (axios.isCancel(err)) {
-          // Let caller handle cancellation if they care
-          throw err;
-        }
-      } finally {
-        activeRequestsRef.current.delete(controller);
-        setLoading(false);
-      }
-    },
-    // Precise deps: callApi only changes when these change
-    [navigate, snackbar, token, xRequestType]
-  );
-
-  return { data, error, loading, callApi, cancelAllRequests, refreshToken };
+  return { callApi, loading, cancelAllRequests };
 };
 
 export default useApi;
 
+import { Dialog, DialogTitle, DialogActions, Button } from "@mui/material";
+import { useDispatch } from "react-redux";
+import { logout } from "../../store/authSlice";
+
+export default function SessionExpiredDialog({ open }) {
+  const dispatch = useDispatch();
+
+  return (
+    <Dialog open={open}>
+      <DialogTitle>
+        Session expired. Please login again.
+      </DialogTitle>
+      <DialogActions>
+        <Button
+          onClick={() => {
+            dispatch(logout());
+            window.location.href = "/";
+          }}
+        >
+          Login
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+import { Dialog, DialogTitle, DialogActions, Button } from "@mui/material";
+import { useDispatch } from "react-redux";
+import { logout } from "../../store/authSlice";
+
+export default function ConcurrentLoginDialog({ open }) {
+  const dispatch = useDispatch();
+
+  return (
+    <Dialog open={open}>
+      <DialogTitle>
+        Your account was logged in from another device.
+      </DialogTitle>
+      <DialogActions>
+        <Button
+          color="error"
+          onClick={() => {
+            dispatch(logout());
+            window.location.href = "/";
+          }}
+        >
+          OK
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+import { useEffect, useState } from "react";
+import { silentRefresh } from "../api/authService";
+
+export default function AuthBootstrap({ children }) {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    silentRefresh().finally(() => setReady(true));
+  }, []);
+
+  if (!ready) return null; // or loader
+  return children;
+}
 
 
+import { useEffect, useState } from "react";
+import { silentRefresh } from "../api/authService";
+
+export default function AuthBootstrap({ children }) {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    silentRefresh().finally(() => setReady(true));
+  }, []);
+
+  if (!ready) return null; // or loader
+  return children;
+}
+
+window.addEventListener("storage", (e) => {
+  if (e.key === "logout") {
+    window.location.href = "/";
+  }
+});
