@@ -7,9 +7,9 @@ import {
   useContext,
 } from "react";
 import axios from "axios";
-import { useLocation, useNavigate } from "react-router-dom";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
+import { useLocation } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
 import { resolveConfig } from "../config/EnvironmentConfig";
 import { convertToKebabCase } from "../utils/CommonUtilities";
 import { AuthContext } from "../context/AuthContext";
@@ -21,25 +21,23 @@ const useApi = () => {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const navigate = useNavigate();
   const location = useLocation();
   const snackbar = useCustomSnackbar();
   const dispatch = useDispatch();
 
-  // Access AuthContext for global session management
+  /** -------------------- Context / Redux -------------------- */
   const { logout, triggerSessionDialog } = useContext(AuthContext);
-
-  // Redux selectors for token (initial state) and menus
   const token = useSelector((state) => state.auth.token);
   const menus = useSelector((s) => s.menus.menus);
   const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
 
-  // Refs for tracking active requests and refresh state
+  /** -------------------- Refs -------------------- */
   const activeRequestsRef = useRef(new Set());
   const isRefreshingRef = useRef(false);
   const refreshQueueRef = useRef([]);
+  const sessionInvalidatedRef = useRef(false);
 
-  /** -------------------- Cancel Requests on Unmount -------------------- */
+  /** -------------------- Abort All Requests -------------------- */
   const cancelAllRequests = useCallback(() => {
     activeRequestsRef.current.forEach((controller) => {
       if (!controller.signal.aborted) controller.abort();
@@ -48,13 +46,22 @@ const useApi = () => {
     setLoading(false);
   }, []);
 
-  useEffect(() => {
-    return () => cancelAllRequests();
-  }, [cancelAllRequests]);
+  useEffect(() => cancelAllRequests, [cancelAllRequests]);
 
-  /** -------------------- Refresh Token Logic -------------------- */
-  const refreshToken = async () => {
-    // Queue concurrent refresh requests
+  /** -------------------- Session Invalid Handler -------------------- */
+  const handleSessionInvalid = useCallback(
+    (reason) => {
+      if (sessionInvalidatedRef.current) return;
+
+      sessionInvalidatedRef.current = true;
+      cancelAllRequests();
+      triggerSessionDialog(reason);
+    },
+    [cancelAllRequests, triggerSessionDialog]
+  );
+
+  /** -------------------- Refresh Token (Queued) -------------------- */
+  const refreshToken = useCallback(async () => {
     if (isRefreshingRef.current) {
       return new Promise((resolve, reject) => {
         refreshQueueRef.current.push({ resolve, reject });
@@ -64,47 +71,36 @@ const useApi = () => {
     isRefreshingRef.current = true;
 
     try {
-      // Call Backend Refresh Endpoint
       const res = await axios.post(
         `${resolveConfig("/LS") ?? ""}/auth/refresh-token`,
         {},
-        {
-          // headers: { "Content-Type": "application/json" },
-          withCredentials: true,
-        }
+        { withCredentials: true }
       );
-      console.log(res);
-      const newAccessToken = res.data?.accessToken;
-      const newRefreshToken = res.data?.refreshToken; // If backend rotates refresh tokens
 
-      const user = parseJwt(newAccessToken);
-      dispatch(setToken(newAccessToken));
+      const { accessToken, refreshToken: newRefreshToken } = res.data || {};
+      if (!accessToken) throw new Error("No access token from refresh");
+
+      const user = parseJwt(accessToken);
+      dispatch(setToken(accessToken));
       dispatch(setUser(user));
 
-      if (!newAccessToken) {
-        throw new Error("No access token received");
-      }
-
-      // Update Local Storage
-      localStorage.setItem("accessToken", newAccessToken);
+      localStorage.setItem("accessToken", accessToken);
       if (newRefreshToken) {
         localStorage.setItem("refreshToken", newRefreshToken);
       }
 
-      // Resolve all queued promises with the new token
-      refreshQueueRef.current.forEach((p) => p.resolve(newAccessToken));
+      refreshQueueRef.current.forEach((p) => p.resolve(accessToken));
       refreshQueueRef.current = [];
 
-      return newAccessToken;
+      return accessToken;
     } catch (err) {
-      // Reject all queued promises
       refreshQueueRef.current.forEach((p) => p.reject(err));
       refreshQueueRef.current = [];
       throw err;
     } finally {
       isRefreshingRef.current = false;
     }
-  };
+  }, [dispatch]);
 
   /** -------------------- Menu Resolver -------------------- */
   const findMenuItem = useCallback((items, route) => {
@@ -126,17 +122,20 @@ const useApi = () => {
     return null;
   }, []);
 
-  const currentMenuFromRoute = useMemo(() => {
-    return findMenuItem(menus, location.pathname);
-  }, [menus, location.pathname, findMenuItem]);
+  const currentMenuFromRoute = useMemo(
+    () => findMenuItem(menus, location.pathname),
+    [menus, location.pathname, findMenuItem]
+  );
 
   const xRequestType = useMemo(
     () =>
-      currentMenuFromRoute?.requestType || selectedMenuItem?.requestType || "*",
+      currentMenuFromRoute?.requestType ||
+      selectedMenuItem?.requestType ||
+      "*",
     [currentMenuFromRoute, selectedMenuItem]
   );
 
-  /** -------------------- Main API Caller -------------------- */
+  /** -------------------- API CALLER -------------------- */
   const callApi = useCallback(
     async (
       url,
@@ -147,7 +146,6 @@ const useApi = () => {
       extraConfig = {},
       returnDataOnly = true
     ) => {
-      // URL Resolution Logic
       const parts = url.split("/");
       const service = parts[1];
       parts[1] = resolveConfig(`/${service}`);
@@ -159,14 +157,10 @@ const useApi = () => {
       setLoading(true);
       setError(null);
 
-      // Helper to prioritize the freshest token (e.g. from retry config or storage)
-      const getCurrentToken = () => {
-        return (
-          extraConfig?.headers?.Authorization?.replace("Bearer ", "") ||
-          localStorage.getItem("accessToken") ||
-          token
-        );
-      };
+      const getCurrentToken = () =>
+        extraConfig?.headers?.Authorization?.replace("Bearer ", "") ||
+        localStorage.getItem("accessToken") ||
+        token;
 
       try {
         const config = {
@@ -192,37 +186,32 @@ const useApi = () => {
 
         const response = await axios(config);
         setData(response.data);
-
         return returnDataOnly ? response.data : response;
       } catch (err) {
-        if (axios.isCancel(err)) {
-          return; // Request cancelled, do nothing
-        }
+        if (axios.isCancel(err)) return;
 
         const status = err.response?.status;
-        const responseData = err.response?.data;
-        // Backend can send { error: "CODE" } or { code: "CODE" }
-        const errorCode = responseData?.error || responseData?.code;
+        const code =
+          err.response?.data?.error || err.response?.data?.code;
 
-        // 1. HARD FAIL: Concurrent Login or Session Expired
-        console.log("status >", status);
-        console.log("errorCode >", errorCode);
+        /** HARD FAIL */
         if (
           status === 401 &&
-          (errorCode === "CONCURRENT_LOGIN" || errorCode === "SESSION_EXPIRED")
+          (code === "CONCURRENT_LOGIN" || code === "SESSION_EXPIRED")
         ) {
-          triggerSessionDialog(errorCode);
-          setLoading(false);
-          return; // Stop execution, user must log in again
+          handleSessionInvalid(code);
+          return;
         }
 
-        // 2. SOFT FAIL: Token Expired (Silent Refresh)
-        if (status === 401 && errorCode === "TOKEN_EXPIRED") {
-          console.log("Inside Token expired");
+        /** TOKEN EXPIRED */
+        if (
+          status === 401 &&
+          code === "TOKEN_EXPIRED" &&
+          !extraConfig.__isRetry
+        ) {
           try {
-            // Attempt Refresh
             const newToken = await refreshToken();
-            // Retry Original Request with New Token
+
             return await callApi(
               url,
               payload,
@@ -231,7 +220,7 @@ const useApi = () => {
               contentType,
               {
                 ...extraConfig,
-                __isRetry: true, // Mark as retry to prevent loops
+                __isRetry: true,
                 headers: {
                   ...(extraConfig.headers || {}),
                   Authorization: `Bearer ${newToken}`,
@@ -239,15 +228,13 @@ const useApi = () => {
               },
               returnDataOnly
             );
-          } catch (refreshErr) {
-            // Refresh Failed (e.g., refresh token expired) -> Force Logout
+          } catch {
             logout();
-            setLoading(false);
             return;
           }
         }
 
-        // 3. OTHER ERRORS (Business Logic, 500s, etc.)
+        /** OTHER ERRORS */
         const msg =
           err.response?.data?.message ||
           err.response?.data?.error ||
@@ -259,20 +246,16 @@ const useApi = () => {
         throw err;
       } finally {
         activeRequestsRef.current.delete(controller);
-        // Ensure loading is set to false only if we aren't in a retry loop
-        // (Though the retry call handles its own loading state)
-        setLoading(false);
+        if (!extraConfig.__isRetry) setLoading(false);
       }
     },
     [
       token,
       xRequestType,
-      navigate,
       snackbar,
       logout,
-      triggerSessionDialog,
-      // refreshToken - stable function inside component scope or useRef approach
-      // findMenuItem - stable via useCallback
+      handleSessionInvalid,
+      refreshToken,
     ]
   );
 
