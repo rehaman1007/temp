@@ -1,11 +1,161 @@
-import {
+import React, {
+  createContext,
   useEffect,
   useRef,
-  useState,
   useCallback,
-  useMemo,
-  useContext,
+  useState,
 } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import axios from "axios";
+import { throttle } from "lodash"; 
+import SessionDialog from "../components/SessionDialog";
+import SessionWarningDialog from "../components/SessionWarningDialog";
+import { logout as reduxLogout } from "../store/slices/authSlice";
+
+export const AuthContext = createContext();
+
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
+const WARNING_SECONDS = 30;
+const LOGIN_GRACE_PERIOD = 3000; // 3 seconds
+
+export const AuthProvider = ({ children }) => {
+  const dispatch = useDispatch();
+  const user = useSelector((state) => state.auth.user);
+
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
+  const [sessionReason, setSessionReason] = useState("");
+
+  const inactivityTimerRef = useRef(null);
+  const warningTimerRef = useRef(null);
+  const countdownRef = useRef(null);
+  const logoutInProgressRef = useRef(false);
+  const loginTimeRef = useRef(0);
+
+  /* ---------- 1. Clear Timers Helper ---------- */
+  const clearAllTimers = useCallback(() => {
+    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+  }, []);
+
+  /* ---------- 2. Central Logout ---------- */
+  const logout = useCallback(
+    async (reason = "SESSION_EXPIRED") => {
+      // Guard: prevent running if user already logged out or logout in progress
+      if (!user && !logoutInProgressRef.current) return;
+      if (logoutInProgressRef.current) return;
+
+      // Guard: ignore events immediately after login
+      if (Date.now() - loginTimeRef.current < LOGIN_GRACE_PERIOD) return;
+
+      logoutInProgressRef.current = true;
+      clearAllTimers();
+      setWarningOpen(false);
+      setSessionReason(reason);
+      setSessionDialogOpen(true); // Show the "Session Expired" dialog
+
+      try {
+        await axios.post("/auth/logout", {}, { withCredentials: true });
+      } catch (err) {
+        console.warn("Backend logout failed", err);
+      }
+
+      dispatch(reduxLogout());
+      sessionStorage.clear();
+    },
+    [dispatch, user, clearAllTimers]
+  );
+
+  /* ---------- 3. Start Inactivity Timers ---------- */
+  const startInactivity = useCallback(() => {
+    clearAllTimers();
+    setWarningOpen(false);
+
+    // Timer 1: Show Warning Dialog
+    warningTimerRef.current = setTimeout(() => {
+      setWarningOpen(true);
+      setSecondsLeft(WARNING_SECONDS);
+      
+      let counter = WARNING_SECONDS;
+      countdownRef.current = setInterval(() => {
+        counter -= 1;
+        setSecondsLeft(counter);
+        if (counter <= 0) clearInterval(countdownRef.current);
+      }, 1000);
+    }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
+
+    // Timer 2: Perform Logout
+    inactivityTimerRef.current = setTimeout(() => {
+      logout("SESSION_EXPIRED");
+    }, INACTIVITY_TIMEOUT);
+  }, [logout, clearAllTimers]);
+
+  /* ---------- 4. Throttled Activity Handler ---------- */
+  // Updates timers max once every 2 seconds to prevent lag
+  const onActivity = useCallback(
+    throttle(() => {
+      if (!user || logoutInProgressRef.current || sessionDialogOpen) return;
+      startInactivity();
+    }, 2000), 
+    [user, startInactivity, sessionDialogOpen]
+  );
+
+  /* ---------- 5. Watch User State ---------- */
+  useEffect(() => {
+    if (!user) {
+      // Cleanup when user logs out
+      clearAllTimers();
+      logoutInProgressRef.current = false;
+      setWarningOpen(false);
+      return; 
+    }
+
+    // Initialize on login
+    loginTimeRef.current = Date.now();
+    setSessionDialogOpen(false); // Reset dialog state
+    startInactivity();
+
+    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+    events.forEach((e) => window.addEventListener(e, onActivity));
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, onActivity));
+      onActivity.cancel();
+      clearAllTimers();
+    };
+  }, [user, onActivity, startInactivity, clearAllTimers]);
+
+  return (
+    <AuthContext.Provider
+      value={{
+        logout,
+        triggerSessionDialog: logout,
+      }}
+    >
+      {children}
+
+      <SessionWarningDialog
+        open={warningOpen}
+        secondsLeft={secondsLeft}
+        onContinue={onActivity}
+      />
+
+      <SessionDialog
+        open={sessionDialogOpen}
+        reason={sessionReason}
+        onConfirm={() => {
+          setSessionDialogOpen(false);
+          window.location.replace("/");
+        }}
+      />
+    </AuthContext.Provider>
+  );
+};
+
+
+import { useEffect, useRef, useState, useCallback, useMemo, useContext } from "react";
 import axios from "axios";
 import { useLocation } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
@@ -13,8 +163,7 @@ import useCustomSnackbar from "../utils/useCustomSnackbar";
 import { resolveConfig } from "../config/EnvironmentConfig";
 import { convertToKebabCase } from "../utils/CommonUtilities";
 import { AuthContext } from "../context/AuthContext";
-import { parseJwt } from "../utils/EncryptionUtilities";
-import { setToken, setUser } from "../store/slices/authSlice";
+import { setToken } from "../store/slices/authSlice";
 
 const useApi = () => {
   const [data, setData] = useState(null);
@@ -25,19 +174,23 @@ const useApi = () => {
   const snackbar = useCustomSnackbar();
   const dispatch = useDispatch();
 
-  /** -------------------- Context / Redux -------------------- */
   const { logout, triggerSessionDialog } = useContext(AuthContext);
   const token = useSelector((state) => state.auth.token);
   const menus = useSelector((s) => s.menus.menus);
   const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
 
-  /** -------------------- Refs -------------------- */
+  // Refs for request management
   const activeRequestsRef = useRef(new Set());
   const isRefreshingRef = useRef(false);
   const refreshQueueRef = useRef([]);
   const sessionInvalidatedRef = useRef(false);
 
-  /** -------------------- Abort All Requests -------------------- */
+  // Reset invalidated flag when token changes (re-login)
+  useEffect(() => {
+    sessionInvalidatedRef.current = false;
+  }, [token]);
+
+  /* ---------- Cleanup Logic ---------- */
   const cancelAllRequests = useCallback(() => {
     activeRequestsRef.current.forEach((controller) => {
       if (!controller.signal.aborted) controller.abort();
@@ -48,19 +201,15 @@ const useApi = () => {
 
   useEffect(() => cancelAllRequests, [cancelAllRequests]);
 
-  /** -------------------- Session Invalid Handler -------------------- */
-  const handleSessionInvalid = useCallback(
-    (reason) => {
-      if (sessionInvalidatedRef.current) return;
+  /* ---------- Session Killer ---------- */
+  const handleSessionInvalid = useCallback((reason) => {
+    if (sessionInvalidatedRef.current) return;
+    sessionInvalidatedRef.current = true;
+    cancelAllRequests();
+    triggerSessionDialog(reason);
+  }, [cancelAllRequests, triggerSessionDialog]);
 
-      sessionInvalidatedRef.current = true;
-      cancelAllRequests();
-      triggerSessionDialog(reason);
-    },
-    [cancelAllRequests, triggerSessionDialog]
-  );
-
-  /** -------------------- Refresh Token (Queued) -------------------- */
+  /* ---------- Token Refresh Logic (Mutex Queue) ---------- */
   const refreshToken = useCallback(async () => {
     if (isRefreshingRef.current) {
       return new Promise((resolve, reject) => {
@@ -77,22 +226,16 @@ const useApi = () => {
         { withCredentials: true }
       );
 
-      const { accessToken, refreshToken: newRefreshToken } = res.data || {};
-      if (!accessToken) throw new Error("No access token from refresh");
+      const { accessToken } = res.data || {};
+      if (!accessToken) throw new Error("No access token returned");
 
-      const user = parseJwt(accessToken);
-      console.log("newUser", user);
+      // Update Redux & Storage
       dispatch(setToken(accessToken));
-      // dispatch(setUser(user));
-
       localStorage.setItem("accessToken", accessToken);
-      if (newRefreshToken) {
-        localStorage.setItem("refreshToken", newRefreshToken);
-      }
 
+      // Resolve all queued requests with the NEW token
       refreshQueueRef.current.forEach((p) => p.resolve(accessToken));
       refreshQueueRef.current = [];
-
       return accessToken;
     } catch (err) {
       refreshQueueRef.current.forEach((p) => p.reject(err));
@@ -103,19 +246,16 @@ const useApi = () => {
     }
   }, [dispatch]);
 
-  /** -------------------- Menu Resolver -------------------- */
+  /* ---------- Menu/Header Logic ---------- */
   const findMenuItem = useCallback((items, route) => {
     if (!items?.length) return null;
-
     for (const item of items) {
       if (item.route === route) return item;
-
       if (item.children?.length) {
         if (route.includes("/choose-option/")) {
           const param = route.split("/choose-option/")[1];
           if (param === convertToKebabCase(item.title)) return item;
         }
-
         const found = findMenuItem(item.children, route);
         if (found) return found;
       }
@@ -123,18 +263,10 @@ const useApi = () => {
     return null;
   }, []);
 
-  const currentMenuFromRoute = useMemo(
-    () => findMenuItem(menus, location.pathname),
-    [menus, location.pathname, findMenuItem]
-  );
+  const currentMenuFromRoute = useMemo(() => findMenuItem(menus, location.pathname), [menus, location.pathname, findMenuItem]);
+  const xRequestType = useMemo(() => currentMenuFromRoute?.requestType || selectedMenuItem?.requestType || "*", [currentMenuFromRoute, selectedMenuItem]);
 
-  const xRequestType = useMemo(
-    () =>
-      currentMenuFromRoute?.requestType || selectedMenuItem?.requestType || "*",
-    [currentMenuFromRoute, selectedMenuItem]
-  );
-
-  /** -------------------- API CALLER -------------------- */
+  /* ---------- Main API Caller ---------- */
   const callApi = useCallback(
     async (
       url,
@@ -145,21 +277,21 @@ const useApi = () => {
       extraConfig = {},
       returnDataOnly = true
     ) => {
+      // URL Construction
       const parts = url.split("/");
       const service = parts[1];
-      parts[1] = resolveConfig(`/${service}`);
-      const Final_Url = parts.slice(1).join("/");
+      const resolvedBase = resolveConfig(`/${service}`);
+      const Final_Url = [resolvedBase, ...parts.slice(2)].join("/");
 
       const controller = new AbortController();
       activeRequestsRef.current.add(controller);
 
-      setLoading(true);
+      // Only show loading if this is NOT a silent retry
+      if (!extraConfig.__isRetry) setLoading(true);
       setError(null);
 
-      const getCurrentToken = () =>
-        extraConfig?.headers?.Authorization?.replace("Bearer ", "") ||
-        localStorage.getItem("accessToken") ||
-        token;
+      // Priority: 1. Retry Override, 2. LocalStorage, 3. Redux
+      const getActiveToken = () => extraConfig._tokenOverride || localStorage.getItem("accessToken") || token;
 
       try {
         const config = {
@@ -169,7 +301,7 @@ const useApi = () => {
           withCredentials: true,
           signal: controller.signal,
           headers: {
-            Authorization: `Bearer ${getCurrentToken()}`,
+            Authorization: `Bearer ${getActiveToken()}`,
             "Content-Type": contentType,
             "X-Request-Type": xRequestType,
             ...(extraConfig.headers || {}),
@@ -178,9 +310,7 @@ const useApi = () => {
         };
 
         if (payload) {
-          method === "GET"
-            ? (config.params = payload)
-            : (config.data = payload);
+          method === "GET" ? (config.params = payload) : (config.data = payload);
         }
 
         const response = await axios(config);
@@ -192,59 +322,35 @@ const useApi = () => {
         const status = err.response?.status;
         const code = err.response?.data?.error || err.response?.data?.code;
 
-        /** HARD FAIL */
-        if (
-          status === 401 &&
-          (code === "CONCURRENT_LOGIN" || code === "SESSION_EXPIRED")
-        ) {
+        // 1. Session Fatal
+        if (status === 401 && (code === "CONCURRENT_LOGIN" || code === "SESSION_EXPIRED")) {
           handleSessionInvalid(code);
           return;
         }
 
-        /** TOKEN EXPIRED */
-        if (
-          status === 401 &&
-          code === "TOKEN_EXPIRED" &&
-          !extraConfig.__isRetry
-        ) {
+        // 2. Token Expired -> Refresh & Retry
+        if (status === 401 && code === "TOKEN_EXPIRED" && !extraConfig.__isRetry) {
           try {
             const newToken = await refreshToken();
-
-            return await callApi(
-              url,
-              payload,
-              method,
-              responseType,
-              contentType,
-              {
-                ...extraConfig,
-                __isRetry: true,
-                headers: {
-                  ...(extraConfig.headers || {}),
-                  Authorization: `Bearer ${newToken}`,
-                },
-              },
-              returnDataOnly
-            );
-          } catch {
-            logout();
+            return await callApi(url, payload, method, responseType, contentType, {
+              ...extraConfig,
+              __isRetry: true,
+              _tokenOverride: newToken, // CRITICAL: Use new token immediately
+            }, returnDataOnly);
+          } catch (refreshErr) {
+            logout("SESSION_EXPIRED");
             return;
           }
         }
 
-        /** OTHER ERRORS */
-        const msg =
-          err.response?.data?.message ||
-          err.response?.data?.error ||
-          err.message ||
-          "Something went wrong";
-
+        // 3. General Error
+        const msg = err.response?.data?.message || err.message || "Something went wrong";
         snackbar(msg, "error");
         setError(err);
         throw err;
       } finally {
         activeRequestsRef.current.delete(controller);
-        if (!extraConfig.__isRetry) setLoading(false);
+        setLoading(false);
       }
     },
     [token, xRequestType, snackbar, logout, handleSessionInvalid, refreshToken]
