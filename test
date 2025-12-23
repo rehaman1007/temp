@@ -1,147 +1,44 @@
-import React, {
-  createContext,
-  useEffect,
-  useRef,
-  useCallback,
-  useState,
-} from "react";
-import { useDispatch, useSelector } from "react-redux";
-import axios from "axios";
+import React, { createContext, useState, useEffect } from "react";
 import SessionDialog from "../components/SessionDialog";
-import SessionWarningDialog from "../components/SessionWarningDialog";
-import { logout as reduxLogout } from "../store/slices/authSlice";
 
 export const AuthContext = createContext();
 
-const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
-const WARNING_SECONDS = 30;
-const LOGIN_GRACE_PERIOD = 3000; // 3 seconds
-
 export const AuthProvider = ({ children }) => {
-  const dispatch = useDispatch();
-  const user = useSelector((state) => state.auth.user);
+  const [user, setUser] = useState(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [sessionError, setSessionError] = useState("");
 
-  const [warningOpen, setWarningOpen] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
-  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
-  const [sessionReason, setSessionReason] = useState("");
+  useEffect(() => {
+    const savedUser = localStorage.getItem("user");
+    if (savedUser) setUser(JSON.parse(savedUser));
+  }, []);
 
-  const inactivityTimerRef = useRef(null);
-  const warningTimerRef = useRef(null);
-  const countdownRef = useRef(null);
-  const logoutInProgressRef = useRef(false);
-  const loginTimeRef = useRef(0);
-
-  /* ---------- Clear timers ---------- */
-  const clearAllTimers = () => {
-    clearTimeout(inactivityTimerRef.current);
-    clearTimeout(warningTimerRef.current);
-    clearInterval(countdownRef.current);
+  const login = (userData, tokens) => {
+    localStorage.setItem("accessToken", tokens.accessToken);
+    localStorage.setItem("refreshToken", tokens.refreshToken);
+    localStorage.setItem("user", JSON.stringify(userData));
+    setUser(userData);
   };
 
-  /* ---------- Central logout ---------- */
-  const logout = useCallback(
-    async (reason = "SESSION_EXPIRED") => {
-      // 🔥 Ignore stale events right after login
-      if (Date.now() - loginTimeRef.current < LOGIN_GRACE_PERIOD) {
-        return;
-      }
+  const logout = () => {
+    localStorage.clear();
+    setUser(null);
+    setDialogOpen(false);
+    window.location.href = "/";
+  };
 
-      if (logoutInProgressRef.current) return;
-      logoutInProgressRef.current = true;
-
-      clearAllTimers();
-      setWarningOpen(false);
-      setSessionReason(reason);
-      setSessionDialogOpen(true);
-
-      try {
-        await axios.post("/auth/logout", {}, { withCredentials: true });
-      } catch {}
-
-      dispatch(reduxLogout());
-      sessionStorage.clear();
-    },
-    [dispatch]
-  );
-
-  /* ---------- Start inactivity ---------- */
-  const startInactivity = useCallback(() => {
-    clearAllTimers();
-    setWarningOpen(false);
-    setSecondsLeft(WARNING_SECONDS);
-
-    warningTimerRef.current = setTimeout(() => {
-      setWarningOpen(true);
-
-      let counter = WARNING_SECONDS;
-      setSecondsLeft(counter);
-
-      countdownRef.current = setInterval(() => {
-        counter -= 1;
-        if (counter <= 0) {
-          clearInterval(countdownRef.current);
-          setSecondsLeft(0);
-        } else {
-          setSecondsLeft(counter);
-        }
-      }, 1000);
-    }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
-
-    inactivityTimerRef.current = setTimeout(() => {
-      logout("SESSION_EXPIRED");
-    }, INACTIVITY_TIMEOUT);
-  }, [logout]);
-
-  /* ---------- Reset on activity ---------- */
-  const onActivity = useCallback(() => {
-    if (!user) return;
-    startInactivity();
-  }, [user, startInactivity]);
-
-  /* ---------- Watch login/logout ---------- */
-  useEffect(() => {
-    if (!user) {
-      clearAllTimers();
-      logoutInProgressRef.current = false;
-      return;
-    }
-
-    // ✅ mark login time
-    loginTimeRef.current = Date.now();
-
-    startInactivity();
-
-    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-    events.forEach((e) => window.addEventListener(e, onActivity));
-
-    return () => {
-      events.forEach((e) =>
-        window.removeEventListener(e, onActivity)
-      );
-      clearAllTimers();
-    };
-  }, [user, onActivity, startInactivity]);
+  const triggerSessionDialog = (reason) => {
+    setSessionError(reason);
+    setDialogOpen(true);
+  };
 
   return (
-    <AuthContext.Provider
-      value={{
-        logout,                 // manual logout
-        triggerSessionDialog: logout, // useApi calls this
-      }}
-    >
+    <AuthContext.Provider value={{ user, login, logout, triggerSessionDialog }}>
       {children}
-
-      <SessionWarningDialog
-        open={warningOpen}
-        secondsLeft={secondsLeft}
-        onContinue={onActivity}
-      />
-
       <SessionDialog
-        open={sessionDialogOpen}
-        reason={sessionReason}
-        onConfirm={() => window.location.replace("/")}
+        open={dialogOpen}
+        reason={sessionError}
+        onConfirm={logout}
       />
     </AuthContext.Provider>
   );
