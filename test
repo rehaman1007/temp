@@ -1,60 +1,88 @@
 import React, {
   createContext,
-  useState,
   useEffect,
   useRef,
   useCallback,
+  useState,
 } from "react";
-import axios from "axios";
+import { useDispatch, useSelector } from "react-redux";
 import SessionDialog from "../components/SessionDialog";
 import SessionWarningDialog from "../components/SessionWarningDialog";
+import { setUser, clearAuth } from "../store/slices/authSlice";
 
 export const AuthContext = createContext();
 
-const INACTIVITY_TIMEOUT = 60 * 1000; // 1 min (for testing)
+/** ===== DEBUG SHORT TIMES ===== */
+const INACTIVITY_TIMEOUT = 60 * 1000; // 1 min
 const WARNING_TIME = 30 * 1000;
-const KEEP_ALIVE_INTERVAL = 2 * 60 * 1000;
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
+  const dispatch = useDispatch();
+
+  /** ---------- USER SOURCE ---------- */
+  const reduxUser = useSelector((state) => state.auth.user);
+  const sessionUser = sessionStorage.getItem("user");
+  const user = reduxUser || (sessionUser && JSON.parse(sessionUser));
+
+  /** ---------- UI STATE ---------- */
   const [dialogOpen, setDialogOpen] = useState(false);
   const [warningOpen, setWarningOpen] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(30);
   const [sessionError, setSessionError] = useState("");
 
+  /** ---------- REFS ---------- */
   const inactivityTimerRef = useRef(null);
   const warningTimerRef = useRef(null);
   const countdownRef = useRef(null);
   const sessionInvalidatedRef = useRef(false);
 
-  /* -------------------- Load User -------------------- */
+  /* -------------------- INIT -------------------- */
   useEffect(() => {
-    const savedUser = localStorage.getItem("user");
-    if (savedUser) setUser(JSON.parse(savedUser));
+    console.log("🟢 AuthProvider mounted");
+
+    if (!reduxUser && sessionUser) {
+      console.log("📦 Restoring user from sessionStorage");
+      dispatch(setUser(JSON.parse(sessionUser)));
+    }
   }, []);
 
-  /* -------------------- Logout -------------------- */
+  /* -------------------- LOGOUT -------------------- */
   const logout = useCallback(() => {
-    localStorage.clear();
-    setUser(null);
+    console.log("🔴 LOGOUT");
+
+    sessionStorage.clear();
+    dispatch(clearAuth());
+
     setDialogOpen(false);
     setWarningOpen(false);
     sessionInvalidatedRef.current = false;
-    localStorage.setItem("LOGOUT_EVENT", Date.now());
-    window.location.href = "/";
-  }, []);
 
-  /* -------------------- Trigger Session Dialog -------------------- */
+    sessionStorage.setItem("LOGOUT_EVENT", Date.now());
+    window.location.href = "/";
+  }, [dispatch]);
+
+  /* -------------------- SESSION INVALID -------------------- */
   const triggerSessionDialog = useCallback((reason) => {
-    if (sessionInvalidatedRef.current) return;
+    if (sessionInvalidatedRef.current) {
+      console.log("⚠️ Session already invalidated");
+      return;
+    }
+
+    console.log("⛔ SESSION INVALIDATED:", reason);
     sessionInvalidatedRef.current = true;
+
     setSessionError(reason);
     setDialogOpen(true);
   }, []);
 
-  /* -------------------- Start / Reset Timers -------------------- */
+  /* -------------------- START / RESET TIMERS -------------------- */
   const startInactivityTimers = useCallback(() => {
-    if (!user || sessionInvalidatedRef.current) return;
+    if (!user) {
+      console.log("⚠️ No user → timers not started");
+      return;
+    }
+
+    console.log("⏱️ STARTING INACTIVITY TIMERS");
 
     clearTimeout(inactivityTimerRef.current);
     clearTimeout(warningTimerRef.current);
@@ -63,83 +91,76 @@ export const AuthProvider = ({ children }) => {
     setWarningOpen(false);
     setSecondsLeft(30);
 
-    // Warning
+    /** ---- Warning Timer ---- */
     warningTimerRef.current = setTimeout(() => {
-      setWarningOpen(true);
+      console.log("⚠️ WARNING TIMER FIRED");
 
+      setWarningOpen(true);
       let counter = 30;
       setSecondsLeft(counter);
 
       countdownRef.current = setInterval(() => {
         counter -= 1;
+        console.log("⏳ Countdown:", counter);
         setSecondsLeft(counter);
       }, 1000);
     }, INACTIVITY_TIMEOUT - WARNING_TIME);
 
-    // Final logout
+    /** ---- Logout Timer ---- */
     inactivityTimerRef.current = setTimeout(() => {
+      console.log("⛔ INACTIVITY TIMEOUT FIRED");
       triggerSessionDialog("SESSION_EXPIRED");
     }, INACTIVITY_TIMEOUT);
   }, [user, triggerSessionDialog]);
 
-  /* -------------------- Start timers immediately when user loads -------------------- */
+  /* -------------------- START WHEN USER AVAILABLE -------------------- */
   useEffect(() => {
-    if (user) {
-      startInactivityTimers();
-    }
+    console.log("👤 User resolved:", user);
+    if (user) startInactivityTimers();
   }, [user, startInactivityTimers]);
 
-  /* -------------------- User Activity -------------------- */
+  /* -------------------- USER ACTIVITY -------------------- */
   useEffect(() => {
     if (!user) return;
 
-    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-    const handleActivity = () => {
+    const handleActivity = (e) => {
+      console.log("🖱️ USER ACTIVITY:", e.type);
       startInactivityTimers();
-      localStorage.setItem("LAST_ACTIVITY", Date.now());
+      sessionStorage.setItem("LAST_ACTIVITY", Date.now());
     };
 
+    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
     events.forEach((e) => window.addEventListener(e, handleActivity));
 
     return () => {
-      events.forEach((e) => window.removeEventListener(e, handleActivity));
+      events.forEach((e) =>
+        window.removeEventListener(e, handleActivity)
+      );
     };
   }, [user, startInactivityTimers]);
 
-  /* -------------------- Multi-tab Sync -------------------- */
+  /* -------------------- MULTI TAB SYNC -------------------- */
   useEffect(() => {
     const handleStorage = (e) => {
-      if (e.key === "LAST_ACTIVITY") startInactivityTimers();
-      if (e.key === "LOGOUT_EVENT") logout();
+      console.log("🪟 STORAGE EVENT:", e.key);
+
+      if (e.key === "LAST_ACTIVITY") {
+        console.log("🔄 Activity sync from another tab");
+        startInactivityTimers();
+      }
+
+      if (e.key === "LOGOUT_EVENT") {
+        console.log("🔴 Logout sync from another tab");
+        logout();
+      }
     };
 
     window.addEventListener("storage", handleStorage);
     return () => window.removeEventListener("storage", handleStorage);
   }, [logout, startInactivityTimers]);
 
-  /* -------------------- Keep Alive -------------------- */
-  useEffect(() => {
-    if (!user) return;
-
-    const interval = setInterval(() => {
-      axios.get("/auth/keep-alive", { withCredentials: true }).catch(() => {});
-    }, KEEP_ALIVE_INTERVAL);
-
-    return () => clearInterval(interval);
-  }, [user]);
-
-  /* -------------------- Login -------------------- */
-  const login = (userData, tokens) => {
-    localStorage.setItem("accessToken", tokens.accessToken);
-    localStorage.setItem("refreshToken", tokens.refreshToken);
-    localStorage.setItem("user", JSON.stringify(userData));
-    localStorage.setItem("LAST_ACTIVITY", Date.now());
-    setUser(userData);
-    sessionInvalidatedRef.current = false;
-  };
-
   return (
-    <AuthContext.Provider value={{ user, login, logout, triggerSessionDialog }}>
+    <AuthContext.Provider value={{ user, logout, triggerSessionDialog }}>
       {children}
 
       <SessionWarningDialog
