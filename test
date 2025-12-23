@@ -11,7 +11,8 @@ import SessionDialog from "../components/SessionDialog";
 export const AuthContext = createContext();
 
 /** CONFIG */
-const LOGIN_GRACE_PERIOD = 2000; // 2 seconds
+const LOGIN_GRACE_PERIOD = 2000; // 2 sec
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -20,11 +21,26 @@ export const AuthProvider = ({ children }) => {
 
   const loginTimeRef = useRef(0);
   const logoutInProgressRef = useRef(false);
+  const inactivityTimerRef = useRef(null);
 
   /* -------------------- Restore user -------------------- */
   useEffect(() => {
     const savedUser = localStorage.getItem("user");
     if (savedUser) setUser(JSON.parse(savedUser));
+  }, []);
+
+  /* -------------------- Clear inactivity timer -------------------- */
+  const clearInactivityTimer = () => {
+    clearTimeout(inactivityTimerRef.current);
+  };
+
+  /* -------------------- Start inactivity timer -------------------- */
+  const startInactivityTimer = useCallback(() => {
+    clearInactivityTimer();
+
+    inactivityTimerRef.current = setTimeout(() => {
+      triggerSessionDialog("SESSION_EXPIRED");
+    }, INACTIVITY_TIMEOUT);
   }, []);
 
   /* -------------------- Login -------------------- */
@@ -37,22 +53,19 @@ export const AuthProvider = ({ children }) => {
     logoutInProgressRef.current = false;
 
     setUser(userData);
+    startInactivityTimer();
   };
 
-  /* -------------------- Logout API (AUTHORITATIVE) -------------------- */
+  /* -------------------- Logout API -------------------- */
   const logout = useCallback(async () => {
     if (logoutInProgressRef.current) return;
     logoutInProgressRef.current = true;
 
+    clearInactivityTimer();
+
     try {
-      await axios.post(
-        "/auth/logout",
-        {},
-        { withCredentials: true }
-      );
-    } catch {
-      /* ignore backend/network errors */
-    }
+      await axios.post("/auth/logout", {}, { withCredentials: true });
+    } catch {}
 
     localStorage.clear();
     setUser(null);
@@ -62,28 +75,48 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   /* -------------------- Trigger session dialog -------------------- */
-  const triggerSessionDialog = useCallback((reason) => {
-    // 🛡️ Prevent false logout right after login
-    if (Date.now() - loginTimeRef.current < LOGIN_GRACE_PERIOD) return;
-    if (logoutInProgressRef.current) return;
+  const triggerSessionDialog = useCallback(
+    (reason) => {
+      // prevent false trigger just after login
+      if (Date.now() - loginTimeRef.current < LOGIN_GRACE_PERIOD) return;
+      if (logoutInProgressRef.current) return;
 
-    logoutInProgressRef.current = true;
-    setSessionError(reason);
-    setDialogOpen(true);
-  }, []);
+      logoutInProgressRef.current = true;
+      clearInactivityTimer();
+      setSessionError(reason);
+      setDialogOpen(true);
+    },
+    []
+  );
+
+  /* -------------------- Track user activity -------------------- */
+  useEffect(() => {
+    if (!user) return;
+
+    const handleActivity = () => startInactivityTimer();
+    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+
+    events.forEach((e) => window.addEventListener(e, handleActivity));
+
+    return () => {
+      events.forEach((e) =>
+        window.removeEventListener(e, handleActivity)
+      );
+      clearInactivityTimer();
+    };
+  }, [user, startInactivityTimer]);
 
   return (
     <AuthContext.Provider
       value={{
         user,
         login,
-        logout,                 // manual logout (profile drawer)
-        triggerSessionDialog,   // API-triggered logout
+        logout,
+        triggerSessionDialog,
       }}
     >
       {children}
 
-      {/* Forced logout dialog */}
       <SessionDialog
         open={dialogOpen}
         reason={sessionError}
