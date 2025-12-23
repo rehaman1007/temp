@@ -1,88 +1,3 @@
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-  LinearProgress,
-  Box,
-} from "@mui/material";
-
-const TOTAL_WARNING_SECONDS = 30;
-
-const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
-  if (!open) return null;
-
-  const progress = (secondsLeft / TOTAL_WARNING_SECONDS) * 100;
-
-  return (
-    <Dialog open disableEscapeKeyDown>
-      <DialogTitle color="warning.main">
-        Session Expiring Soon
-      </DialogTitle>
-
-      <DialogContent>
-        <Typography sx={{ mb: 1 }}>
-          You will be logged out in <strong>{secondsLeft}</strong> seconds.
-        </Typography>
-
-        <Box sx={{ width: "100%" }}>
-          <LinearProgress
-            variant="determinate"
-            value={Math.max(progress, 0)}
-            color="warning"
-          />
-        </Box>
-      </DialogContent>
-
-      <DialogActions>
-        <Button onClick={onContinue} variant="contained">
-          Continue Session
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default SessionWarningDialog;
-
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-  Button,
-} from "@mui/material";
-
-const SessionDialog = ({ open, reason, onConfirm }) => {
-  let title = "Session Expired";
-  let message = "Your session has ended. Please log in again.";
-
-  if (reason === "CONCURRENT_LOGIN") {
-    title = "Security Alert";
-    message =
-      "You have been logged out because this account signed in on another device.";
-  }
-
-  return (
-    <Dialog open={open} disableEscapeKeyDown>
-      <DialogTitle color="error">{title}</DialogTitle>
-      <DialogContent>
-        <DialogContentText>{message}</DialogContentText>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onConfirm} variant="contained">
-          Return to Login
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default SessionDialog;
-
 import React, {
   createContext,
   useEffect,
@@ -98,9 +13,9 @@ import { logout as reduxLogout } from "../store/slices/authSlice";
 
 export const AuthContext = createContext();
 
-/** ===== CONFIG ===== */
 const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
 const WARNING_SECONDS = 30;
+const LOGIN_GRACE_PERIOD = 3000; // 3 seconds
 
 export const AuthProvider = ({ children }) => {
   const dispatch = useDispatch();
@@ -115,17 +30,23 @@ export const AuthProvider = ({ children }) => {
   const warningTimerRef = useRef(null);
   const countdownRef = useRef(null);
   const logoutInProgressRef = useRef(false);
+  const loginTimeRef = useRef(0);
 
-  /* ================== CLEANUP ALL TIMERS ================== */
+  /* ---------- Clear timers ---------- */
   const clearAllTimers = () => {
     clearTimeout(inactivityTimerRef.current);
     clearTimeout(warningTimerRef.current);
     clearInterval(countdownRef.current);
   };
 
-  /* ================== SINGLE LOGOUT FUNCTION ================== */
+  /* ---------- Central logout ---------- */
   const logout = useCallback(
     async (reason = "SESSION_EXPIRED") => {
+      // 🔥 Ignore stale events right after login
+      if (Date.now() - loginTimeRef.current < LOGIN_GRACE_PERIOD) {
+        return;
+      }
+
       if (logoutInProgressRef.current) return;
       logoutInProgressRef.current = true;
 
@@ -136,9 +57,7 @@ export const AuthProvider = ({ children }) => {
 
       try {
         await axios.post("/auth/logout", {}, { withCredentials: true });
-      } catch {
-        /* ignore */
-      }
+      } catch {}
 
       dispatch(reduxLogout());
       sessionStorage.clear();
@@ -146,15 +65,15 @@ export const AuthProvider = ({ children }) => {
     [dispatch]
   );
 
-  /* ================== START INACTIVITY ================== */
-  const startInactivityTracking = useCallback(() => {
+  /* ---------- Start inactivity ---------- */
+  const startInactivity = useCallback(() => {
     clearAllTimers();
     setWarningOpen(false);
     setSecondsLeft(WARNING_SECONDS);
 
-    // Warning timer
     warningTimerRef.current = setTimeout(() => {
       setWarningOpen(true);
+
       let counter = WARNING_SECONDS;
       setSecondsLeft(counter);
 
@@ -169,19 +88,18 @@ export const AuthProvider = ({ children }) => {
       }, 1000);
     }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
 
-    // Final logout timer
     inactivityTimerRef.current = setTimeout(() => {
       logout("SESSION_EXPIRED");
     }, INACTIVITY_TIMEOUT);
   }, [logout]);
 
-  /* ================== RESET ON ACTIVITY ================== */
-  const resetOnActivity = useCallback(() => {
+  /* ---------- Reset on activity ---------- */
+  const onActivity = useCallback(() => {
     if (!user) return;
-    startInactivityTracking();
-  }, [user, startInactivityTracking]);
+    startInactivity();
+  }, [user, startInactivity]);
 
-  /* ================== USER EFFECT ================== */
+  /* ---------- Watch login/logout ---------- */
   useEffect(() => {
     if (!user) {
       clearAllTimers();
@@ -189,24 +107,27 @@ export const AuthProvider = ({ children }) => {
       return;
     }
 
-    startInactivityTracking();
+    // ✅ mark login time
+    loginTimeRef.current = Date.now();
+
+    startInactivity();
 
     const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-    events.forEach((e) => window.addEventListener(e, resetOnActivity));
+    events.forEach((e) => window.addEventListener(e, onActivity));
 
     return () => {
       events.forEach((e) =>
-        window.removeEventListener(e, resetOnActivity)
+        window.removeEventListener(e, onActivity)
       );
       clearAllTimers();
     };
-  }, [user, resetOnActivity, startInactivityTracking]);
+  }, [user, onActivity, startInactivity]);
 
   return (
     <AuthContext.Provider
       value={{
-        logout, // manual logout button uses this
-        triggerSessionDialog: logout, // useApi uses this
+        logout,                 // manual logout
+        triggerSessionDialog: logout, // useApi calls this
       }}
     >
       {children}
@@ -214,7 +135,7 @@ export const AuthProvider = ({ children }) => {
       <SessionWarningDialog
         open={warningOpen}
         secondsLeft={secondsLeft}
-        onContinue={resetOnActivity}
+        onContinue={onActivity}
       />
 
       <SessionDialog
