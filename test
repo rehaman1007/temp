@@ -6,83 +6,59 @@ import React, {
   useState,
 } from "react";
 import { useDispatch, useSelector } from "react-redux";
+import axios from "axios";
 import SessionDialog from "../components/SessionDialog";
 import SessionWarningDialog from "../components/SessionWarningDialog";
-import { setUser, clearAuth } from "../store/slices/authSlice";
+import { clearAuth } from "../store/slices/authSlice";
 
 export const AuthContext = createContext();
 
-/** ===== DEBUG SHORT TIMES ===== */
-const INACTIVITY_TIMEOUT = 60 * 1000; // 1 min
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000;
 const WARNING_TIME = 30 * 1000;
 
 export const AuthProvider = ({ children }) => {
   const dispatch = useDispatch();
+  const user = useSelector((state) => state.auth.user);
 
-  /** ---------- USER SOURCE ---------- */
-  const reduxUser = useSelector((state) => state.auth.user);
-  const sessionUser = sessionStorage.getItem("user");
-  const user = reduxUser || (sessionUser && JSON.parse(sessionUser));
-
-  /** ---------- UI STATE ---------- */
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [warningOpen, setWarningOpen] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(30);
-  const [sessionError, setSessionError] = useState("");
+  const [sessionReason, setSessionReason] = useState("");
 
-  /** ---------- REFS ---------- */
   const inactivityTimerRef = useRef(null);
   const warningTimerRef = useRef(null);
   const countdownRef = useRef(null);
-  const sessionInvalidatedRef = useRef(false);
+  const sessionEndedRef = useRef(false);
 
-  /* -------------------- INIT -------------------- */
-  useEffect(() => {
-    console.log("🟢 AuthProvider mounted");
+  /* -------------------- HARD SESSION END -------------------- */
+  const endSession = useCallback(
+    async (reason) => {
+      if (sessionEndedRef.current) return;
+      sessionEndedRef.current = true;
 
-    if (!reduxUser && sessionUser) {
-      console.log("📦 Restoring user from sessionStorage");
-      dispatch(setUser(JSON.parse(sessionUser)));
-    }
-  }, []);
+      clearTimeout(inactivityTimerRef.current);
+      clearTimeout(warningTimerRef.current);
+      clearInterval(countdownRef.current);
 
-  /* -------------------- LOGOUT -------------------- */
-  const logout = useCallback(() => {
-    console.log("🔴 LOGOUT");
+      setWarningOpen(false);
+      setSessionReason(reason);
+      setSessionDialogOpen(true);
 
-    sessionStorage.clear();
-    dispatch(clearAuth());
+      try {
+        await axios.post("/auth/logout", {}, { withCredentials: true });
+      } catch {
+        /* ignore */
+      }
 
-    setDialogOpen(false);
-    setWarningOpen(false);
-    sessionInvalidatedRef.current = false;
+      dispatch(clearAuth());
+      sessionStorage.clear();
+    },
+    [dispatch]
+  );
 
-    sessionStorage.setItem("LOGOUT_EVENT", Date.now());
-    window.location.href = "/";
-  }, [dispatch]);
-
-  /* -------------------- SESSION INVALID -------------------- */
-  const triggerSessionDialog = useCallback((reason) => {
-    if (sessionInvalidatedRef.current) {
-      console.log("⚠️ Session already invalidated");
-      return;
-    }
-
-    console.log("⛔ SESSION INVALIDATED:", reason);
-    sessionInvalidatedRef.current = true;
-
-    setSessionError(reason);
-    setDialogOpen(true);
-  }, []);
-
-  /* -------------------- START / RESET TIMERS -------------------- */
-  const startInactivityTimers = useCallback(() => {
-    if (!user) {
-      console.log("⚠️ No user → timers not started");
-      return;
-    }
-
-    console.log("⏱️ STARTING INACTIVITY TIMERS");
+  /* -------------------- RESET TIMERS -------------------- */
+  const resetInactivityTimers = useCallback(() => {
+    if (!user || sessionEndedRef.current) return;
 
     clearTimeout(inactivityTimerRef.current);
     clearTimeout(warningTimerRef.current);
@@ -91,89 +67,154 @@ export const AuthProvider = ({ children }) => {
     setWarningOpen(false);
     setSecondsLeft(30);
 
-    /** ---- Warning Timer ---- */
     warningTimerRef.current = setTimeout(() => {
-      console.log("⚠️ WARNING TIMER FIRED");
-
       setWarningOpen(true);
+
       let counter = 30;
       setSecondsLeft(counter);
 
       countdownRef.current = setInterval(() => {
         counter -= 1;
-        console.log("⏳ Countdown:", counter);
-        setSecondsLeft(counter);
+        if (counter <= 0) {
+          clearInterval(countdownRef.current);
+          setSecondsLeft(0);
+        } else {
+          setSecondsLeft(counter);
+        }
       }, 1000);
     }, INACTIVITY_TIMEOUT - WARNING_TIME);
 
-    /** ---- Logout Timer ---- */
     inactivityTimerRef.current = setTimeout(() => {
-      console.log("⛔ INACTIVITY TIMEOUT FIRED");
-      triggerSessionDialog("SESSION_EXPIRED");
+      endSession("SESSION_EXPIRED");
     }, INACTIVITY_TIMEOUT);
-  }, [user, triggerSessionDialog]);
+  }, [user, endSession]);
 
-  /* -------------------- START WHEN USER AVAILABLE -------------------- */
+  /* -------------------- START ON LOGIN -------------------- */
   useEffect(() => {
-    console.log("👤 User resolved:", user);
-    if (user) startInactivityTimers();
-  }, [user, startInactivityTimers]);
+    if (user) {
+      sessionEndedRef.current = false;
+      resetInactivityTimers();
+    }
+  }, [user, resetInactivityTimers]);
 
-  /* -------------------- USER ACTIVITY -------------------- */
+  /* -------------------- ACTIVITY -------------------- */
   useEffect(() => {
     if (!user) return;
 
-    const handleActivity = (e) => {
-      console.log("🖱️ USER ACTIVITY:", e.type);
-      startInactivityTimers();
-      sessionStorage.setItem("LAST_ACTIVITY", Date.now());
-    };
-
+    const handleActivity = () => resetInactivityTimers();
     const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-    events.forEach((e) => window.addEventListener(e, handleActivity));
 
-    return () => {
+    events.forEach((e) => window.addEventListener(e, handleActivity));
+    return () =>
       events.forEach((e) =>
         window.removeEventListener(e, handleActivity)
       );
-    };
-  }, [user, startInactivityTimers]);
+  }, [user, resetInactivityTimers]);
 
-  /* -------------------- MULTI TAB SYNC -------------------- */
+  /* -------------------- MULTI TAB -------------------- */
   useEffect(() => {
     const handleStorage = (e) => {
-      console.log("🪟 STORAGE EVENT:", e.key);
-
-      if (e.key === "LAST_ACTIVITY") {
-        console.log("🔄 Activity sync from another tab");
-        startInactivityTimers();
-      }
-
       if (e.key === "LOGOUT_EVENT") {
-        console.log("🔴 Logout sync from another tab");
-        logout();
+        endSession("SESSION_EXPIRED");
       }
     };
 
     window.addEventListener("storage", handleStorage);
     return () => window.removeEventListener("storage", handleStorage);
-  }, [logout, startInactivityTimers]);
+  }, [endSession]);
 
   return (
-    <AuthContext.Provider value={{ user, logout, triggerSessionDialog }}>
+    <AuthContext.Provider
+      value={{
+        triggerSessionDialog: endSession,
+        logout: () => endSession("SESSION_EXPIRED"),
+      }}
+    >
       {children}
 
       <SessionWarningDialog
         open={warningOpen}
         secondsLeft={secondsLeft}
-        onContinue={startInactivityTimers}
+        onContinue={resetInactivityTimers}
       />
 
       <SessionDialog
-        open={dialogOpen}
-        reason={sessionError}
-        onConfirm={logout}
+        open={sessionDialogOpen}
+        reason={sessionReason}
+        onConfirm={() => (window.location.href = "/")}
       />
     </AuthContext.Provider>
   );
 };
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  Typography,
+} from "@mui/material";
+
+const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
+  if (!open) return null;
+
+  return (
+    <Dialog open disableEscapeKeyDown>
+      <DialogTitle color="warning.main">
+        Session Expiring Soon
+      </DialogTitle>
+
+      <DialogContent>
+        <Typography>
+          You will be logged out due to inactivity in{" "}
+          <strong>{Math.max(secondsLeft, 0)}</strong> seconds.
+        </Typography>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onContinue} variant="contained">
+          Continue Session
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default SessionWarningDialog;
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Button,
+} from "@mui/material";
+
+const SessionDialog = ({ open, reason, onConfirm }) => {
+  let title = "Session Expired";
+  let message = "Your session has ended. Please log in again.";
+
+  if (reason === "CONCURRENT_LOGIN") {
+    title = "Security Alert";
+    message =
+      "You have been logged out because this account signed in on another device.";
+  }
+
+  return (
+    <Dialog open={open} disableEscapeKeyDown>
+      <DialogTitle color="error">{title}</DialogTitle>
+      <DialogContent>
+        <DialogContentText>{message}</DialogContentText>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onConfirm} variant="contained">
+          Return to Login
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default SessionDialog;
