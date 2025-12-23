@@ -9,7 +9,7 @@ import { useDispatch, useSelector } from "react-redux";
 import axios from "axios";
 import SessionDialog from "../components/SessionDialog";
 import SessionWarningDialog from "../components/SessionWarningDialog";
-import { clearAuth } from "../store/slices/authSlice";
+import { logout as reduxLogout } from "../store/slices/authSlice";
 
 export const AuthContext = createContext();
 
@@ -30,7 +30,7 @@ export const AuthProvider = ({ children }) => {
   const countdownRef = useRef(null);
   const sessionEndedRef = useRef(false);
 
-  /* -------------------- HARD SESSION END -------------------- */
+  /** -------------------- SINGLE LOGOUT ENTRY -------------------- */
   const endSession = useCallback(
     async (reason) => {
       if (sessionEndedRef.current) return;
@@ -41,8 +41,12 @@ export const AuthProvider = ({ children }) => {
       clearInterval(countdownRef.current);
 
       setWarningOpen(false);
-      setSessionReason(reason);
-      setSessionDialogOpen(true);
+
+      // Show dialog only for forced logout
+      if (reason !== "MANUAL_LOGOUT") {
+        setSessionReason(reason);
+        setSessionDialogOpen(true);
+      }
 
       try {
         await axios.post("/auth/logout", {}, { withCredentials: true });
@@ -50,13 +54,18 @@ export const AuthProvider = ({ children }) => {
         /* ignore */
       }
 
-      dispatch(clearAuth());
+      dispatch(reduxLogout());
       sessionStorage.clear();
+      sessionStorage.setItem("LOGOUT_EVENT", Date.now());
+
+      if (reason === "MANUAL_LOGOUT") {
+        window.location.href = "/";
+      }
     },
     [dispatch]
   );
 
-  /* -------------------- RESET TIMERS -------------------- */
+  /** -------------------- INACTIVITY RESET -------------------- */
   const resetInactivityTimers = useCallback(() => {
     if (!user || sessionEndedRef.current) return;
 
@@ -89,7 +98,7 @@ export const AuthProvider = ({ children }) => {
     }, INACTIVITY_TIMEOUT);
   }, [user, endSession]);
 
-  /* -------------------- START ON LOGIN -------------------- */
+  /** -------------------- START ON LOGIN -------------------- */
   useEffect(() => {
     if (user) {
       sessionEndedRef.current = false;
@@ -97,7 +106,7 @@ export const AuthProvider = ({ children }) => {
     }
   }, [user, resetInactivityTimers]);
 
-  /* -------------------- ACTIVITY -------------------- */
+  /** -------------------- USER ACTIVITY -------------------- */
   useEffect(() => {
     if (!user) return;
 
@@ -111,7 +120,7 @@ export const AuthProvider = ({ children }) => {
       );
   }, [user, resetInactivityTimers]);
 
-  /* -------------------- MULTI TAB -------------------- */
+  /** -------------------- MULTI TAB LOGOUT -------------------- */
   useEffect(() => {
     const handleStorage = (e) => {
       if (e.key === "LOGOUT_EVENT") {
@@ -126,8 +135,8 @@ export const AuthProvider = ({ children }) => {
   return (
     <AuthContext.Provider
       value={{
+        logout: () => endSession("MANUAL_LOGOUT"),
         triggerSessionDialog: endSession,
-        logout: () => endSession("SESSION_EXPIRED"),
       }}
     >
       {children}
@@ -147,74 +156,15 @@ export const AuthProvider = ({ children }) => {
   );
 };
 
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-} from "@mui/material";
+import { useContext } from "react";
+import { AuthContext } from "../context/AuthContext";
 
-const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
-  if (!open) return null;
+const ProfileDrawer = () => {
+  const { logout } = useContext(AuthContext);
 
   return (
-    <Dialog open disableEscapeKeyDown>
-      <DialogTitle color="warning.main">
-        Session Expiring Soon
-      </DialogTitle>
-
-      <DialogContent>
-        <Typography>
-          You will be logged out due to inactivity in{" "}
-          <strong>{Math.max(secondsLeft, 0)}</strong> seconds.
-        </Typography>
-      </DialogContent>
-
-      <DialogActions>
-        <Button onClick={onContinue} variant="contained">
-          Continue Session
-        </Button>
-      </DialogActions>
-    </Dialog>
+    <Button color="error" onClick={logout}>
+      Sign Out
+    </Button>
   );
 };
-
-export default SessionWarningDialog;
-
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-  Button,
-} from "@mui/material";
-
-const SessionDialog = ({ open, reason, onConfirm }) => {
-  let title = "Session Expired";
-  let message = "Your session has ended. Please log in again.";
-
-  if (reason === "CONCURRENT_LOGIN") {
-    title = "Security Alert";
-    message =
-      "You have been logged out because this account signed in on another device.";
-  }
-
-  return (
-    <Dialog open={open} disableEscapeKeyDown>
-      <DialogTitle color="error">{title}</DialogTitle>
-      <DialogContent>
-        <DialogContentText>{message}</DialogContentText>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onConfirm} variant="contained">
-          Return to Login
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default SessionDialog;
