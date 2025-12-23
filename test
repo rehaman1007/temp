@@ -1,84 +1,153 @@
-import React from "react";
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-  Button,
-} from "@mui/material";
-
-const SessionDialog = ({ open, reason, onConfirm }) => {
-  let title = "Session Expired";
-  let message = "Your session has timed out. Please log in again.";
-
-  if (reason === "CONCURRENT_LOGIN") {
-    title = "Security Alert";
-    message =
-      "You have been logged out because this account signed in on another device.";
-  }
-
-  return (
-    <Dialog
-      open={open}
-      disableEscapeKeyDown
-      onClose={(e, r) => {
-        if (r !== "backdropClick") onConfirm();
-      }}
-    >
-      <DialogTitle color="error">{title}</DialogTitle>
-      <DialogContent>
-        <DialogContentText>{message}</DialogContentText>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onConfirm} variant="contained" color="primary">
-          Return to Login
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default SessionDialog;
-
-
-import React, { createContext, useState, useEffect } from "react";
+import React, {
+  createContext,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+} from "react";
 import SessionDialog from "../components/SessionDialog";
+import SessionWarningDialog from "../components/SessionWarningDialog";
+import axios from "axios";
 
 export const AuthContext = createContext();
+
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000;
+const WARNING_TIME = 30 * 1000;
+const KEEP_ALIVE_INTERVAL = 2 * 60 * 1000;
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(30);
   const [sessionError, setSessionError] = useState("");
 
+  const inactivityTimerRef = useRef(null);
+  const warningTimerRef = useRef(null);
+  const countdownRef = useRef(null);
+  const sessionInvalidatedRef = useRef(false);
+
+  /** -------------------- Load User -------------------- */
   useEffect(() => {
     const savedUser = localStorage.getItem("user");
     if (savedUser) setUser(JSON.parse(savedUser));
   }, []);
 
+  /** -------------------- Logout -------------------- */
+  const logout = useCallback(() => {
+    localStorage.clear();
+    setUser(null);
+    setDialogOpen(false);
+    setWarningOpen(false);
+    sessionInvalidatedRef.current = false;
+    window.location.href = "/";
+  }, []);
+
+  /** -------------------- Trigger Session Dialog -------------------- */
+  const triggerSessionDialog = useCallback((reason) => {
+    if (sessionInvalidatedRef.current) return;
+    sessionInvalidatedRef.current = true;
+    setSessionError(reason);
+    setDialogOpen(true);
+  }, []);
+
+  /** -------------------- Reset Inactivity Timers -------------------- */
+  const resetInactivityTimer = useCallback(() => {
+    if (!user) return;
+
+    clearTimeout(inactivityTimerRef.current);
+    clearTimeout(warningTimerRef.current);
+    clearInterval(countdownRef.current);
+
+    setWarningOpen(false);
+    setSecondsLeft(30);
+
+    // Warning timer
+    warningTimerRef.current = setTimeout(() => {
+      setWarningOpen(true);
+
+      let counter = 30;
+      setSecondsLeft(counter);
+
+      countdownRef.current = setInterval(() => {
+        counter -= 1;
+        setSecondsLeft(counter);
+      }, 1000);
+    }, INACTIVITY_TIMEOUT - WARNING_TIME);
+
+    // Final logout timer
+    inactivityTimerRef.current = setTimeout(() => {
+      triggerSessionDialog("SESSION_EXPIRED");
+    }, INACTIVITY_TIMEOUT);
+  }, [user, triggerSessionDialog]);
+
+  /** -------------------- Activity Listener -------------------- */
+  useEffect(() => {
+    if (!user) return;
+
+    const events = ["mousemove", "keydown", "click", "scroll"];
+    const handleActivity = () => {
+      resetInactivityTimer();
+      localStorage.setItem("LAST_ACTIVITY", Date.now());
+    };
+
+    events.forEach((e) => window.addEventListener(e, handleActivity));
+    resetInactivityTimer();
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, handleActivity));
+      clearTimeout(inactivityTimerRef.current);
+      clearTimeout(warningTimerRef.current);
+      clearInterval(countdownRef.current);
+    };
+  }, [user, resetInactivityTimer]);
+
+  /** -------------------- Multi-Tab Sync -------------------- */
+  useEffect(() => {
+    const handleStorage = (e) => {
+      if (e.key === "LAST_ACTIVITY") {
+        resetInactivityTimer();
+      }
+      if (e.key === "LOGOUT_EVENT") {
+        logout();
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [logout, resetInactivityTimer]);
+
+  /** -------------------- Background Keep-Alive Ping -------------------- */
+  useEffect(() => {
+    if (!user) return;
+
+    const interval = setInterval(() => {
+      axios.get("/auth/keep-alive", { withCredentials: true }).catch(() => {});
+    }, KEEP_ALIVE_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [user]);
+
+  /** -------------------- Login -------------------- */
   const login = (userData, tokens) => {
     localStorage.setItem("accessToken", tokens.accessToken);
     localStorage.setItem("refreshToken", tokens.refreshToken);
     localStorage.setItem("user", JSON.stringify(userData));
+    localStorage.setItem("LAST_ACTIVITY", Date.now());
     setUser(userData);
-  };
-
-  const logout = () => {
-    localStorage.clear();
-    setUser(null);
-    setDialogOpen(false);
-    window.location.href = "/";
-  };
-
-  const triggerSessionDialog = (reason) => {
-    setSessionError(reason);
-    setDialogOpen(true);
+    sessionInvalidatedRef.current = false;
   };
 
   return (
     <AuthContext.Provider value={{ user, login, logout, triggerSessionDialog }}>
       {children}
+
+      <SessionWarningDialog
+        open={warningOpen}
+        secondsLeft={secondsLeft}
+        onContinue={resetInactivityTimer}
+      />
+
       <SessionDialog
         open={dialogOpen}
         reason={sessionError}
@@ -88,259 +157,40 @@ export const AuthProvider = ({ children }) => {
   );
 };
 
-
 import {
-  useEffect,
-  useRef,
-  useState,
-  useCallback,
-  useMemo,
-  useContext,
-} from "react";
-import axios from "axios";
-import { useLocation } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { convertToKebabCase } from "../utils/CommonUtilities";
-import { AuthContext } from "../context/AuthContext";
-import { parseJwt } from "../utils/EncryptionUtilities";
-import { setToken, setUser } from "../store/slices/authSlice";
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  Typography,
+} from "@mui/material";
 
-const useApi = () => {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(false);
+const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
+  return (
+    <Dialog open={open} disableEscapeKeyDown>
+      <DialogTitle color="warning.main">
+        Session Expiring Soon
+      </DialogTitle>
 
-  const location = useLocation();
-  const snackbar = useCustomSnackbar();
-  const dispatch = useDispatch();
+      <DialogContent>
+        <Typography>
+          You will be logged out due to inactivity in{" "}
+          <strong>{secondsLeft}</strong> seconds.
+        </Typography>
+      </DialogContent>
 
-  /** -------------------- Context / Redux -------------------- */
-  const { logout, triggerSessionDialog } = useContext(AuthContext);
-  const token = useSelector((state) => state.auth.token);
-  const menus = useSelector((s) => s.menus.menus);
-  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
-
-  /** -------------------- Refs -------------------- */
-  const activeRequestsRef = useRef(new Set());
-  const isRefreshingRef = useRef(false);
-  const refreshQueueRef = useRef([]);
-  const sessionInvalidatedRef = useRef(false);
-
-  /** -------------------- Abort All Requests -------------------- */
-  const cancelAllRequests = useCallback(() => {
-    activeRequestsRef.current.forEach((controller) => {
-      if (!controller.signal.aborted) controller.abort();
-    });
-    activeRequestsRef.current.clear();
-    setLoading(false);
-  }, []);
-
-  useEffect(() => cancelAllRequests, [cancelAllRequests]);
-
-  /** -------------------- Session Invalid Handler -------------------- */
-  const handleSessionInvalid = useCallback(
-    (reason) => {
-      if (sessionInvalidatedRef.current) return;
-
-      sessionInvalidatedRef.current = true;
-      cancelAllRequests();
-      triggerSessionDialog(reason);
-    },
-    [cancelAllRequests, triggerSessionDialog]
+      <DialogActions>
+        <Button onClick={onContinue} variant="contained">
+          Continue Session
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
-
-  /** -------------------- Refresh Token (Queued) -------------------- */
-  const refreshToken = useCallback(async () => {
-    if (isRefreshingRef.current) {
-      return new Promise((resolve, reject) => {
-        refreshQueueRef.current.push({ resolve, reject });
-      });
-    }
-
-    isRefreshingRef.current = true;
-
-    try {
-      const res = await axios.post(
-        `${resolveConfig("/LS") ?? ""}/auth/refresh-token`,
-        {},
-        { withCredentials: true }
-      );
-
-      const { accessToken, refreshToken: newRefreshToken } = res.data || {};
-      if (!accessToken) throw new Error("No access token from refresh");
-
-      const user = parseJwt(accessToken);
-      dispatch(setToken(accessToken));
-      dispatch(setUser(user));
-
-      localStorage.setItem("accessToken", accessToken);
-      if (newRefreshToken) {
-        localStorage.setItem("refreshToken", newRefreshToken);
-      }
-
-      refreshQueueRef.current.forEach((p) => p.resolve(accessToken));
-      refreshQueueRef.current = [];
-
-      return accessToken;
-    } catch (err) {
-      refreshQueueRef.current.forEach((p) => p.reject(err));
-      refreshQueueRef.current = [];
-      throw err;
-    } finally {
-      isRefreshingRef.current = false;
-    }
-  }, [dispatch]);
-
-  /** -------------------- Menu Resolver -------------------- */
-  const findMenuItem = useCallback((items, route) => {
-    if (!items?.length) return null;
-
-    for (const item of items) {
-      if (item.route === route) return item;
-
-      if (item.children?.length) {
-        if (route.includes("/choose-option/")) {
-          const param = route.split("/choose-option/")[1];
-          if (param === convertToKebabCase(item.title)) return item;
-        }
-
-        const found = findMenuItem(item.children, route);
-        if (found) return found;
-      }
-    }
-    return null;
-  }, []);
-
-  const currentMenuFromRoute = useMemo(
-    () => findMenuItem(menus, location.pathname),
-    [menus, location.pathname, findMenuItem]
-  );
-
-  const xRequestType = useMemo(
-    () =>
-      currentMenuFromRoute?.requestType || selectedMenuItem?.requestType || "*",
-    [currentMenuFromRoute, selectedMenuItem]
-  );
-
-  /** -------------------- API CALLER -------------------- */
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true
-    ) => {
-      const parts = url.split("/");
-      const service = parts[1];
-      parts[1] = resolveConfig(`/${service}`);
-      const Final_Url = parts.slice(1).join("/");
-
-      const controller = new AbortController();
-      activeRequestsRef.current.add(controller);
-
-      setLoading(true);
-      setError(null);
-
-      const getCurrentToken = () =>
-        extraConfig?.headers?.Authorization?.replace("Bearer ", "") ||
-        localStorage.getItem("accessToken") ||
-        token;
-
-      try {
-        const config = {
-          method,
-          url: Final_Url,
-          responseType,
-          withCredentials: true,
-          signal: controller.signal,
-          headers: {
-            Authorization: `Bearer ${getCurrentToken()}`,
-            "Content-Type": contentType,
-            "X-Request-Type": xRequestType,
-            ...(extraConfig.headers || {}),
-          },
-          ...extraConfig,
-        };
-
-        if (payload) {
-          method === "GET"
-            ? (config.params = payload)
-            : (config.data = payload);
-        }
-
-        const response = await axios(config);
-        setData(response.data);
-        return returnDataOnly ? response.data : response;
-      } catch (err) {
-        if (axios.isCancel(err)) return;
-
-        const status = err.response?.status;
-        const code = err.response?.data?.error || err.response?.data?.code;
-
-        /** HARD FAIL */
-        if (
-          status === 401 &&
-          (code === "CONCURRENT_LOGIN" || code === "SESSION_EXPIRED")
-        ) {
-          handleSessionInvalid(code);
-          return;
-        }
-
-        /** TOKEN EXPIRED */
-        if (
-          status === 401 &&
-          code === "TOKEN_EXPIRED" &&
-          !extraConfig.__isRetry
-        ) {
-          try {
-            const newToken = await refreshToken();
-
-            return await callApi(
-              url,
-              payload,
-              method,
-              responseType,
-              contentType,
-              {
-                ...extraConfig,
-                __isRetry: true,
-                headers: {
-                  ...(extraConfig.headers || {}),
-                  Authorization: `Bearer ${newToken}`,
-                },
-              },
-              returnDataOnly
-            );
-          } catch {
-            logout();
-            return;
-          }
-        }
-
-        /** OTHER ERRORS */
-        const msg =
-          err.response?.data?.message ||
-          err.response?.data?.error ||
-          err.message ||
-          "Something went wrong";
-
-        snackbar(msg, "error");
-        setError(err);
-        throw err;
-      } finally {
-        activeRequestsRef.current.delete(controller);
-        if (!extraConfig.__isRetry) setLoading(false);
-      }
-    },
-    [token, xRequestType, snackbar, logout, handleSessionInvalid, refreshToken]
-  );
-
-  return { data, error, loading, callApi, cancelAllRequests };
 };
 
-export default useApi;
+export default SessionWarningDialog;
+
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
+const WARNING_TIME = 30 * 1000;           // 30 sec before logout
+const KEEP_ALIVE_INTERVAL = 2 * 60 * 1000; // 2 min ping
