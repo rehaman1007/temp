@@ -1,3 +1,37 @@
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  Typography,
+} from "@mui/material";
+
+const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
+  return (
+    <Dialog open={open} disableEscapeKeyDown>
+      <DialogTitle color="warning.main">
+        Session Expiring Soon
+      </DialogTitle>
+
+      <DialogContent>
+        <Typography>
+          You will be logged out due to inactivity in{" "}
+          <strong>{secondsLeft}</strong> seconds.
+        </Typography>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onContinue} variant="contained">
+          Continue Session
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default SessionWarningDialog;
+
 import React, {
   createContext,
   useState,
@@ -5,14 +39,14 @@ import React, {
   useRef,
   useCallback,
 } from "react";
+import axios from "axios";
 import SessionDialog from "../components/SessionDialog";
 import SessionWarningDialog from "../components/SessionWarningDialog";
-import axios from "axios";
 
 export const AuthContext = createContext();
 
-const INACTIVITY_TIMEOUT = 5 * 60 * 1000;
-const WARNING_TIME = 30 * 1000;
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
+const WARNING_TIME = 30 * 1000;           // last 30 sec
 const KEEP_ALIVE_INTERVAL = 2 * 60 * 1000;
 
 export const AuthProvider = ({ children }) => {
@@ -40,12 +74,14 @@ export const AuthProvider = ({ children }) => {
     setDialogOpen(false);
     setWarningOpen(false);
     sessionInvalidatedRef.current = false;
+    localStorage.setItem("LOGOUT_EVENT", Date.now());
     window.location.href = "/";
   }, []);
 
   /** -------------------- Trigger Session Dialog -------------------- */
   const triggerSessionDialog = useCallback((reason) => {
     if (sessionInvalidatedRef.current) return;
+
     sessionInvalidatedRef.current = true;
     setSessionError(reason);
     setDialogOpen(true);
@@ -53,7 +89,7 @@ export const AuthProvider = ({ children }) => {
 
   /** -------------------- Reset Inactivity Timers -------------------- */
   const resetInactivityTimer = useCallback(() => {
-    if (!user) return;
+    if (!user || sessionInvalidatedRef.current) return;
 
     clearTimeout(inactivityTimerRef.current);
     clearTimeout(warningTimerRef.current);
@@ -62,7 +98,7 @@ export const AuthProvider = ({ children }) => {
     setWarningOpen(false);
     setSecondsLeft(30);
 
-    // Warning timer
+    // 4:30 warning
     warningTimerRef.current = setTimeout(() => {
       setWarningOpen(true);
 
@@ -75,17 +111,18 @@ export const AuthProvider = ({ children }) => {
       }, 1000);
     }, INACTIVITY_TIMEOUT - WARNING_TIME);
 
-    // Final logout timer
+    // 5:00 logout
     inactivityTimerRef.current = setTimeout(() => {
       triggerSessionDialog("SESSION_EXPIRED");
     }, INACTIVITY_TIMEOUT);
   }, [user, triggerSessionDialog]);
 
-  /** -------------------- Activity Listener -------------------- */
+  /** -------------------- User Activity Listener -------------------- */
   useEffect(() => {
     if (!user) return;
 
-    const events = ["mousemove", "keydown", "click", "scroll"];
+    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+
     const handleActivity = () => {
       resetInactivityTimer();
       localStorage.setItem("LAST_ACTIVITY", Date.now());
@@ -105,19 +142,15 @@ export const AuthProvider = ({ children }) => {
   /** -------------------- Multi-Tab Sync -------------------- */
   useEffect(() => {
     const handleStorage = (e) => {
-      if (e.key === "LAST_ACTIVITY") {
-        resetInactivityTimer();
-      }
-      if (e.key === "LOGOUT_EVENT") {
-        logout();
-      }
+      if (e.key === "LAST_ACTIVITY") resetInactivityTimer();
+      if (e.key === "LOGOUT_EVENT") logout();
     };
 
     window.addEventListener("storage", handleStorage);
     return () => window.removeEventListener("storage", handleStorage);
   }, [logout, resetInactivityTimer]);
 
-  /** -------------------- Background Keep-Alive Ping -------------------- */
+  /** -------------------- Keep Alive Ping -------------------- */
   useEffect(() => {
     if (!user) return;
 
@@ -157,40 +190,3 @@ export const AuthProvider = ({ children }) => {
   );
 };
 
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-} from "@mui/material";
-
-const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
-  return (
-    <Dialog open={open} disableEscapeKeyDown>
-      <DialogTitle color="warning.main">
-        Session Expiring Soon
-      </DialogTitle>
-
-      <DialogContent>
-        <Typography>
-          You will be logged out due to inactivity in{" "}
-          <strong>{secondsLeft}</strong> seconds.
-        </Typography>
-      </DialogContent>
-
-      <DialogActions>
-        <Button onClick={onContinue} variant="contained">
-          Continue Session
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default SessionWarningDialog;
-
-const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
-const WARNING_TIME = 30 * 1000;           // 30 sec before logout
-const KEEP_ALIVE_INTERVAL = 2 * 60 * 1000; // 2 min ping
