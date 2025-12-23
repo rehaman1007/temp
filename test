@@ -1,3 +1,88 @@
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  Typography,
+  LinearProgress,
+  Box,
+} from "@mui/material";
+
+const TOTAL_WARNING_SECONDS = 30;
+
+const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
+  if (!open) return null;
+
+  const progress = (secondsLeft / TOTAL_WARNING_SECONDS) * 100;
+
+  return (
+    <Dialog open disableEscapeKeyDown>
+      <DialogTitle color="warning.main">
+        Session Expiring Soon
+      </DialogTitle>
+
+      <DialogContent>
+        <Typography sx={{ mb: 1 }}>
+          You will be logged out in <strong>{secondsLeft}</strong> seconds.
+        </Typography>
+
+        <Box sx={{ width: "100%" }}>
+          <LinearProgress
+            variant="determinate"
+            value={Math.max(progress, 0)}
+            color="warning"
+          />
+        </Box>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onContinue} variant="contained">
+          Continue Session
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default SessionWarningDialog;
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Button,
+} from "@mui/material";
+
+const SessionDialog = ({ open, reason, onConfirm }) => {
+  let title = "Session Expired";
+  let message = "Your session has ended. Please log in again.";
+
+  if (reason === "CONCURRENT_LOGIN") {
+    title = "Security Alert";
+    message =
+      "You have been logged out because this account signed in on another device.";
+  }
+
+  return (
+    <Dialog open={open} disableEscapeKeyDown>
+      <DialogTitle color="error">{title}</DialogTitle>
+      <DialogContent>
+        <DialogContentText>{message}</DialogContentText>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onConfirm} variant="contained">
+          Return to Login
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default SessionDialog;
+
 import React, {
   createContext,
   useEffect,
@@ -13,67 +98,64 @@ import { logout as reduxLogout } from "../store/slices/authSlice";
 
 export const AuthContext = createContext();
 
+/** ===== CONFIG ===== */
 const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
-const WARNING_TIME = 30 * 1000;           // last 30 sec
+const WARNING_SECONDS = 30;
 
 export const AuthProvider = ({ children }) => {
   const dispatch = useDispatch();
   const user = useSelector((state) => state.auth.user);
 
-  // ✅ SAFE replacement for useLocation
-  const isLoginPage = window.location.pathname === "/";
-
   const [warningOpen, setWarningOpen] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(30);
+  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [sessionReason, setSessionReason] = useState("");
 
   const inactivityTimerRef = useRef(null);
   const warningTimerRef = useRef(null);
   const countdownRef = useRef(null);
-  const sessionEndedRef = useRef(false);
+  const logoutInProgressRef = useRef(false);
 
-  /* -------------------- HARD LOGOUT -------------------- */
-  const endSession = useCallback(
-    async (reason) => {
-      if (!user || sessionEndedRef.current) return;
-      sessionEndedRef.current = true;
+  /* ================== CLEANUP ALL TIMERS ================== */
+  const clearAllTimers = () => {
+    clearTimeout(inactivityTimerRef.current);
+    clearTimeout(warningTimerRef.current);
+    clearInterval(countdownRef.current);
+  };
 
-      clearTimeout(inactivityTimerRef.current);
-      clearTimeout(warningTimerRef.current);
-      clearInterval(countdownRef.current);
+  /* ================== SINGLE LOGOUT FUNCTION ================== */
+  const logout = useCallback(
+    async (reason = "SESSION_EXPIRED") => {
+      if (logoutInProgressRef.current) return;
+      logoutInProgressRef.current = true;
 
+      clearAllTimers();
       setWarningOpen(false);
       setSessionReason(reason);
       setSessionDialogOpen(true);
 
       try {
         await axios.post("/auth/logout", {}, { withCredentials: true });
-      } catch {}
+      } catch {
+        /* ignore */
+      }
 
       dispatch(reduxLogout());
       sessionStorage.clear();
-      sessionStorage.setItem("LOGOUT_EVENT", Date.now());
     },
-    [dispatch, user]
+    [dispatch]
   );
 
-  /* -------------------- RESET INACTIVITY -------------------- */
-  const resetInactivityTimers = useCallback(() => {
-    if (!user || sessionEndedRef.current || isLoginPage) return;
-
-    clearTimeout(inactivityTimerRef.current);
-    clearTimeout(warningTimerRef.current);
-    clearInterval(countdownRef.current);
-
+  /* ================== START INACTIVITY ================== */
+  const startInactivityTracking = useCallback(() => {
+    clearAllTimers();
     setWarningOpen(false);
-    setSecondsLeft(30);
+    setSecondsLeft(WARNING_SECONDS);
 
-    // 4:30 warning
+    // Warning timer
     warningTimerRef.current = setTimeout(() => {
       setWarningOpen(true);
-
-      let counter = 30;
+      let counter = WARNING_SECONDS;
       setSecondsLeft(counter);
 
       countdownRef.current = setInterval(() => {
@@ -85,71 +167,56 @@ export const AuthProvider = ({ children }) => {
           setSecondsLeft(counter);
         }
       }, 1000);
-    }, INACTIVITY_TIMEOUT - WARNING_TIME);
+    }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
 
-    // 5:00 logout
+    // Final logout timer
     inactivityTimerRef.current = setTimeout(() => {
-      endSession("SESSION_EXPIRED");
+      logout("SESSION_EXPIRED");
     }, INACTIVITY_TIMEOUT);
-  }, [user, isLoginPage, endSession]);
+  }, [logout]);
 
-  /* -------------------- START / STOP -------------------- */
+  /* ================== RESET ON ACTIVITY ================== */
+  const resetOnActivity = useCallback(() => {
+    if (!user) return;
+    startInactivityTracking();
+  }, [user, startInactivityTracking]);
+
+  /* ================== USER EFFECT ================== */
   useEffect(() => {
-    if (!user || isLoginPage) {
-      sessionEndedRef.current = true;
-      clearTimeout(inactivityTimerRef.current);
-      clearTimeout(warningTimerRef.current);
-      clearInterval(countdownRef.current);
+    if (!user) {
+      clearAllTimers();
+      logoutInProgressRef.current = false;
       return;
     }
 
-    sessionEndedRef.current = false;
-    resetInactivityTimers();
-  }, [user, isLoginPage, resetInactivityTimers]);
+    startInactivityTracking();
 
-  /* -------------------- USER ACTIVITY -------------------- */
-  useEffect(() => {
-    if (!user || isLoginPage) return;
-
-    const handleActivity = () => resetInactivityTimers();
     const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+    events.forEach((e) => window.addEventListener(e, resetOnActivity));
 
-    events.forEach((e) => window.addEventListener(e, handleActivity));
-    return () =>
+    return () => {
       events.forEach((e) =>
-        window.removeEventListener(e, handleActivity)
+        window.removeEventListener(e, resetOnActivity)
       );
-  }, [user, isLoginPage, resetInactivityTimers]);
-
-  /* -------------------- MULTI TAB LOGOUT -------------------- */
-  useEffect(() => {
-    const handleStorage = (e) => {
-      if (e.key === "LOGOUT_EVENT") {
-        endSession("SESSION_EXPIRED");
-      }
+      clearAllTimers();
     };
-
-    window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
-  }, [endSession]);
+  }, [user, resetOnActivity, startInactivityTracking]);
 
   return (
     <AuthContext.Provider
       value={{
-        logout: () => endSession("MANUAL_LOGOUT"),
-        triggerSessionDialog: endSession,
+        logout, // manual logout button uses this
+        triggerSessionDialog: logout, // useApi uses this
       }}
     >
       {children}
 
-      {/* Warning dialog with progress */}
       <SessionWarningDialog
         open={warningOpen}
         secondsLeft={secondsLeft}
-        onContinue={resetInactivityTimers}
+        onContinue={resetOnActivity}
       />
 
-      {/* Final session dialog */}
       <SessionDialog
         open={sessionDialogOpen}
         reason={sessionReason}
