@@ -1,19 +1,26 @@
-import React, { createContext, useEffect, useRef, useCallback, useState } from "react";
+import React, {
+  createContext,
+  useEffect,
+  useRef,
+  useCallback,
+  useState,
+} from "react";
 import { useDispatch, useSelector } from "react-redux";
 import axios from "axios";
+import { throttle } from "lodash"; // Recommended: npm install lodash
 import SessionDialog from "../components/SessionDialog";
 import SessionWarningDialog from "../components/SessionWarningDialog";
 import { logout as reduxLogout } from "../store/slices/authSlice";
-import { throttle } from "lodash"; // Highly recommended: npm install lodash
 
 export const AuthContext = createContext();
 
-const INACTIVITY_TIMEOUT = 5 * 60 * 1000; 
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
 const WARNING_SECONDS = 30;
-const LOGIN_GRACE_PERIOD = 3000;
+const LOGIN_GRACE_PERIOD = 3000; // 3 seconds
 
 export const AuthProvider = ({ children }) => {
   const dispatch = useDispatch();
+  // We monitor the Redux user state to start/stop the session logic
   const user = useSelector((state) => state.auth.user);
 
   const [warningOpen, setWarningOpen] = useState(false);
@@ -27,45 +34,57 @@ export const AuthProvider = ({ children }) => {
   const logoutInProgressRef = useRef(false);
   const loginTimeRef = useRef(0);
 
+  /* ---------- Clear all active timers ---------- */
   const clearAllTimers = useCallback(() => {
     if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
     if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
     if (countdownRef.current) clearInterval(countdownRef.current);
   }, []);
 
-  const logout = useCallback(async (reason = "SESSION_EXPIRED") => {
-    if (Date.now() - loginTimeRef.current < LOGIN_GRACE_PERIOD) return;
-    if (logoutInProgressRef.current) return;
-    
-    logoutInProgressRef.current = true;
-    clearAllTimers();
-    
-    setWarningOpen(false);
-    setSessionReason(reason);
-    setSessionDialogOpen(true);
+  /* ---------- Central logout logic ---------- */
+  const logout = useCallback(
+    async (reason = "SESSION_EXPIRED") => {
+      // 1. Guard: Don't run if no user is present or if logout is already happening
+      if (!user || logoutInProgressRef.current) return;
 
-    try {
-      await axios.post("/auth/logout", {}, { withCredentials: true });
-    } catch (err) {
-      console.error("Logout API failed", err);
-    }
+      // 2. Ignore accidental triggers immediately after login
+      if (Date.now() - loginTimeRef.current < LOGIN_GRACE_PERIOD) return;
 
-    dispatch(reduxLogout());
-    sessionStorage.clear();
-  }, [dispatch, clearAllTimers]);
+      logoutInProgressRef.current = true;
+      clearAllTimers();
 
+      // Close the warning, show the final session dialog
+      setWarningOpen(false);
+      setSessionReason(reason);
+      setSessionDialogOpen(true);
+
+      try {
+        // Notify backend to kill the session cookie/token
+        await axios.post("/auth/logout", {}, { withCredentials: true });
+      } catch (err) {
+        console.warn("Session cleanup on server failed or already cleared.");
+      }
+
+      // Update Redux state
+      dispatch(reduxLogout());
+      sessionStorage.clear();
+    },
+    [dispatch, user, clearAllTimers]
+  );
+
+  /* ---------- Start/Restart the inactivity logic ---------- */
   const startInactivity = useCallback(() => {
     clearAllTimers();
     
-    // Only reset these if they aren't already at default to prevent unnecessary renders
+    // Only close warning if it's currently open to avoid unnecessary re-renders
     setWarningOpen(false);
-    
-    // Timer to show the warning
+
+    // Set timer for the warning dialog
     warningTimerRef.current = setTimeout(() => {
       setWarningOpen(true);
-      setSecondsLeft(WARNING_SECONDS);
-
       let counter = WARNING_SECONDS;
+      setSecondsLeft(counter);
+
       countdownRef.current = setInterval(() => {
         counter -= 1;
         setSecondsLeft(counter);
@@ -73,29 +92,37 @@ export const AuthProvider = ({ children }) => {
       }, 1000);
     }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
 
-    // Timer to perform the actual logout
+    // Set timer for the actual logout
     inactivityTimerRef.current = setTimeout(() => {
       logout("SESSION_EXPIRED");
     }, INACTIVITY_TIMEOUT);
   }, [logout, clearAllTimers]);
 
-  // Throttled activity handler to prevent 100s of updates per second
+  /* ---------- Throttled activity listener ---------- */
+  // Throttle prevents this from firing 100 times/sec during mouse moves
   const onActivity = useCallback(
     throttle(() => {
-      if (!user || logoutInProgressRef.current) return;
+      if (!user || logoutInProgressRef.current || sessionDialogOpen) return;
       startInactivity();
-    }, 2000), // Only reset timers at most every 2 seconds
-    [user, startInactivity]
+    }, 2000), 
+    [user, startInactivity, sessionDialogOpen]
   );
 
+  /* ---------- Lifecycle: Watch User Presence ---------- */
   useEffect(() => {
+    // If user logs out (manually or via this script), clean up everything
     if (!user) {
       clearAllTimers();
       logoutInProgressRef.current = false;
+      setWarningOpen(false);
+      // We DON'T setSessionDialogOpen(false) here yet, because we want 
+      // the user to see the "Session Expired" message until they click "Return to Login"
       return;
     }
 
+    // On successful login detection:
     loginTimeRef.current = Date.now();
+    setSessionDialogOpen(false); // Hide any leftover dialogs
     startInactivity();
 
     const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
@@ -103,25 +130,37 @@ export const AuthProvider = ({ children }) => {
 
     return () => {
       events.forEach((e) => window.removeEventListener(e, onActivity));
-      onActivity.cancel(); // Cleanup throttle
+      onActivity.cancel(); // Cleanup the throttle
       clearAllTimers();
     };
   }, [user, onActivity, startInactivity, clearAllTimers]);
 
+  /* ---------- Handle Dialog Confirmation ---------- */
+  const handleDialogConfirm = () => {
+    setSessionDialogOpen(false);
+    window.location.replace("/");
+  };
+
   return (
-    <AuthContext.Provider value={{ logout, triggerSessionDialog: logout }}>
+    <AuthContext.Provider
+      value={{
+        logout,                 // manual logout (from header, etc)
+        triggerSessionDialog: logout, // can be called by API interceptors
+      }}
+    >
       {children}
+
       <SessionWarningDialog
         open={warningOpen}
         secondsLeft={secondsLeft}
         onContinue={onActivity}
       />
+
       <SessionDialog
         open={sessionDialogOpen}
         reason={sessionReason}
-        onConfirm={() => window.location.replace("/")}
+        onConfirm={handleDialogConfirm}
       />
     </AuthContext.Provider>
   );
 };
-test
