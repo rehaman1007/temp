@@ -1,90 +1,24 @@
-// PrivateRouter file
-import React, { useEffect, useContext } from "react";
-import { Navigate, Outlet } from "react-router-dom";
-import { useSelector } from "react-redux";
-import { AuthContext } from "../context/AuthContext";
-
-const PrivateRouter = () => {
-  const { token, user } = useSelector((state) => state.auth);
-  const tabId = useSelector((state) => state.tab.tabId);
-
-  // Use the global context trigger
-  const { triggerSessionDialog } = useContext(AuthContext);
-
-  useEffect(() => {
-    // Only listen if logged in
-    if (!user?.userId || !tabId) return;
-
-    const bc = new BroadcastChannel("auth");
-
-    const handleMessage = (event) => {
-      const { type, userId: eventUserId, tabId: eventTabId } = event.data || {};
-
-      // If same user logs in on a different tab
-      if (
-        type === "USER_LOGGED_IN" &&
-        eventUserId === user.userId &&
-        eventTabId !== tabId
-      ) {
-        // Trigger the global dialog with the correct reason
-        triggerSessionDialog("CONCURRENT_LOGIN");
-      }
-    };
-
-    bc.onmessage = handleMessage;
-
-    return () => {
-      bc.close();
-    };
-  }, [user, tabId, triggerSessionDialog]);
-
-  if (!token) {
-    return <Navigate to="/" replace />;
-  }
-
-  // No local dialogs here! Just the content.
-  return <Outlet />;
-};
-
-export default PrivateRouter;
-
-
-// authSlice file
 import { createSlice } from "@reduxjs/toolkit";
+
 const initialState = {
-  user: null, // The decoded user object
-  token: null, // The Access Token string
+  user: null,
+  token: null,
   isAuthenticated: false,
-  loading: false,
-  error: null,
 };
+
 const authSlice = createSlice({
   name: "auth",
   initialState,
   reducers: {
-    //Existing
-    setToken: (state, action) => {
-      state.token = action.payload;
-    },
-    setUser: (state, action) => {
-      state.user = action.payload;
-    },
-    logout: (state) => {
-      state.token = null;
-      state.user = null;
-    },
-    // Called immediately after Login API success
     loginSuccess: (state, action) => {
       state.user = action.payload.user;
       state.token = action.payload.token;
       state.isAuthenticated = true;
-      state.error = null;
-      state.loading = false;
-      // Persist to local storage for page reloads
+
       localStorage.setItem("token", action.payload.token);
       localStorage.setItem("user", JSON.stringify(action.payload.user));
     },
-    // Called when the Refresh Token API returns a new Access Token
+
     tokenRefreshed: (state, action) => {
       state.token = action.payload.token;
       if (action.payload.user) {
@@ -93,576 +27,40 @@ const authSlice = createSlice({
       }
       localStorage.setItem("token", action.payload.token);
     },
-    // Called on Logout or Session Expiry
-    logoutSuccess: (state) => {
+
+    logout: (state) => {
       state.user = null;
       state.token = null;
       state.isAuthenticated = false;
-      state.error = null;
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
+      localStorage.clear();
     },
-    // Optional: Load state from LocalStorage on app startup
+
     initializeAuth: (state) => {
       const token = localStorage.getItem("token");
-      const userStr = localStorage.getItem("user");
-      if (token && userStr) {
+      const user = localStorage.getItem("user");
+      if (token && user) {
         state.token = token;
-        state.user = JSON.parse(userStr);
+        state.user = JSON.parse(user);
         state.isAuthenticated = true;
       }
     },
   },
 });
+
 export const {
-  setToken,
-  setUser,
-  logout,
   loginSuccess,
   tokenRefreshed,
-  logoutSuccess,
+  logout,
   initializeAuth,
 } = authSlice.actions;
+
 export default authSlice.reducer;
 
-
-// old logic
-import { useState, useCallback, useRef, useEffect } from "react";
-import { useSelector } from "react-redux";
-import { useLocation } from "react-router-dom";
-import api from "../config/axiosConfig"; // Import the Singleton
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-import { convertToKebabCase } from "../utils/CommonUtilities";
-
-const useApi = () => {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(false);
-
-  const activeRequests = useRef(new Set());
-  const snackbar = useCustomSnackbar();
-  const location = useLocation();
-
-  // Get Menus from Redux to calculate X-Request-Type
-  const menus = useSelector((state) => state.menus.menus);
-  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
-
-  // --- Helper to find Menu Item based on Route ---
-  const findMenuItem = useCallback((items, route) => {
-    if (!items?.length) return null;
-    for (const item of items) {
-      if (item.route === route) return item;
-      if (item.children?.length) {
-        // Handle dynamic routes if needed
-        if (route.includes("/choose-option/")) {
-          const param = route.split("/choose-option/")[1];
-          if (param === convertToKebabCase(item.title)) return item;
-        }
-        const found = findMenuItem(item.children, route);
-        if (found) return found;
-      }
-    }
-    return null;
-  }, []);
-
-  // Calculate X-Request-Type only when location changes
-  const xRequestType = (() => {
-    const currentMenu = findMenuItem(menus, location.pathname);
-    return currentMenu?.requestType || selectedMenuItem?.requestType || "*";
-  })();
-
-  const cancelAllRequests = useCallback(() => {
-    activeRequests.current.forEach((controller) => {
-      controller.abort();
-    });
-    activeRequests.current.clear();
-  }, []);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => cancelAllRequests();
-  }, [cancelAllRequests]);
-
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true
-    ) => {
-      setLoading(true);
-      setError(null);
-      const controller = new AbortController();
-      activeRequests.current.add(controller);
-
-      try {
-        const config = {
-          method,
-          url,
-          data: method !== "GET" ? payload : undefined,
-          params: method === "GET" ? payload : undefined,
-          responseType,
-          signal: controller.signal,
-          headers: {
-            "Content-Type": contentType,
-            "X-Request-Type": xRequestType, // Context Header
-            ...(extraConfig.headers || {}),
-          },
-          ...extraConfig,
-        };
-
-        // Use the Singleton API instance
-        const response = await api(config);
-
-        setData(response.data);
-        return returnDataOnly ? response.data : response;
-      } catch (err) {
-        // if (api.isCancel(err)) {
-        //   // Request cancelled, do nothing
-        //   return;
-        // }
-        setError(err);
-
-        // Show Snackbar for generic errors (skip 401s as they are handled by interceptor)
-        if (err.response?.status !== 401) {
-          const msg =
-            err.response?.data?.message ||
-            err.response?.data?.error ||
-            "An error occurred";
-          snackbar(msg, "error");
-        }
-        throw err;
-      } finally {
-        activeRequests.current.delete(controller);
-        setLoading(false);
-      }
-    },
-    [xRequestType, snackbar]
-  );
-
-  return { data, error, loading, callApi, cancelAllRequests };
-};
-
-export default useApi;
-
-
-// new logic
-import {
-  useState,
-  useRef,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-} from "react";
-import axios from "axios";
-import { useLocation } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { convertToKebabCase } from "../utils/CommonUtilities";
-import { AuthContext } from "../context/AuthContext";
-import { parseJwt } from "../utils/EncryptionUtilities";
-import { setToken, setUser } from "../store/slices/authSlice";
-
-const useApi = () => {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(false);
-
-  const location = useLocation();
-  const snackbar = useCustomSnackbar();
-  const dispatch = useDispatch();
-
-  // Get the safe trigger from Context
-  const { triggerSessionDialog, logout } = useContext(AuthContext);
-  
-  const token = useSelector((state) => state.auth.token);
-  const menus = useSelector((s) => s.menus.menus);
-  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
-
-  const activeRequestsRef = useRef(new Set());
-  const isRefreshingRef = useRef(false);
-  const refreshQueueRef = useRef([]);
-  const sessionInvalidatedRef = useRef(false);
-
-  const cancelAllRequests = useCallback(() => {
-    activeRequestsRef.current.forEach((controller) => {
-      if (!controller.signal.aborted) controller.abort();
-    });
-    activeRequestsRef.current.clear();
-    setLoading(false);
-  }, []);
-
-  useEffect(() => cancelAllRequests, [cancelAllRequests]);
-
-  const handleSessionInvalid = useCallback(
-    (reason) => {
-      if (sessionInvalidatedRef.current) return;
-      sessionInvalidatedRef.current = true;
-      
-      cancelAllRequests();
-      
-      // CALL THE SAFE TRIGGER (Doesn't redirect yet)
-      triggerSessionDialog(reason);
-    },
-    [cancelAllRequests, triggerSessionDialog]
-  );
-
-  const refreshToken = useCallback(async () => {
-    if (isRefreshingRef.current) {
-      return new Promise((resolve, reject) => {
-        refreshQueueRef.current.push({ resolve, reject });
-      });
-    }
-
-    isRefreshingRef.current = true;
-
-    try {
-      const res = await axios.post(
-        `${resolveConfig("/LS") ?? ""}/auth/refresh-token`,
-        {},
-        { withCredentials: true }
-      );
-
-      const { accessToken, refreshToken: newRefreshToken } = res.data || {};
-      if (!accessToken) throw new Error("No access token from refresh");
-
-      const user = parseJwt(accessToken);
-      dispatch(setToken(accessToken));
-      dispatch(setUser(user));
-
-      localStorage.setItem("accessToken", accessToken);
-      if (newRefreshToken) {
-        localStorage.setItem("refreshToken", newRefreshToken);
-      }
-
-      refreshQueueRef.current.forEach((p) => p.resolve(accessToken));
-      refreshQueueRef.current = [];
-
-      return accessToken;
-    } catch (err) {
-      refreshQueueRef.current.forEach((p) => p.reject(err));
-      refreshQueueRef.current = [];
-      throw err;
-    } finally {
-      isRefreshingRef.current = false;
-    }
-  }, [dispatch]);
-
-  // ... Menu logic remains the same ...
-  const findMenuItem = useCallback((items, route) => {
-    if (!items?.length) return null;
-    for (const item of items) {
-      if (item.route === route) return item;
-      if (item.children?.length) {
-        if (route.includes("/choose-option/")) {
-          const param = route.split("/choose-option/")[1];
-          if (param === convertToKebabCase(item.title)) return item;
-        }
-        const found = findMenuItem(item.children, route);
-        if (found) return found;
-      }
-    }
-    return null;
-  }, []);
-
-  const currentMenuFromRoute = useMemo(
-    () => findMenuItem(menus, location.pathname),
-    [menus, location.pathname, findMenuItem]
-  );
-
-  const xRequestType = useMemo(
-    () => currentMenuFromRoute?.requestType || selectedMenuItem?.requestType || "*",
-    [currentMenuFromRoute, selectedMenuItem]
-  );
-
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true
-    ) => {
-      const parts = url.split("/");
-      const service = parts[1];
-      parts[1] = resolveConfig(`/${service}`);
-      const Final_Url = parts.slice(1).join("/");
-
-      const controller = new AbortController();
-      activeRequestsRef.current.add(controller);
-
-      setLoading(true);
-      setError(null);
-
-      const getCurrentToken = () =>
-        extraConfig?.headers?.Authorization?.replace("Bearer ", "") ||
-        localStorage.getItem("accessToken") ||
-        token;
-
-      try {
-        const config = {
-          method,
-          url: Final_Url,
-          responseType,
-          withCredentials: true,
-          signal: controller.signal,
-          headers: {
-            Authorization: `Bearer ${getCurrentToken()}`,
-            "Content-Type": contentType,
-            "X-Request-Type": xRequestType,
-            ...(extraConfig.headers || {}),
-          },
-          ...extraConfig,
-        };
-
-        if (payload) {
-          method === "GET"
-            ? (config.params = payload)
-            : (config.data = payload);
-        }
-
-        const response = await axios(config);
-        setData(response.data);
-        return returnDataOnly ? response.data : response;
-      } catch (err) {
-        if (axios.isCancel(err)) return;
-
-        const status = err.response?.status;
-        const code = err.response?.data?.error || err.response?.data?.code;
-
-        /** HARD FAIL - Shows Dialog, stays on page */
-        if (
-          status === 401 &&
-          (code === "CONCURRENT_LOGIN" || code === "SESSION_EXPIRED")
-        ) {
-          handleSessionInvalid(code);
-          return;
-        }
-
-        /** TOKEN EXPIRED */
-        if (
-          status === 401 &&
-          code === "TOKEN_EXPIRED" &&
-          !extraConfig.__isRetry
-        ) {
-          try {
-            const newToken = await refreshToken();
-            return await callApi(
-              url,
-              payload,
-              method,
-              responseType,
-              contentType,
-              {
-                ...extraConfig,
-                __isRetry: true,
-                headers: {
-                  ...(extraConfig.headers || {}),
-                  Authorization: `Bearer ${newToken}`,
-                },
-              },
-              returnDataOnly
-            );
-          } catch {
-            // If refresh fails, performs actual logout
-            logout(); 
-            return;
-          }
-        }
-
-        const msg = err.response?.data?.message || err.message || "Error";
-        snackbar(msg, "error");
-        setError(err);
-        throw err;
-      } finally {
-        activeRequestsRef.current.delete(controller);
-        if (!extraConfig.__isRetry) setLoading(false);
-      }
-    },
-    [token, xRequestType, snackbar, logout, handleSessionInvalid, refreshToken]
-  );
-
-  return { data, error, loading, callApi, cancelAllRequests };
-};
-
-export default useApi;
-
-======================================================
-
-// old logic
 import React, {
   createContext,
+  useCallback,
   useEffect,
   useRef,
-  useCallback,
-  useState,
-} from "react";
-import { useDispatch, useSelector } from "react-redux";
-import { throttle } from "lodash";
-import SessionDialog from "../components/SessionDialog";
-import SessionWarningDialog from "../components/SessionWarningDialog";
-import { logoutSuccess } from "../store/slices/authSlice";
-import api from "../config/axiosConfig";
-import { resolveConfig } from "../config/EnvironmentConfig";
-
-export const AuthContext = createContext();
-
-const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
-const WARNING_SECONDS = 30;
-
-export const AuthProvider = ({ children }) => {
-  const dispatch = useDispatch();
-  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
-
-  const [warningOpen, setWarningOpen] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
-
-  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
-  const [sessionReason, setSessionReason] = useState("");
-
-  const inactivityTimerRef = useRef(null);
-  const warningTimerRef = useRef(null);
-  const countdownRef = useRef(null);
-
-  // --- 1. Helper to Clear Timers ---
-  const clearAllTimers = useCallback(() => {
-    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
-    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-  }, []);
-
-  // --- 2. Perform Logout ---
-  // reason can be: "USER_INITIATED", "SESSION_EXPIRED", "CONCURRENT_LOGIN"
-  const performLogout = useCallback(
-    async (reason = "USER_INITIATED") => {
-      clearAllTimers();
-
-      // If triggered by system (not manual button click), show the dialog
-      if (reason !== "USER_INITIATED") {
-        setSessionReason(reason);
-        setSessionDialogOpen(true);
-      }
-
-      try {
-        // Attempt server logout (best effort)
-        await api.post(`${resolveConfig("/LS") || ""}/auth/logout`);
-      } catch (err) {
-        // Ignore errors if token is already dead
-      } finally {
-        // Always clear client state
-        localStorage.clear();
-        dispatch(logoutSuccess());
-        setWarningOpen(false);
-      }
-    },
-    [dispatch, clearAllTimers]
-  );
-
-  // --- 3. Start Timers ---
-  const startInactivityTimer = useCallback(() => {
-    clearAllTimers();
-    if (!isAuthenticated) return;
-
-    warningTimerRef.current = setTimeout(() => {
-      setWarningOpen(true);
-      setSecondsLeft(WARNING_SECONDS);
-
-      let counter = WARNING_SECONDS;
-      countdownRef.current = setInterval(() => {
-        counter -= 1;
-        setSecondsLeft(counter);
-        if (counter <= 0) clearInterval(countdownRef.current);
-      }, 1000);
-    }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
-
-    inactivityTimerRef.current = setTimeout(() => {
-      performLogout("SESSION_EXPIRED");
-    }, INACTIVITY_TIMEOUT);
-  }, [isAuthenticated, clearAllTimers, performLogout]);
-
-  // --- 4. Event Listeners ---
-  const onActivity = useCallback(
-    throttle(() => {
-      if (!isAuthenticated || sessionDialogOpen) return;
-      if (warningOpen) setWarningOpen(false);
-      startInactivityTimer();
-    }, 2000),
-    [isAuthenticated, sessionDialogOpen, warningOpen, startInactivityTimer]
-  );
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      startInactivityTimer();
-      const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-      events.forEach((e) => window.addEventListener(e, onActivity));
-
-      return () => {
-        events.forEach((e) => window.removeEventListener(e, onActivity));
-        onActivity.cancel();
-        clearAllTimers();
-      };
-    } else {
-      clearAllTimers();
-      setWarningOpen(false);
-    }
-  }, [isAuthenticated, onActivity, startInactivityTimer, clearAllTimers]);
-
-  useEffect(() => {
-    const handleSessionEvent = (e) => {
-      const reason = e.detail?.reason || "SESSION_EXPIRED";
-      performLogout(reason);
-    };
-
-    window.addEventListener("auth:session-expired", handleSessionEvent);
-    return () =>
-      window.removeEventListener("auth:session-expired", handleSessionEvent);
-  }, [performLogout]);
-
-  return (
-    <AuthContext.Provider
-      value={{
-        logout: () => performLogout("USER_INITIATED"),
-        // Expose this so PrivateRouter can trigger it
-        triggerSessionDialog: (reason) => performLogout(reason),
-      }}
-    >
-      {children}
-
-      <SessionWarningDialog
-        open={warningOpen}
-        secondsLeft={secondsLeft}
-        onContinue={() => {
-          setWarningOpen(false);
-          startInactivityTimer();
-        }}
-      />
-
-      {/* The ONE Global Dialog for all session issues */}
-      <SessionDialog
-        open={sessionDialogOpen}
-        reason={sessionReason}
-        onConfirm={() => {
-          setSessionDialogOpen(false);
-          // window.location.href = "/";
-        }}
-      />
-    </AuthContext.Provider>
-  );
-};
-
-// new logic
-import React, {
-  createContext,
-  useEffect,
-  useRef,
-  useCallback,
   useState,
 } from "react";
 import { useDispatch, useSelector } from "react-redux";
@@ -675,18 +73,17 @@ import { resolveConfig } from "../config/EnvironmentConfig";
 
 export const AuthContext = createContext();
 
-const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000;
 const WARNING_SECONDS = 30;
 
 export const AuthProvider = ({ children }) => {
   const dispatch = useDispatch();
-  const token = useSelector((state) => state.auth.token);
-  const user = useSelector((state) => state.auth.user);
+  const token = useSelector((s) => s.auth.token);
+  const user = useSelector((s) => s.auth.user);
 
   const [warningOpen, setWarningOpen] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
-  
-  // Dialog State
+
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [sessionReason, setSessionReason] = useState("");
 
@@ -694,88 +91,67 @@ export const AuthProvider = ({ children }) => {
   const warningTimerRef = useRef(null);
   const countdownRef = useRef(null);
 
-  // --- 1. Helper to Clear Timers ---
   const clearAllTimers = useCallback(() => {
-    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
-    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
+    clearTimeout(inactivityTimerRef.current);
+    clearTimeout(warningTimerRef.current);
+    clearInterval(countdownRef.current);
   }, []);
 
-  // --- 2. PERFORM LOGOUT (Destructive) ---
-  // Called when user clicks "Return to Login" or manually clicks Logout button.
+  // 🔥 FINAL DESTRUCTIVE LOGOUT
   const performLogout = useCallback(async () => {
-    console.log("Initiating Logout Sequence...");
     clearAllTimers();
     setWarningOpen(false);
-    setSessionDialogOpen(false); // Close dialog immediately
+    setSessionDialogOpen(false);
 
     try {
       if (token) {
-        // Await the response so it appears in Network tab
-        const response = await axios.post(
-          `${resolveConfig("/LS") ?? ""}/auth/logout`,
+        await axios.post(
+          `${resolveConfig("/LS")}/auth/logout`,
           {},
           {
             headers: { Authorization: `Bearer ${token}` },
             withCredentials: true,
           }
         );
-        console.log("Logout API Response:", response.data);
       }
-    } catch (err) {
-      console.warn("Logout API failed or Network Error:", err);
+    } catch (_) {
+      // ignore
     } finally {
-      console.log("Clearing Client State and Redirecting...");
       dispatch(reduxLogout());
-      
-      // OPTIONAL: Add a small delay (e.g., 500ms) to ensure 
-      // the network request is visible in DevTools before the page reloads.
-      setTimeout(() => {
-          window.location.replace("/");
-      }, 500);
+      window.location.replace("/");
     }
   }, [token, dispatch, clearAllTimers]);
 
-  // --- 3. TRIGGER SESSION DIALOG (Safe) ---
-  // Called by System Events (Concurrent Login, Timeout).
-  // Shows dialog but keeps page/token alive.
-  const showSessionDialog = useCallback((reason = "SESSION_EXPIRED") => {
-      // Prevent spamming state updates if already open
-      setSessionDialogOpen((prev) => {
-        if (prev) return true;
-        
-        clearAllTimers();
-        setWarningOpen(false);
-        setSessionReason(reason);
-        return true;
-      });
-  }, [clearAllTimers]);
+  // ✅ SAFE SYSTEM TRIGGER (NO SIDE EFFECTS)
+  const triggerSessionDialog = useCallback((reason) => {
+    setSessionDialogOpen((prev) => {
+      if (prev) return true;
+      setSessionReason(reason);
+      return true;
+    });
+  }, []);
 
-  // --- 4. Inactivity Timer Logic ---
+  // 🕒 Inactivity timers
   const startInactivity = useCallback(() => {
     clearAllTimers();
     if (!user) return;
 
-    // Warning Timer
     warningTimerRef.current = setTimeout(() => {
       setWarningOpen(true);
-      setSecondsLeft(WARNING_SECONDS);
-
       let counter = WARNING_SECONDS;
+      setSecondsLeft(counter);
+
       countdownRef.current = setInterval(() => {
         counter -= 1;
         setSecondsLeft(counter);
-        if (counter <= 0) clearInterval(countdownRef.current);
       }, 1000);
     }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
 
-    // Hard Stop Timer -> Show Dialog
     inactivityTimerRef.current = setTimeout(() => {
-      showSessionDialog("SESSION_EXPIRED");
+      triggerSessionDialog("SESSION_EXPIRED");
     }, INACTIVITY_TIMEOUT);
-  }, [user, clearAllTimers, showSessionDialog]);
+  }, [user, clearAllTimers, triggerSessionDialog]);
 
-  // --- 5. Activity Listener ---
   const onActivity = useCallback(
     throttle(() => {
       if (!user || sessionDialogOpen) return;
@@ -806,8 +182,8 @@ export const AuthProvider = ({ children }) => {
   return (
     <AuthContext.Provider
       value={{
-        logout: performLogout,          // Use for Manual Logout
-        triggerSessionDialog: showSessionDialog, // Use for System Events
+        logout: performLogout,
+        triggerSessionDialog,
       }}
     >
       {children}
@@ -816,17 +192,203 @@ export const AuthProvider = ({ children }) => {
         open={warningOpen}
         secondsLeft={secondsLeft}
         onContinue={() => {
-            setWarningOpen(false);
-            startInactivity();
+          setWarningOpen(false);
+          startInactivity();
         }}
       />
 
-      {/* When user confirms dialog, execute the destructive logout */}
       <SessionDialog
         open={sessionDialogOpen}
         reason={sessionReason}
-        onConfirm={performLogout} 
+        onConfirm={performLogout}
       />
     </AuthContext.Provider>
   );
 };
+
+import { useCallback, useContext, useMemo, useRef, useState } from "react";
+import axios from "axios";
+import { useDispatch, useSelector } from "react-redux";
+import { useLocation } from "react-router-dom";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
+import { AuthContext } from "../context/AuthContext";
+import { tokenRefreshed } from "../store/slices/authSlice";
+import { parseJwt } from "../utils/EncryptionUtilities";
+import { resolveConfig } from "../config/EnvironmentConfig";
+import { convertToKebabCase } from "../utils/CommonUtilities";
+
+const useApi = () => {
+  const [loading, setLoading] = useState(false);
+  const snackbar = useCustomSnackbar();
+  const dispatch = useDispatch();
+  const location = useLocation();
+
+  const { triggerSessionDialog, logout } = useContext(AuthContext);
+
+  const token = useSelector((s) => s.auth.token);
+  const menus = useSelector((s) => s.menus.menus);
+  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+
+  const activeRequestsRef = useRef(new Set());
+  const isRefreshingRef = useRef(false);
+  const refreshQueueRef = useRef([]);
+  const sessionInvalidatedRef = useRef(false);
+
+  const cancelAllRequests = useCallback(() => {
+    activeRequestsRef.current.forEach((c) => c.abort());
+    activeRequestsRef.current.clear();
+    setLoading(false);
+  }, []);
+
+  const refreshToken = useCallback(async () => {
+    if (sessionInvalidatedRef.current) {
+      throw new Error("Session invalidated");
+    }
+
+    if (isRefreshingRef.current) {
+      return new Promise((resolve, reject) =>
+        refreshQueueRef.current.push({ resolve, reject })
+      );
+    }
+
+    isRefreshingRef.current = true;
+
+    try {
+      const res = await axios.post(
+        `${resolveConfig("/LS")}/auth/refresh-token`,
+        {},
+        { withCredentials: true }
+      );
+
+      const accessToken = res.data?.accessToken;
+      if (!accessToken) throw new Error("No token");
+
+      const user = parseJwt(accessToken);
+      dispatch(tokenRefreshed({ token: accessToken, user }));
+
+      refreshQueueRef.current.forEach((p) => p.resolve(accessToken));
+      refreshQueueRef.current = [];
+      return accessToken;
+    } catch (e) {
+      refreshQueueRef.current.forEach((p) => p.reject(e));
+      refreshQueueRef.current = [];
+      throw e;
+    } finally {
+      isRefreshingRef.current = false;
+    }
+  }, [dispatch]);
+
+  const findMenuItem = useCallback((items, route) => {
+    for (const item of items || []) {
+      if (item.route === route) return item;
+      if (item.children) {
+        const found = findMenuItem(item.children, route);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
+
+  const currentMenu = useMemo(
+    () => findMenuItem(menus, location.pathname),
+    [menus, location.pathname, findMenuItem]
+  );
+
+  const xRequestType =
+    currentMenu?.requestType || selectedMenuItem?.requestType || "*";
+
+  const callApi = useCallback(
+    async (url, payload, method = "GET", extraConfig = {}) => {
+      if (sessionInvalidatedRef.current) return;
+
+      const controller = new AbortController();
+      activeRequestsRef.current.add(controller);
+      setLoading(true);
+
+      try {
+        const res = await axios({
+          method,
+          url,
+          data: method !== "GET" ? payload : undefined,
+          params: method === "GET" ? payload : undefined,
+          withCredentials: true,
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "X-Request-Type": xRequestType,
+            ...extraConfig.headers,
+          },
+        });
+
+        return res.data;
+      } catch (err) {
+        const status = err.response?.status;
+        const code = err.response?.data?.code;
+
+        if (status === 401 && ["SESSION_EXPIRED", "CONCURRENT_LOGIN"].includes(code)) {
+          sessionInvalidatedRef.current = true;
+          cancelAllRequests();
+          triggerSessionDialog(code);
+          return;
+        }
+
+        if (status === 401 && code === "TOKEN_EXPIRED") {
+          try {
+            const newToken = await refreshToken();
+            return callApi(url, payload, method, {
+              ...extraConfig,
+              headers: { Authorization: `Bearer ${newToken}` },
+            });
+          } catch {
+            logout();
+            return;
+          }
+        }
+
+        snackbar(err.message || "Error", "error");
+        throw err;
+      } finally {
+        activeRequestsRef.current.delete(controller);
+        setLoading(false);
+      }
+    },
+    [token, xRequestType, refreshToken, logout, triggerSessionDialog, cancelAllRequests]
+  );
+
+  return { callApi, loading, cancelAllRequests };
+};
+
+export default useApi;
+
+import React, { useEffect, useContext } from "react";
+import { Navigate, Outlet } from "react-router-dom";
+import { useSelector } from "react-redux";
+import { AuthContext } from "../context/AuthContext";
+
+const PrivateRouter = () => {
+  const { token, user } = useSelector((state) => state.auth);
+  const tabId = useSelector((state) => state.tab.tabId);
+  const { triggerSessionDialog } = useContext(AuthContext);
+
+  useEffect(() => {
+    if (!user?.userId || !tabId) return;
+
+    const bc = new BroadcastChannel("auth");
+    bc.onmessage = (e) => {
+      if (
+        e.data?.type === "USER_LOGGED_IN" &&
+        e.data.userId === user.userId &&
+        e.data.tabId !== tabId
+      ) {
+        triggerSessionDialog("CONCURRENT_LOGIN");
+      }
+    };
+
+    return () => bc.close();
+  }, [user, tabId, triggerSessionDialog]);
+
+  if (!token) return <Navigate to="/" replace />;
+  return <Outlet />;
+};
+
+export default PrivateRouter;
