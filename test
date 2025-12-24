@@ -1,158 +1,152 @@
+import { createSlice } from "@reduxjs/toolkit";
+
+const initialState = {
+  user: null,
+  token: null,
+  isAuthenticated: false,
+};
+
+const authSlice = createSlice({
+  name: "auth",
+  initialState,
+  reducers: {
+    loginSuccess: (state, action) => {
+      state.user = action.payload.user;
+      state.token = action.payload.token;
+      state.isAuthenticated = true;
+
+      localStorage.setItem("token", action.payload.token);
+      localStorage.setItem("user", JSON.stringify(action.payload.user));
+    },
+
+    tokenRefreshed: (state, action) => {
+      state.token = action.payload.token;
+      state.user = action.payload.user;
+      localStorage.setItem("token", action.payload.token);
+      localStorage.setItem("user", JSON.stringify(action.payload.user));
+    },
+
+    logout: (state) => {
+      state.user = null;
+      state.token = null;
+      state.isAuthenticated = false;
+      localStorage.clear();
+    },
+
+    initializeAuth: (state) => {
+      const token = localStorage.getItem("token");
+      const user = localStorage.getItem("user");
+      if (token && user) {
+        state.token = token;
+        state.user = JSON.parse(user);
+        state.isAuthenticated = true;
+      }
+    },
+  },
+});
+
+export const {
+  loginSuccess,
+  tokenRefreshed,
+  logout,
+  initializeAuth,
+} = authSlice.actions;
+
+export default authSlice.reducer;
+
 import axios from "axios";
-import { resolveConfig } from "../config/EnvironmentConfig"; // Ensure this path is correct
-import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
+import { resolveConfig } from "../config/EnvironmentConfig";
+import { tokenRefreshed } from "../store/slices/authSlice";
 import { parseJwt } from "../utils/EncryptionUtilities";
 
-let store; // Will hold the Redux store reference
-
-// Inject store from App.js or index.js to avoid circular dependency
+let store;
 export const injectStore = (_store) => {
   store = _store;
 };
 
-// Create a Singleton Axios Instance
 const api = axios.create({
-  baseURL: "", // Base URL
-  withCredentials: true, // IMPORTANT: Allows sending/receiving HttpOnly Cookies
-  headers: {
-    "Content-Type": "application/json",
-  },
+  withCredentials: true,
+  headers: { "Content-Type": "application/json" },
 });
 
-// --- Request Interceptor ---
-api.interceptors.request.use(
-  (config) => {
-    // 1. Get Token from Redux Store
-    const state = store?.getState();
-    const token = state?.auth?.token;
+// ---------------- REQUEST ----------------
+api.interceptors.request.use((config) => {
+  const token = store?.getState()?.auth?.token;
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  config.headers["X-Request-Type"] ||= "*";
+  return config;
+});
 
-    // 2. Attach Authorization Header
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-
-    // 3. Attach Context Header (X-Request-Type) if passed in config
-    // The hook will pass this in, or defaults to '*'
-    if (!config.headers["X-Request-Type"]) {
-      config.headers["X-Request-Type"] = "*";
-    }
-
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
-
-// --- Response Interceptor ---
+// ---------------- RESPONSE ----------------
 let isRefreshing = false;
 let failedQueue = [];
 
-const processQueue = (error, token = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
+const processQueue = (error, token) => {
+  failedQueue.forEach((p) =>
+    error ? p.reject(error) : p.resolve(token)
+  );
   failedQueue = [];
 };
 
 api.interceptors.response.use(
-  (response) => {
-    return response;
-  },
+  (res) => res,
   async (error) => {
     const originalRequest = error.config;
-
-    // Safety check to prevent infinite loops
-    if (!originalRequest || originalRequest._retryCount > 2) {
-      return Promise.reject(error);
-    }
-
-    // Extract Error Details
     const status = error.response?.status;
-    const errorCode = error.response?.data?.error || error.response?.data?.code;
+    const code = error.response?.data?.code || error.response?.data?.error;
 
-    // ---------------------------------------------------------
-    // SCENARIO 1: Concurrent Login / Session Invalidated
-    // ---------------------------------------------------------
+    // ❌ Session Dead → notify UI only
     if (
       status === 401 &&
-      (errorCode === "CONCURRENT_LOGIN" ||
-        errorCode === "SESSION_EXPIRED" ||
-        errorCode === "INVALID_TOKEN")
+      ["SESSION_EXPIRED", "CONCURRENT_LOGIN", "INVALID_TOKEN"].includes(code)
     ) {
-      // Do NOT attempt refresh. The session is dead.
-      // We dispatch a custom event that AuthContext listens to for the Dialog
       window.dispatchEvent(
-        new CustomEvent("auth:session-expired", {
-          detail: { reason: errorCode },
+        new CustomEvent("auth:session-invalid", {
+          detail: { reason: code },
         })
       );
-
-      // Clear local state immediately
-      store.dispatch(logoutSuccess());
       return Promise.reject(error);
     }
 
-    // ---------------------------------------------------------
-    // SCENARIO 2: Access Token Expired (Try Refresh)
-    // ---------------------------------------------------------
-    if (
-      status === 401 &&
-      errorCode === "TOKEN_EXPIRED" &&
-      !originalRequest._retry
-    ) {
+    // 🔁 Token Expired → Refresh once
+    if (status === 401 && code === "TOKEN_EXPIRED" && !originalRequest._retry) {
       if (isRefreshing) {
-        // If already refreshing, queue this request
-        return new Promise(function (resolve, reject) {
+        return new Promise((resolve, reject) =>
           failedQueue.push({
             resolve: (token) => {
-              originalRequest.headers["Authorization"] = "Bearer " + token;
+              originalRequest.headers.Authorization = `Bearer ${token}`;
               resolve(api(originalRequest));
             },
-            reject: (err) => {
-              reject(err);
-            },
-          });
-        });
+            reject,
+          })
+        );
       }
 
       originalRequest._retry = true;
       isRefreshing = true;
 
       try {
-        // Call Backend Refresh Endpoint
-        // Note: We don't send the refresh token in body; backend reads the Cookie
-        const response = await api.post(
-          `${resolveConfig("/LS") || ""}/auth/refresh-token`
+        const res = await api.post(
+          `${resolveConfig("/LS")}/auth/refresh-token`
         );
 
-        const { accessToken } = response.data;
+        const accessToken = res.data?.accessToken;
+        if (!accessToken) throw new Error("No token");
 
-        if (accessToken) {
-          // 1. Update Redux
-          const user = parseJwt(accessToken);
-          store.dispatch(tokenRefreshed({ token: accessToken, user }));
+        const user = parseJwt(accessToken);
+        store.dispatch(tokenRefreshed({ token: accessToken, user }));
 
-          // 2. Process Queue
-          processQueue(null, accessToken);
-
-          // 3. Retry Original Request
-          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
-          return api(originalRequest);
-        } else {
-          throw new Error("No access token returned");
-        }
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        store.dispatch(logoutSuccess());
+        processQueue(null, accessToken);
+        originalRequest.headers.Authorization = `Bearer ${accessToken}`;
+        return api(originalRequest);
+      } catch (e) {
+        processQueue(e);
         window.dispatchEvent(
-          new CustomEvent("auth:session-expired", {
+          new CustomEvent("auth:session-invalid", {
             detail: { reason: "SESSION_EXPIRED" },
           })
         );
-        return Promise.reject(refreshError);
+        return Promise.reject(e);
       } finally {
         isRefreshing = false;
       }
@@ -164,61 +158,258 @@ api.interceptors.response.use(
 
 export default api;
 
+import React, {
+  createContext,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { useDispatch, useSelector } from "react-redux";
+import axios from "axios";
+import { throttle } from "lodash";
+import SessionDialog from "../components/SessionDialog";
+import SessionWarningDialog from "../components/SessionWarningDialog";
+import { logout } from "../store/slices/authSlice";
+import { resolveConfig } from "../config/EnvironmentConfig";
 
+export const AuthContext = createContext();
 
-import React from "react";
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000;
+const WARNING_SECONDS = 30;
+
+export const AuthProvider = ({ children }) => {
+  const dispatch = useDispatch();
+  const token = useSelector((s) => s.auth.token);
+  const user = useSelector((s) => s.auth.user);
+
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [reason, setReason] = useState("");
+
+  const inactivityRef = useRef();
+  const warningRef = useRef();
+  const countdownRef = useRef();
+
+  const clearTimers = useCallback(() => {
+    clearTimeout(inactivityRef.current);
+    clearTimeout(warningRef.current);
+    clearInterval(countdownRef.current);
+  }, []);
+
+  // 🔥 FINAL LOGOUT
+  const performLogout = useCallback(async () => {
+    clearTimers();
+    try {
+      if (token) {
+        await axios.post(
+          `${resolveConfig("/LS")}/auth/logout`,
+          {},
+          { headers: { Authorization: `Bearer ${token}` }, withCredentials: true }
+        );
+      }
+    } catch {}
+    finally {
+      dispatch(logout());
+      window.location.replace("/");
+    }
+  }, [token, dispatch, clearTimers]);
+
+  // UI ONLY
+  const triggerSessionDialog = useCallback((r) => {
+    setDialogOpen((prev) => {
+      if (prev) return true;
+      setReason(r);
+      return true;
+    });
+  }, []);
+
+  // Listen from axios interceptor
+  useEffect(() => {
+    const handler = (e) =>
+      triggerSessionDialog(e.detail?.reason || "SESSION_EXPIRED");
+    window.addEventListener("auth:session-invalid", handler);
+    return () => window.removeEventListener("auth:session-invalid", handler);
+  }, [triggerSessionDialog]);
+
+  const startInactivity = useCallback(() => {
+    clearTimers();
+    if (!user) return;
+
+    warningRef.current = setTimeout(() => {
+      setWarningOpen(true);
+      let sec = WARNING_SECONDS;
+      setSecondsLeft(sec);
+      countdownRef.current = setInterval(() => {
+        sec -= 1;
+        setSecondsLeft(sec);
+      }, 1000);
+    }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
+
+    inactivityRef.current = setTimeout(
+      () => triggerSessionDialog("SESSION_EXPIRED"),
+      INACTIVITY_TIMEOUT
+    );
+  }, [user, clearTimers, triggerSessionDialog]);
+
+  const onActivity = useCallback(
+    throttle(() => {
+      if (!user || dialogOpen) return;
+      if (warningOpen) setWarningOpen(false);
+      startInactivity();
+    }, 2000),
+    [user, dialogOpen, warningOpen, startInactivity]
+  );
+
+  useEffect(() => {
+    if (!user) return clearTimers();
+    startInactivity();
+    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+    events.forEach((e) => window.addEventListener(e, onActivity));
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, onActivity));
+      onActivity.cancel();
+      clearTimers();
+    };
+  }, [user, onActivity, startInactivity, clearTimers]);
+
+  return (
+    <AuthContext.Provider value={{ logout: performLogout, triggerSessionDialog }}>
+      {children}
+
+      <SessionWarningDialog
+        open={warningOpen}
+        secondsLeft={secondsLeft}
+        onContinue={() => {
+          setWarningOpen(false);
+          startInactivity();
+        }}
+      />
+
+      <SessionDialog open={dialogOpen} reason={reason} onConfirm={performLogout} />
+    </AuthContext.Provider>
+  );
+};
+
+import { useCallback, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
+import { useSelector } from "react-redux";
+import api from "../config/axiosConfig";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
+
+const useApi = () => {
+  const [loading, setLoading] = useState(false);
+  const snackbar = useCustomSnackbar();
+  const location = useLocation();
+
+  const menus = useSelector((s) => s.menus.menus);
+  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+
+  const currentMenu = useMemo(
+    () => menus?.find((m) => m.route === location.pathname),
+    [menus, location.pathname]
+  );
+
+  const xRequestType =
+    currentMenu?.requestType || selectedMenuItem?.requestType || "*";
+
+  const callApi = useCallback(
+    async (url, payload, method = "GET", extraConfig = {}) => {
+      setLoading(true);
+      try {
+        const res = await api({
+          method,
+          url,
+          data: method !== "GET" ? payload : undefined,
+          params: method === "GET" ? payload : undefined,
+          headers: { "X-Request-Type": xRequestType },
+          ...extraConfig,
+        });
+        return res.data;
+      } catch (e) {
+        snackbar(e.response?.data?.message || "Error", "error");
+        throw e;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [xRequestType, snackbar]
+  );
+
+  return { callApi, loading };
+};
+
+export default useApi;
+
+import React, { useEffect, useContext } from "react";
+import { Navigate, Outlet } from "react-router-dom";
+import { useSelector } from "react-redux";
+import { AuthContext } from "../context/AuthContext";
+
+const PrivateRouter = () => {
+  const { token, user } = useSelector((s) => s.auth);
+  const tabId = useSelector((s) => s.tab.tabId);
+  const { triggerSessionDialog } = useContext(AuthContext);
+
+  useEffect(() => {
+    if (!user?.userId || !tabId) return;
+    const bc = new BroadcastChannel("auth");
+    bc.onmessage = (e) => {
+      if (
+        e.data?.type === "USER_LOGGED_IN" &&
+        e.data.userId === user.userId &&
+        e.data.tabId !== tabId
+      ) {
+        triggerSessionDialog("CONCURRENT_LOGIN");
+      }
+    };
+    return () => bc.close();
+  }, [user, tabId, triggerSessionDialog]);
+
+  if (!token) return <Navigate to="/" replace />;
+  return <Outlet />;
+};
+
+export default PrivateRouter;
+
 import {
   Dialog,
   DialogTitle,
   DialogContent,
-  DialogContentText,
   DialogActions,
   Button,
   Typography,
   Box,
 } from "@mui/material";
-
-// Import the necessary icons
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 import SecurityIcon from "@mui/icons-material/Security";
-const SessionDialog = ({ open, reason, onConfirm }) => {
-  let title = "Session Expired";
-  let message =
-    "Your session has ended, Kindly log in again to access FinCore.";
-  let IconComponent = ErrorOutlineIcon;
-  let iconColor = "error";
 
-  // Covers both Backend 401s and Frontend BroadcastChannel detections
-  if (reason === "CONCURRENT_LOGIN") {
-    title = "Security Alert";
-    message =
-      "You have been logged out because this account signed in FinCore on another device or tab.";
-    IconComponent = SecurityIcon;
-    iconColor = "warning";
-  }
+const SessionDialog = ({ open, reason, onConfirm }) => {
+  const isConcurrent = reason === "CONCURRENT_LOGIN";
 
   return (
-    <Dialog
-      maxWidth="sm"
-      fullWidth
-      open={open}
-      disableEscapeKeyDown // Prevent closing by clicking outside
-      onClose={() => {}}
-    >
+    <Dialog open={open} disableEscapeKeyDown>
       <DialogTitle>
         <Box display="flex" alignItems="center">
-          <IconComponent color={iconColor} sx={{ mr: 1 }} />
-          <Typography variant="h6" component="span" color={iconColor}>
-            {title}
+          {isConcurrent ? (
+            <SecurityIcon color="warning" />
+          ) : (
+            <ErrorOutlineIcon color="error" />
+          )}
+          <Typography ml={1}>
+            {isConcurrent ? "Security Alert" : "Session Expired"}
           </Typography>
         </Box>
       </DialogTitle>
       <DialogContent>
-        <DialogContentText>{message}</DialogContentText>
+        {isConcurrent
+          ? "Your account was logged in from another device or tab."
+          : "Your session has expired. Please login again."}
       </DialogContent>
       <DialogActions>
-        <Button onClick={onConfirm} variant="contained" color="primary">
-          Close
+        <Button onClick={onConfirm} variant="contained">
+          Return to Login
         </Button>
       </DialogActions>
     </Dialog>
