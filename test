@@ -1,26 +1,212 @@
-import { createSlice } from "@reduxjs/toolkit";
+import React, { useMemo, Suspense } from "react";
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { useSelector } from "react-redux";
+import PrivateRouter from "./PrivateRouter";
+// Page Components
+import Login from "../features/auth/pages/Login";
+import Home from "../pages/Home";
+import NotFound from "../pages/NotFound";
+import ServerError from "../pages/ServerError";
+import { generateRouteObjects } from "./RouteGenerator";
+import CommonLayout from "../layout/CommonLayout";
+import SubmenuSelectionPage from "../pages/SubmenuSelectionPage";
+import FullscreenLayout from "../layout/FullscreenLayout";
 
-const initialState = {
-  token: null,
-  user: null,
+// A fallback component for suspense
+const PageLoader = () => <div>Loading Page...</div>;
+
+const DynamicLayout = () => {
+  const isComponentFullscreen = useSelector(
+    (state) => state.ui.isComponentFullscreen
+  );
+
+  return !isComponentFullscreen ? <CommonLayout /> : <FullscreenLayout />;
 };
 
-const authSlice = createSlice({
-  name: "auth",
-  initialState,
-  reducers: {
-    setToken: (state, action) => {
-      state.token = action.payload;
-    },
-    setUser: (state, action) => {
-      state.user = action.payload;
-    },
-    logout: (state) => {
-      state.token = null;
-      state.user = null;
-    },
-  },
-});
+const AppRouter = () => {
+  const menus = useSelector((state) => state.menus.menus);
 
-export const { setToken, setUser, logout } = authSlice.actions;
-export default authSlice.reducer;
+  const router = useMemo(() => {
+    // Generate the dynamic routes from the menu data
+    const dynamicRoutes = generateRouteObjects(menus || []);
+
+    // Define the entire application route structure as an array of objects
+    const routeConfig = [
+      {
+        path: "/",
+        element: <Login />,
+
+        errorElement: <ServerError />, // Top-level error boundary
+      },
+      {
+        path: "/server-error",
+        element: <ServerError />,
+      },
+      // This is the protected section of app
+      {
+        element: <PrivateRouter />,
+        children: [
+          {
+            element: <DynamicLayout />,
+            children: [
+              { path: "/home", element: <Home /> },
+              {
+                path: "/choose-option/:mainMenuTitle",
+                element: <SubmenuSelectionPage />,
+              },
+              ...dynamicRoutes,
+            ],
+          },
+        ].filter(Boolean),
+      },
+
+      {
+        path: "*",
+        element: <NotFound />,
+      },
+    ];
+
+    return createBrowserRouter(routeConfig);
+  }, [menus]); // The router will only be recreated if the 'menus' data changes
+
+  return (
+    <Suspense fallback={<PageLoader />}>
+      <RouterProvider router={router} />
+    </Suspense>
+  );
+};
+
+export default AppRouter;
+
+
+import React, { useState } from "react";
+import { Navigate, Outlet } from "react-router-dom";
+import ConcurrentLoginDialog from "../components/ConcurrentLoginDialog";
+import { useSelector } from "react-redux";
+
+const useAuth = () => {
+  const token = useSelector((state) => state.auth.token);
+  return !!token; // Returns true if token exists, false otherwise
+};
+
+const PrivateRouter = () => {
+  const [openLogoutDialog, setOpenLogoutDialog] = useState(false);
+  const bc = new BroadcastChannel("auth");
+  const tabId = useSelector((state) => state.tab.tabId);
+  const user = useSelector((state) => state.auth.user);
+
+  bc.onmessage = (event) => {
+    if (!user) {
+      setTimeout(() => bc.onmessage(event), 200);
+      return;
+    }
+
+    if (event.data.tabId === tabId) return;
+    if (!user) {
+      console.log("user is empty");
+      return;
+    }
+    if (
+      event.data.type === "USER_LOGGED_IN" &&
+      event.data.userId === user?.userId &&
+      user &&
+      tabId &&
+      event.data.tabId !== tabId
+    ) {
+      setOpenLogoutDialog(true);
+      console.log("event triggered");
+      //sessionStorage.clear();
+    }
+  };
+
+  const isAuthenticated = useAuth();
+
+  return (
+    <>
+      {isAuthenticated ? <Outlet /> : <Navigate to="/" replace />}
+      <ConcurrentLoginDialog
+        openLogoutDialog={openLogoutDialog}
+        setOpenLogoutDialog={setOpenLogoutDialog}
+      />
+    </>
+  );
+};
+
+export default PrivateRouter;
+
+import React from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  colors,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  IconButton,
+  Button,
+  Typography,
+  Stack,
+} from "@mui/material";
+import CloseSharpIcon from "@mui/icons-material/CloseSharp";
+const ConcurrentLoginDialog = ({ openLogoutDialog, setOpenLogoutDialog }) => {
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    setOpenLogoutDialog(false);
+    navigate("/");
+  };
+
+  return (
+    <Dialog
+      open={openLogoutDialog}
+      sx={{
+        backdropFilter: "blur(5px)",
+      }}
+      fullWidth={true}
+      onClose={() => {}}
+    >
+      <DialogTitle
+        sx={{
+          color: "white",
+          backgroundImage:
+            "linear-gradient(to bottom right, #6b21a8,#1e3a8a,#312e81)",
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          backgroundRepeat: "no-repeat",
+          borderColor: "white",
+          display: "flex",
+          justifyContent: "space-between",
+        }}
+      >
+        {/* <Typography>{title}</Typography> */}
+        Logged in another Tab
+        <IconButton onClick={handleLogout}>
+          <CloseSharpIcon sx={{ color: "white", mt: -0.25 }} />
+        </IconButton>
+      </DialogTitle>
+      <DialogContent>
+        <DialogContentText sx={{ pt: 5 }}>
+          <Typography variant="subtitle1" gutterBottom>
+            You have logged in another tab. Please close this tab and use the
+            application in the other tab.
+          </Typography>
+        </DialogContentText>
+        <Stack
+          direction="row"
+          spacing={2}
+          sx={{
+            justifyContent: "flex-end",
+            alignItems: "center",
+          }}
+        >
+          <Button variant="contained" color="error" onClick={handleLogout}>
+            Log Out
+          </Button>
+        </Stack>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+export default ConcurrentLoginDialog;
