@@ -1,141 +1,233 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector, useDispatch } from "react-redux"; // Added useDispatch
-import useCustomSnackbar from "../utils/useCustomSnackbar";
-import { resolveConfig } from "../config/EnvironmentConfig";
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  Typography,
+  LinearProgress,
+  Stack,
+  useTheme,
+  useMediaQuery,
+  Divider,
+} from "@mui/material";
+import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 
-// --- New Imports for Refresh Logic ---
-import api from "../config/axiosConfig"; // Reuse your configured Axios instance
-import { tokenRefreshed } from "../store/slices/authSlice";
-import { parseJwt } from "../utils/EncryptionUtilities";
+const TOTAL_WARNING_SECONDS = 30;
 
-const useStreamApi = () => {
-  const token = useSelector((state) => state.auth.token);
-  const dispatch = useDispatch(); // Initialize dispatch
-  const snackbar = useCustomSnackbar();
+const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
 
-  const controllerRef = useRef(null);
-  const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState(null);
+  if (!open) return null;
 
-  const startStream = useCallback(
-    (url, { onMessage, onOpen, onError } = {}) => {
-      if (!token) return console.warn("No token, cannot start SSE stream");
+  const progress = (secondsLeft / TOTAL_WARNING_SECONDS) * 100;
 
-      const parts = url.split("/");
-      const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
-      parts[1] = resolved;
-      const Final_Url = parts.slice(1).join("/");
+  return (
+    <Dialog
+      open={open}
+      fullWidth
+      maxWidth="sm"
+      disableEscapeKeyDown
+      PaperProps={{
+        sx: { borderRadius: 2, px: 1 },
+      }}
+    >
+      <DialogTitle>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <WarningAmberRoundedIcon color="warning" />
+          <Typography variant="h6">Session Expiring</Typography>
+        </Stack>
+      </DialogTitle>
+      <Divider />
 
-      // Cancel any existing connection
-      if (controllerRef.current) controllerRef.current.abort();
+      <DialogContent>
+        <Typography textAlign="center">
+          Session Inactive detected, You’ll be logged out in
+        </Typography>
 
-      const controller = new AbortController();
-      controllerRef.current = controller;
+        <Typography
+          variant="h3"
+          fontWeight={700}
+          color="warning.main"
+          textAlign="center"
+          sx={{ my: 2 }}
+        >
+          {secondsLeft}s
+        </Typography>
 
-      fetchEventSource(Final_Url, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
+        <LinearProgress
+          variant="determinate"
+          value={Math.max(progress, 0)}
+          color="warning"
+          sx={{ height: 8, borderRadius: 4 }}
+        />
 
-        async onopen(response) {
-          // 1. Handle Successful Connection
-          if (response.ok && response.status === 200) {
-            console.log("SSE Connection established");
-            setConnected(true);
-            onOpen?.(response);
-            return; // connection successful
-          }
-
-          // 2. Handle Token Expiry (401)
-          if (response.status === 401) {
-            console.log("SSE 401: Token expired, attempting refresh...");
-
-            try {
-              // Attempt to refresh using your existing Axios instance
-              // We use 'api' here so it includes the HttpOnly cookies and response interceptors
-              const refreshResponse = await api.post(
-                `${resolveConfig("/LS") || ""}/auth/refresh-token`
-              );
-
-              const { accessToken } = refreshResponse.data;
-
-              if (accessToken) {
-                // Update Redux - this will likely trigger a re-render in the parent,
-                // causing startStream to be called again with the new token.
-                const user = parseJwt(accessToken);
-                dispatch(tokenRefreshed({ token: accessToken, user }));
-                
-                // Throw specific error to stop the CURRENT stream attempt
-                // The React lifecycle will start a NEW one with the new token
-                throw new Error("TOKEN_REFRESHED_RETRY"); 
-              }
-            } catch (err) {
-              console.error("SSE Refresh failed:", err);
-              // If refresh fails, your axios interceptor likely handled logout already.
-              // We throw a fatal error to stop the stream retries.
-              throw err; 
-            }
-          }
-
-          // 3. Handle Other Errors
-          console.error("SSE Connection failed:", response.status);
-          // Only show snackbar if it's not a 401 (since 401 is being handled internally)
-          if (response.status !== 401) {
-             snackbar(`SSE Connection failed (${response.status})`, "error");
-          }
-          // Throw to trigger onError
-          throw new Error(`Connection failed: ${response.status}`);
-        },
-
-        onmessage(event) {
-          if (event.event === "connected") {
-            return;
-          }
-          if (event.event === "new_notification") {
-            try {
-              const data = JSON.parse(event.data);
-              setLastMessage(data);
-              onMessage?.(data);
-            } catch (err) {
-              console.error("SSE message parse error:", err);
-            }
-          }
-        },
-
-        onerror(err) {
-          // If this was our custom error, we stop the internal retry loop
-          // because React will create a fresh connection instance.
-          if (err.message === "TOKEN_REFRESHED_RETRY") {
-             // Throwing ensures fetchEventSource stops retrying this dead connection
-             throw err; 
-          }
-
-          console.error("SSE Error:", err);
-          setConnected(false);
-          onError?.(err);
-          
-          // Optional: You can decide to rethrow here if you want to stop retries entirely
-          // or return nothing to let fetchEventSource try again (default behavior)
-        },
-      });
-    },
-    [snackbar, token, dispatch] // Added dispatch to dependency array
+        <Typography
+          variant="caption"
+          textAlign="center"
+          color="text.secondary"
+          sx={{ display: "block", mt: 1 }}
+        >
+          Move your cursor to stay logged in
+        </Typography>
+      </DialogContent>
+    </Dialog>
   );
-
-  const stopStream = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
-      controllerRef.current = null;
-      setConnected(false);
-      console.log("SSE connection stopped.");
-    }
-  }, []);
-
-  useEffect(() => stopStream, [stopStream]);
-
-  return { connected, lastMessage, startStream, stopStream };
 };
 
-export default useStreamApi;
+export default SessionWarningDialog;
+
+
+import React, {
+  createContext,
+  useEffect,
+  useRef,
+  useCallback,
+  useState,
+} from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { throttle } from "lodash";
+import SessionDialog from "../components/SessionDialog";
+import SessionWarningDialog from "../components/SessionWarningDialog";
+import { logoutSuccess } from "../store/slices/authSlice";
+import api from "../config/axiosConfig";
+import { resolveConfig } from "../config/EnvironmentConfig";
+
+export const AuthContext = createContext();
+
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
+const WARNING_SECONDS = 30;
+
+export const AuthProvider = ({ children }) => {
+  const dispatch = useDispatch();
+  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
+
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
+  const [sessionReason, setSessionReason] = useState("");
+
+  const inactivityTimerRef = useRef(null);
+  const warningTimerRef = useRef(null);
+  const countdownRef = useRef(null);
+
+  // --- Clear all timers ---
+  const clearAllTimers = useCallback(() => {
+    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+  }, []);
+
+  // --- Perform Logout ---
+  const performLogout = useCallback(
+    async (reason = "USER_INITIATED") => {
+      clearAllTimers();
+
+      if (reason !== "USER_INITIATED") {
+        setSessionReason(reason);
+        setSessionDialogOpen(true);
+      }
+
+      try {
+        await api.post(`${resolveConfig("/LS")}/auth/logout`);
+      } catch (_) {
+        // ignore
+      } finally {
+        localStorage.clear();
+        dispatch(logoutSuccess());
+        setWarningOpen(false);
+      }
+    },
+    [dispatch, clearAllTimers]
+  );
+
+  // --- Start inactivity timers ---
+  const startInactivityTimer = useCallback(() => {
+    clearAllTimers();
+    if (!isAuthenticated) return;
+
+    warningTimerRef.current = setTimeout(() => {
+      setSecondsLeft(WARNING_SECONDS);
+      setWarningOpen(true);
+      countdownRef.current = setInterval(() => {
+        setSecondsLeft((prev) => {
+          if (prev <= 1) {
+            clearInterval(countdownRef.current);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
+
+    inactivityTimerRef.current = setTimeout(() => {
+      performLogout("SESSION_EXPIRED");
+    }, INACTIVITY_TIMEOUT);
+  }, [isAuthenticated, clearAllTimers, performLogout]);
+
+  // --- User Activity Listener ---
+  const onActivity = useCallback(
+    throttle(() => {
+      if (!isAuthenticated || sessionDialogOpen) return;
+      if (warningOpen) setWarningOpen(false);
+      startInactivityTimer();
+    }, 2000),
+    [isAuthenticated, sessionDialogOpen, warningOpen, startInactivityTimer]
+  );
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      startInactivityTimer();
+      const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+      events.forEach((e) => window.addEventListener(e, onActivity));
+
+      return () => {
+        events.forEach((e) => window.removeEventListener(e, onActivity));
+        onActivity.cancel();
+        clearAllTimers();
+      };
+    } else {
+      clearAllTimers();
+      setWarningOpen(false);
+    }
+  }, [isAuthenticated, onActivity, startInactivityTimer, clearAllTimers]);
+
+  // --- Cross-tab / forced logout ---
+  useEffect(() => {
+    const handleSessionEvent = (e) => {
+      performLogout(e.detail?.reason || "SESSION_EXPIRED");
+    };
+
+    window.addEventListener("auth:session-expired", handleSessionEvent);
+    return () =>
+      window.removeEventListener("auth:session-expired", handleSessionEvent);
+  }, [performLogout]);
+
+  return (
+    <AuthContext.Provider
+      value={{
+        logout: () => performLogout("USER_INITIATED"),
+        triggerSessionDialog: (reason) => performLogout(reason),
+      }}
+    >
+      {children}
+
+      <SessionWarningDialog
+        open={warningOpen}
+        secondsLeft={secondsLeft}
+        onContinue={() => {
+          setWarningOpen(false);
+          startInactivityTimer();
+        }}
+      />
+
+      <SessionDialog
+        open={sessionDialogOpen}
+        reason={sessionReason}
+        onConfirm={() => setSessionDialogOpen(false)}
+      />
+    </AuthContext.Provider>
+  );
+};
