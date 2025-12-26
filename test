@@ -15,34 +15,29 @@ import { resolveConfig } from "../config/EnvironmentConfig";
 
 export const AuthContext = createContext();
 
-const INACTIVITY_TIMEOUT = 0.7 * 60 * 1000; // 5 min
-const WARNING_SECONDS = 30;
+// CONFIGURATION
+const INACTIVITY_LIMIT_MS = 5 * 60 * 1000; // 5 Minutes total
+const WARNING_DURATION_MS = 30 * 1000;     // Warning at last 30 seconds
+const CHECK_INTERVAL_MS = 1000;            // Check every second
 
 export const AuthProvider = ({ children }) => {
   const dispatch = useDispatch();
   const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
 
+  // UI State
   const [warningOpen, setWarningOpen] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
-
+  const [secondsLeft, setSecondsLeft] = useState(WARNING_DURATION_MS / 1000);
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [sessionReason, setSessionReason] = useState("");
 
-  const inactivityTimerRef = useRef(null);
-  const warningTimerRef = useRef(null);
-  const countdownRef = useRef(null);
+  // Refs for logic (Timestamp based to prevent drift)
+  const logoutTimeRef = useRef(Date.now() + INACTIVITY_LIMIT_MS);
+  const intervalIdRef = useRef(null);
 
-  // --- Clear all timers ---
-  const clearAllTimers = useCallback(() => {
-    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
-    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-  }, []);
-
-  // --- Perform Logout ---
+  // --- 1. Core Logout Function ---
   const performLogout = useCallback(
     async (reason = "USER_INITIATED") => {
-      clearAllTimers();
+      if (intervalIdRef.current) clearInterval(intervalIdRef.current);
 
       if (reason !== "USER_INITIATED") {
         setSessionReason(reason);
@@ -51,51 +46,81 @@ export const AuthProvider = ({ children }) => {
 
       try {
         await api.post(`${resolveConfig("/LS")}/auth/logout`);
-      } catch (_) {
-        // ignore
+      } catch (err) {
+        console.error("Logout API failed", err);
       } finally {
         localStorage.clear();
         dispatch(logoutSuccess());
         setWarningOpen(false);
       }
     },
-    [dispatch, clearAllTimers]
+    [dispatch]
   );
 
-  // --- Start inactivity timers ---
+  // --- 2. The Heartbeat Timer ---
+  const checkTimer = useCallback(() => {
+    const now = Date.now();
+    const timeRemaining = logoutTimeRef.current - now;
+
+    // A. Time is up -> Logout
+    if (timeRemaining <= 0) {
+      if (intervalIdRef.current) clearInterval(intervalIdRef.current);
+      setWarningOpen(false);
+      performLogout("SESSION_EXPIRED");
+      return;
+    }
+
+    // B. Inside Warning Zone -> Show Dialog
+    if (timeRemaining <= WARNING_DURATION_MS) {
+      // Ensure dialog is open
+      setWarningOpen(true);
+      // Update countdown UI
+      setSecondsLeft(Math.ceil(timeRemaining / 1000));
+    } else {
+      // C. Safe Zone -> Ensure dialog is closed
+      if (warningOpen) setWarningOpen(false);
+    }
+  }, [performLogout, warningOpen]);
+
+  // --- 3. Start/Reset Logic ---
+  // This is called by the "Continue" button to force a full reset
   const startInactivityTimer = useCallback(() => {
-    clearAllTimers();
     if (!isAuthenticated) return;
 
-    warningTimerRef.current = setTimeout(() => {
-      setSecondsLeft(WARNING_SECONDS);
-      setWarningOpen(true);
-      countdownRef.current = setInterval(() => {
-        setSecondsLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(countdownRef.current);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
+    // Reset the target logout time to (Now + 5 mins)
+    logoutTimeRef.current = Date.now() + INACTIVITY_LIMIT_MS;
 
-    inactivityTimerRef.current = setTimeout(() => {
-      performLogout("SESSION_EXPIRED");
-    }, INACTIVITY_TIMEOUT);
-  }, [isAuthenticated, clearAllTimers, performLogout]);
+    // If interval isn't running, start it
+    if (!intervalIdRef.current) {
+      intervalIdRef.current = setInterval(checkTimer, CHECK_INTERVAL_MS);
+    }
+    
+    // Immediate UI update to hide warning
+    setWarningOpen(false);
+  }, [isAuthenticated, checkTimer]);
 
-  // --- User Activity Listener ---
+  // --- 4. User Activity Listener (Passive) ---
   const onActivity = useCallback(
     throttle(() => {
       if (!isAuthenticated || sessionDialogOpen) return;
-      if (warningOpen) setWarningOpen(false);
+
+      const timeLeft = logoutTimeRef.current - Date.now();
+      
+      // CRITICAL LOGIC CHANGE:
+      // If we are currently in the "Warning Zone" (<= 30s), 
+      // IGNORE mouse/keyboard events. User MUST click the button.
+      if (timeLeft <= WARNING_DURATION_MS) {
+        return; 
+      }
+
+      // If we are in the safe zone (e.g., 4 mins left), 
+      // these events quietly reset the timer to full.
       startInactivityTimer();
-    }, 2000),
-    [isAuthenticated, sessionDialogOpen, warningOpen, startInactivityTimer]
+    }, 1000), 
+    [isAuthenticated, sessionDialogOpen, startInactivityTimer]
   );
 
+  // --- 5. Event Binding ---
   useEffect(() => {
     if (isAuthenticated) {
       startInactivityTimer();
@@ -105,20 +130,20 @@ export const AuthProvider = ({ children }) => {
       return () => {
         events.forEach((e) => window.removeEventListener(e, onActivity));
         onActivity.cancel();
-        clearAllTimers();
+        if (intervalIdRef.current) clearInterval(intervalIdRef.current);
       };
     } else {
-      clearAllTimers();
+      if (intervalIdRef.current) clearInterval(intervalIdRef.current);
+      intervalIdRef.current = null;
       setWarningOpen(false);
     }
-  }, [isAuthenticated, onActivity, startInactivityTimer, clearAllTimers]);
+  }, [isAuthenticated, onActivity, startInactivityTimer]);
 
-  // --- Cross-tab / forced logout ---
+  // --- 6. Cross-tab Logout Handler ---
   useEffect(() => {
     const handleSessionEvent = (e) => {
       performLogout(e.detail?.reason || "SESSION_EXPIRED");
     };
-
     window.addEventListener("auth:session-expired", handleSessionEvent);
     return () =>
       window.removeEventListener("auth:session-expired", handleSessionEvent);
@@ -136,10 +161,8 @@ export const AuthProvider = ({ children }) => {
       <SessionWarningDialog
         open={warningOpen}
         secondsLeft={secondsLeft}
-        onContinue={() => {
-          setWarningOpen(false);
-          startInactivityTimer();
-        }}
+        totalWarningSeconds={WARNING_DURATION_MS / 1000}
+        onContinue={startInactivityTimer}
       />
 
       <SessionDialog
@@ -152,6 +175,7 @@ export const AuthProvider = ({ children }) => {
 };
 
 
+import React from "react";
 import {
   Dialog,
   DialogTitle,
@@ -161,68 +185,107 @@ import {
   Typography,
   LinearProgress,
   Stack,
+  Box,
 } from "@mui/material";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 
-const TOTAL_WARNING_SECONDS = 30;
-
-const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
+const SessionWarningDialog = ({ 
+  open, 
+  secondsLeft, 
+  totalWarningSeconds = 30, 
+  onContinue 
+}) => {
   if (!open) return null;
 
-  const progress = (secondsLeft / TOTAL_WARNING_SECONDS) * 100;
+  const progressNormal = (secondsLeft / totalWarningSeconds) * 100;
 
   return (
     <Dialog
       open={open}
       fullWidth
-      maxWidth="sm"
+      maxWidth="xs"
+      // Prevent closing by clicking backdrop or pressing escape
       disableEscapeKeyDown
+      onClose={(event, reason) => {
+        if (reason !== "backdropClick") {
+           // Optional: handle specific close reasons if needed
+        }
+      }}
       PaperProps={{
-        sx: { borderRadius: 2, px: 1 },
+        sx: { 
+          borderRadius: 3, 
+          padding: 1,
+          boxShadow: 24 
+        },
       }}
     >
-      <DialogTitle>
-        <Stack direction="row" spacing={1} alignItems="center">
-          <WarningAmberRoundedIcon color="warning" />
-          <Typography variant="h6">Session Expiring</Typography>
-        </Stack>
+      <DialogTitle sx={{ textAlign: "center", pb: 0 }}>
+        <Box
+          sx={{
+            display: "inline-flex",
+            p: 1.5,
+            borderRadius: "50%",
+            bgcolor: "warning.light",
+            color: "warning.dark",
+            mb: 1,
+          }}
+        >
+          <WarningAmberRoundedIcon fontSize="large" />
+        </Box>
+        <Typography variant="h6" component="div" fontWeight="bold">
+          Session Expiring
+        </Typography>
       </DialogTitle>
 
-      <DialogContent>
-        <Typography>
-          Session Inactive detected, You’ll be logged out soon in
+      <DialogContent sx={{ textAlign: "center", pb: 3 }}>
+        <Typography variant="body1" color="text.secondary" sx={{ mb: 2 }}>
+          You have been inactive for a while. You will be logged out automatically.
         </Typography>
 
-        <Typography
-          variant="h3"
-          fontWeight={700}
-          color="warning.main"
-          textAlign="center"
-          sx={{ my: 2 }}
-        >
-          {secondsLeft}s
-        </Typography>
+        <Box sx={{ position: "relative", display: "inline-flex", mb: 2 }}>
+          <Typography
+            variant="h2"
+            fontWeight={800}
+            color="warning.main"
+          >
+            {secondsLeft}
+          </Typography>
+          <Typography 
+            variant="h6" 
+            component="span" 
+            color="text.secondary" 
+            sx={{ alignSelf: 'flex-end', mb: 1.5, ml: 0.5 }}
+          >
+            s
+          </Typography>
+        </Box>
 
-        <LinearProgress
-          variant="determinate"
-          value={Math.max(progress, 0)}
-          color="warning"
-          sx={{ height: 8, borderRadius: 4 }}
-        />
-
-        <Typography
-          variant="caption"
-          textAlign="center"
-          color="text.secondary"
-          sx={{ display: "block", mt: 1 }}
-        >
-          Move your cursor or click continue to stay logged in
-        </Typography>
+        <Stack spacing={1} width="100%">
+          <LinearProgress
+            variant="determinate"
+            value={Math.max(0, Math.min(progressNormal, 100))}
+            color="warning"
+            sx={{ 
+              height: 10, 
+              borderRadius: 5,
+              backgroundColor: "action.hover" 
+            }}
+          />
+          <Typography variant="caption" color="error.main" fontWeight="bold">
+            Action Required: Click below to stay signed in
+          </Typography>
+        </Stack>
       </DialogContent>
 
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button variant="contained" color="warning" onClick={onContinue}>
-          Continue Session
+      <DialogActions sx={{ justifyContent: "center", pb: 2 }}>
+        <Button 
+          variant="contained" 
+          color="warning" 
+          onClick={onContinue}
+          size="large"
+          sx={{ borderRadius: 2, px: 4, fontWeight: "bold" }}
+        >
+          I'm still here
         </Button>
       </DialogActions>
     </Dialog>
