@@ -1,114 +1,47 @@
-import {
-  Add as AddIcon,
-  Close as CloseIcon,
-  Edit as EditIcon,
-} from "@mui/icons-material";
-
-import {
-  Autocomplete,
-  Typography,
-  Box,
-  styled,
-  Button,
-  CircularProgress,
-  debounce,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  IconButton,
-  MenuItem,
-  Stack,
-  TextField,
-  Tooltip,
-} from "@mui/material";
-
+import React, {
+  useEffect,
+  useState,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
+import { Box, Fab, IconButton, Tooltip, Typography } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
 import { DataGrid } from "@mui/x-data-grid";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import dayjs from "dayjs";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
+import EditIcon from "@mui/icons-material/Edit";
 import useApi from "../../hooks/useApi";
-import { getIconComponent } from "../../utils/IconUtils";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import CustomChip from "../../utils/CustomChip";
+import CGLDialog from "./CGLDialog";
+import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import TrendingDownIcon from "@mui/icons-material/TrendingDown";
+import BookmarkAddedIcon from "@mui/icons-material/BookmarkAdded";
+import BookmarkRemoveIcon from "@mui/icons-material/BookmarkRemove";
+import DatasetIcon from "@mui/icons-material/Dataset";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import GppGoodIcon from "@mui/icons-material/GppGood";
+import GppBadIcon from "@mui/icons-material/GppBad";
+import NoteIcon from "@mui/icons-material/Note";
+import LoadingOverlay from "../../utils/LoadingOverlay";
+import { useSelector } from "react-redux";
+import { getPermissions } from "../../utils/CommonUtilities";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import styled from "@emotion/styled";
 
-import {
-  AddIconStyle,
-  Box1Style,
-  ChipStyle,
-  DatePicker1Style,
-  DatePickerStyle,
-  DialogTitleStyle,
-  FabStyle,
-  IconButtonStyle,
-  StackStyle,
-  TextField1Style,
-  TextFieldStyle,
-} from "./BranchMasterStyle";
+/* ================= CONSTANTS ================= */
 
-const branchType = [
-  { value: "A", label: "Automated" },
-  { value: "M", label: "Manual" },
+const ACCOUNT_CLASSIFICATIONS = [
+  { value: "A", label: "Asset", icon: <DatasetIcon fontSize="small" /> },
+  {
+    value: "L",
+    label: "Liability",
+    icon: <AccountBalanceWalletIcon fontSize="small" />,
+  },
+  { value: "I", label: "Income", icon: <TrendingUpIcon fontSize="small" /> },
+  { value: "E", label: "Expense", icon: <TrendingDownIcon fontSize="small" /> },
+  { value: "M", label: "Memo A/c", icon: <NoteIcon fontSize="small" /> },
 ];
-
-const reDigits = /^[0-9]*$/;
-const reDesc = /^[a-zA-Z0-9\s/&,-.()\\]*$/;
-const emailRegex = /^[a-zA-Z0-9._]*$/;
-
-const CustomAutoComplete = ({
-  options,
-  value,
-  onChange,
-  onInputChange,
-  renderOption,
-  uniqueElementKey,
-  label,
-  name,
-  loading,
-  error,
-}) => {
-  const filterOptions = name !== "currency" ? (x) => x : undefined;
-  return (
-    <Autocomplete
-      options={options}
-      getOptionLabel={(option) => renderOption(option)}
-      defaultValue={value || {}}
-      onInputChange={onInputChange}
-      onChange={(_, value) => onChange(value)}
-      filterOptions={filterOptions}
-      isOptionEqualToValue={(option, value) =>
-        option[uniqueElementKey] === value[uniqueElementKey]
-      }
-      renderOption={(props, option) => (
-        <li {...props} key={option[uniqueElementKey]}>
-          {renderOption(option)}
-        </li>
-      )}
-      noOptionsText={"Exactly 5 digits"}
-      renderInput={(params) => (
-        <TextField
-          {...params}
-          label={label}
-          name={name}
-          InputProps={{
-            ...params.InputProps,
-            endAdornment: (
-              <>
-                {loading ? (
-                  <CircularProgress color="inherit" size={20} />
-                ) : null}
-                {params.InputProps.endAdornment}
-              </>
-            ),
-          }}
-          error={error}
-          helperText={error}
-          sx={{ width: 300 }}
-        />
-      )}
-    />
-  );
-};
 
 const OverlayBox = styled(Box)(() => ({
   display: "flex",
@@ -118,1225 +51,309 @@ const OverlayBox = styled(Box)(() => ({
   alignItems: "center",
 }));
 
-const CustomNoRowsOverlay = () => {
-  return (
-    <OverlayBox>
-      <ErrorOutlineIcon fontSize="large" />
-      <Typography variant="h5" fontSize="1.2rem">
-        Data is not available
-      </Typography>
-    </OverlayBox>
-  );
-};
+const CustomNoRowsOverlay = () => (
+  <OverlayBox>
+    <ErrorOutlineIcon fontSize="large" />
+    <Typography fontSize="1.1rem">Data is not available</Typography>
+  </OverlayBox>
+);
 
-export default function BranchMasterTab() {
+/* ================= COMPONENT ================= */
+
+export default function CGLMasterTab() {
+  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+  const requestType = selectedMenuItem?.requestType || "";
+  const permissions = getPermissions(selectedMenuItem);
+
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
+
   const [rows, setRows] = useState([]);
   const [rowCount, setRowCount] = useState(0);
-  const [open, setOpen] = useState(false);
-  const { callApi, cancelAllRequests } = useApi();
+  const [loading, setLoading] = useState(false);
 
-  const [originalData, setOriginalData] = useState(null); // New state for original data
-  const [isDataSame, setIsDataSame] = useState(true);
+  const [openDialog, setOpenDialog] = useState(false);
+  const [editRow, setEditRow] = useState(null);
 
-  const [editingId, setEditingId] = useState(null);
-  const emailDomain = "@sbi.co.in";
-  const emailPrefix = 50;
-  // const navigate = useNavigate();
-  const [branchData, setBranchData] = useState({
-    code: "",
-    name: "",
-    circleCode: "",
-    state: "",
-    city: "",
-    address: "",
-    pinCode: "",
-    phoneNumber: "",
-    emailId: emailDomain,
-    nmrCode: "",
-    status: "Active",
-    openDate: dayjs(),
-    closeDate: new Date(),
-    mergeDate: new Date(),
-    mergedWithBranch: "",
-    lastChangeDate: new Date(),
-    cpcFlag: false,
-    foodCreditFlag: false,
-    currChestFlag: false,
-    branchType: "A",
-  });
+  /* ===== SERVER GRID STATE ===== */
 
-  const [states, setStates] = useState([]);
-  const [errors, setErrors] = useState({});
-  const [circles, setCircles] = useState([]);
-  const [mwb, setMwb] = useState([]);
-  const [mwbLoading, setMwbLoading] = useState(false);
-  const snackbar = useCustomSnackbar();
-  const [fetchPageParam, setFetchPageParam] = useState({
+  const [paginationModel, setPaginationModel] = useState({
     page: 0,
-    pageSize: 10,
+    pageSize: 20,
   });
 
-  const ActiveIcon = useMemo(() => {
-    return getIconComponent("FiberManualRecord");
-  }, []);
+  const [sortModel, setSortModel] = useState([]);
+  const [filterModel, setFilterModel] = useState({ items: [] });
 
-  const InActiveIcon = useMemo(() => {
-    return getIconComponent("FiberManualRecord");
-  }, []);
+  /* ===== REFS TO PREVENT DOUBLE CALLS ===== */
 
-  // --- throttle snackbars so they don't spam while typing ---
-  const snackGateRef = useRef(true);
-  const notifyOnce = useCallback(
-    (msg, variant = "warning") => {
-      if (!snackGateRef.current) return;
-      snackGateRef.current = false;
-      snackbar(msg, variant);
-      setTimeout(() => (snackGateRef.current = true), 800);
-    },
-    [snackbar]
-  );
+  const lastFilterRef = useRef("");
+  const lastQueryRef = useRef("");
 
-  const checkDataEquality = (current, original) => {
-    if (!original) return true; // If no original data, assume they are "same" initially for disable state
-    return (
-      current.name === original.name &&
-      current.circleCode === original.circleCode &&
-      current.state === original.state &&
-      current.city === original.city &&
-      current.address === original.address &&
-      current.pinCode === original.pinCode &&
-      current.phoneNumber === original.phoneNumber &&
-      current.emailId === original.emailId &&
-      current.nmrCode === original.nmrCode &&
-      current.status === original.status &&
-      current.openDate === original.openDate &&
-      current.closeDate === original.closeDate &&
-      current.mergeDate === original.mergeDate &&
-      current.mergedWithBranch === original.mergedWithBranch &&
-      current.cpcFlag === original.cpcFlag &&
-      current.foodCreditFlag === original.foodCreditFlag &&
-      current.currChestFlag === original.currChestFlag &&
-      current.branchType === original.branchType
-    );
-  };
+  /* ================= FETCH DATA ================= */
 
-  const fetchData = useCallback(async () => {
-    console.log("fetchPageParam", fetchPageParam);
-    const branchesResponse = await callApi(
-      "/CM/branchesNewAPI",
-      {
-        page: fetchPageParam.page,
-        size: fetchPageParam.pageSize,
-        sort: "code,asc",
-      },
-      "GET"
-    );
-    console.log("inside fetchinng data  >>>>", branchesResponse);
-    setRows(branchesResponse?.data?.content ?? []);
-    setRowCount(branchesResponse?.data?.totalElements ?? 0);
+  const fetchRows = useCallback(async () => {
+    if (!requestType) return;
 
-    const statesResponse = await callApi("/CM/states", null, "GET");
-    setStates(statesResponse?.data ?? []);
-    const circleResponse = await callApi("/CM/circle-codes", null, "GET");
-    setCircles(circleResponse?.data ?? []);
-  }, [callApi, fetchPageParam]);
+    const sortField = sortModel[0]?.field;
+    const sortOrder = sortModel[0]?.sort;
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData, fetchPageParam]);
-
-  useEffect(() => {
-    const change =
-      branchData.status != "Active" ||
-      !!branchData.closeDate ||
-      !!branchData.mergeDate ||
-      !!branchData.mergedWithBranch;
-    if (change && branchData.branchType !== "M") {
-      setBranchData((prev) => ({
-        ...prev,
-        branchType: "M",
+    const filters = filterModel.items
+      .filter(
+        (f) =>
+          f.operator &&
+          f.value !== undefined &&
+          f.value !== null &&
+          f.value !== ""
+      )
+      .map((f) => ({
+        field: f.field,
+        operator: f.operator,
+        value: f.value,
       }));
-    }
-    if (!change && branchData.branchType !== "A") {
-      setBranchData((prev) => ({
-        ...prev,
-        branchType: "A",
-      }));
-    }
-  }, [
-    editingId,
-    branchData.status,
-    branchData.closeDate,
-    branchData.mergeDate,
-    branchData.mergedWithBranch,
-  ]);
 
-  useEffect(() => {
-    if (branchData.status !== "InActive") {
-      setBranchData((prev) => ({
-        ...prev,
-        closeDate: null,
-      }));
-    }
-    if (!branchData.mergedWithBranch) {
-      setBranchData((prev) => ({
-        ...prev,
-        mergeDate: null,
-      }));
-    }
-  }, [branchData.status, branchData.mergedWithBranch]);
+    const querySignature = JSON.stringify({
+      page: paginationModel.page,
+      size: paginationModel.pageSize,
+      sortField,
+      sortOrder,
+      filters,
+    });
 
-  useEffect(() => {
-    if (editingId && originalData) {
-      setIsDataSame(checkDataEquality(branchData, originalData));
-    }
-  }, [branchData, originalData, editingId]);
-
-  const handleMergedWithBranchAutoCompleteChange = (value) => {
-    const name = "mergedWithBranch";
-
-    setBranchData((prev) => ({ ...prev, [name]: value?.code }));
-
-    setErrors((prev) => ({
-      ...prev,
-      [name]: validateField(name, value?.code),
-    }));
-  };
-
-  const isAllZeros = (str) => {
-    return /^0+$/.test(str);
-  };
-
-  const validateField = useCallback((name, value) => {
-    switch (name) {
-      case "code":
-        if (!value.trim()) return "Branch Code is required";
-        if (!reDigits.test(value)) return "Only digits allowed";
-        if (value.length !== 5) return "Must be 5 digits";
-        break;
-
-      case "name":
-        if (!value.trim()) return "Branch name is required";
-        if (!reDesc.test(value))
-          return "Only letters, spaces, numbers, / & ( ) - , .";
-        break;
-
-      case "circleCode":
-        if (!value.trim()) return "Circle Code is required";
-        if (!reDigits.test(value)) return "Only digits allowed";
-        if (value.length !== 3) return "Must be 3 digits";
-        break;
-
-      case "state":
-        if (!value.trim()) return "state is required";
-        if (!reDesc.test(value)) return "Only letters";
-        break;
-
-      case "city":
-        if (value.trim() && !reDesc.test(value))
-          return "Only letters, digits, spaces, / & ( ) - ,";
-        if (value.trim().length < 3)
-          return "City name must be at least 3 characters";
-        break;
-
-      case "address":
-        if (value.trim() && !reDesc.test(value))
-          return "Only letters, digits, spaces, / & ( ) - ,";
-
-        if (value.trim().length < 5)
-          return "Address must be at least 5 characters";
-        break;
-
-      case "pinCode":
-        if (value.trim() && !reDigits.test(value)) return "Only digits allowed";
-        if (value.length !== 6) return "Must be 6 digits";
-        break;
-
-      case "phoneNumber":
-        if (!value.trim()) return "Phone Number is required";
-        if (!reDigits.test(value)) return "Only digits allowed";
-        if (value.length !== 12) return "Must be 12 digits";
-        break;
-
-      case "emailId": {
-        if (!value | (value === emailDomain)) return "Email ID is required";
-        const prefix = value.replace(emailDomain, "");
-        if (prefix.length === 0) return "Email ID is required";
-        if (prefix.length > 50) return "Maximum 50 characters allowed before @";
-        if (!emailRegex.test(prefix))
-          return "Only letters, digits,.,_,- allowed";
-        break;
-      }
-
-      case "nmrCode":
-        if (!value.trim()) return "NMR Code is required";
-        if (!reDigits.test(value)) return "Only digits allowed";
-        if (value.length !== 9) return "Must be 9 digits";
-        break;
-
-      case "mergedWithBranch":
-        if (branchData?.code === value)
-          return "Merged with Branch cannot be same as current Branch!";
-        if (!reDigits.test(value)) return "Only digits allowed";
-        if (value.length !== 5) return "Must be 5 digits";
-        break;
-
-      default:
-        return "";
-    }
-  });
-
-  const isFormValid = useCallback(() => {
-    if (
-      validateField("code", branchData.code) ||
-      validateField("name", branchData.name) ||
-      validateField("circleCode", branchData.circleCode) ||
-      validateField("state", branchData.state) ||
-      validateField("city", branchData.city) ||
-      validateField("address", branchData.address) ||
-      validateField("pinCode", branchData.pinCode) ||
-      validateField("phoneNumber", branchData.phoneNumber) ||
-      validateField("emailId", branchData.emailId) ||
-      validateField("nmrCode", branchData.nmrCode)
-    ) {
-      return false;
-    }
-    if (branchData.status === "InActive" && !branchData.closeDate) {
-      return false;
-    }
-    if (branchData.mergedWithBranch && !branchData.mergeDate) {
-      return false;
-    }
-    return true;
-  }, [branchData, validateField]);
-
-  // --- live validation on change + snackbars for bad keystrokes ---
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    if (name === "code") {
-      if (!reDigits.test(value)) {
-        notifyOnce("branch Code accepts digits only");
-        return;
-      }
-      if (value.length > 5) {
-        notifyOnce("branch Code must be 5 digits");
-        return;
-      }
-      if (value.length === 5 && isAllZeros(value)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-    }
-
-    if (name === "name") {
-      if (value.length == 50 && isAllZeros(value)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-    }
-
-    if (name === "city") {
-      if (value.length == 30 && isAllZeros(value)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-    }
-
-    if (name === "address") {
-      if (value.length == 50 && isAllZeros(value)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-    }
-
-    if (name === "pinCode") {
-      if (!reDigits.test(value)) {
-        notifyOnce("Pin Code accepts digits only");
-        return;
-      }
-      if (value.length > 6) {
-        notifyOnce("Pin Code must be 6 digits");
-        return;
-      }
-      if (value.length === 6 && isAllZeros(value)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-    }
-
-    if (name === "phoneNumber") {
-      if (!reDigits.test(value)) {
-        notifyOnce("Phone Number accepts digits only");
-        return;
-      }
-      if (value.length > 12) {
-        notifyOnce("Phone Number must be 12 digits");
-        return;
-      }
-      if (value.length === 12 && isAllZeros(value)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-    }
-
-    if (name === "nmrCode") {
-      if (!reDigits.test(value)) {
-        notifyOnce("N-M-R Code accepts digits only");
-        return;
-      }
-      if (value.length > 9) {
-        notifyOnce("N-M-R Code must be 9 digits");
-        return;
-      }
-      if (value.length === 9 && isAllZeros(value)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-    }
-
-    if (name === "emailId") {
-      const prefix = value.replace(emailDomain, "");
-      if (prefix.includes("@")) return;
-      if (prefix.length > emailPrefix) return;
-      if (!emailRegex.test(prefix) && prefix.length > 0) return;
-      if (prefix.length === emailPrefix && isAllZeros(prefix)) {
-        notifyOnce("All zeros are not Allowed");
-        return;
-      }
-      setBranchData((prev) => ({ ...prev, emailId: prefix + emailDomain }));
-      return;
-    }
-
-    setBranchData((prev) => ({ ...prev, [name]: value }));
-
-    // update error for just this field
-    setErrors((prev) => ({
-      ...prev,
-      [name]: validateField(name, value),
-    }));
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    const isEditing = editingId;
-    if (editingId && isDataSame) {
-      snackbar("No Changes Detected!", "warning");
-      return; // Stop submission
-    }
-    if (!isEditing) {
-      try {
-        const url =
-          "/CM/branches-code-name-only?q=" +
-          encodeURIComponent(branchData.code);
-        const payload = null;
-        const response = await callApi(url, payload, "GET");
-        const data = response.data;
-
-        const branchExists = data.some((row) => row.code === branchData.code);
-        if (branchExists) {
-          snackbar("Branch code already exist", "warning");
-          return;
-        }
-      } catch {
-        snackbar("Something went wrong", "warning");
-        return;
-      }
-    }
-
-    if (editingId) {
-      if (
-        !branchData?.code ||
-        !branchData?.name ||
-        !branchData?.circleCode ||
-        !branchData?.state ||
-        !branchData?.city ||
-        !branchData?.pinCode ||
-        !branchData?.address ||
-        !branchData?.phoneNumber ||
-        !branchData?.emailId ||
-        !branchData?.nmrCode ||
-        !branchData?.status ||
-        !branchData?.foodCreditFlag ||
-        !branchData?.currChestFlag ||
-        !branchData?.branchType ||
-        !branchData?.openDate
-      ) {
-        snackbar("Kindly Check data before updating", "warning");
-        return;
-      }
-    }
-
-    const allErrors = {
-      code: validateField("code", branchData.code),
-      name: validateField("name", branchData.name),
-      circleCode: validateField("circleCode", branchData.circleCode),
-      state: validateField("state", branchData.state),
-      city: validateField("city", branchData.city),
-      address: validateField("address", branchData.address),
-      pinCode: validateField("pinCode", branchData.pinCode),
-      phoneNumber: validateField("phoneNumber", branchData.phoneNumber),
-      emailId: validateField("emailId", branchData.emailId),
-      nmrCode: validateField("cnmrCode", branchData.nmrCode),
-      status: validateField("status", branchData.status),
-      openDate: validateField("openDate", branchData.openDate),
-      cpcFlag: validateField("cpcFlag", branchData.cpcFlag),
-      foodCreditFlag: validateField(
-        "foodCreditFlag",
-        branchData.foodCreditFlag
-      ),
-      currChestFlag: validateField("currChestFlag", branchData.currChestFlag),
-      branchType: validateField("branchType", branchData.branchType),
-      mergedWithBranch: branchData.mergedWithBranch
-        ? validateField("mergedWithBranch", branchData.mergedWithBranch)
-        : null,
-      closeDate:
-        editingId && branchData.status === "InActive"
-          ? validateField("closeDate", branchData.closeDate)
-          : null,
-      mergeDate: branchData.mergeDate
-        ? validateField("mergeDate", branchData.mergeDate)
-        : null,
-    };
-    setErrors(allErrors);
-
-    const valid = Object.values(allErrors).every((v) => !v);
-    if (!valid) {
-      notifyOnce("Please fix validation errors", "error");
-      return;
-    }
-
-    const payloadData = {
-      requestType: "BRANCH",
-      changeType: editingId ? "UPDATE" : "ADD",
-      targetId: branchData.code,
-      payload: {
-        code: branchData.code.trim(),
-        name: branchData.name.trim(),
-        circleCode: branchData.circleCode.trim(),
-        state: branchData.state.trim(),
-        city: branchData.city.trim(),
-        address: branchData.address.trim(),
-        pinCode: branchData.pinCode.trim(),
-        phoneNumber: branchData.phoneNumber.trim(),
-        emailId: branchData.emailId.trim(),
-        nmrCode: branchData.nmrCode.trim(),
-        status: branchData.status === "Active",
-        cpcFlag: branchData.cpcFlag,
-        foodCreditFlag: branchData.foodCreditFlag,
-        currChestFlag: branchData.currChestFlag,
-        branchType: branchData.branchType,
-        openDate: editingId
-          ? branchData.openDate
-          : branchData.openDate
-          ? dayjs(branchData.openDate).format("DD/MM/YYYY")
-          : null,
-
-        ...(editingId && {
-          mergedWithBranch: branchData.mergedWithBranch,
-          closeDate: branchData.closeDate
-            ? dayjs(branchData.closeDate).format("DD/MM/YYYY")
-            : null,
-          mergeDate: branchData.mergeDate
-            ? dayjs(branchData.mergeDate).format("DD/MM/YYYY")
-            : null,
-        }),
-      },
-    };
+    // PREVENT DUPLICATE API CALL
+    if (lastQueryRef.current === querySignature) return;
+    lastQueryRef.current = querySignature;
 
     try {
-      const response = await callApi("/CR/create-request", payloadData, "POST");
-      if (response) {
-        snackbar(editingId ? "Branch updated" : "Branch created", "success");
-        handleClose();
-        fetchData();
-      }
+      setLoading(true);
+      const payload = {
+        // requestType,
+        page: paginationModel.page,
+        size: paginationModel.pageSize,
+        sortField,
+        sortOrder,
+        filters,
+      };
+      const resp = await callApi("/CM/cgls", payload, "POST");
+      console.log(resp);
+
+      setRows(resp?.data?.data || []);
+      setRowCount(resp?.data?.totalElements || 0);
     } catch (err) {
-      snackbar(err?.message || "Request failed", "error");
+      snackbar(err?.message || "Failed to load CGLs", "error");
+      setRows([]);
+      setRowCount(0);
+    } finally {
+      setLoading(false);
     }
+  }, [callApi, requestType, snackbar, paginationModel, sortModel, filterModel]);
+
+  /* ================= EFFECTS ================= */
+
+  // Main fetch
+  useEffect(() => {
+    fetchRows();
+  }, [fetchRows]);
+
+  // Reset page ONLY when filter meaningfully changes
+  useEffect(() => {
+    const current = JSON.stringify(filterModel.items || []);
+    if (current === lastFilterRef.current) return;
+
+    lastFilterRef.current = current;
+
+    setPaginationModel((p) => (p.page === 0 ? p : { ...p, page: 0 }));
+  }, [filterModel]);
+
+  /* ================= DIALOG ================= */
+
+  const handleOpenCreate = () => {
+    setEditRow(null);
+    setOpenDialog(true);
   };
 
-  const handleEdit = useCallback((row) => {
-    const initialData = {
-      code: String(row.code ?? ""),
-      name: String(row.name ?? ""),
-      circleCode: String(row.circleCode ?? ""),
-      state: String(row.state ?? ""),
-      city: String(row.city ?? ""),
-      address: String(row.address ?? ""),
-      pinCode: String(row.pinCode ?? ""),
-      phoneNumber: String(row.phoneNumber ?? ""),
-      emailId: String(row.emailId ?? ""),
-      nmrCode: String(row.nmrCode ?? ""),
-      openDate: row.openDate,
-      closeDate: row.closeDate,
-      mergeDate: row.mergeDate,
-      status: row.status,
-      mergedWithBranch: String(row.mergedWithBranch ?? ""),
-      cpcFlag: row.cpcFlag,
-      currChestFlag: row.currChestFlag,
-      foodCreditFlag: row.foodCreditFlag,
-      branchType: String(row.branchType ?? ""),
-    };
-    setBranchData(initialData);
-    setOriginalData(initialData); // Store the original data here
-    setEditingId(row.code);
-    setOpen(true);
-    setIsDataSame(true);
-  }, []);
+  const handleOpenEdit = (row) => {
+    setEditRow(row);
+    setOpenDialog(true);
+  };
+
+  const handleSaved = () => {
+    setOpenDialog(false);
+    setEditRow(null);
+    lastQueryRef.current = ""; // force reload
+    fetchRows();
+  };
+
+  /* ================= COLUMNS ================= */
 
   const columns = useMemo(
     () => [
+      { field: "cglNumber", headerName: "CGL Code", flex: 1 },
+
+      { field: "description", headerName: "Description", flex: 2 },
+
       {
-        field: "code",
-        headerName: "Branch Code",
-        flex: 2,
-        sortable: true,
+        field: "acClassification",
+        headerName: "Account Classification",
+        flex: 1.2,
+        type: "singleSelect",
+        valueOptions: ACCOUNT_CLASSIFICATIONS.map((a) => ({
+          value: a.value, // A, L, I, E, M
+          label: a.label,
+        })),
+        align: "center",
+        headerAlign: "center",
+        renderCell: (params) => {
+          const found = ACCOUNT_CLASSIFICATIONS.find(
+            (x) => x.value === params.value
+          );
+          return (
+            <CustomChip
+              label={found?.label}
+              icon={found?.icon}
+              variant="outlined"
+            />
+          );
+        },
       },
+
       {
-        field: "name",
-        headerName: "Branch Name",
-        flex: 3,
-        sortable: true,
+        field: "balCompare",
+        headerName: "Balance Compare",
+        flex: 1,
+        align: "center",
+        headerAlign: "center",
+        sortable: false,
+        filterable: false,
+        renderCell: (params) => (
+          <CustomChip
+            label={params.value == 1 ? "Include" : "Exclude"}
+            icon={
+              params.value == 1 ? <BookmarkAddedIcon /> : <BookmarkRemoveIcon />
+            }
+            variant="outlined"
+          />
+        ),
       },
+
+      {
+        field: "manualPosting",
+        headerName: "Manual Posting",
+        flex: 1,
+        align: "center",
+        headerAlign: "center",
+        sortable: false,
+        filterable: false,
+        renderCell: (params) => (
+          <CustomChip
+            label={params.value == 1 ? "Allowed" : "Not Allowed"}
+            icon={params.value == 1 ? <GppGoodIcon /> : <GppBadIcon />}
+            variant="outlined"
+          />
+        ),
+      },
+
       {
         field: "status",
-        headerName: "Status",
+        headerName: "CGL Status",
         flex: 1,
-        sortable: true,
+        type: "singleSelect",
+        valueOptions: [
+          { value: 1, label: "Active" },
+          { value: 0, label: "In Active" },
+        ],
         align: "center",
         headerAlign: "center",
         renderCell: (params) => (
-          <Box1Style>
-            <ChipStyle
-              size="small"
-              icon={params.row.status ? <ActiveIcon /> : <InActiveIcon />}
-              label={params.row.status ? "Active" : "In-Active"}
-              color="primary"
-              row={params.row}
-            />
-          </Box1Style>
+          <CustomChip
+            icon={<OnlinePredictionIcon />}
+            label={params.value === 1 ? "Active" : "In Active"}
+            variant="outlined"
+          />
         ),
       },
+
       {
         field: "actions",
         headerName: "Actions",
-        flex: 1,
+        flex: 0.6,
+        sortable: false,
+        filterable: false,
         align: "center",
         headerAlign: "center",
-        filterable: false,
-        sortable: false,
-        disableColumnMenu: true,
         renderCell: (params) => (
-          <StackStyle
-            direction="row"
-            spacing={1}
-            alignItems="center"
-            justifyContent="center"
-          >
-            <Tooltip title="Edit">
-              <div>
-                <IconButton
-                  size="small"
-                  onClick={() => handleEdit(params.row)}
-                  color="primary"
-                >
-                  <EditIcon fontSize="inherit" />
-                </IconButton>
-              </div>
-            </Tooltip>
-          </StackStyle>
+          <Tooltip title="Edit">
+            <IconButton onClick={() => handleOpenEdit(params.row)}>
+              <EditIcon />
+            </IconButton>
+          </Tooltip>
         ),
       },
     ],
-    [handleEdit]
+    []
   );
 
-  const resetForm = () => {
-    setBranchData({
-      code: "",
-      name: "",
-      circleCode: "",
-      state: "",
-      city: "",
-      address: "",
-      pinCode: "",
-      phoneNumber: "",
-      emailId: emailDomain,
-      nmrCode: "",
-      openDate: dayjs(),
-      mergedWithBranch: "",
-      cpcFlag: false,
-      foodCreditFlag: false,
-      currChestFlag: false,
-      branchType: "A",
-      status: "Active",
-    });
-    setErrors({});
-    setEditingId(null);
-    setIsDataSame(true);
-  };
+  const filteredColumns = useMemo(() => {
+    if (permissions.modify || permissions.block || permissions.unblock) {
+      return columns;
+    }
+    return columns.filter((c) => c.field !== "actions");
+  }, [columns, permissions]);
 
-  const handleClose = () => {
-    setOpen(false);
-    resetForm();
-  };
-
-  const fetchAutoCompleteData = useCallback(
-    async (e, value, reason) => {
-      try {
-        const query = value?.trim();
-
-        if (reason === "clear" || !query || query === "") {
-          setMwb([]);
-          return;
-        }
-        if (query.length < 3) {
-          return;
-        }
-        setMwbLoading(true);
-
-        const url =
-          "/CM/branches-code-name-only?q=" + encodeURIComponent(query);
-
-        const payload = null;
-        cancelAllRequests();
-        const response = await callApi(url, payload, "GET");
-
-        if (!response || !response?.data) {
-          setMwb([]);
-          setMwbLoading(false);
-          return;
-        }
-        setMwb(response?.data);
-        setMwbLoading(false);
-      } catch (e) {
-        if (e.code === "ERR_CANCELED") {
-          return;
-        }
-        setMwbLoading(false);
-      }
-    },
-    [callApi, cancelAllRequests]
-  );
-
-  const handleAutoCompleteInputChange = useCallback(
-    (e, value, reason) => {
-      fetchAutoCompleteData(e, value, reason);
-    },
-    [fetchAutoCompleteData]
-  );
-
-  const debounceQuery = debounce(handleAutoCompleteInputChange, 500);
+  /* ================= RENDER ================= */
 
   return (
-    <LocalizationProvider dateAdapter={AdapterDayjs}>
-      <Box>
-        {/* <Button
-          size="small"
-          variant="outlined"
-          startIcon={<KeyboardReturnIcon />}
-          onClick={() => navigate(-1)}
-          // disabled={filteredCount === 0 || loading || errorText}
+    <Box>
+      <DataGrid
+        rows={rows}
+        columns={filteredColumns}
+        getRowId={(row) => row.cglNumber}
+        loading={loading}
+        paginationMode="server"
+        sortingMode="server"
+        filterMode="server"
+        rowCount={rowCount}
+        paginationModel={paginationModel}
+        onPaginationModelChange={setPaginationModel}
+        sortModel={sortModel}
+        onSortModelChange={setSortModel}
+        filterModel={filterModel}
+        onFilterModelChange={setFilterModel}
+        pageSizeOptions={[10, 20, 50, 100]}
+        disableRowSelectionOnClick
+        slots={{
+          noRowsOverlay: CustomNoRowsOverlay,
+        }}
+        sx={{ minHeight: "100%" }}
+      />
+
+      {permissions?.create && !loading && (
+        <Fab
+          color="primary"
+          variant="extended"
+          onClick={handleOpenCreate}
+          sx={{
+            position: "fixed",
+            bottom: 15,
+            right: 30,
+            borderRadius: 1,
+          }}
         >
-          Back
-        </Button> */}
-        <Box>
-          <FabStyle
-            onClick={() => setOpen(true)}
-            color="primary"
-            variant="extended"
-          >
-            <AddIconStyle />
-            Create
-          </FabStyle>
-        </Box>
+          <AddIcon sx={{ mr: 1 }} />
+          Create
+        </Fab>
+      )}
 
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          SortMode="server"
-          pagination
-          onSortModelChange={() => {
-            setFetchPageParam((prev) => {
-              return {
-                ...prev,
-                pageSize: 10,
-                page: 0,
-                sortByCode: !prev.sortByCode,
-              };
-            });
-          }}
-          disableColumnFilter
-          disableColumnMenu
-          paginationMode="server"
-          rowCount={rowCount}
-          paginationModel={{
-            page: fetchPageParam.page,
-            pageSize: fetchPageParam.pageSize,
-          }}
-          onPaginationModelChange={(newModel) => {
-            console.log("using rowscount", rowCount);
-            console.log("page changed", newModel);
-            if (fetchPageParam.pageSize === newModel.pageSize) {
-              setFetchPageParam((prev) => {
-                return { ...prev, ...newModel };
-              });
-              console.log("fetchparams>>", fetchPageParam);
-              return;
-            } else {
-              setFetchPageParam((prev) => {
-                return { ...prev, pageSize: newModel.pageSize, page: 0 };
-              });
-            }
-          }}
-          slots={{
-            noRowsOverlay: CustomNoRowsOverlay,
-          }}
-          slotProps={{
-            pagination: {
-              showFirstButton: true,
-              showLastButton: true,
-            },
-          }}
-          getRowClassName={(params) =>
-            params.indexRelativeToCurrentPage % 2 === 0
-              ? "odd-rows"
-              : "even-rows"
-          }
-          initialState={{
-            pagination: {
-              paginationModel: {
-                pageSize: 10,
-              },
-            },
-          }}
-          pageSizeOptions={rows.length == 0 ? [] : [10, 20, 50, 100]}
-          getRowId={(row) => row.code}
-        />
+      <CGLDialog
+        open={openDialog}
+        onClose={() => setOpenDialog(false)}
+        onSaved={handleSaved}
+        editInitialData={editRow}
+        accountClassifications={ACCOUNT_CLASSIFICATIONS}
+        permissions={permissions}
+      />
 
-        {open && (
-          <Dialog
-            open={true}
-            onClose={handleClose}
-            scroll="paper"
-            component="form"
-            onSubmit={handleSubmit}
-            maxWidth={"md"}
-          >
-            <DialogTitleStyle id="customized-dialog-title">
-              {editingId ? "Edit Branch" : "Add New Branch"}
-            </DialogTitleStyle>
-            <IconButtonStyle aria-label="close" onClick={handleClose}>
-              <CloseIcon />
-            </IconButtonStyle>
-            <DialogContent dividers>
-              <Stack direction={"column"} spacing={2}>
-                <Stack direction={"row"} spacing={1}>
-                  <TextFieldStyle
-                    fullWidth
-                    label="Branch Code *"
-                    name="code"
-                    value={branchData.code}
-                    onChange={handleChange}
-                    disabled={!!editingId}
-                    error={!!errors.code}
-                    helperText={errors.code || "Exactly 5 digits"}
-                    inputProps={{ maxLength: 5, inputMode: "numeric" }}
-                  />
-
-                  <TextFieldStyle
-                    fullWidth
-                    label="Branch Name *"
-                    name="name"
-                    value={branchData.name}
-                    onChange={handleChange}
-                    error={!!errors.name}
-                    inputProps={{ maxLength: 50 }}
-                    helperText={
-                      errors.name ||
-                      "Allowed: letters, numbers, spaces, /&()-,."
-                    }
-                  />
-
-                  <TextFieldStyle
-                    fullWidth
-                    select
-                    label="Circle Code *"
-                    name="circleCode"
-                    value={branchData.circleCode}
-                    onChange={handleChange}
-                    error={!!errors.circleCode}
-                    helperText={errors.circleCode || ""}
-                    inputProps={{ maxLength: 5, inputMode: "numeric" }}
-                  >
-                    {circles.map((circles) => (
-                      <MenuItem
-                        key={circles.circleCode}
-                        value={circles.circleCode}
-                      >
-                        {circles.circleCode} - {circles.circleName}
-                      </MenuItem>
-                    ))}
-                  </TextFieldStyle>
-                </Stack>
-
-                <Stack direction={"row"} spacing={1}>
-                  <TextFieldStyle
-                    fullWidth
-                    select
-                    label="State *"
-                    name="state"
-                    value={branchData.state}
-                    onChange={handleChange}
-                    error={!!errors.state}
-                    inputProps={{ maxLength: 50 }}
-                    helperText={errors.state || ""}
-                  >
-                    {states.map((states) => (
-                      <MenuItem key={states.stateCode} value={states.stateCode}>
-                        {states.stateCode} - {states.stateName}
-                      </MenuItem>
-                    ))}
-                  </TextFieldStyle>
-
-                  <TextFieldStyle
-                    fullWidth
-                    label="City *"
-                    name="city"
-                    value={branchData.city}
-                    onChange={handleChange}
-                    error={!!errors.city}
-                    inputProps={{ maxLength: 30 }}
-                    helperText={errors.city || "Allowed 3-30 characters"}
-                  />
-
-                  <TextFieldStyle
-                    fullWidth
-                    label="Pin Code *"
-                    name="pinCode"
-                    value={branchData.pinCode}
-                    onChange={handleChange}
-                    error={!!errors.pinCode}
-                    helperText={errors.pinCode || "Exactly 6 digits"}
-                    inputProps={{ maxLength: 6, inputMode: "numeric" }}
-                  />
-                </Stack>
-
-                <Stack direction={"row"} spacing={1}>
-                  <TextField
-                    fullWidth
-                    label="Address *"
-                    name="address"
-                    value={branchData.address}
-                    onChange={handleChange}
-                    error={!!errors.address}
-                    inputProps={{ maxLength: 50 }}
-                    helperText={
-                      errors.address ||
-                      "Allowed 5-50 characters (A-Z, 0-9, spaces,/,&,(,),- )"
-                    }
-                    multiline
-                    maxRows={2}
-                  />
-                </Stack>
-
-                <Stack direction={"row"} spacing={1}>
-                  <TextField1Style
-                    fullWidth
-                    label="Phone Number *"
-                    name="phoneNumber"
-                    value={branchData.phoneNumber}
-                    onChange={handleChange}
-                    error={!!errors.phoneNumber}
-                    helperText={errors.phoneNumber || "Exactly 12 digits"}
-                    inputProps={{ maxLength: 12, inputMode: "numeric" }}
-                  />
-                  <TextField1Style
-                    fullWidth
-                    name="emailId"
-                    label="Email ID *"
-                    value={branchData.emailId || emailDomain}
-                    onChange={handleChange}
-                    onClick={(e) => {
-                      const i = e.target;
-                      const p = branchData.emailId.indexOf("@");
-                      i.setSelectionRange(p, p);
-                    }}
-                    onKeyDown={(e) => {
-                      const p = e.target.selectionStart;
-                      const a = branchData.emailId.indexOf("@");
-                      if (e.key === "Delete" && p >= a) {
-                        e.preventDefault();
-                        return;
-                      }
-                      if (p > a) {
-                        e.preventDefault();
-                        e.target.setSelectionRange(a, a);
-                      }
-                    }}
-                    onBlur={handleChange} // Re-validate on blur
-                    error={!!errors.emailId}
-                    helperText={
-                      errors.emailId || "Maximum 50 characters allowed before @"
-                    }
-                    inputProps={{ maxLength: emailPrefix + emailDomain.length }}
-                  />
-                </Stack>
-                <Stack direction={"row"} spacing={1}>
-                  <TextFieldStyle
-                    fullWidth
-                    name="nmrCode"
-                    label="N-M-R Code *"
-                    value={branchData.nmrCode}
-                    onChange={handleChange}
-                    onBlur={handleChange} // Re-validate on blur
-                    error={!!errors.nmrCode}
-                    helperText={errors.nmrCode || "Exactly 9 digits"}
-                    inputProps={{ maxLength: 9, inputMode: "numeric" }}
-                  />
-                  <TextFieldStyle
-                    select
-                    fullWidth
-                    label="Branch Status as per CBS*"
-                    name="status"
-                    value={
-                      !branchData.status || branchData.status === "InActive"
-                        ? "InActive"
-                        : "Active"
-                    }
-                    onChange={handleChange}
-                    error={!!errors.status}
-                    helperText={errors.status}
-                  >
-                    <MenuItem value="">Select Branch Status</MenuItem>
-                    <MenuItem key={"Live"} value={"Active"}>
-                      Live
-                    </MenuItem>
-                    <MenuItem key={"Closed"} value={"InActive"}>
-                      Closed
-                    </MenuItem>
-                  </TextFieldStyle>
-                  <DatePickerStyle
-                    label="Open Date *"
-                    format="DD/MM/YYYY"
-                    name="openDate"
-                    disabled={!!editingId}
-                    value={
-                      branchData.openDate
-                        ? dayjs(branchData.openDate, "DD/MM/YYYY")
-                        : null
-                    }
-                    onChange={(newValue) => {
-                      handleChange({
-                        target: {
-                          name: "openDate",
-                          value: newValue,
-                        },
-                      });
-                    }}
-                    slotProps={{
-                      textField: {
-                        fullWidth: true,
-                        variant: "outlined",
-                      },
-                    }}
-                  />
-                </Stack>
-
-                <Stack direction={"row"} spacing={1}>
-                  {editingId && (
-                    <DatePicker1Style
-                      label="Close Date"
-                      format="DD/MM/YYYY"
-                      name="closeDate"
-                      required={branchData.status === "InActive"}
-                      value={
-                        branchData.closeDate
-                          ? dayjs(branchData.closeDate, "DD/MM/YYYY")
-                          : null
-                      }
-                      onChange={(newValue) => {
-                        handleChange({
-                          target: {
-                            name: "closeDate",
-                            value: newValue,
-                          },
-                        });
-                      }}
-                      slotProps={{
-                        textField: {
-                          fullWidth: true,
-                          variant: "outlined", // Pass props to the internal TextField
-                          error:
-                            branchData.status === "Closed" &&
-                            branchData.closeDate,
-                          helperText:
-                            branchData.status === "Closed" &&
-                            branchData.closeDate
-                              ? "Close Date is required when status is Closed"
-                              : "",
-                        },
-                      }}
-                    />
-                  )}
-
-                  {/* Conditionally render closeDate field only if editingId exists */}
-                  {editingId && (
-                    <DatePicker1Style
-                      label="Merge Date"
-                      format="DD/MM/YYYY"
-                      name="mergeDate"
-                      required={editingId && branchData.mergedWithBranch}
-                      value={
-                        branchData.mergeDate
-                          ? dayjs(branchData.mergeDate, "DD/MM/YYYY")
-                          : null
-                      }
-                      onChange={(newValue) => {
-                        handleChange({
-                          target: {
-                            name: "mergeDate",
-                            value: newValue,
-                          },
-                        });
-                      }}
-                      slotProps={{
-                        textField: {
-                          fullWidth: true,
-                          variant: "outlined", // Pass props to the internal TextField
-                          error: !!errors.closeDate,
-                          helperText: errors.closeDate,
-                        },
-                      }}
-                    />
-                  )}
-
-                  {editingId && (
-                    <CustomAutoComplete
-                      options={mwb || []}
-                      loading={mwbLoading}
-                      value={
-                        typeof branchData?.mergedWithBranch === "object"
-                          ? branchData?.mergedWithBranch
-                          : {
-                              code: branchData?.mergedWithBranch,
-                              name: "",
-                            }
-                      }
-                      onChange={handleMergedWithBranchAutoCompleteChange}
-                      onInputChange={debounceQuery}
-                      renderOption={(option) =>
-                        typeof option === "string"
-                          ? option
-                          : !option || !option?.code || !option?.name
-                          ? ""
-                          : `${option.code} (${option.name})`
-                      }
-                      uniqueElementKey={"code"}
-                      label={"Merged with Branch"}
-                      name={"mergedWithBranch"}
-                      error={errors?.mergedWithBranch}
-                    />
-                  )}
-                </Stack>
-
-                <Stack direction={"row"} spacing={1}>
-                  <TextFieldStyle
-                    fullWidth
-                    select
-                    label="CPC Flag"
-                    name="cpcFlag"
-                    value={branchData.cpcFlag}
-                    onChange={handleChange}
-                    error={!!errors.state}
-                    inputProps={{ maxLength: 50 }}
-                    helperText={errors.cpcFlag}
-                  >
-                    <MenuItem key={true} value={true}>
-                      Allowed
-                    </MenuItem>
-                    <MenuItem key={false} value={false}>
-                      Not Allowed
-                    </MenuItem>
-                  </TextFieldStyle>
-
-                  <TextFieldStyle
-                    fullWidth
-                    select
-                    label="Food Credit Flag *"
-                    name="foodCreditFlag"
-                    value={branchData.foodCreditFlag}
-                    onChange={handleChange}
-                    error={!!errors.foodCreditFlag}
-                    inputProps={{ maxLength: 50 }}
-                    helperText={errors.foodCreditFlag}
-                  >
-                    <MenuItem key={true} value={true}>
-                      Allowed
-                    </MenuItem>
-                    <MenuItem key={false} value={false}>
-                      Not Allowed
-                    </MenuItem>
-                  </TextFieldStyle>
-
-                  <TextFieldStyle
-                    fullWidth
-                    select
-                    label="Curr Chest Flag *"
-                    name="currChestFlag"
-                    value={branchData.currChestFlag}
-                    onChange={handleChange}
-                    error={!!errors.currChestFlag}
-                    inputProps={{ maxLength: 50 }}
-                    helperText={errors.currChestFlag}
-                  >
-                    <MenuItem key={true} value={true}>
-                      Allowed
-                    </MenuItem>
-                    <MenuItem key={false} value={false}>
-                      Not Allowed
-                    </MenuItem>
-                  </TextFieldStyle>
-
-                  <TextFieldStyle
-                    select
-                    fullWidth
-                    label="Branch Type *"
-                    name="branchType"
-                    value={branchData.branchType}
-                    onChange={handleChange}
-                    // disabled={
-                    //   editingId &&
-                    //  // branchData.status==="Closed" &&
-                    //   (branchData.closeDate||
-                    //   branchData.mergeDate||
-                    //   branchData.mergedWithBranch)
-                    // }
-                    error={!!errors.branchType}
-                    helperText={errors.branchType}
-                  >
-                    {branchType.map((option) => (
-                      <MenuItem key={option.value} value={option.value}>
-                        {option.label}
-                      </MenuItem>
-                    ))}
-                  </TextFieldStyle>
-                </Stack>
-              </Stack>
-            </DialogContent>
-            <DialogActions>
-              <Button
-                type="submit"
-                variant="contained"
-                startIcon={editingId ? <EditIcon /> : <AddIcon />}
-                disabled={!isFormValid()}
-              >
-                {editingId ? "Update" : "Add"}
-              </Button>
-            </DialogActions>
-          </Dialog>
-        )}
-      </Box>
-    </LocalizationProvider>
+      <LoadingOverlay loading={loading} />
+    </Box>
   );
 }
