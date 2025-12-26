@@ -32,32 +32,28 @@ export const AuthProvider = ({ children }) => {
   const warningTimerRef = useRef(null);
   const countdownRef = useRef(null);
 
-  // --- 1. Helper to Clear Timers ---
+  // --- Clear all timers ---
   const clearAllTimers = useCallback(() => {
     if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
     if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
     if (countdownRef.current) clearInterval(countdownRef.current);
   }, []);
 
-  // --- 2. Perform Logout ---
-  // reason can be: "USER_INITIATED", "SESSION_EXPIRED", "CONCURRENT_LOGIN"
+  // --- Perform Logout ---
   const performLogout = useCallback(
     async (reason = "USER_INITIATED") => {
       clearAllTimers();
 
-      // If triggered by system (not manual button click), show the dialog
       if (reason !== "USER_INITIATED") {
         setSessionReason(reason);
         setSessionDialogOpen(true);
       }
 
       try {
-        // Attempt server logout (best effort)
-        await api.post(`${resolveConfig("/LS") || ""}/auth/logout`);
-      } catch (err) {
-        // Ignore errors if token is already dead
+        await api.post(`${resolveConfig("/LS")}/auth/logout`);
+      } catch (_) {
+        // ignore
       } finally {
-        // Always clear client state
         localStorage.clear();
         dispatch(logoutSuccess());
         setWarningOpen(false);
@@ -66,7 +62,7 @@ export const AuthProvider = ({ children }) => {
     [dispatch, clearAllTimers]
   );
 
-  // --- 3. Start Timers ---
+  // --- Start inactivity timers ---
   const startInactivityTimer = useCallback(() => {
     clearAllTimers();
     if (!isAuthenticated) return;
@@ -75,11 +71,14 @@ export const AuthProvider = ({ children }) => {
       setWarningOpen(true);
       setSecondsLeft(WARNING_SECONDS);
 
-      let counter = WARNING_SECONDS;
       countdownRef.current = setInterval(() => {
-        counter -= 1;
-        setSecondsLeft(counter);
-        if (counter <= 0) clearInterval(countdownRef.current);
+        setSecondsLeft((prev) => {
+          if (prev <= 1) {
+            clearInterval(countdownRef.current);
+            return 0;
+          }
+          return prev - 1;
+        });
       }, 1000);
     }, INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000);
 
@@ -88,7 +87,7 @@ export const AuthProvider = ({ children }) => {
     }, INACTIVITY_TIMEOUT);
   }, [isAuthenticated, clearAllTimers, performLogout]);
 
-  // --- 4. Event Listeners ---
+  // --- User Activity Listener ---
   const onActivity = useCallback(
     throttle(() => {
       if (!isAuthenticated || sessionDialogOpen) return;
@@ -115,10 +114,10 @@ export const AuthProvider = ({ children }) => {
     }
   }, [isAuthenticated, onActivity, startInactivityTimer, clearAllTimers]);
 
+  // --- Cross-tab / forced logout ---
   useEffect(() => {
     const handleSessionEvent = (e) => {
-      const reason = e.detail?.reason || "SESSION_EXPIRED";
-      performLogout(reason);
+      performLogout(e.detail?.reason || "SESSION_EXPIRED");
     };
 
     window.addEventListener("auth:session-expired", handleSessionEvent);
@@ -130,7 +129,6 @@ export const AuthProvider = ({ children }) => {
     <AuthContext.Provider
       value={{
         logout: () => performLogout("USER_INITIATED"),
-        // Expose this so PrivateRouter can trigger it
         triggerSessionDialog: (reason) => performLogout(reason),
       }}
     >
@@ -145,19 +143,14 @@ export const AuthProvider = ({ children }) => {
         }}
       />
 
-      {/* The ONE Global Dialog for all session issues */}
       <SessionDialog
         open={sessionDialogOpen}
         reason={sessionReason}
-        onConfirm={() => {
-          setSessionDialogOpen(false);
-          // window.location.href = "/";
-        }}
+        onConfirm={() => setSessionDialogOpen(false)}
       />
     </AuthContext.Provider>
   );
 };
-
 
 import {
   Dialog,
@@ -167,36 +160,79 @@ import {
   Button,
   Typography,
   LinearProgress,
-  Box,
+  Stack,
+  useTheme,
+  useMediaQuery,
 } from "@mui/material";
+import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 
 const TOTAL_WARNING_SECONDS = 30;
 
 const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
+
   if (!open) return null;
 
   const progress = (secondsLeft / TOTAL_WARNING_SECONDS) * 100;
 
   return (
-    <Dialog open disableEscapeKeyDown>
-      <DialogTitle color="warning.main">Session Expiring Soon</DialogTitle>
+    <Dialog
+      open={open}
+      fullWidth
+      maxWidth="xs"
+      disableEscapeKeyDown
+      PaperProps={{
+        sx: { borderRadius: 3, px: 1 },
+      }}
+    >
+      <DialogTitle>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <WarningAmberRoundedIcon color="warning" />
+          <Typography fontWeight={600}>Session Expiring</Typography>
+        </Stack>
+      </DialogTitle>
 
       <DialogContent>
-        <Typography sx={{ mb: 1 }}>
-          You will be logged out in <strong>{secondsLeft}</strong> seconds.
+        <Typography textAlign="center">
+          You’ll be logged out in
         </Typography>
 
-        <Box sx={{ width: "100%" }}>
-          <LinearProgress
-            variant="determinate"
-            value={Math.max(progress, 0)}
-            color="warning"
-          />
-        </Box>
+        <Typography
+          variant="h3"
+          fontWeight={700}
+          color="warning.main"
+          textAlign="center"
+          sx={{ my: 2 }}
+        >
+          {secondsLeft}s
+        </Typography>
+
+        <LinearProgress
+          variant="determinate"
+          value={Math.max(progress, 0)}
+          color="warning"
+          sx={{ height: 8, borderRadius: 4 }}
+        />
+
+        <Typography
+          variant="caption"
+          textAlign="center"
+          color="text.secondary"
+          sx={{ display: "block", mt: 1 }}
+        >
+          Continue to stay logged in
+        </Typography>
       </DialogContent>
 
-      <DialogActions>
-        <Button onClick={onContinue} variant="contained">
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button
+          fullWidth
+          size={isMobile ? "large" : "medium"}
+          variant="contained"
+          color="warning"
+          onClick={onContinue}
+        >
           Continue Session
         </Button>
       </DialogActions>
@@ -206,11 +242,11 @@ const SessionWarningDialog = ({ open, secondsLeft, onContinue }) => {
 
 export default SessionWarningDialog;
 
-
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useSelector } from "react-redux";
 import { useLocation } from "react-router-dom";
-import api from "../config/axiosConfig"; // Import the Singleton
+import api from "../config/axiosConfig";
+import { resolveConfig } from "../config/EnvironmentConfig";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
 import { convertToKebabCase } from "../utils/CommonUtilities";
 
@@ -223,17 +259,14 @@ const useApi = () => {
   const snackbar = useCustomSnackbar();
   const location = useLocation();
 
-  // Get Menus from Redux to calculate X-Request-Type
   const menus = useSelector((state) => state.menus.menus);
   const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
 
-  // --- Helper to find Menu Item based on Route ---
   const findMenuItem = useCallback((items, route) => {
     if (!items?.length) return null;
     for (const item of items) {
       if (item.route === route) return item;
       if (item.children?.length) {
-        // Handle dynamic routes if needed
         if (route.includes("/choose-option/")) {
           const param = route.split("/choose-option/")[1];
           if (param === convertToKebabCase(item.title)) return item;
@@ -245,23 +278,17 @@ const useApi = () => {
     return null;
   }, []);
 
-  // Calculate X-Request-Type only when location changes
   const xRequestType = (() => {
     const currentMenu = findMenuItem(menus, location.pathname);
     return currentMenu?.requestType || selectedMenuItem?.requestType || "*";
   })();
 
   const cancelAllRequests = useCallback(() => {
-    activeRequests.current.forEach((controller) => {
-      controller.abort();
-    });
+    activeRequests.current.forEach((controller) => controller.abort());
     activeRequests.current.clear();
   }, []);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => cancelAllRequests();
-  }, [cancelAllRequests]);
+  useEffect(() => () => cancelAllRequests(), [cancelAllRequests]);
 
   const callApi = useCallback(
     async (
@@ -275,44 +302,38 @@ const useApi = () => {
     ) => {
       setLoading(true);
       setError(null);
+
       const controller = new AbortController();
       activeRequests.current.add(controller);
 
       try {
         const config = {
           method,
-          url,
+          url: resolveConfig(url),
           data: method !== "GET" ? payload : undefined,
           params: method === "GET" ? payload : undefined,
           responseType,
           signal: controller.signal,
           headers: {
             "Content-Type": contentType,
-            "X-Request-Type": xRequestType, // Context Header
+            "X-Request-Type": xRequestType,
             ...(extraConfig.headers || {}),
           },
           ...extraConfig,
         };
 
-        // Use the Singleton API instance
         const response = await api(config);
-
         setData(response.data);
         return returnDataOnly ? response.data : response;
       } catch (err) {
-        // if (api.isCancel(err)) {
-        //   // Request cancelled, do nothing
-        //   return;
-        // }
         setError(err);
-
-        // Show Snackbar for generic errors (skip 401s as they are handled by interceptor)
         if (err.response?.status !== 401) {
-          const msg =
+          snackbar(
             err.response?.data?.message ||
-            err.response?.data?.error ||
-            "An error occurred";
-          snackbar(msg, "error");
+              err.response?.data?.error ||
+              "An error occurred",
+            "error"
+          );
         }
         throw err;
       } finally {
