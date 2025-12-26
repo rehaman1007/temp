@@ -1,245 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { Box, Fab, IconButton, Tooltip, Typography } from "@mui/material";
-import { DataGrid } from "@mui/x-data-grid";
-import AddIcon from "@mui/icons-material/Add";
-import EditIcon from "@mui/icons-material/Edit";
-import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
-import styled from "@emotion/styled";
-
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import BranchFormDialog from "./BranchFormDialog";
-import { FabStyle, ChipStyle, Box1Style, StackStyle } from "./BranchMasterStyle";
-import { getIconComponent } from "../../utils/IconUtils";
-
-/* ================= NO ROWS OVERLAY ================= */
-
-const OverlayBox = styled(Box)(() => ({
-  display: "flex",
-  flexDirection: "column",
-  height: "100%",
-  justifyContent: "center",
-  alignItems: "center",
-}));
-
-const CustomNoRowsOverlay = () => (
-  <OverlayBox>
-    <ErrorOutlineIcon fontSize="large" />
-    <Typography fontSize="1.1rem">Data is not available</Typography>
-  </OverlayBox>
-);
-
-/* ================= COMPONENT ================= */
-
-export default function BranchMasterTab() {
-  const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-
-  const [rows, setRows] = useState([]);
-  const [rowCount, setRowCount] = useState(0);
-  const [loading, setLoading] = useState(false);
-
-  const [openDialog, setOpenDialog] = useState(false);
-  const [editRow, setEditRow] = useState(null);
-
-  /* ===== SERVER GRID STATE ===== */
-
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 20,
-  });
-  const [sortModel, setSortModel] = useState([]);
-  const [filterModel, setFilterModel] = useState({ items: [] });
-
-  /* ===== DUPLICATE CALL PREVENTION ===== */
-
-  const lastQueryRef = useRef("");
-  const lastFilterRef = useRef("");
-
-  const ActiveIcon = useMemo(() => getIconComponent("FiberManualRecord"), []);
-  const InActiveIcon = useMemo(() => getIconComponent("FiberManualRecord"), []);
-
-  /* ================= FETCH ================= */
-
-  const fetchBranches = useCallback(async () => {
-    const sortField = sortModel[0]?.field;
-    const sortOrder = sortModel[0]?.sort;
-
-    const filters = filterModel.items
-      .filter(
-        (f) =>
-          f.operator &&
-          f.value !== undefined &&
-          f.value !== null &&
-          f.value !== ""
-      )
-      .map((f) => ({
-        field: f.field,
-        operator: f.operator,
-        value: f.value,
-      }));
-
-    const querySignature = JSON.stringify({
-      page: paginationModel.page,
-      size: paginationModel.pageSize,
-      sortField,
-      sortOrder,
-      filters,
-    });
-
-    if (lastQueryRef.current === querySignature) return;
-    lastQueryRef.current = querySignature;
-
-    try {
-      setLoading(true);
-
-      const payload = {
-        page: paginationModel.page,
-        size: paginationModel.pageSize,
-        sortField,
-        sortOrder,
-        filters,
-      };
-
-      const resp = await callApi("/CM/branchesNewAPI", payload, "POST");
-
-      setRows(resp?.data?.data || []);
-      setRowCount(resp?.data?.totalElements || 0);
-    } catch (err) {
-      snackbar(err?.message || "Failed to load branches", "error");
-      setRows([]);
-      setRowCount(0);
-    } finally {
-      setLoading(false);
-    }
-  }, [callApi, snackbar, paginationModel, sortModel, filterModel]);
-
-  /* ================= EFFECTS ================= */
-
-  useEffect(() => {
-    fetchBranches();
-  }, [fetchBranches]);
-
-  useEffect(() => {
-    const current = JSON.stringify(filterModel.items || []);
-    if (current === lastFilterRef.current) return;
-
-    lastFilterRef.current = current;
-    setPaginationModel((p) => (p.page === 0 ? p : { ...p, page: 0 }));
-  }, [filterModel]);
-
-  /* ================= ACTIONS ================= */
-
-  const handleOpenCreate = () => {
-    setEditRow(null);
-    setOpenDialog(true);
-  };
-
-  const handleOpenEdit = (row) => {
-    setEditRow(row);
-    setOpenDialog(true);
-  };
-
-  const handleSaved = () => {
-    setOpenDialog(false);
-    setEditRow(null);
-    lastQueryRef.current = "";
-    fetchBranches();
-  };
-
-  /* ================= COLUMNS ================= */
-
-  const columns = useMemo(
-    () => [
-      { field: "code", headerName: "Branch Code", flex: 1 },
-      { field: "name", headerName: "Branch Name", flex: 2 },
-      { field: "circleCode", headerName: "Circle Code", flex: 1 },
-      {
-        field: "status",
-        headerName: "Status",
-        flex: 1,
-        type: "singleSelect",
-        valueOptions: [
-          { value: true, label: "Active" },
-          { value: false, label: "In-Active" },
-        ],
-        align: "center",
-        headerAlign: "center",
-        renderCell: ({ row }) => (
-          <Box1Style>
-            <ChipStyle
-              size="small"
-              icon={row.status ? <ActiveIcon /> : <InActiveIcon />}
-              label={row.status ? "Active" : "In-Active"}
-            />
-          </Box1Style>
-        ),
-      },
-      {
-        field: "actions",
-        headerName: "Actions",
-        flex: 0.6,
-        sortable: false,
-        filterable: false,
-        align: "center",
-        headerAlign: "center",
-        renderCell: ({ row }) => (
-          <Tooltip title="Edit">
-            <IconButton onClick={() => handleOpenEdit(row)}>
-              <EditIcon />
-            </IconButton>
-          </Tooltip>
-        ),
-      },
-    ],
-    [ActiveIcon, InActiveIcon]
-  );
-
-  /* ================= RENDER ================= */
-
-  return (
-    <Box>
-      <DataGrid
-        rows={rows}
-        columns={columns}
-        getRowId={(row) => row.code}
-        loading={loading}
-        paginationMode="server"
-        sortingMode="server"
-        filterMode="server"
-        rowCount={rowCount}
-        paginationModel={paginationModel}
-        onPaginationModelChange={setPaginationModel}
-        sortModel={sortModel}
-        onSortModelChange={setSortModel}
-        filterModel={filterModel}
-        onFilterModelChange={setFilterModel}
-        pageSizeOptions={[10, 20, 50, 100]}
-        disableRowSelectionOnClick
-        slots={{ noRowsOverlay: CustomNoRowsOverlay }}
-      />
-
-      <FabStyle onClick={handleOpenCreate} variant="extended">
-        <AddIcon sx={{ mr: 1 }} />
-        Create
-      </FabStyle>
-
-      <BranchFormDialog
-        open={openDialog}
-        onClose={() => setOpenDialog(false)}
-        editingRow={editRow}
-        onSuccess={handleSaved}
-      />
-    </Box>
-  );
-}
-
-import {
-  Dialog,
-  DialogActions,
-  DialogContent,
-  Button,
-} from "@mui/material";
+import { Dialog, DialogActions, DialogContent, Button } from "@mui/material";
 import { Add, Edit } from "@mui/icons-material";
 import { LocalizationProvider } from "@mui/x-date-pickers";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
@@ -371,6 +130,393 @@ export default function BranchFormDialog({
 
         <DialogContent dividers>
           {/* 👉 Paste your FULL existing form JSX here unchanged */}
+          <Stack direction={"column"} spacing={2}>
+            <Stack direction={"row"} spacing={1}>
+              <TextFieldStyle
+                fullWidth
+                label="Branch Code *"
+                name="code"
+                value={branchData.code}
+                onChange={handleChange}
+                disabled={!!editingId}
+                error={!!errors.code}
+                helperText={errors.code || "Exactly 5 digits"}
+                inputProps={{ maxLength: 5, inputMode: "numeric" }}
+              />
+
+              <TextFieldStyle
+                fullWidth
+                label="Branch Name *"
+                name="name"
+                value={branchData.name}
+                onChange={handleChange}
+                error={!!errors.name}
+                inputProps={{ maxLength: 50 }}
+                helperText={
+                  errors.name || "Allowed: letters, numbers, spaces, /&()-,."
+                }
+              />
+
+              <TextFieldStyle
+                fullWidth
+                select
+                label="Circle Code *"
+                name="circleCode"
+                value={branchData.circleCode}
+                onChange={handleChange}
+                error={!!errors.circleCode}
+                helperText={errors.circleCode || ""}
+                inputProps={{ maxLength: 5, inputMode: "numeric" }}
+              >
+                {circles.map((circles) => (
+                  <MenuItem key={circles.circleCode} value={circles.circleCode}>
+                    {circles.circleCode} - {circles.circleName}
+                  </MenuItem>
+                ))}
+              </TextFieldStyle>
+            </Stack>
+
+            <Stack direction={"row"} spacing={1}>
+              <TextFieldStyle
+                fullWidth
+                select
+                label="State *"
+                name="state"
+                value={branchData.state}
+                onChange={handleChange}
+                error={!!errors.state}
+                inputProps={{ maxLength: 50 }}
+                helperText={errors.state || ""}
+              >
+                {states.map((states) => (
+                  <MenuItem key={states.stateCode} value={states.stateCode}>
+                    {states.stateCode} - {states.stateName}
+                  </MenuItem>
+                ))}
+              </TextFieldStyle>
+
+              <TextFieldStyle
+                fullWidth
+                label="City *"
+                name="city"
+                value={branchData.city}
+                onChange={handleChange}
+                error={!!errors.city}
+                inputProps={{ maxLength: 30 }}
+                helperText={errors.city || "Allowed 3-30 characters"}
+              />
+
+              <TextFieldStyle
+                fullWidth
+                label="Pin Code *"
+                name="pinCode"
+                value={branchData.pinCode}
+                onChange={handleChange}
+                error={!!errors.pinCode}
+                helperText={errors.pinCode || "Exactly 6 digits"}
+                inputProps={{ maxLength: 6, inputMode: "numeric" }}
+              />
+            </Stack>
+
+            <Stack direction={"row"} spacing={1}>
+              <TextField
+                fullWidth
+                label="Address *"
+                name="address"
+                value={branchData.address}
+                onChange={handleChange}
+                error={!!errors.address}
+                inputProps={{ maxLength: 50 }}
+                helperText={
+                  errors.address ||
+                  "Allowed 5-50 characters (A-Z, 0-9, spaces,/,&,(,),- )"
+                }
+                multiline
+                maxRows={2}
+              />
+            </Stack>
+
+            <Stack direction={"row"} spacing={1}>
+              <TextField1Style
+                fullWidth
+                label="Phone Number *"
+                name="phoneNumber"
+                value={branchData.phoneNumber}
+                onChange={handleChange}
+                error={!!errors.phoneNumber}
+                helperText={errors.phoneNumber || "Exactly 12 digits"}
+                inputProps={{ maxLength: 12, inputMode: "numeric" }}
+              />
+              <TextField1Style
+                fullWidth
+                name="emailId"
+                label="Email ID *"
+                value={branchData.emailId || emailDomain}
+                onChange={handleChange}
+                onClick={(e) => {
+                  const i = e.target;
+                  const p = branchData.emailId.indexOf("@");
+                  i.setSelectionRange(p, p);
+                }}
+                onKeyDown={(e) => {
+                  const p = e.target.selectionStart;
+                  const a = branchData.emailId.indexOf("@");
+                  if (e.key === "Delete" && p >= a) {
+                    e.preventDefault();
+                    return;
+                  }
+                  if (p > a) {
+                    e.preventDefault();
+                    e.target.setSelectionRange(a, a);
+                  }
+                }}
+                onBlur={handleChange} // Re-validate on blur
+                error={!!errors.emailId}
+                helperText={
+                  errors.emailId || "Maximum 50 characters allowed before @"
+                }
+                inputProps={{ maxLength: emailPrefix + emailDomain.length }}
+              />
+            </Stack>
+            <Stack direction={"row"} spacing={1}>
+              <TextFieldStyle
+                fullWidth
+                name="nmrCode"
+                label="N-M-R Code *"
+                value={branchData.nmrCode}
+                onChange={handleChange}
+                onBlur={handleChange} // Re-validate on blur
+                error={!!errors.nmrCode}
+                helperText={errors.nmrCode || "Exactly 9 digits"}
+                inputProps={{ maxLength: 9, inputMode: "numeric" }}
+              />
+              <TextFieldStyle
+                select
+                fullWidth
+                label="Branch Status as per CBS*"
+                name="status"
+                value={
+                  !branchData.status || branchData.status === "InActive"
+                    ? "InActive"
+                    : "Active"
+                }
+                onChange={handleChange}
+                error={!!errors.status}
+                helperText={errors.status}
+              >
+                <MenuItem value="">Select Branch Status</MenuItem>
+                <MenuItem key={"Live"} value={"Active"}>
+                  Live
+                </MenuItem>
+                <MenuItem key={"Closed"} value={"InActive"}>
+                  Closed
+                </MenuItem>
+              </TextFieldStyle>
+              <DatePickerStyle
+                label="Open Date *"
+                format="DD/MM/YYYY"
+                name="openDate"
+                disabled={!!editingId}
+                value={
+                  branchData.openDate
+                    ? dayjs(branchData.openDate, "DD/MM/YYYY")
+                    : null
+                }
+                onChange={(newValue) => {
+                  handleChange({
+                    target: {
+                      name: "openDate",
+                      value: newValue,
+                    },
+                  });
+                }}
+                slotProps={{
+                  textField: {
+                    fullWidth: true,
+                    variant: "outlined",
+                  },
+                }}
+              />
+            </Stack>
+
+            <Stack direction={"row"} spacing={1}>
+              {editingId && (
+                <DatePicker1Style
+                  label="Close Date"
+                  format="DD/MM/YYYY"
+                  name="closeDate"
+                  required={branchData.status === "InActive"}
+                  value={
+                    branchData.closeDate
+                      ? dayjs(branchData.closeDate, "DD/MM/YYYY")
+                      : null
+                  }
+                  onChange={(newValue) => {
+                    handleChange({
+                      target: {
+                        name: "closeDate",
+                        value: newValue,
+                      },
+                    });
+                  }}
+                  slotProps={{
+                    textField: {
+                      fullWidth: true,
+                      variant: "outlined", // Pass props to the internal TextField
+                      error:
+                        branchData.status === "Closed" && branchData.closeDate,
+                      helperText:
+                        branchData.status === "Closed" && branchData.closeDate
+                          ? "Close Date is required when status is Closed"
+                          : "",
+                    },
+                  }}
+                />
+              )}
+
+              {/* Conditionally render closeDate field only if editingId exists */}
+              {editingId && (
+                <DatePicker1Style
+                  label="Merge Date"
+                  format="DD/MM/YYYY"
+                  name="mergeDate"
+                  required={editingId && branchData.mergedWithBranch}
+                  value={
+                    branchData.mergeDate
+                      ? dayjs(branchData.mergeDate, "DD/MM/YYYY")
+                      : null
+                  }
+                  onChange={(newValue) => {
+                    handleChange({
+                      target: {
+                        name: "mergeDate",
+                        value: newValue,
+                      },
+                    });
+                  }}
+                  slotProps={{
+                    textField: {
+                      fullWidth: true,
+                      variant: "outlined", // Pass props to the internal TextField
+                      error: !!errors.closeDate,
+                      helperText: errors.closeDate,
+                    },
+                  }}
+                />
+              )}
+
+              {editingId && (
+                <CustomAutoComplete
+                  options={mwb || []}
+                  loading={mwbLoading}
+                  value={
+                    typeof branchData?.mergedWithBranch === "object"
+                      ? branchData?.mergedWithBranch
+                      : {
+                          code: branchData?.mergedWithBranch,
+                          name: "",
+                        }
+                  }
+                  onChange={handleMergedWithBranchAutoCompleteChange}
+                  onInputChange={debounceQuery}
+                  renderOption={(option) =>
+                    typeof option === "string"
+                      ? option
+                      : !option || !option?.code || !option?.name
+                      ? ""
+                      : `${option.code} (${option.name})`
+                  }
+                  uniqueElementKey={"code"}
+                  label={"Merged with Branch"}
+                  name={"mergedWithBranch"}
+                  error={errors?.mergedWithBranch}
+                />
+              )}
+            </Stack>
+
+            <Stack direction={"row"} spacing={1}>
+              <TextFieldStyle
+                fullWidth
+                select
+                label="CPC Flag"
+                name="cpcFlag"
+                value={branchData.cpcFlag}
+                onChange={handleChange}
+                error={!!errors.state}
+                inputProps={{ maxLength: 50 }}
+                helperText={errors.cpcFlag}
+              >
+                <MenuItem key={true} value={true}>
+                  Allowed
+                </MenuItem>
+                <MenuItem key={false} value={false}>
+                  Not Allowed
+                </MenuItem>
+              </TextFieldStyle>
+
+              <TextFieldStyle
+                fullWidth
+                select
+                label="Food Credit Flag *"
+                name="foodCreditFlag"
+                value={branchData.foodCreditFlag}
+                onChange={handleChange}
+                error={!!errors.foodCreditFlag}
+                inputProps={{ maxLength: 50 }}
+                helperText={errors.foodCreditFlag}
+              >
+                <MenuItem key={true} value={true}>
+                  Allowed
+                </MenuItem>
+                <MenuItem key={false} value={false}>
+                  Not Allowed
+                </MenuItem>
+              </TextFieldStyle>
+
+              <TextFieldStyle
+                fullWidth
+                select
+                label="Curr Chest Flag *"
+                name="currChestFlag"
+                value={branchData.currChestFlag}
+                onChange={handleChange}
+                error={!!errors.currChestFlag}
+                inputProps={{ maxLength: 50 }}
+                helperText={errors.currChestFlag}
+              >
+                <MenuItem key={true} value={true}>
+                  Allowed
+                </MenuItem>
+                <MenuItem key={false} value={false}>
+                  Not Allowed
+                </MenuItem>
+              </TextFieldStyle>
+
+              <TextFieldStyle
+                select
+                fullWidth
+                label="Branch Type *"
+                name="branchType"
+                value={branchData.branchType}
+                onChange={handleChange}
+                // disabled={
+                //   editingId &&
+                //  // branchData.status==="Closed" &&
+                //   (branchData.closeDate||
+                //   branchData.mergeDate||
+                //   branchData.mergedWithBranch)
+                // }
+                error={!!errors.branchType}
+                helperText={errors.branchType}
+              >
+                {branchType.map((option) => (
+                  <MenuItem key={option.value} value={option.value}>
+                    {option.label}
+                  </MenuItem>
+                ))}
+              </TextFieldStyle>
+            </Stack>
+          </Stack>
         </DialogContent>
 
         <DialogActions>
