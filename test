@@ -1,339 +1,368 @@
-import {
-  Dialog,
-  DialogActions,
-  DialogContent,
-  Button,
-  Stack,
-  MenuItem,
-  TextField,
-} from "@mui/material";
-import { Add, Edit } from "@mui/icons-material";
-import { LocalizationProvider } from "@mui/x-date-pickers";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import dayjs from "dayjs";
 import { useEffect, useRef, useState, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
+import { resolveConfig } from "../config/EnvironmentConfig";
 
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-
-import {
-  DialogTitleStyle,
-  TextFieldStyle,
-  TextField1Style,
-  DatePickerStyle,
-  DatePicker1Style,
-} from "./BranchMasterStyle";
-
-/* ================= CONSTANTS ================= */
-
-const emailDomain = "@sbi.co.in";
-const emailPrefix = 50;
-
-const branchType = [
-  { value: "A", label: "Automated" },
-  { value: "M", label: "Manual" },
-];
-
-/* ================= INITIAL FORM ================= */
-
-const getInitialForm = () => ({
-  code: "",
-  name: "",
-  circleCode: "",
-  state: "",
-  city: "",
-  address: "",
-  pinCode: "",
-  phoneNumber: "",
-  emailId: emailDomain,
-  nmrCode: "",
-  status: "Active",
-  openDate: dayjs(),
-  closeDate: null,
-  mergeDate: null,
-  mergedWithBranch: "",
-  cpcFlag: false,
-  foodCreditFlag: false,
-  currChestFlag: false,
-  branchType: "A",
-});
-
-/* ================= COMPONENT ================= */
-
-export default function BranchFormDialog({
-  open,
-  onClose,
-  editingRow,
-  onSuccess,
-}) {
-  const { callApi } = useApi();
+const useStreamApi = () => {
+  const token = useSelector((state) => state.auth.token);
   const snackbar = useCustomSnackbar();
 
-  const isEdit = !!editingRow;
+  const controllerRef = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [lastMessage, setLastMessage] = useState(null);
 
-  const [form, setForm] = useState(getInitialForm());
-  const [errors, setErrors] = useState({});
-  const [states, setStates] = useState([]);
-  const [circles, setCircles] = useState([]);
+  const startStream = useCallback(
+    (url, { onMessage, onOpen, onError } = {}) => {
+      if (!token) return console.warn("No token, cannot start SSE stream");
+      const parts = url.split("/");
+      const service = parts[1];
+      const resolved = resolveConfig(`/${service}`);
+      parts[1] = resolved;
+      const Final_Url = parts.slice(1).join("/");
 
-  const originalRef = useRef(null);
+      // Cancel any existing connection
+      if (controllerRef.current) controllerRef.current.abort();
 
-  /* ================= LOAD MASTER DATA ================= */
+      const controller = new AbortController();
+      controllerRef.current = controller;
 
-  useEffect(() => {
-    const loadMasters = async () => {
-      try {
-        const s = await callApi("/CM/states", null, "GET");
-        const c = await callApi("/CM/circle-codes", null, "GET");
-        setStates(s?.data || []);
-        setCircles(c?.data || []);
-      } catch {
-        snackbar("Failed to load master data", "error");
-      }
-    };
-    loadMasters();
-  }, [callApi, snackbar]);
+      fetchEventSource(Final_Url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
 
-  /* ================= LOAD EDIT DATA ================= */
+        onopen(response) {
+          if (response.ok && response.status === 200) {
+            console.log("SSE Connection established");
+            setConnected(true);
+            onOpen?.(response);
+          } else {
+            console.error("SSE Connection failed:", response.status);
+            snackbar(`SSE Connection failed (${response.status})`, "error");
+          }
+        },
 
-  useEffect(() => {
-    if (editingRow) {
-      const mapped = {
-        ...editingRow,
-        status: editingRow.status ? "Active" : "InActive",
-      };
-      setForm(mapped);
-      originalRef.current = mapped;
-    } else {
-      setForm(getInitialForm());
-      originalRef.current = null;
+        onmessage(event) {
+          if (event.event === "connected") {
+            // console.log("Server connected:", event.data);
+            return;
+          }
+          if (event.event === "new_notification") {
+            try {
+              const data = JSON.parse(event.data);
+              setLastMessage(data);
+              onMessage?.(data);
+            } catch (err) {
+              console.error("SSE message parse error:", err);
+            }
+          }
+        },
+
+        onerror(err) {
+          console.error("SSE Error:", err);
+          setConnected(false);
+          onError?.(err);
+        },
+      });
+    },
+    [snackbar, token]
+  );
+
+  const stopStream = useCallback(() => {
+    if (controllerRef.current) {
+      controllerRef.current.abort();
+      controllerRef.current = null;
+      setConnected(false);
+      console.log("SSE connection stopped.");
     }
-  }, [editingRow]);
-
-  /* ================= AUTO BRANCH TYPE ================= */
-
-  useEffect(() => {
-    const manual =
-      form.status !== "Active" ||
-      !!form.closeDate ||
-      !!form.mergeDate ||
-      !!form.mergedWithBranch;
-
-    setForm((p) => ({ ...p, branchType: manual ? "M" : "A" }));
-  }, [form.status, form.closeDate, form.mergeDate, form.mergedWithBranch]);
-
-  /* ================= HANDLERS ================= */
-
-  const handleChange = useCallback((e) => {
-    const { name, value } = e.target;
-    setForm((p) => ({ ...p, [name]: value }));
   }, []);
 
-  /* ================= SUBMIT ================= */
+  useEffect(() => stopStream, [stopStream]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  return { connected, lastMessage, startStream, stopStream };
+};
 
+export default useStreamApi;
+
+
+import axios from "axios";
+import { resolveConfig } from "../config/EnvironmentConfig"; // Ensure this path is correct
+import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
+import { parseJwt } from "../utils/EncryptionUtilities";
+
+let store; // Will hold the Redux store reference
+
+// Inject store from App.js or index.js to avoid circular dependency
+export const injectStore = (_store) => {
+  store = _store;
+};
+
+// Create a Singleton Axios Instance
+const api = axios.create({
+  baseURL: "", // Base URL
+  withCredentials: true, // IMPORTANT: Allows sending/receiving HttpOnly Cookies
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
+
+// --- Request Interceptor ---
+api.interceptors.request.use(
+  (config) => {
+    // 1. Get Token from Redux Store
+    const state = store?.getState();
+    const token = state?.auth?.token;
+
+    // 2. Attach Authorization Header
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    // 3. Attach Context Header (X-Request-Type) if passed in config
+    // The hook will pass this in, or defaults to '*'
+    if (!config.headers["X-Request-Type"]) {
+      config.headers["X-Request-Type"] = "*";
+    }
+
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// --- Response Interceptor ---
+let isRefreshing = false;
+let failedQueue = [];
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+};
+
+api.interceptors.response.use(
+  (response) => {
+    return response;
+  },
+  async (error) => {
+    const originalRequest = error.config;
+
+    // Safety check to prevent infinite loops
+    if (!originalRequest || originalRequest._retryCount > 2) {
+      return Promise.reject(error);
+    }
+
+    // Extract Error Details
+    const status = error.response?.status;
+    const errorCode = error.response?.data?.error || error.response?.data?.code;
+
+    // ---------------------------------------------------------
+    // SCENARIO 1: Concurrent Login / Session Invalidated
+    // ---------------------------------------------------------
     if (
-      isEdit &&
-      JSON.stringify(form) === JSON.stringify(originalRef.current)
+      status === 401 &&
+      (errorCode === "CONCURRENT_LOGIN" ||
+        errorCode === "SESSION_EXPIRED" ||
+        errorCode === "INVALID_TOKEN")
     ) {
-      snackbar("No changes detected", "warning");
-      return;
+      // Do NOT attempt refresh. The session is dead.
+      // We dispatch a custom event that AuthContext listens to for the Dialog
+      window.dispatchEvent(
+        new CustomEvent("auth:session-expired", {
+          detail: { reason: errorCode },
+        })
+      );
+
+      // Clear local state immediately
+      store.dispatch(logoutSuccess());
+      return Promise.reject(error);
     }
 
-    try {
-      const payload = {
-        requestType: "BRANCH",
-        changeType: isEdit ? "UPDATE" : "ADD",
-        targetId: form.code,
-        payload: {
-          ...form,
-          status: form.status === "Active",
-          openDate: dayjs(form.openDate).format("DD/MM/YYYY"),
-          closeDate: form.closeDate
-            ? dayjs(form.closeDate).format("DD/MM/YYYY")
-            : null,
-          mergeDate: form.mergeDate
-            ? dayjs(form.mergeDate).format("DD/MM/YYYY")
-            : null,
-        },
-      };
+    // ---------------------------------------------------------
+    // SCENARIO 2: Access Token Expired (Try Refresh)
+    // ---------------------------------------------------------
+    if (
+      status === 401 &&
+      errorCode === "TOKEN_EXPIRED" &&
+      !originalRequest._retry
+    ) {
+      if (isRefreshing) {
+        // If already refreshing, queue this request
+        return new Promise(function (resolve, reject) {
+          failedQueue.push({
+            resolve: (token) => {
+              originalRequest.headers["Authorization"] = "Bearer " + token;
+              resolve(api(originalRequest));
+            },
+            reject: (err) => {
+              reject(err);
+            },
+          });
+        });
+      }
 
-      await callApi("/CR/create-request", payload, "POST");
-      snackbar(isEdit ? "Branch updated" : "Branch created", "success");
-      onClose();
-      onSuccess();
-    } catch {
-      snackbar("Request failed", "error");
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        // Call Backend Refresh Endpoint
+        // Note: We don't send the refresh token in body; backend reads the Cookie
+        const response = await api.post(
+          `${resolveConfig("/LS") || ""}/auth/refresh-token`
+        );
+
+        const { accessToken } = response.data;
+
+        if (accessToken) {
+          // 1. Update Redux
+          const user = parseJwt(accessToken);
+          store.dispatch(tokenRefreshed({ token: accessToken, user }));
+
+          // 2. Process Queue
+          processQueue(null, accessToken);
+
+          // 3. Retry Original Request
+          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
+          return api(originalRequest);
+        } else {
+          throw new Error("No access token returned");
+        }
+      } catch (refreshError) {
+        processQueue(refreshError, null);
+        store.dispatch(logoutSuccess());
+        window.dispatchEvent(
+          new CustomEvent("auth:session-expired", {
+            detail: { reason: "SESSION_EXPIRED" },
+          })
+        );
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
+      }
     }
-  };
 
-  /* ================= RENDER ================= */
+    return Promise.reject(error);
+  }
+);
 
-  return (
-    <LocalizationProvider dateAdapter={AdapterDayjs}>
-      <Dialog
-        open={open}
-        onClose={onClose}
-        maxWidth="md"
-        fullWidth
-        component="form"
-        onSubmit={handleSubmit}
-      >
-        <DialogTitleStyle>
-          {isEdit ? "Edit Branch" : "Add Branch"}
-        </DialogTitleStyle>
+export default api;
 
-        <DialogContent dividers>
-          <Stack spacing={2}>
-            <Stack direction="row" spacing={1}>
-              <TextFieldStyle
-                fullWidth
-                label="Branch Code *"
-                name="code"
-                value={form.code}
-                onChange={handleChange}
-                disabled={isEdit}
-              />
-              <TextFieldStyle
-                fullWidth
-                label="Branch Name *"
-                name="name"
-                value={form.name}
-                onChange={handleChange}
-              />
-              <TextFieldStyle
-                select
-                fullWidth
-                label="Circle Code *"
-                name="circleCode"
-                value={form.circleCode}
-                onChange={handleChange}
-              >
-                {circles.map((c) => (
-                  <MenuItem key={c.circleCode} value={c.circleCode}>
-                    {c.circleCode} - {c.circleName}
-                  </MenuItem>
-                ))}
-              </TextFieldStyle>
-            </Stack>
 
-            <Stack direction="row" spacing={1}>
-              <TextFieldStyle
-                select
-                fullWidth
-                label="State *"
-                name="state"
-                value={form.state}
-                onChange={handleChange}
-              >
-                {states.map((s) => (
-                  <MenuItem key={s.stateCode} value={s.stateCode}>
-                    {s.stateCode} - {s.stateName}
-                  </MenuItem>
-                ))}
-              </TextFieldStyle>
-              <TextFieldStyle
-                fullWidth
-                label="City *"
-                name="city"
-                value={form.city}
-                onChange={handleChange}
-              />
-              <TextFieldStyle
-                fullWidth
-                label="Pin Code *"
-                name="pinCode"
-                value={form.pinCode}
-                onChange={handleChange}
-              />
-            </Stack>
+import { useState, useCallback, useRef, useEffect } from "react";
+import { useSelector } from "react-redux";
+import { useLocation } from "react-router-dom";
+import api from "../config/axiosConfig";
+import { resolveConfig } from "../config/EnvironmentConfig";
+import useCustomSnackbar from "../utils/useCustomSnackbar";
+import { convertToKebabCase } from "../utils/CommonUtilities";
 
-            <TextField
-              fullWidth
-              label="Address *"
-              name="address"
-              value={form.address}
-              onChange={handleChange}
-              multiline
-              maxRows={2}
-            />
+const useApi = () => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
-            <Stack direction="row" spacing={1}>
-              <TextField1Style
-                fullWidth
-                label="Phone Number *"
-                name="phoneNumber"
-                value={form.phoneNumber}
-                onChange={handleChange}
-              />
-              <TextField1Style
-                fullWidth
-                label="Email ID *"
-                name="emailId"
-                value={form.emailId}
-                onChange={handleChange}
-              />
-            </Stack>
+  const activeRequests = useRef(new Set());
+  const snackbar = useCustomSnackbar();
+  const location = useLocation();
 
-            <Stack direction="row" spacing={1}>
-              <TextFieldStyle
-                fullWidth
-                label="NMR Code *"
-                name="nmrCode"
-                value={form.nmrCode}
-                onChange={handleChange}
-              />
-              <TextFieldStyle
-                select
-                fullWidth
-                label="Status *"
-                name="status"
-                value={form.status}
-                onChange={handleChange}
-              >
-                <MenuItem value="Active">Active</MenuItem>
-                <MenuItem value="InActive">InActive</MenuItem>
-              </TextFieldStyle>
-              <DatePickerStyle
-                label="Open Date *"
-                value={form.openDate}
-                onChange={(v) =>
-                  handleChange({ target: { name: "openDate", value: v } })
-                }
-              />
-            </Stack>
+  const menus = useSelector((state) => state.menus.menus);
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
 
-            <Stack direction="row" spacing={1}>
-              <TextFieldStyle
-                select
-                fullWidth
-                label="Branch Type *"
-                name="branchType"
-                value={form.branchType}
-                onChange={handleChange}
-              >
-                {branchType.map((b) => (
-                  <MenuItem key={b.value} value={b.value}>
-                    {b.label}
-                  </MenuItem>
-                ))}
-              </TextFieldStyle>
-            </Stack>
-          </Stack>
-        </DialogContent>
+  const findMenuItem = useCallback((items, route) => {
+    if (!items?.length) return null;
+    for (const item of items) {
+      if (item.route === route) return item;
+      if (item.children?.length) {
+        if (route.includes("/choose-option/")) {
+          const param = route.split("/choose-option/")[1];
+          if (param === convertToKebabCase(item.title)) return item;
+        }
+        const found = findMenuItem(item.children, route);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
 
-        <DialogActions>
-          <Button
-            type="submit"
-            variant="contained"
-            startIcon={isEdit ? <Edit /> : <Add />}
-          >
-            {isEdit ? "Update" : "Add"}
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </LocalizationProvider>
+  const xRequestType = (() => {
+    const currentMenu = findMenuItem(menus, location.pathname);
+    return currentMenu?.requestType || selectedMenuItem?.requestType || "*";
+  })();
+
+  const cancelAllRequests = useCallback(() => {
+    activeRequests.current.forEach((controller) => controller.abort());
+    activeRequests.current.clear();
+  }, []);
+
+  useEffect(() => () => cancelAllRequests(), [cancelAllRequests]);
+
+  const callApi = useCallback(
+    async (
+      url,
+      payload = null,
+      method = "GET",
+      responseType = "json",
+      contentType = "application/json",
+      extraConfig = {},
+      returnDataOnly = true
+    ) => {
+      setLoading(true);
+      setError(null);
+
+      // Build final URL using service resolution
+      const parts = url.split("/");
+      const service = parts[1];
+      const resolved = resolveConfig(`/${service}`);
+      parts[1] = resolved;
+      const finalUrl = parts.slice(1).join("/");
+
+      const controller = new AbortController();
+      activeRequests.current.add(controller);
+
+      try {
+        const config = {
+          method,
+          url: finalUrl,
+          data: method !== "GET" ? payload : undefined,
+          params: method === "GET" ? payload : undefined,
+          responseType,
+          signal: controller.signal,
+          headers: {
+            "Content-Type": contentType,
+            "X-Request-Type": xRequestType,
+            ...(extraConfig.headers || {}),
+          },
+          ...extraConfig,
+        };
+
+        const response = await api(config);
+        setData(response.data);
+        return returnDataOnly ? response.data : response;
+      } catch (err) {
+        setError(err);
+        if (err.response?.status !== 401) {
+          snackbar(
+            err.response?.data?.message ||
+              err.response?.data?.error ||
+              "An error occurred",
+            "error"
+          );
+        }
+        throw err;
+      } finally {
+        activeRequests.current.delete(controller);
+        setLoading(false);
+      }
+    },
+    [xRequestType, snackbar]
   );
-}
+
+  return { data, error, loading, callApi, cancelAllRequests };
+};
+
+export default useApi;
