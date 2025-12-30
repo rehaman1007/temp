@@ -1,295 +1,813 @@
-import React, {
-  createContext,
-  useEffect,
-  useRef,
-  useCallback,
-  useState,
-} from "react";
-import { useDispatch, useSelector } from "react-redux";
-import { throttle } from "lodash";
-import SessionDialog from "../components/SessionDialog";
-import SessionWarningDialog from "../components/SessionWarningDialog";
-import { logoutSuccess } from "../store/slices/authSlice";
-import api from "../config/axiosConfig";
-import { resolveConfig } from "../config/EnvironmentConfig";
+import { useEffect, useState, useCallback } from "react";
+import { Box, Fab } from "@mui/material";
+import useApi from "../../../hooks/useApi";
 
-export const AuthContext = createContext();
+import UsersTable from "../components/UsersTable";
+import UserDialog from "../components/UserDialog";
+import DeleteConfirmDialog from "../components/DeleteConfirmDialog";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import AddIcon from "@mui/icons-material/Add";
 
-// CONFIGURATION
-const INACTIVITY_LIMIT_MS = 5 * 60 * 1000; // 5 Minutes total
-const WARNING_DURATION_MS = 30 * 1000;     // Warning at last 30 seconds
-const CHECK_INTERVAL_MS = 1000;            // Check every second
+const API_URL = "/UM/user/user-details";
 
-export const AuthProvider = ({ children }) => {
-  const dispatch = useDispatch();
-  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+export default function UserManagement() {
+  const { callApi, loading, error: apiError } = useApi();
 
-  // UI State
-  const [warningOpen, setWarningOpen] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(WARNING_DURATION_MS / 1000);
-  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
-  const [sessionReason, setSessionReason] = useState("");
+  // ---- server data ----
+  const [rows, setRows] = useState([]);
+  const [roles, setRoles] = useState([]);
+  const [uiError, setUiError] = useState("");
 
-  // Refs for logic (Timestamp based to prevent drift)
-  const logoutTimeRef = useRef(Date.now() + INACTIVITY_LIMIT_MS);
-  const intervalIdRef = useRef(null);
+  const [selection, setSelection] = useState([]);
 
-  // --- 1. Core Logout Function ---
-  const performLogout = useCallback(
-    async (reason = "USER_INITIATED") => {
-      if (intervalIdRef.current) clearInterval(intervalIdRef.current);
+  const emailDomain = "@sbi.co.in";
+  //const emailPrefix = 50;
+  // ---- local CRUD dialog state ----
+  const emptyForm = {
+    id: null,
+    USERID: "",
+    FIRST_NAME: "",
+    MIDDLE_NAME: "",
+    LAST_NAME: "",
+    EMAIL: emailDomain,
+    PHONE_NUMBER: "",
+    ROLE_NAME: "",
+    ROLE_ID: "",
+  };
+  const [form, setForm] = useState(emptyForm);
+  const [initialState, setInitialState] = useState({});
+  const [openEdit, setOpenEdit] = useState(false);
+  const [openView, setOpenView] = useState(false);
+  const [isViewMode, setIsViewMode] = useState(false);
 
-      if (reason !== "USER_INITIATED") {
-        setSessionReason(reason);
-        setSessionDialogOpen(true);
-      }
+  // ---- delete dialog ----
+  const [deleteTarget, setDeleteTarget] = useState(null);
 
-      try {
-        await api.post(`${resolveConfig("/LS")}/auth/logout`);
-      } catch (err) {
-        console.error("Logout API failed", err);
-      } finally {
-        localStorage.clear();
-        dispatch(logoutSuccess());
-        setWarningOpen(false);
-      }
-    },
-    [dispatch]
-  );
+  const snackbar = useCustomSnackbar();
 
-  // --- 2. The Heartbeat Timer ---
-  const checkTimer = useCallback(() => {
-    const now = Date.now();
-    const timeRemaining = logoutTimeRef.current - now;
+  const normalizeUsers = useCallback((users = []) => {
+    return users.map((u, idx) => {
+      const USERID = u?.USERID ?? u?.userId ?? "";
+      const first = (u?.FIRST_NAME ?? u?.firstName ?? "").toString().trim();
+      const last = (u?.LAST_NAME ?? u?.lastName ?? "").toString().trim();
+      const name = [first, last].filter(Boolean).join(" ");
+      const roleIdRaw = u?.ROLE_ID ?? u?.roleId ?? "";
+      const parsedRoleId =
+        typeof roleIdRaw === "number"
+          ? roleIdRaw
+          : Number.isNaN(parseInt(roleIdRaw, 10))
+          ? roleIdRaw
+          : parseInt(roleIdRaw, 10);
 
-    // A. Time is up -> Logout
-    if (timeRemaining <= 0) {
-      if (intervalIdRef.current) clearInterval(intervalIdRef.current);
-      setWarningOpen(false);
-      performLogout("SESSION_EXPIRED");
-      return;
-    }
-
-    // B. Inside Warning Zone -> Show Dialog
-    if (timeRemaining <= WARNING_DURATION_MS) {
-      // Ensure dialog is open
-      setWarningOpen(true);
-      // Update countdown UI
-      setSecondsLeft(Math.ceil(timeRemaining / 1000));
-    } else {
-      // C. Safe Zone -> Ensure dialog is closed
-      if (warningOpen) setWarningOpen(false);
-    }
-  }, [performLogout, warningOpen]);
-
-  // --- 3. Start/Reset Logic ---
-  // This is called by the "Continue" button to force a full reset
-  const startInactivityTimer = useCallback(() => {
-    if (!isAuthenticated) return;
-
-    // Reset the target logout time to (Now + 5 mins)
-    logoutTimeRef.current = Date.now() + INACTIVITY_LIMIT_MS;
-
-    // If interval isn't running, start it
-    if (!intervalIdRef.current) {
-      intervalIdRef.current = setInterval(checkTimer, CHECK_INTERVAL_MS);
-    }
-    
-    // Immediate UI update to hide warning
-    setWarningOpen(false);
-  }, [isAuthenticated, checkTimer]);
-
-  // --- 4. User Activity Listener (Passive) ---
-  const onActivity = useCallback(
-    throttle(() => {
-      if (!isAuthenticated || sessionDialogOpen) return;
-
-      const timeLeft = logoutTimeRef.current - Date.now();
-      
-      // CRITICAL LOGIC CHANGE:
-      // If we are currently in the "Warning Zone" (<= 30s), 
-      // IGNORE mouse/keyboard events. User MUST click the button.
-      if (timeLeft <= WARNING_DURATION_MS) {
-        return; 
-      }
-
-      // If we are in the safe zone (e.g., 4 mins left), 
-      // these events quietly reset the timer to full.
-      startInactivityTimer();
-    }, 1000), 
-    [isAuthenticated, sessionDialogOpen, startInactivityTimer]
-  );
-
-  // --- 5. Event Binding ---
-  useEffect(() => {
-    if (isAuthenticated) {
-      startInactivityTimer();
-      const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-      events.forEach((e) => window.addEventListener(e, onActivity));
-
-      return () => {
-        events.forEach((e) => window.removeEventListener(e, onActivity));
-        onActivity.cancel();
-        if (intervalIdRef.current) clearInterval(intervalIdRef.current);
+      return {
+        id: USERID || String(idx + 1),
+        USERID,
+        FIRST_NAME: first,
+        LAST_NAME: last,
+        EMAIL: (u?.EMAIL ?? u?.email ?? "").toString(),
+        PHONE_NUMBER: (u?.PHONE_NUMBER ?? u?.phone ?? "").toString(),
+        ROLE_NAME: (u?.ROLE_NAME ?? u?.roleName ?? "").toString().trim(),
+        ROLE_ID: parsedRoleId,
+        BRANCH: (u?.BRANCH ?? u?.branch ?? "").toString(),
+        __name: name || USERID || "(unknown)",
+        ACCOUNT_STATUS: u?.ACCOUNT_STATUS,
       };
-    } else {
-      if (intervalIdRef.current) clearInterval(intervalIdRef.current);
-      intervalIdRef.current = null;
-      setWarningOpen(false);
-    }
-  }, [isAuthenticated, onActivity, startInactivityTimer]);
+    });
+  }, []);
 
-  // --- 6. Cross-tab Logout Handler ---
+  const fetchUsers = useCallback(async () => {
+    setUiError("");
+    try {
+      const data = await callApi(API_URL, null, "GET");
+      const users = data?.result?.users ?? [];
+      setRows(normalizeUsers(users));
+    } catch (e) {
+      console.error(e);
+      setRows([]);
+      // setUiError(
+      //   "Failed to fetch users. Check network, CORS, or API availability."
+      // );
+    }
+  }, [callApi, normalizeUsers]);
+
+  const fetchRoles = useCallback(async () => {
+    try {
+      const data = await callApi(
+        "/UM/role/get-roles",
+        { permissions: false },
+        "GET"
+      );
+      const raw = data?.result?.roles ?? [];
+      setRoles(
+        raw.map((r) => ({
+          id: r?.roleId,
+          name: (r?.roleName ?? "").trim(),
+          description: r?.description ?? "",
+        }))
+      );
+    } catch (e) {
+      console.error("Error while fetching roles", e);
+    }
+  }, [callApi]);
+
+  const findRole = useCallback(
+    (id) => roles.find((r) => String(r.id) === String(id)),
+    [roles]
+  );
+
   useEffect(() => {
-    const handleSessionEvent = (e) => {
-      performLogout(e.detail?.reason || "SESSION_EXPIRED");
-    };
-    window.addEventListener("auth:session-expired", handleSessionEvent);
-    return () =>
-      window.removeEventListener("auth:session-expired", handleSessionEvent);
-  }, [performLogout]);
+    fetchUsers();
+    fetchRoles();
+  }, [fetchUsers, fetchRoles]);
+
+  const removeUser = useCallback(
+    (id) => setRows((prev) => prev.filter((r) => r.id !== id)),
+    []
+  );
+
+  const effectiveError =
+    apiError?.response?.data?.message || apiError?.message || uiError || "";
+
+  if (effectiveError !== "") {
+    snackbar(
+      apiError?.response?.data?.message || apiError?.message || uiError,
+      "error"
+    );
+  }
 
   return (
-    <AuthContext.Provider
-      value={{
-        logout: () => performLogout("USER_INITIATED"),
-        triggerSessionDialog: (reason) => performLogout(reason),
-      }}
-    >
-      {children}
+    <Box sx={{ p: { xs: 2, md: 0 } }}>
+      <Box variant="outlined" sx={{ mt: 2 }}>
+        <UsersTable
+          rows={rows}
+          roles={roles}
+          loading={loading}
+          onSelectionChange={setSelection}
+          onEditRow={(row) => {
+            const matched = findRole(row.ROLE_ID);
+            setForm({
+              ...row,
+              ROLE_ID: matched ? matched.id : row.ROLE_ID,
+              ROLE_NAME: matched ? matched.name : row.ROLE_NAME,
+            });
+            setInitialState({
+              ...row,
+              ROLE_ID: matched ? matched.id : row.ROLE_ID,
+              ROLE_NAME: matched ? matched.name : row.ROLE_NAME,
+            });
+            setOpenEdit(true);
+          }}
+          onViewRow={(row) => {
+            const matched = findRole(row.ROLE_ID);
+            setForm({
+              ...row,
+              ROLE_ID: matched ? matched.id : row.ROLE_ID,
+              ROLE_NAME: matched ? matched.name : row.ROLE_NAME,
+            });
 
-      <SessionWarningDialog
-        open={warningOpen}
-        secondsLeft={secondsLeft}
-        totalWarningSeconds={WARNING_DURATION_MS / 1000}
-        onContinue={startInactivityTimer}
+            setIsViewMode(true);
+            setOpenView(true);
+          }}
+          onDeleteRow={(row) => setDeleteTarget(row)}
+          errorText={effectiveError}
+        />
+      </Box>
+
+      <UserDialog
+        open={openEdit}
+        onClose={() => setOpenEdit(false)}
+        roles={roles}
+        form={form}
+        setForm={setForm}
+        initialState={initialState}
       />
 
-      <SessionDialog
-        open={sessionDialogOpen}
-        reason={sessionReason}
-        onConfirm={() => setSessionDialogOpen(false)}
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        name={deleteTarget?.__name || deleteTarget?.USERID}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget?.id) removeUser(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
       />
-    </AuthContext.Provider>
+      <Fab
+        sx={{
+          position: "fixed",
+          borderRadius: "4px",
+          fontSize: "15px",
+          bottom: "64px",
+          right: "32px",
+          zIndex: 1200,
+        }}
+        onClick={() => {
+          setForm({ ...emptyForm });
+          setOpenEdit(true);
+        }}
+        // disabled={loading || errorText}
+        color="primary"
+        variant="extended"
+      >
+        <AddIcon />
+        Create
+      </Fab>
+    </Box>
+  );
+}
+
+
+import {
+  Box,
+  IconButton,
+  Stack,
+  Tooltip,
+  Typography,
+  styled,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import EditIcon from "@mui/icons-material/Edit";
+import DeleteIcon from "@mui/icons-material/DeleteOutline";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import CustomChip from "../../../utils/CustomChip";
+import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
+import { toPascalKebabCase } from "../../../utils/CommonUtilities";
+
+const OverlayBox = styled(Box)(() => ({
+  display: "flex",
+  flexDirection: "column",
+  height: "100%",
+  justifyContent: "center",
+  alignItems: "center",
+}));
+
+const CustomNoRowsOverlay = () => {
+  return (
+    <OverlayBox>
+      <ErrorOutlineIcon fontSize="large" />
+      <Typography variant="h5" fontSize="1.2rem">
+        Data is not available
+      </Typography>
+    </OverlayBox>
   );
 };
 
+export default function UsersTable({
+  rows,
+  roles,
+  loading,
+  onSelectionChange,
+  onEditRow,
+  onDeleteRow,
+  errorText,
+}) {
+  const columns = [
+    {
+      field: "USERID",
+      headerName: "User Id",
+      flex: 0.7,
+      sortable: true,
+    },
+    {
+      field: "__name",
+      headerName: "User Name",
+      flex: 1.4,
+      sortable: true,
+    },
 
-import React from "react";
+    { field: "ROLE_NAME", headerName: "Role", flex: 0.8, sortable: true },
+
+    // {
+    //   field: "ACCOUNT_STATUS",
+    //   headerName: "Account Status",
+    //   flex: 1,
+    //   sortable: true,
+    //   align: "center",
+    //   headerAlign: "center",
+    //   renderCell: (params) => (
+    //     <CustomChip
+    //       icon={<OnlinePredictionIcon />}
+    //       label={toPascalKebabCase(params.value)}
+    //       variant="outlined"
+    //     />
+    //   ),
+    // },
+
+    { field: "EMAIL", headerName: "Email", flex: 1.2, sortable: true },
+    { field: "PHONE_NUMBER", headerName: "Phone", flex: 0.9, sortable: true },
+    {
+      field: "action",
+      headerName: "Action",
+      sortable: false,
+      flex: 1,
+      align: "center",
+      headerAlign: "center",
+      filterable: false,
+      disableColumnMenu: true,
+      renderCell: (params) => (
+        <Stack
+          direction="row"
+          spacing={0.5}
+          alignItems="center"
+          justifyContent="center"
+          sx={{ height: "100%" }}
+        >
+          <Tooltip title="Edit">
+            <IconButton
+              size="small"
+              onClick={() => onEditRow(params.row, "Edit")}
+            >
+              <EditIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Delete">
+            <IconButton
+              size="small"
+              color="error"
+              onClick={() => onDeleteRow(params.row)}
+            >
+              <DeleteIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
+  ];
+
+  return (
+    <DataGrid
+      rows={roles.length > 0 ? rows : []}
+      columns={columns}
+      disableRowSelectionOnClick
+      onRowSelectionModelChange={onSelectionChange}
+      pageSizeOptions={[5, 10, 25, 50]}
+      loading={loading}
+      localeText={{
+        noRowsLabel: errorText,
+      }}
+      autoHeight
+      initialState={{
+        pagination: { paginationModel: { pageSize: 10, page: 0 } },
+        sorting: { sortModel: [{ field: "__name", sort: "asc" }] },
+      }}
+      slots={{
+        noRowsOverlay: CustomNoRowsOverlay,
+      }}
+    />
+  );
+}
+
 import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
   Button,
-  Typography,
-  LinearProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
   Stack,
-  Box,
+  TextField,
+  Grid,
+  Divider,
+  IconButton,
+  Typography,
 } from "@mui/material";
-import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
+import useApi from "../../../hooks/useApi";
 
-const SessionWarningDialog = ({ 
-  open, 
-  secondsLeft, 
-  totalWarningSeconds = 30, 
-  onContinue 
-}) => {
-  if (!open) return null;
+import { useCallback, useRef, useState } from "react";
+import LockOutlineIcon from "@mui/icons-material/LockOutline";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
+import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
+import GppBadIcon from "@mui/icons-material/GppBad";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import _ from "lodash";
 
-  const progressNormal = (secondsLeft / totalWarningSeconds) * 100;
+const STATUS_MAP = {
+  ACTIVE: <VerifiedUserIcon color="success" />,
+  INACTIVE: <GppBadIcon color="error" />,
+  LOCKED: <LockOutlineIcon color="error" />,
+  UNLOCKED: <LockOpenIcon color="success" />,
+};
+
+export default function UserDialog({
+  open,
+  onClose,
+  roles,
+  form,
+  setForm,
+  initialState,
+}) {
+  const user = JSON.parse(sessionStorage.getItem("user"));
+  const API_URL = "/UM/user/create-request";
+
+  const { callApi } = useApi();
+
+  const snackbar = useCustomSnackbar();
+  const [errors, setErrors] = useState({});
+  console.log(form);
+
+  const makePayload = useCallback(() => {
+    const requestPayload = JSON.stringify({
+      userId: form.USERID,
+      firstName: form.FIRST_NAME,
+      middleName: form.MIDDLE_NAME,
+      lastName: form.LAST_NAME,
+      email: form.EMAIL,
+      phoneNumber: form.PHONE_NUMBER,
+      roleName: form.ROLE_NAME,
+      roleId: form.ROLE_ID,
+      // branch: form.BRANCH,
+    });
+    return {
+      targetUserId: form?.USERID || undefined,
+      requestorUserId: user?.userId || undefined,
+      requestType: form.id
+        ? "MODIFY"
+        : form.ACCOUNT_STATUS === "LOCKED"
+        ? "UNLOCK"
+        : form.ACCOUNT_STATUS === "ACTIVE"
+        ? "LOCK"
+        : form.ACCOUNT_STATUS === "INACTIVE"
+        ? "ACTIVE"
+        : "CREATE",
+      requestPayload,
+    };
+  }, [form, user]);
+
+  const onSave = async () => {
+    if (!isFormValid()) {
+      snackbar("Please fix validation errors", "error");
+      return;
+    }
+    const isSame = _.isEqual(initialState, form);
+    if (isSame) {
+      snackbar("No Changes detected, Kindly modify before saving", "error");
+      return;
+    }
+    try {
+      const payload = makePayload();
+      const res = await callApi(API_URL, payload, "POST");
+      if (res) {
+        snackbar(
+          form.id
+            ? "User update request submitted successfully"
+            : "User creation request submitted successfully",
+          "success"
+        );
+        onClose();
+      }
+    } catch (error) {
+      console.error(error);
+      snackbar(
+        error?.response?.data?.message ||
+          "Something went wrong, Kindly try again",
+        "error"
+      );
+    }
+  };
+
+  const reDigits = /^[0-9]*$/;
+  const reDesc = /^[a-zA-Z\s]*$/;
+  const fname = /^[a-zA-Z\s.]*$/;
+  const emailRegex = /^[a-zA-Z0-9._]*$/;
+
+  const validateField = useCallback((name, value) => {
+    switch (name) {
+      case "USERID":
+        if (!value) return "User ID is required";
+        if (!reDigits.test(value)) return "Only digits allowed";
+        if (value.length !== 7) return "Must be 7 digits";
+        break;
+
+      case "FIRST_NAME":
+        if (!value.trim()) return "First Name is required";
+        if (!fname.test(value)) return "Only letters, spaces";
+        break;
+
+      case "MIDDLE_NAME":
+        if (!value.trim()) return "Middle Name is required";
+        if (!reDesc.test(value)) return "Only letters, spaces";
+        break;
+
+      case "LAST_NAME":
+        if (!value.trim()) return "Last Name is required";
+        if (!reDesc.test(value)) return "Only letters, spaces";
+        break;
+
+      case "PHONE_NUMBER":
+        if (!value) return "Phone Number is required";
+        if (!reDigits.test(value)) return "Only digits allowed";
+        if (value.length !== 10) return "Must be 10 digits";
+        break;
+
+      case "EMAIL": {
+        if (!value | (value === emailDomain)) return "Email ID is required";
+        const prefix = value.replace(emailDomain, "");
+        if (prefix.length === 0) return "Email ID is required";
+        if (prefix.length > emailPrefix)
+          return "Maximum 50 characters allowed before @";
+        if (!emailRegex.test(prefix))
+          return "Only letters, digits,.,_,- allowed";
+        break;
+      }
+
+      case "ROLE_ID": {
+        if (!value) return "Role is required";
+        break;
+      }
+
+      default:
+        return "";
+    }
+  });
+
+  const isFormValid = useCallback(() => {
+    const fields = ["USERID", "FIRST_NAME", "PHONE_NUMBER", "EMAIL", "ROLE_ID"];
+    return fields.every((f) => !validateField(f, form[f] || ""));
+  });
+  const snackGateRef = useRef(true);
+  const notifyOnce = useCallback(
+    (msg, variant = "warning") => {
+      if (!snackGateRef.current) return;
+      snackGateRef.current = false;
+      snackbar(msg, variant);
+      setTimeout(() => (snackGateRef.current = true), 800);
+    },
+    [snackbar]
+  );
+  const isAllZeros = (str) => {
+    return /^0+$/.test(str);
+  };
+  const emailDomain = "@sbi.co.in";
+  const emailPrefix = 50;
+
+  // --- live validation on change + snackbars for bad keystrokes ---
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    console.log(e.target.name, e.target.value);
+
+    if (name === "USERID") {
+      if (!reDigits.test(value)) {
+        notifyOnce("User ID accepts digits only");
+        return;
+      }
+      if (value.length > 7) {
+        notifyOnce("User ID must be 7 digits");
+        return;
+      }
+      if (value.length === 7 && isAllZeros(value)) {
+        notifyOnce("All zeros are not Allowed");
+        return;
+      }
+    }
+    if (name === "FIRST_NAME") {
+      if (!fname.test(value)) {
+        notifyOnce("First Name accepts letters and spaces only");
+        return;
+      }
+    }
+    if (name === "MIDDLE_NAME") {
+      if (!reDesc.test(value)) {
+        notifyOnce("Middle Name accepts letters and spaces only");
+        return;
+      }
+    }
+    if (name === "LAST_NAME") {
+      if (!reDesc.test(value)) {
+        notifyOnce("Last Name accepts letters and spaces only");
+        return;
+      }
+    }
+    if (name === "PHONE_NUMBER") {
+      if (!reDigits.test(value)) {
+        notifyOnce("Phone Number accepts digits only");
+        return;
+      }
+      if (value.length > 10) {
+        notifyOnce("Phone Number must be 10 digits");
+        return;
+      }
+      if (value.length === 10 && isAllZeros(value)) {
+        notifyOnce("All zeros are not Allowed");
+        return;
+      }
+    }
+    if (name === "EMAIL") {
+      const prefix = value.replace(emailDomain, "");
+      if (prefix.includes("@")) return;
+      if (prefix.length > emailPrefix) return;
+      if (!emailRegex.test(prefix) && prefix.length > 0) return;
+      if (prefix.length === emailPrefix && isAllZeros(prefix)) {
+        notifyOnce("All zeros are not Allowed");
+        return;
+      }
+      setForm((prev) => ({ ...prev, EMAIL: prefix + emailDomain }));
+      return;
+    }
+
+    setForm((prev) => ({ ...prev, [name]: value }));
+
+    // update error for just this field
+    setErrors((prev) => ({
+      ...prev,
+      [name]: validateField(name, value),
+    }));
+  };
 
   return (
     <Dialog
       open={open}
+      onClose={onClose}
       fullWidth
-      maxWidth="xs"
-      // Prevent closing by clicking backdrop or pressing escape
-      disableEscapeKeyDown
-      onClose={(event, reason) => {
-        if (reason !== "backdropClick") {
-           // Optional: handle specific close reasons if needed
-        }
-      }}
+      maxWidth="md"
       PaperProps={{
-        sx: { 
-          borderRadius: 3, 
-          padding: 1,
-          boxShadow: 24 
+        sx: {
+          minWidth: 800,
+          maxWidth: "45vw",
         },
       }}
     >
-      <DialogTitle sx={{ textAlign: "center", pb: 0 }}>
-        <Box
-          sx={{
-            display: "inline-flex",
-            p: 1.5,
-            borderRadius: "50%",
-            bgcolor: "warning.light",
-            color: "warning.dark",
-            mb: 1,
-          }}
+      <DialogTitle>{form.id ? "Edit User" : "Add New User"}</DialogTitle>
+      {/* {form?.id && (
+        <IconButton
+          aria-label="account status"
+          sx={(theme) => ({
+            position: "absolute",
+            right: 10,
+            top: 8,
+            color: theme.palette.grey[500],
+          })}
+          onClick={() => onSave()}
         >
-          <WarningAmberRoundedIcon fontSize="large" />
-        </Box>
-        <Typography variant="h6" component="div" fontWeight="bold">
-          Session Expiring
-        </Typography>
-      </DialogTitle>
+          {STATUS_MAP[form.ACCOUNT_STATUS]}
+          <Typography variant="caption">{form.ACCOUNT_STATUS}</Typography>
+        </IconButton>
+      )} */}
 
-      <DialogContent sx={{ textAlign: "center", pb: 3 }}>
-        <Typography variant="body1" color="text.secondary" sx={{ mb: 2 }}>
-          You have been inactive for a while. You will be logged out automatically.
-        </Typography>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          {/* Identity Section */}
+          <Grid container spacing={2} alignItems="flex-start">
+            <Grid item xs={12} md={8}>
+              <TextField
+                name="USERID"
+                label="User ID *"
+                value={form.USERID || ""}
+                onChange={handleChange}
+                fullWidth
+                size="medium"
+                disabled={form?.id}
+                error={!!errors.USERID}
+                helperText={errors.USERID}
+              />
+            </Grid>
+            {/* spacer to keep nice balance on first row */}
+            <Grid item xs={12} md={4} />
+          </Grid>
+          <Divider />
+          <Grid container spacing={2} alignItems="flex-start">
+            <Grid item xs={12} md={4}>
+              <TextField
+                name="FIRST_NAME"
+                label="First Name *"
+                slotProps={{ htmlInput: { maxLength: 50 } }}
+                value={form.FIRST_NAME || ""}
+                onChange={handleChange}
+                fullWidth
+                size="medium"
+                error={!!errors.FIRST_NAME}
+                helperText={errors.FIRST_NAME}
+              />
+            </Grid>
 
-        <Box sx={{ position: "relative", display: "inline-flex", mb: 2 }}>
-          <Typography
-            variant="h2"
-            fontWeight={800}
-            color="warning.main"
-          >
-            {secondsLeft}
-          </Typography>
-          <Typography 
-            variant="h6" 
-            component="span" 
-            color="text.secondary" 
-            sx={{ alignSelf: 'flex-end', mb: 1.5, ml: 0.5 }}
-          >
-            s
-          </Typography>
-        </Box>
+            <Grid item xs={12} md={4}>
+              <TextField
+                name="MIDDLE_NAME"
+                label="Middle Name"
+                slotProps={{ htmlInput: { maxLength: 50 } }}
+                value={form.MIDDLE_NAME || ""}
+                onChange={handleChange}
+                fullWidth
+                size="medium"
+                error={!!errors.MIDDLE_NAME}
+                helperText={errors.MIDDLE_NAME}
+              />
+            </Grid>
 
-        <Stack spacing={1} width="100%">
-          <LinearProgress
-            variant="determinate"
-            value={Math.max(0, Math.min(progressNormal, 100))}
-            color="warning"
-            sx={{ 
-              height: 10, 
-              borderRadius: 5,
-              backgroundColor: "action.hover" 
-            }}
-          />
-          <Typography variant="caption" color="error.main" fontWeight="bold">
-            Action Required: Click below to stay signed in
-          </Typography>
+            <Grid item xs={12} md={4}>
+              <TextField
+                name="LAST_NAME"
+                label="Last Name"
+                slotProps={{ htmlInput: { maxLength: 50 } }}
+                value={form.LAST_NAME || ""}
+                onChange={handleChange}
+                fullWidth
+                size="medium"
+                error={!!errors.LAST_NAME}
+                helperText={errors.LAST_NAME}
+              />
+            </Grid>
+          </Grid>
+
+          {/* Contact Section */}
+          <Grid container spacing={2}>
+            <Grid item xs={12} md={8}>
+              <TextField
+                name="EMAIL"
+                sx={{ width: 465, borderRadius: 0.7 }}
+                label="Email *"
+                slotProps={{ htmlInput: { maxLength: 100 } }}
+                type="email"
+                value={form.EMAIL || emailDomain}
+                onChange={handleChange}
+                onClick={(e) => {
+                  const i = e.target;
+                  const p = form.EMAIL.indexOf("@");
+                  i.setSelectionRange(p, p);
+                }}
+                onKeyDown={(e) => {
+                  const p = e.target.selectionStart;
+                  const a = form.EMAIL.indexOf("@");
+                  if (e.key === "Delete" && p >= a) {
+                    e.preventDefault();
+                    return;
+                  }
+                  if (p > a) {
+                    e.preventDefault();
+                    e.target.setSelectionRange(a, a);
+                  }
+                }}
+                onBlur={(e) => {
+                  const { name, value } = e.target;
+                  setErrors((prev) => ({
+                    ...prev,
+                    [name]: validateField(name, value),
+                  }));
+                }}
+                fullWidth
+                size="medium"
+                error={!!errors.EMAIL}
+                helperText={errors.EMAIL}
+              />
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <TextField
+                name="PHONE_NUMBER"
+                label="Mobile Number *"
+                value={form.PHONE_NUMBER}
+                onChange={handleChange}
+                slotProps={{
+                  htmlInput: {
+                    maxLength: 10, // Limits the input to 10 characters
+                  },
+                }}
+                fullWidth
+                size="medium"
+                error={!!errors.PHONE_NUMBER}
+                helperText={errors.PHONE_NUMBER}
+              />
+            </Grid>
+          </Grid>
+
+          {/* Org Section */}
+          <Grid container spacing={2}>
+            <Grid item xs={12} md={6}>
+              <FormControl fullWidth size="medium">
+                <InputLabel required>Role</InputLabel>
+                <Select
+                  label="Role"
+                  name="ROLE"
+                  value={form.ROLE_ID || ""}
+                  sx={{ width: 220, borderRadius: 0.7 }}
+                  onChange={(e) => {
+                    const roleId = e.target.value;
+                    const r = roles.find(
+                      (rr) => String(rr.id) === String(roleId)
+                    ) || { id: roleId, name: String(roleId) };
+                    setForm({ ...form, ROLE_ID: r.id, ROLE_NAME: r.name });
+                  }}
+                  MenuProps={{ PaperProps: { style: { maxHeight: 320 } } }}
+                >
+                  {roles.map((r) => (
+                    <MenuItem key={r.id} value={r.id}>
+                      {r.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+          </Grid>
         </Stack>
       </DialogContent>
 
-      <DialogActions sx={{ justifyContent: "center", pb: 2 }}>
-        <Button 
-          variant="contained" 
-          color="warning" 
-          onClick={onContinue}
-          size="large"
-          sx={{ borderRadius: 2, px: 4, fontWeight: "bold" }}
-        >
-          I'm still here
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={onSave} disabled={!isFormValid()}>
+          {form.id ? "Update User" : "Add User"}
         </Button>
       </DialogActions>
     </Dialog>
   );
-};
+}
 
-export default SessionWarningDialog;
