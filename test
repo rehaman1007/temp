@@ -1,319 +1,447 @@
-import React, { useEffect, useState } from "react";
-import axios from "axios";
-import { Box, Container, InputAdornment } from "@mui/material";
-import PersonIcon from "@mui/icons-material/Person";
-import LogoImg from "../../../assets/Logos/Fincore_transperent.svg";
-import LoginErrorDialog from "./LoginErrorDialog";
-import LoginWithPassword from "./LoginWithPassword";
-import UpdatePassword from "./UpdatePassword";
-import {
-  Root,
-  ContainerInner,
-  Content,
-  LeftCol,
-  RightCol,
-  LogoWrap,
-  BrandTitle,
-  BrandSub,
-  BigHeading,
-  SubText,
-  FeatureList,
-  FeatureItem,
-  Bullet,
-  GlassCard,
-  FormTitle,
-  StyledTextField,
-  PrimaryButton,
-} from "./LoginStyles";
-import CustomChip from "../../../utils/CustomChip";
-import AccountCircleIcon from "@mui/icons-material/AccountCircle";
-import { resolveConfig } from "../../../config/EnvironmentConfig";
+import { useEffect, useState, useCallback } from "react";
+import { Box, Fab } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 
-export default function LoginPort() {
-  const [content, setContent] = useState(null);
+import UsersTable from "../components/UsersTable";
+import UserDialog from "../components/UserDialog";
+import DeleteConfirmDialog from "../components/DeleteConfirmDialog";
 
-  useEffect(() => {
-    const loadContent = async () => {
-      try {
-        const res = await axios.get("/loginContent.json");
-        setContent(res.data);
-      } catch (err) {
-        console.error("Failed to load content JSON:", err);
-      }
-    };
-    loadContent();
+const API_URL = "/UM/user/user-details";
+
+export default function UserManagement() {
+  const { callApi, loading, error: apiError } = useApi();
+  const snackbar = useCustomSnackbar();
+
+  const [rows, setRows] = useState([]);
+  const [roles, setRoles] = useState([]);
+  const [uiError, setUiError] = useState("");
+  const [selection, setSelection] = useState([]);
+
+  const emptyForm = {
+    id: null,
+    USERID: "",
+    FIRST_NAME: "",
+    MIDDLE_NAME: "",
+    LAST_NAME: "",
+    EMAIL: "@sbi.co.in",
+    PHONE_NUMBER: "",
+    ROLE_NAME: "",
+    ROLE_ID: "",
+    ACCOUNT_STATUS: "",
+  };
+
+  const [form, setForm] = useState(emptyForm);
+  const [initialState, setInitialState] = useState({});
+  const [openEdit, setOpenEdit] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+
+  const normalizeUsers = useCallback((users = []) => {
+    return users.map((u, idx) => ({
+      id: u.USERID || String(idx + 1),
+      USERID: u.USERID,
+      FIRST_NAME: u.FIRST_NAME,
+      LAST_NAME: u.LAST_NAME,
+      EMAIL: u.EMAIL,
+      PHONE_NUMBER: u.PHONE_NUMBER,
+      ROLE_NAME: u.ROLE_NAME,
+      ROLE_ID: u.ROLE_ID,
+      ACCOUNT_STATUS: u.ACCOUNT_STATUS,
+      __name: `${u.FIRST_NAME || ""} ${u.LAST_NAME || ""}`.trim(),
+    }));
   }, []);
 
-  // === STATES ===
-  const userList = [
-    { id: 1, user: "1111111" },
-    { id: 2, user: "2222222" },
-    { id: 3, user: "3333333" },
+  const fetchUsers = useCallback(async () => {
+    try {
+      const data = await callApi(API_URL, null, "GET");
+      setRows(normalizeUsers(data?.result?.users || []));
+    } catch {
+      setRows([]);
+      setUiError("Failed to load users");
+    }
+  }, [callApi, normalizeUsers]);
+
+  const fetchRoles = useCallback(async () => {
+    try {
+      const data = await callApi("/UM/role/get-roles", { permissions: false }, "GET");
+      setRoles(
+        (data?.result?.roles || []).map((r) => ({
+          id: r.roleId,
+          name: r.roleName,
+        }))
+      );
+    } catch {
+      snackbar("Failed to load roles", "error");
+    }
+  }, [callApi, snackbar]);
+
+  useEffect(() => {
+    fetchUsers();
+    fetchRoles();
+  }, [fetchUsers, fetchRoles]);
+
+  if (apiError || uiError) {
+    snackbar(apiError?.message || uiError, "error");
+  }
+
+  return (
+    <Box sx={{ p: 2 }}>
+      <UsersTable
+        rows={rows}
+        roles={roles}
+        loading={loading}
+        onSelectionChange={setSelection}
+        onEditRow={(row) => {
+          setForm(row);
+          setInitialState(row);
+          setOpenEdit(true);
+        }}
+        onDeleteRow={(row) => setDeleteTarget(row)}
+      />
+
+      <UserDialog
+        open={openEdit}
+        onClose={() => setOpenEdit(false)}
+        roles={roles}
+        form={form}
+        setForm={setForm}
+        initialState={initialState}
+      />
+
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        name={deleteTarget?.__name}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          setRows((prev) => prev.filter((r) => r.id !== deleteTarget.id));
+          setDeleteTarget(null);
+        }}
+      />
+
+      <Fab
+        sx={{ position: "fixed", bottom: 64, right: 32 }}
+        color="primary"
+        variant="extended"
+        onClick={() => {
+          setForm(emptyForm);
+          setInitialState({});
+          setOpenEdit(true);
+        }}
+      >
+        <AddIcon /> Create
+      </Fab>
+    </Box>
+  );
+}
+
+import {
+  Box,
+  IconButton,
+  Stack,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import EditIcon from "@mui/icons-material/Edit";
+import DeleteIcon from "@mui/icons-material/DeleteOutline";
+import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
+import CustomChip from "../../../utils/CustomChip";
+
+const STATUS_CONFIG = {
+  ACTIVE: { label: "Active", color: "success" },
+  INACTIVE: { label: "Inactive", color: "warning" },
+  LOCKED: { label: "Locked", color: "error" },
+};
+
+export default function UsersTable({
+  rows,
+  loading,
+  onSelectionChange,
+  onEditRow,
+  onDeleteRow,
+}) {
+  const columns = [
+    { field: "USERID", headerName: "User ID", flex: 0.7 },
+    { field: "__name", headerName: "User Name", flex: 1.2 },
+    { field: "ROLE_NAME", headerName: "Role", flex: 0.8 },
+    {
+      field: "ACCOUNT_STATUS",
+      headerName: "Status",
+      flex: 0.8,
+      align: "center",
+      renderCell: ({ value }) =>
+        STATUS_CONFIG[value] ? (
+          <CustomChip
+            icon={<OnlinePredictionIcon />}
+            label={STATUS_CONFIG[value].label}
+            color={STATUS_CONFIG[value].color}
+            variant="outlined"
+          />
+        ) : (
+          "-"
+        ),
+    },
+    { field: "EMAIL", headerName: "Email", flex: 1.2 },
+    { field: "PHONE_NUMBER", headerName: "Phone", flex: 0.8 },
+    {
+      field: "action",
+      headerName: "Action",
+      flex: 0.8,
+      sortable: false,
+      align: "center",
+      renderCell: (params) => (
+        <Stack direction="row">
+          <Tooltip title="Edit">
+            <IconButton
+              size="small"
+              disabled={params.row.ACCOUNT_STATUS === "LOCKED"}
+              onClick={() => onEditRow(params.row)}
+            >
+              <EditIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Delete">
+            <IconButton
+              size="small"
+              color="error"
+              onClick={() => onDeleteRow(params.row)}
+            >
+              <DeleteIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
   ];
-  const [userId, setUserId] = useState("1015698");
-  const [error, setError] = useState("");
-  const [page, setPage] = useState("HOME"); // HOME | PASSWORD | UPDATE
-  const [dialogHeading, setDialogHeading] = useState("");
-  const [dialogContent, setDialogContent] = useState("");
-  const [showErrorDialog, setShowErrorDialog] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [userIdDisabled, setUserIdDisabled] = useState(false);
 
-  // === DIALOG HANDLERS ===
-  const handleDialogClose = () => {
-    setShowErrorDialog(false);
-    setDialogHeading("");
-    setDialogContent("");
-  };
+  return (
+    <DataGrid
+      rows={rows}
+      columns={columns}
+      loading={loading}
+      autoHeight
+      disableRowSelectionOnClick
+      onRowSelectionModelChange={onSelectionChange}
+      pageSizeOptions={[5, 10, 25]}
+      initialState={{
+        pagination: { paginationModel: { pageSize: 10, page: 0 } },
+      }}
+    />
+  );
+}
 
-  const openLoginErrorDialog = (heading, content) => {
-    setDialogHeading(heading);
-    setDialogContent(content);
-    setShowErrorDialog(true);
-  };
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControl,
+  InputAdornment,
+  InputLabel,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Grid,
+} from "@mui/material";
+import PersonIcon from "@mui/icons-material/Person";
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import { useCallback, useState } from "react";
+import _ from "lodash";
 
-  // === VALIDATION ===
-  const validateId = (id) => {
-    if (!id) return false;
-    const v = id.trim().toLowerCase();
-    const regex = /^(?:\d{7}|v\d{7}|tcs\d{7}|tcsv\d{7})$/;
-    return regex.test(v);
-  };
+const USERID_REGEX = /^(?:\d{7}|v\d{7}|tcs\d{7}|tcsv\d{7})$/i;
+const ALLOWED_PREFIXES = ["", "t", "tc", "tcs", "tcsv", "v"];
 
-  // === INPUT RESTRICTIONS ===
+export default function UserDialog({
+  open,
+  onClose,
+  roles,
+  form,
+  setForm,
+  initialState,
+}) {
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
+  const [errors, setErrors] = useState({});
+
+  const isLocked = form.ACCOUNT_STATUS === "LOCKED";
+
   const handleUserIdChange = (raw) => {
-    if (userIdDisabled) return;
-    let val = (raw || "").replace(/\s+/g, "");
-    const m = val.match(/^([A-Za-z]*)(.*)$/);
-    let prefixCandidate = (m && m[1]) || "";
-    let rest = (m && m[2]) || "";
+    if (form.id) return;
 
-    const prefixLow = prefixCandidate.toLowerCase();
-    const allowedPrefixList = ["", "t", "tc", "tcs", "tcsv", "v"];
-    if (!allowedPrefixList.some((p) => prefixLow.startsWith(p))) {
-      prefixCandidate = "";
+    let val = raw.replace(/\s+/g, "");
+    const match = val.match(/^([A-Za-z]*)(.*)$/);
+    let prefix = match?.[1] || "";
+    let digits = (match?.[2] || "").replace(/\D/g, "").slice(0, 7);
+
+    if (!ALLOWED_PREFIXES.some((p) => prefix.toLowerCase().startsWith(p))) {
+      prefix = "";
     }
 
-    const prefix = prefixCandidate;
-    let digitsPart = rest.replace(/\D/g, "");
-    if (digitsPart.length > 7) digitsPart = digitsPart.slice(0, 7);
-
-    const newVal = prefix + digitsPart;
-    // console.log(digitsPart.length<8 , allowedPrefixList.some((p)=>p.startsWith(prefix)))
-    if (
-      digitsPart.length < 8 &&
-      allowedPrefixList.some((p) => p.startsWith(prefix))
-    ) {
-      setUserId(newVal);
-    }
-
-    if (error) setError("");
+    setForm((p) => ({ ...p, USERID: prefix + digits }));
   };
 
   const handleUserIdPaste = (e) => {
     e.preventDefault();
-    const paste = (e.clipboardData || window.clipboardData).getData("text");
-    handleUserIdChange(paste);
+    handleUserIdChange(
+      (e.clipboardData || window.clipboardData).getData("text")
+    );
   };
 
-  // === API CALL: CHECK USER ===
-  const checkUser = async () => {
-    setError("");
-    if (!validateId(userId)) {
-      setError("Invalid User ID");
+  const fetchUserOnBlur = async () => {
+    if (!USERID_REGEX.test(form.USERID)) {
+      setErrors({ USERID: "Invalid User ID format" });
       return;
     }
 
     try {
-      setLoading(true);
-      const payloadUserId = userId.trim();
-      const res = await axios.post(`${resolveConfig("/LS")}/auth/check-user`, {
-        userId: payloadUserId,
+      const res = await callApi(
+        "/UM/user/get-user-by-id",
+        { userId: form.USERID },
+        "POST"
+      );
+
+      const u = res?.result?.user;
+      if (!u) {
+        snackbar("New user, continue filling details", "info");
+        return;
+      }
+
+      snackbar("User already exists. Loaded details.", "warning");
+      setForm({
+        ...form,
+        ...u,
+        id: u.userId,
+        USERID: u.userId,
+        FIRST_NAME: u.firstName,
+        LAST_NAME: u.lastName,
+        EMAIL: u.email,
+        PHONE_NUMBER: u.phoneNumber,
+        ROLE_ID: u.roleId,
+        ROLE_NAME: u.roleName,
+        ACCOUNT_STATUS: u.accountStatus,
       });
-      const response = res?.data || {};
-      const result = response?.data || {};
-      console.log(result);
-
-      if (result?.userStatus == "RESTRICTED") {
-        setError("");
-        openLoginErrorDialog(
-          "Access Restricted",
-          "This system is restricted to use FinCore, Please contact the administrator."
-        );
-        return;
-      }
-      if (result?.userStatus === "INVALID") {
-        setError("User ID does not exist");
-        return;
-      }
-
-      if (result?.passwordLoginStatus === "INACTIVE") {
-        openLoginErrorDialog(
-          "Password Locked!",
-          "You cannot login using password currently. Please contact the administrator."
-        );
-        return;
-      }
-
-      if (result?.updatePassword === true) {
-        setPage("UPDATE");
-        setUserIdDisabled(true);
-        return;
-      }
-
-      if (
-        result?.userStatus == "ACTIVE" &&
-        result?.passwordLoginStatus == "ACTIVE"
-      ) {
-        setPage("PASSWORD");
-        setUserIdDisabled(true);
-        return;
-      }
-
-      openLoginErrorDialog(
-        "Login Not Allowed",
-        result?.message || "Please contact the administrator."
-      );
-    } catch (err) {
-      console.error("checkUser error:", err);
-      openLoginErrorDialog(
-        "Login Error",
-        "Something went wrong, please try again later."
-      );
-    } finally {
-      setLoading(false);
+    } catch {
+      snackbar("User lookup failed", "error");
     }
   };
 
-  // === FORM SUBMIT ===
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (page === "HOME") checkUser();
+  const onSave = async () => {
+    if (_.isEqual(initialState, form)) {
+      snackbar("No changes detected", "warning");
+      return;
+    }
+
+    try {
+      await callApi("/UM/user/create-request", {
+        targetUserId: form.USERID,
+        requestType: form.id ? "MODIFY" : "CREATE",
+        requestPayload: JSON.stringify(form),
+      });
+      snackbar("Request submitted successfully", "success");
+      onClose();
+    } catch {
+      snackbar("Save failed", "error");
+    }
   };
-
-  // === CALLBACKS ===
-  const handlePasswordUpdateSuccess = () => {
-    setPage("PASSWORD");
-
-    setUserIdDisabled(true);
-  };
-
-  const enableEditingBackToHome = () => {
-    setPage("HOME");
-    setUserIdDisabled(false);
-    setError("");
-    setUserId("");
-  };
-
-  if (!content) return null;
 
   return (
-    <Root>
-      <ContainerInner>
-        <Content>
-          {/* LEFT COLUMN */}
-          <LeftCol>
-            <LogoWrap>
-              <img src={LogoImg} alt="FinCore Logo" width={100} height="auto" />
-              <div>
-                <BrandTitle>{content?.brand?.title}</BrandTitle>
-                <BrandSub>{content?.brand?.subtitle}</BrandSub>
-              </div>
-            </LogoWrap>
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle>{form.id ? "Edit User" : "Create User"}</DialogTitle>
 
-            <BigHeading>{content?.hero?.welcomeTitle}</BigHeading>
-            <SubText>{content?.hero?.subText}</SubText>
+      <DialogContent>
+        <Stack spacing={2} mt={1}>
+          <Grid container spacing={2}>
+            <Grid item xs={12}>
+              <TextField
+                label="User ID *"
+                value={form.USERID}
+                onChange={(e) => handleUserIdChange(e.target.value)}
+                onPaste={handleUserIdPaste}
+                onBlur={fetchUserOnBlur}
+                disabled={!!form.id}
+                error={!!errors.USERID}
+                helperText={errors.USERID || " "}
+                InputProps={{
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <PersonIcon />
+                    </InputAdornment>
+                  ),
+                }}
+                fullWidth
+              />
+            </Grid>
 
-            <BrandTitle>{content?.legal?.title}</BrandTitle>
-            <FeatureList>
-              {content?.legal?.items.map((item, idx) => (
-                <FeatureItem key={idx}>
-                  <Bullet /> {item}
-                </FeatureItem>
-              ))}
-            </FeatureList>
-          </LeftCol>
+            <Grid item xs={4}>
+              <TextField
+                label="First Name"
+                value={form.FIRST_NAME}
+                disabled={isLocked}
+                onChange={(e) =>
+                  setForm({ ...form, FIRST_NAME: e.target.value })
+                }
+                fullWidth
+              />
+            </Grid>
 
-          {/* RIGHT COLUMN */}
-          <RightCol>
-            <GlassCard elevation={3}>
-              <FormTitle>{content?.form?.signIn}</FormTitle>
+            <Grid item xs={4}>
+              <TextField
+                label="Last Name"
+                value={form.LAST_NAME}
+                disabled={isLocked}
+                onChange={(e) =>
+                  setForm({ ...form, LAST_NAME: e.target.value })
+                }
+                fullWidth
+              />
+            </Grid>
 
-              {userList.map((item) => (
-                <CustomChip
-                  key={item.id}
-                  icon={<AccountCircleIcon />}
-                  size="small"
-                  color="info"
-                  label={item.user}
-                  variant="outlined"
-                  onClick={() => setUserId(item.user)}
-                  sx={{ cursor: "pointer", mr: 1 }}
-                />
-              ))}
+            <Grid item xs={4}>
+              <TextField
+                label="Phone"
+                value={form.PHONE_NUMBER}
+                disabled={isLocked}
+                onChange={(e) =>
+                  setForm({ ...form, PHONE_NUMBER: e.target.value })
+                }
+                fullWidth
+              />
+            </Grid>
 
-              <form onSubmit={handleSubmit} noValidate>
-                <StyledTextField
-                  fullWidth
-                  label="User ID"
-                  placeholder={content?.form?.userIdPlaceholder}
-                  margin="dense"
-                  value={userId}
-                  onChange={(e) => handleUserIdChange(e.target.value)}
-                  onPaste={handleUserIdPaste}
-                  error={Boolean(error)}
-                  helperText={error || " "}
-                  disabled={userIdDisabled}
-                  InputProps={{
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <PersonIcon />
-                      </InputAdornment>
-                    ),
+            <Grid item xs={6}>
+              <FormControl fullWidth>
+                <InputLabel>Role</InputLabel>
+                <Select
+                  value={form.ROLE_ID || ""}
+                  label="Role"
+                  disabled={isLocked}
+                  onChange={(e) => {
+                    const r = roles.find((x) => x.id === e.target.value);
+                    setForm({ ...form, ROLE_ID: r.id, ROLE_NAME: r.name });
                   }}
-                />
+                >
+                  {roles.map((r) => (
+                    <MenuItem key={r.id} value={r.id}>
+                      {r.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+          </Grid>
+        </Stack>
+      </DialogContent>
 
-                {page === "HOME" && (
-                  <PrimaryButton
-                    type="submit"
-                    variant="contained"
-                    disabled={loading}
-                  >
-                    {loading ? content?.form?.checking : content?.form?.signIn}
-                  </PrimaryButton>
-                )}
-
-                {page === "PASSWORD" && (
-                  <Box>
-                    <LoginWithPassword
-                      userId={userId}
-                      openLoginErrorDialog={openLoginErrorDialog}
-                      onBackToHome={enableEditingBackToHome}
-                    />
-                  </Box>
-                )}
-
-                {page === "UPDATE" && (
-                  <Box>
-                    <UpdatePassword
-                      userId={userId}
-                      openLoginErrorDialog={openLoginErrorDialog}
-                      onUpdateSuccess={handlePasswordUpdateSuccess}
-                    />
-                  </Box>
-                )}
-              </form>
-            </GlassCard>
-          </RightCol>
-        </Content>
-      </ContainerInner>
-
-      <LoginErrorDialog
-        showErrorDialog={showErrorDialog}
-        title={dialogHeading}
-        content={dialogContent}
-        onDialogClose={handleDialogClose}
-      />
-    </Root>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={onSave}>
+          {form.id ? "Update" : "Create"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
