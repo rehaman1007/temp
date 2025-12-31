@@ -1,464 +1,527 @@
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
-  Button,
+  Box,
   Dialog,
-  DialogActions,
-  DialogContent,
   DialogTitle,
-  FormControl,
-  Grid,
-  InputAdornment,
-  InputLabel,
-  MenuItem,
-  Select,
-  Stack,
+  DialogContent,
+  DialogActions,
   TextField,
   Typography,
+  Button,
+  Stack,
+  Tooltip,
+  IconButton,
+  Divider,
 } from "@mui/material";
-import PersonIcon from "@mui/icons-material/Person";
-import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
-import GppBadIcon from "@mui/icons-material/GppBad";
-import LockOutlineIcon from "@mui/icons-material/LockOutline";
-import { useState } from "react";
-import useApi from "../../../hooks/useApi";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
-import _ from "lodash";
+import InfoIcon from "@mui/icons-material/Info";
+import { DataGrid } from "@mui/x-data-grid";
+import { Check, Clear, Visibility } from "@mui/icons-material";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
+import AccountCircleIcon from "@mui/icons-material/AccountCircle";
+import { useNavigate } from "react-router-dom";
+import { useSelector } from "react-redux";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { COMMON_REQ_SCREEN_CONFIGS } from "../common/CommonConstants";
+import CustomChip from "../../utils/CustomChip";
+import RequestAnalytics from "./RequestAnalytics";
+import ViewRequestDialog from "./ViewRequestDailog";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
+import { styles } from "./CommonRequestScreenStyles";
+import LoadingOverlay from "../../utils/LoadingOverlay";
 
-/* ================= CONSTANTS ================= */
-
-const USERID_REGEX = /^(?:\d{7}|v\d{7}|tcs\d{7}|tcsv\d{7})$/i;
-const NAME_REGEX = /^[a-zA-Z\s.]*$/;
-const DIGITS_REGEX = /^[0-9]*$/;
-const EMAIL_PREFIX_REGEX = /^[a-zA-Z0-9._]+$/;
-
-const EMAIL_DOMAIN = "@sbi.co.in";
-const EMAIL_PREFIX_MAX = 50;
-
-// 🔐 Restricted role
-const FORBIDDEN_ROLE_ID = 11; // f1bog
-
-const STATUS_OPTIONS = [
-  { value: "ACTIVE", label: "Active", icon: <VerifiedUserIcon color="success" /> },
-  { value: "INACTIVE", label: "Inactive", icon: <GppBadIcon color="warning" /> },
-  { value: "LOCKED", label: "Locked", icon: <LockOutlineIcon color="error" /> },
-];
-
-/* ================= COMPONENT ================= */
-
-export default function UserDialog({
-  open,
-  onClose,
-  roles,
-  form,
-  setForm,
-  initialState,
-}) {
+export default function CommonRequestScreen() {
+  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+  const requestType = selectedMenuItem?.requestType || "";
+  const navigate = useNavigate();
   const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-  const [errors, setErrors] = useState({});
-  const isEdit = Boolean(form.id);
+  const showSnackBar = useCustomSnackbar();
+  const screenConfig = COMMON_REQ_SCREEN_CONFIGS[selectedMenuItem?.id];
+  const { columns, transformData, processViewData } = screenConfig || {};
+  const [loading, setLoading] = useState(false);
+  const [dataGridLoading, setDataGridLoading] = useState(true);
+  const [rows, setRows] = useState([]);
+  const [remarks, setRemarks] = useState("");
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewData, setViewData] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState({
+    open: false,
+    type: null,
+    rowId: null,
+  });
 
-  /* ---------- ROLE STATE ---------- */
-  const isOriginalF1BOG = initialState?.ROLE_ID === FORBIDDEN_ROLE_ID;
-  const isDowngradingF1BOG =
-    isOriginalF1BOG && form.ROLE_ID !== FORBIDDEN_ROLE_ID;
-
-  /* ---------- ERROR HELPERS ---------- */
-  const setFieldError = (n, m) => setErrors((p) => ({ ...p, [n]: m }));
-  const clearFieldError = (n) => setErrors((p) => ({ ...p, [n]: "" }));
-
-  /* ================= USER ID ================= */
-
-  const handleUserIdChange = (raw) => {
-    if (isEdit) return;
-
-    let value = raw.replace(/\s+/g, "");
-    const match = value.match(/^([A-Za-z]*)(.*)$/);
-    let prefix = match?.[1] || "";
-    let digits = (match?.[2] || "").replace(/\D/g, "");
-
-    const allowedPrefixes = ["", "t", "tc", "tcs", "tcsv", "v"];
-    if (!allowedPrefixes.some((p) => prefix.toLowerCase().startsWith(p))) {
-      setFieldError("USERID", "Invalid prefix");
-      return;
-    }
-    if (digits.length > 7) {
-      setFieldError("USERID", "User ID must be 7 digits");
-      return;
-    }
-
-    clearFieldError("USERID");
-    setForm((p) => ({ ...p, USERID: prefix + digits }));
-  };
-
-  const fetchUserOnBlur = async () => {
-    if (!USERID_REGEX.test(form.USERID)) {
-      setFieldError("USERID", "Invalid User ID format");
-      return;
-    }
-
+  const fetchData = useCallback(async () => {
+    if (!requestType) return;
     try {
-      const res = await callApi(
-        "/UM/user/get-user-by-id",
-        { userId: form.USERID },
+      const response = await callApi(
+        "/CR/pending-requests",
+        { requestType },
         "POST"
       );
-      const u = res?.result?.user;
-      if (!u) return;
+      const result = response?.data || [];
 
-      snackbar("User already exists. Loaded details.", "warning");
-      setForm({
-        id: u.userId,
-        USERID: u.userId,
-        FIRST_NAME: u.firstName,
-        MIDDLE_NAME: u.middleName || "",
-        LAST_NAME: u.lastName,
-        EMAIL: u.email,
-        PHONE_NUMBER: u.phoneNumber || "",
-        ROLE_ID: u.roleId,
-        ROLE_NAME: u.roleName,
-        ACCOUNT_STATUS: u.accountStatus,
+      const data = result.map((row) => ({
+        ...row,
+        ...(typeof row.payload === "object" ? row.payload : {}),
+      }));
+
+      setRows(transformData ? transformData(data) : data);
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error fetching data", "error");
+    } finally {
+      setRemarks("");
+      setDataGridLoading(false);
+      setConfirmDialog({
+        open: false,
+        type: null,
+        rowId: null,
       });
-    } catch {
-      snackbar("User lookup failed", "error");
     }
-  };
+  }, [requestType, transformData, callApi, showSnackBar]);
 
-  /* ================= NAME ================= */
-
-  const handleNameChange = (name, value, mandatory) => {
-    if (!NAME_REGEX.test(value)) {
-      setFieldError(name, "Only alphabets allowed");
+  useEffect(() => {
+    if (!screenConfig || !requestType) {
       return;
     }
-    if (!value && mandatory) {
-      setFieldError(name, "This field is required");
-    } else if (value && value.length < 3) {
-      setFieldError(name, "Minimum 3 characters required");
-    } else if (value.length > 20) {
-      setFieldError(name, "Maximum 20 characters allowed");
-    } else {
-      clearFieldError(name);
-    }
-    setForm((p) => ({ ...p, [name]: value }));
-  };
+    setRows([]);
+    setRemarks("");
+    setConfirmDialog({ open: false, type: null, rowId: null });
+    fetchData();
+  }, [selectedMenuItem.id, fetchData, screenConfig, requestType, navigate]);
 
-  /* ================= EMAIL ================= */
-
-  const handleEmailChange = (raw) => {
-    let prefix = raw.replace(EMAIL_DOMAIN, "");
-
-    if (prefix.includes("@")) return;
-    if (prefix.length > EMAIL_PREFIX_MAX) return;
-
-    if (!prefix) {
-      setFieldError("EMAIL", "Email prefix is required");
-      setForm((p) => ({ ...p, EMAIL: EMAIL_DOMAIN }));
-      return;
-    }
-
-    if (!EMAIL_PREFIX_REGEX.test(prefix)) {
-      setFieldError(
-        "EMAIL",
-        "Only letters, numbers, dot (.) and underscore (_) allowed"
+  const handleConfirm = async () => {
+    if (confirmDialog.type === "reject" && remarks.trim().length < 5) {
+      showSnackBar(
+        "Please provide minimum 5 characters remarks before rejecting",
+        "warning"
       );
       return;
     }
-
-    if (prefix.length < 3) {
-      setFieldError("EMAIL", "Minimum 3 characters required before @");
-    } else {
-      clearFieldError("EMAIL");
-    }
-
-    setForm((p) => ({ ...p, EMAIL: prefix + EMAIL_DOMAIN }));
-  };
-
-  /* ================= MOBILE ================= */
-
-  const handleMobileChange = (value) => {
-    if (!DIGITS_REGEX.test(value)) return;
-
-    if (value && value.length !== 10) {
-      setFieldError("PHONE_NUMBER", "Mobile must be exactly 10 digits");
-    } else {
-      clearFieldError("PHONE_NUMBER");
-    }
-
-    if (value.length <= 10)
-      setForm((p) => ({ ...p, PHONE_NUMBER: value }));
-  };
-
-  /* ================= FINAL VALIDATION ================= */
-
-  const validateFinal = () => {
-    const e = {};
-
-    if (!USERID_REGEX.test(form.USERID))
-      e.USERID = "Valid User ID required";
-
-    if (!form.FIRST_NAME || form.FIRST_NAME.length < 3)
-      e.FIRST_NAME = "First Name must be at least 3 characters";
-
-    if (!form.LAST_NAME || form.LAST_NAME.length < 3)
-      e.LAST_NAME = "Last Name must be at least 3 characters";
-
-    const email = form.EMAIL || "";
-    const prefix = email.replace(EMAIL_DOMAIN, "");
-
-    if (!email.endsWith(EMAIL_DOMAIN))
-      e.EMAIL = "Email must be @sbi.co.in";
-    else if (!prefix)
-      e.EMAIL = "Email prefix is required";
-    else if (prefix.length < 3)
-      e.EMAIL = "Email prefix must be at least 3 characters";
-    else if (!EMAIL_PREFIX_REGEX.test(prefix))
-      e.EMAIL =
-        "Only letters, numbers, dot (.) and underscore (_) allowed";
-
-    if (form.PHONE_NUMBER && form.PHONE_NUMBER.length !== 10)
-      e.PHONE_NUMBER = "Mobile must be exactly 10 digits";
-
-    if (!form.ROLE_ID) e.ROLE_ID = "Role is required";
-    if (isEdit && !form.ACCOUNT_STATUS)
-      e.ACCOUNT_STATUS = "Status is required";
-
-    setErrors(e);
-    return Object.keys(e).length === 0;
-  };
-
-  /* ================= SAVE ================= */
-
-  const onSave = async () => {
-    // 🚫 HARD BLOCK f1bog
-    if (form.ROLE_ID === FORBIDDEN_ROLE_ID) {
-      snackbar(
-        "Assignment of role 'f1bog' is restricted and not allowed",
-        "error"
-      );
-      return;
-    }
-
-    if (!validateFinal()) {
-      snackbar("Please fix validation errors", "error");
-      return;
-    }
-
-    if (_.isEqual(form, initialState)) {
-      snackbar("No Changes detected, Kindly modify before saving", "warning");
-      return;
-    }
-
-    const payload = {
-      targetUserId: form.USERID,
-      requestType: isEdit ? "MODIFY" : "CREATE",
-      requestPayload: JSON.stringify({
-        userId: form.USERID,
-        firstName: form.FIRST_NAME,
-        middleName: form.MIDDLE_NAME,
-        lastName: form.LAST_NAME,
-        email: form.EMAIL,
-        phoneNumber: form.PHONE_NUMBER,
-        roleId: form.ROLE_ID,
-        roleName: form.ROLE_NAME,
-        accountStatus: form.ACCOUNT_STATUS,
-      }),
-    };
+    setLoading(true);
 
     try {
-      await callApi("/UM/user/create-request", payload, "POST");
-      snackbar(
-        isEdit
-          ? "User update request submitted successfully"
-          : "User creation request submitted successfully",
-        "success"
-      );
-      onClose();
-    } catch (error) {
-      snackbar(
-        error?.response?.data?.message ||
-          "Something went wrong, Kindly try again",
-        "error"
-      );
+      const payload = {
+        requestId: confirmDialog.rowId,
+        status: confirmDialog.type === "reject" ? "REJECTED" : "ACCEPTED",
+        remarks:
+          confirmDialog.type === "reject" ? remarks.trim() : "No Remarks",
+      };
+
+      const res = await callApi("/CR/update-request", payload, "PATCH");
+
+      if (res?.success || res) {
+        showSnackBar(
+          confirmDialog.type === "accept"
+            ? "Request Approved"
+            : "Request Rejected",
+          "success"
+        );
+        fetchData();
+      } else {
+        showSnackBar("Failed to process request" + res?.message, "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error while processing request", "error");
+    } finally {
+      closeConfirmDialog();
+      setLoading(false);
     }
   };
 
-  /* ================= RENDER ================= */
+  const handleViewClick = (data) => {
+    const view = processViewData ? processViewData(data) : data;
+    setViewData(view);
+    setViewOpen(true);
+  };
+
+  const openConfirmDialog = (type, id) =>
+    setConfirmDialog({ open: true, type, rowId: id });
+
+  const closeConfirmDialog = () =>
+    setConfirmDialog({ open: false, type: null, rowId: null });
+
+  // Columns
+  const allColumns = useMemo(() => {
+    return [
+      ...(columns || []),
+
+      {
+        field: "changeType",
+        headerName: "Type",
+        flex: 0.6,
+        headerAlign: "center",
+        align: "center",
+        renderCell: (p) => {
+          const val = p.value;
+          return (
+            <CustomChip
+              icon={
+                val === "ADD" ? (
+                  <AddBoxIcon />
+                ) : val === "DELETE" ? (
+                  <AutoDeleteIcon />
+                ) : (
+                  <EditDocumentIcon />
+                )
+              }
+              label={
+                val === "ADD"
+                  ? "Added"
+                  : val === "DELETE"
+                  ? "Deleted"
+                  : "Modified"
+              }
+              color={
+                val === "ADD"
+                  ? "success"
+                  : val === "DELETE"
+                  ? "error"
+                  : "warning"
+              }
+              size="small"
+              variant="outlined"
+            />
+          );
+        },
+      },
+
+      {
+        field: "creatorId",
+        headerName: "Creator",
+        flex: 0.8,
+        headerAlign: "center",
+        align: "center",
+        renderCell: (p) => (
+          <CustomChip
+            icon={<AccountCircleIcon />}
+            size="small"
+            color="info"
+            label={p.value}
+            variant="outlined"
+          />
+        ),
+      },
+
+      {
+        field: "reqDate",
+        headerName: "Date",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        renderCell: (p) => (
+          <Typography variant="body1" component="span" sx={styles.requestDate}>
+            {timeStampFormatter(p.value)}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.7,
+        headerAlign: "center",
+        align: "center",
+        renderCell: (p) => (
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            justifyContent="center"
+            style={styles.StackStyle}
+          >
+            <Tooltip title="Approve">
+              <IconButton
+                color="success"
+                onClick={() => openConfirmDialog("accept", p.row.id)}
+              >
+                <Check />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title="Reject">
+              <IconButton
+                color="error"
+                onClick={() => openConfirmDialog("reject", p.row.id)}
+              >
+                <Clear />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title="View">
+              <IconButton onClick={() => handleViewClick(p.row)}>
+                <Visibility />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+        ),
+      },
+    ];
+  }, [columns]);
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle>{isEdit ? "Edit User" : "Create User"}</DialogTitle>
+    <Box sx={styles.container}>
+      <RequestAnalytics data={rows} />
 
-      <DialogContent>
-        <Stack spacing={2} mt={1}>
-          {/* Row 1 */}
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 6 }}>
-              <TextField
-                label="User ID *"
-                value={form.USERID}
-                onChange={(e) => handleUserIdChange(e.target.value)}
-                onBlur={fetchUserOnBlur}
-                disabled={isEdit}
-                error={!!errors.USERID}
-                helperText={errors.USERID}
-                InputProps={{
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <PersonIcon />
-                    </InputAdornment>
-                  ),
-                }}
-                fullWidth
-              />
-            </Grid>
+      <DataGrid
+        rows={rows}
+        columns={allColumns}
+        loading={dataGridLoading}
+        disableRowSelectionOnClick
+        pageSizeOptions={[5, 10, 25, 50]}
+        initialState={{
+          pagination: { paginationModel: { pageSize: 5 } },
+          sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
+        }}
+        getRowId={(row) => row.id}
+        sx={styles.dataGrid}
+        slots={{
+          noRowsOverlay: () => (
+            <Stack height="100%" alignItems="center" justifyContent="center">
+              <InfoIcon sx={{ fontSize: 48, color: "text.secondary", mb: 2 }} />
+              <Typography variant="h6">No Pending Requests Found</Typography>
+              <Typography>
+                All {selectedMenuItem.title} have been processed.
+              </Typography>
+            </Stack>
+          ),
+        }}
+      />
 
-            {isEdit && (
-              <Grid size={{ xs: 6 }}>
-                <FormControl fullWidth error={!!errors.ACCOUNT_STATUS}>
-                  <InputLabel>Status *</InputLabel>
-                  <Select
-                    label="Status *"
-                    value={form.ACCOUNT_STATUS || ""}
-                    onChange={(e) =>
-                      setForm({ ...form, ACCOUNT_STATUS: e.target.value })
-                    }
-                  >
-                    {STATUS_OPTIONS.map((s) => (
-                      <MenuItem key={s.value} value={s.value}>
-                        <Stack direction="row" spacing={1} alignItems="center">
-                          {s.icon}
-                          <Typography>{s.label}</Typography>
-                        </Stack>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                  <Typography variant="caption" color="error">
-                    {errors.ACCOUNT_STATUS}
-                  </Typography>
-                </FormControl>
-              </Grid>
-            )}
-          </Grid>
+      {/* View Dialog */}
+      <ViewRequestDialog
+        open={viewOpen}
+        handleClose={() => setViewOpen(false)}
+        data={viewData}
+      />
 
-          {/* Row 2 */}
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 4 }}>
-              <TextField
-                label="First Name *"
-                value={form.FIRST_NAME}
-                error={!!errors.FIRST_NAME}
-                helperText={errors.FIRST_NAME}
-                onChange={(e) =>
-                  handleNameChange("FIRST_NAME", e.target.value, true)
-                }
-                fullWidth
-              />
-            </Grid>
+      {/* Confirm Dialog */}
+      <Dialog
+        maxWidth="sm"
+        fullWidth="true"
+        open={confirmDialog.open}
+        onClose={closeConfirmDialog}
+      >
+        <DialogTitle>
+          {confirmDialog.type === "accept"
+            ? "Confirm Approval"
+            : "Confirm Rejection"}
+        </DialogTitle>
+        <Divider />
+        <DialogContent>
+          <Typography>
+            {confirmDialog.type === "accept"
+              ? "Are you sure you want to approve the request?"
+              : "Please provide remarks to reject this request."}
+          </Typography>
 
-            <Grid size={{ xs: 4 }}>
-              <TextField
-                label="Middle Name"
-                value={form.MIDDLE_NAME}
-                error={!!errors.MIDDLE_NAME}
-                helperText={errors.MIDDLE_NAME}
-                onChange={(e) =>
-                  handleNameChange("MIDDLE_NAME", e.target.value, false)
-                }
-                fullWidth
-              />
-            </Grid>
+          {confirmDialog.type === "reject" && (
+            <TextField
+              fullWidth
+              label="Remarks"
+              value={remarks}
+              multiline
+              rows={4}
+              onChange={(e) => setRemarks(e.target.value)}
+              margin="dense"
+              slotProps={{
+                htmlInput: {
+                  maxLength: 200,
+                },
+              }}
+              helperText={
+                remarks?.length !== 0 && remarks?.length < 5
+                  ? "Enter at least 5 characters"
+                  : "Allowed 5-200 characters"
+              }
+              error={remarks?.length !== 0 && remarks?.length < 5}
+            />
+          )}
+        </DialogContent>
 
-            <Grid size={{ xs: 4 }}>
-              <TextField
-                label="Last Name *"
-                value={form.LAST_NAME}
-                error={!!errors.LAST_NAME}
-                helperText={errors.LAST_NAME}
-                onChange={(e) =>
-                  handleNameChange("LAST_NAME", e.target.value, true)
-                }
-                fullWidth
-              />
-            </Grid>
-          </Grid>
-
-          {/* Row 3 */}
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 6 }}>
-              <TextField
-                label="Email *"
-                value={form.EMAIL || EMAIL_DOMAIN}
-                error={!!errors.EMAIL}
-                helperText={errors.EMAIL}
-                onChange={(e) => handleEmailChange(e.target.value)}
-                fullWidth
-              />
-            </Grid>
-
-            <Grid size={{ xs: 6 }}>
-              <TextField
-                label="Mobile Number"
-                value={form.PHONE_NUMBER}
-                error={!!errors.PHONE_NUMBER}
-                helperText={errors.PHONE_NUMBER}
-                onChange={(e) => handleMobileChange(e.target.value)}
-                inputProps={{ maxLength: 10 }}
-                fullWidth
-              />
-            </Grid>
-          </Grid>
-
-          {/* Row 4 */}
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 6 }}>
-              <FormControl fullWidth error={!!errors.ROLE_ID}>
-                <InputLabel>Role *</InputLabel>
-                <Select
-                  label="Role *"
-                  value={form.ROLE_ID || ""}
-                  onChange={(e) => {
-                    const r = roles.find((x) => x.id === e.target.value);
-                    setForm({ ...form, ROLE_ID: r.id, ROLE_NAME: r.name });
-                    clearFieldError("ROLE_ID");
-                  }}
-                >
-                  {roles.map((r) => (
-                    <MenuItem
-                      key={r.id}
-                      value={r.id}
-                      disabled={r.id === FORBIDDEN_ROLE_ID}
-                    >
-                      {r.name}
-                    </MenuItem>
-                  ))}
-                </Select>
-
-                {isDowngradingF1BOG && (
-                  <Typography
-                    variant="caption"
-                    color="warning.main"
-                    sx={{ mt: 0.5 }}
-                  >
-                    ⚠️ This user currently has the <b>f1bog</b> role.  
-                    Once changed, it cannot be assigned again.
-                  </Typography>
-                )}
-
-                <Typography variant="caption" color="error">
-                  {errors.ROLE_ID}
-                </Typography>
-              </FormControl>
-            </Grid>
-          </Grid>
-        </Stack>
-      </DialogContent>
-
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={onSave}>
-          {isEdit ? "Update User" : "Create User"}
-        </Button>
-      </DialogActions>
-    </Dialog>
+        <DialogActions>
+          <Button onClick={closeConfirmDialog}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleConfirm}
+            color={confirmDialog.type === "accept" ? "success" : "error"}
+          >
+            {confirmDialog.type === "accept" ? "Approve" : "Reject"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <LoadingOverlay loading={loading} />
+    </Box>
   );
 }
+
+
+import React, { useMemo } from "react";
+import { Box, Typography, Card, Stack, Chip } from "@mui/material";
+
+import {
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+} from "recharts";
+
+import { analyticsStyles as s } from "./RequestAnalyticsStyles";
+
+const COLORS = ["#d87093", "#6a5acd", "#20b2aa"];
+
+const RequestAnalytics = ({ data = [] }) => {
+  const { total, pieData } = useMemo(() => {
+    const counts = { add: 0, modify: 0, delete: 0 };
+
+    data.forEach((d) => {
+      if (d.changeType === "ADD") counts.add++;
+      if (d.changeType === "UPDATE") counts.modify++;
+      if (d.changeType === "DELETE") counts.delete++;
+    });
+
+    return {
+      total: data.length,
+      pieData: [
+        { name: "Add Requests", value: counts.add },
+        { name: "Modify Requests", value: counts.modify },
+        // { name: "Delete Requests", value: counts.delete },
+      ],
+    };
+  }, [data]);
+
+  const histogramData = useMemo(() => {
+    const map = {};
+    data.forEach((item) => {
+      if (item.reqDate) {
+        const date = new Date(item.reqDate).toLocaleDateString("en-GB");
+        map[date] = (map[date] || 0) + 1;
+      }
+    });
+
+    return Object.keys(map).map((d) => ({ date: d, count: map[d] }));
+  }, [data]);
+
+  return (
+    <Card sx={s.card}>
+      <Typography sx={s.headerTitle}>Request Analytics Overview</Typography>
+      <Typography variant="caption" sx={s.headerSubtitle}>
+        Requests comparison by type and daily frequency
+      </Typography>
+
+      {total > 0 ? (
+        <Box sx={s.wrapper}>
+          {/* PIE SECTION */}
+          <Box sx={s.pieWrapper}>
+            <Box sx={s.pieChartBox}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <defs>
+                    {COLORS.map((color, idx) => (
+                      <linearGradient
+                        key={idx}
+                        id={`gradient-${idx}`}
+                        x1="0"
+                        y1="0"
+                        x2="1"
+                        y2="1"
+                      >
+                        <stop stopColor={color} stopOpacity={0.9} offset="0%" />
+                        <stop
+                          stopColor={color}
+                          stopOpacity={0.5}
+                          offset="100%"
+                        />
+                      </linearGradient>
+                    ))}
+                  </defs>
+
+                  <Pie
+                    data={pieData}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={55}
+                    outerRadius={80}
+                    paddingAngle={3}
+                    dataKey="value"
+                  >
+                    {pieData.map((_, i) => (
+                      <Cell key={i} fill={`url(#gradient-${i})`} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+
+              {/* Center Label */}
+              <Box sx={s.pieCenterBox}>
+                <Typography variant="caption" sx={s.pieCenterSubtitle}>
+                  Total Requests
+                </Typography>
+                <Typography sx={s.pieCenterValue}>{total}</Typography>
+              </Box>
+            </Box>
+
+            {/* Legend row */}
+            <Stack direction="row" spacing={1.5} sx={s.legendRow}>
+              {pieData.map((p, i) => (
+                <Stack
+                  key={p.name}
+                  direction="row"
+                  alignItems="center"
+                  spacing={0.5}
+                  sx={s.legendChipBox}
+                >
+                  <Box sx={s.legendColorDot(COLORS[i])} />
+                  <Typography variant="caption">{p.name}</Typography>
+                  <Chip
+                    label={p.value}
+                    sx={{ bgcolor: COLORS[i], color: "white" }}
+                    size="small"
+                  />
+                </Stack>
+              ))}
+            </Stack>
+          </Box>
+
+          {/* BAR SECTION */}
+          <Box sx={s.barChartArea}>
+            <ResponsiveContainer>
+              <BarChart data={histogramData}>
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="rgba(255,255,255,0.3)"
+                />
+                <XAxis
+                  dataKey="date"
+                  stroke="white"
+                  fontSize={10}
+                  tickMargin={4}
+                />
+                <YAxis stroke="white" fontSize={10} />
+                <Tooltip />
+                <Bar
+                  dataKey="count"
+                  fill="url(#gradient-0)"
+                  radius={[6, 6, 0, 0]}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </Box>
+        </Box>
+      ) : (
+        <Typography>No data to display</Typography>
+      )}
+    </Card>
+  );
+};
+
+export default RequestAnalytics;
