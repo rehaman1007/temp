@@ -38,229 +38,199 @@ export default function CommonRequestScreen() {
   const navigate = useNavigate();
   const { callApi } = useApi();
   const showSnackBar = useCustomSnackbar();
-  const screenConfig = COMMON_REQ_SCREEN_CONFIGS[selectedMenuItem?.id];
-  const { columns, transformData, processViewData } = screenConfig || {};
-  const [loading, setLoading] = useState(false);
-  const [dataGridLoading, setDataGridLoading] = useState(true);
+
+  const screenConfig = COMMON_REQ_SCREEN_CONFIGS[selectedMenuItem?.id] || {};
+  const { columns, transformData, processViewData } = screenConfig;
+
   const [rows, setRows] = useState([]);
   const [remarks, setRemarks] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [dataGridLoading, setDataGridLoading] = useState(true);
+
   const [viewOpen, setViewOpen] = useState(false);
   const [viewData, setViewData] = useState(null);
+
   const [confirmDialog, setConfirmDialog] = useState({
     open: false,
     type: null,
     rowId: null,
   });
 
+  /* ---------------- FETCH DATA ---------------- */
   const fetchData = useCallback(async () => {
     if (!requestType) return;
+
     try {
-      const response = await callApi(
-        "/CR/pending-requests",
-        { requestType },
-        "POST"
-      );
+      setDataGridLoading(true);
+      const response = await callApi("/CR/pending-requests", { requestType }, "POST");
       const result = response?.data || [];
 
-      const data = result.map((row) => ({
-        ...row,
-        ...(typeof row.payload === "object" ? row.payload : {}),
+      const normalized = result.map((r) => ({
+        ...r,
+        ...(typeof r.payload === "object" ? r.payload : {}),
       }));
 
-      setRows(transformData ? transformData(data) : data);
-    } catch (err) {
-      console.error(err);
+      setRows(transformData ? transformData(normalized) : normalized);
+    } catch {
       showSnackBar("Error fetching data", "error");
     } finally {
-      setRemarks("");
       setDataGridLoading(false);
-      setConfirmDialog({
-        open: false,
-        type: null,
-        rowId: null,
-      });
+      setRemarks("");
+      setConfirmDialog({ open: false, type: null, rowId: null });
     }
   }, [requestType, transformData, callApi, showSnackBar]);
 
   useEffect(() => {
-    if (!screenConfig || !requestType) {
-      return;
-    }
-    setRows([]);
-    setRemarks("");
-    setConfirmDialog({ open: false, type: null, rowId: null });
+    if (!screenConfig || !requestType) return;
     fetchData();
-  }, [selectedMenuItem.id, fetchData, screenConfig, requestType, navigate]);
+  }, [selectedMenuItem?.id, fetchData, screenConfig, requestType, navigate]);
 
+  /* ---------------- CONFIRM ACTION ---------------- */
   const handleConfirm = async () => {
-    if (confirmDialog.type === "reject" && remarks.trim().length < 5) {
-      showSnackBar(
-        "Please provide minimum 5 characters remarks before rejecting",
-        "warning"
-      );
+    const { type, rowId } = confirmDialog;
+
+    if (type === "reject" && remarks.trim().length < 5) {
+      showSnackBar("Please provide minimum 5 characters remarks", "warning");
       return;
     }
-    setLoading(true);
 
+    setLoading(true);
     try {
       const payload = {
-        requestId: confirmDialog.rowId,
-        status: confirmDialog.type === "reject" ? "REJECTED" : "ACCEPTED",
-        remarks:
-          confirmDialog.type === "reject" ? remarks.trim() : "No Remarks",
+        requestId: rowId,
+        status: type === "accept" ? "ACCEPTED" : "REJECTED",
+        remarks: type === "reject" ? remarks.trim() : "No Remarks",
       };
 
       const res = await callApi("/CR/update-request", payload, "PATCH");
 
       if (res?.success || res) {
         showSnackBar(
-          confirmDialog.type === "accept"
-            ? "Request Approved"
-            : "Request Rejected",
+          type === "accept" ? "Request Approved" : "Request Rejected",
           "success"
         );
         fetchData();
       } else {
-        showSnackBar("Failed to process request" + res?.message, "error");
+        showSnackBar("Failed to process request", "error");
       }
-    } catch (err) {
-      console.error(err);
+    } catch {
       showSnackBar("Error while processing request", "error");
     } finally {
-      closeConfirmDialog();
       setLoading(false);
+      setConfirmDialog({ open: false, type: null, rowId: null });
     }
   };
 
-  const handleViewClick = (data) => {
-    const view = processViewData ? processViewData(data) : data;
-    setViewData(view);
+  /* ---------------- VIEW ---------------- */
+  const handleViewClick = (row) => {
+    setViewData(processViewData ? processViewData(row) : row);
     setViewOpen(true);
   };
 
-  const openConfirmDialog = (type, id) =>
-    setConfirmDialog({ open: true, type, rowId: id });
+  /* ---------------- COLUMNS ---------------- */
+  const allColumns = useMemo(() => [
+    ...(columns || []),
 
-  const closeConfirmDialog = () =>
-    setConfirmDialog({ open: false, type: null, rowId: null });
+    {
+      field: "changeType",
+      headerName: "Type",
+      flex: 0.7,
+      align: "center",
+      headerAlign: "center",
+      renderCell: ({ value }) => (
+        <CustomChip
+          size="small"
+          variant="outlined"
+          icon={
+            value === "ADD" ? <AddBoxIcon /> :
+            value === "DELETE" ? <AutoDeleteIcon /> :
+            <EditDocumentIcon />
+          }
+          label={
+            value === "ADD" ? "Added" :
+            value === "DELETE" ? "Deleted" :
+            "Modified"
+          }
+          color={
+            value === "ADD" ? "success" :
+            value === "DELETE" ? "error" :
+            "warning"
+          }
+        />
+      ),
+    },
 
-  // Columns
-  const allColumns = useMemo(() => {
-    return [
-      ...(columns || []),
+    {
+      field: "creatorId",
+      headerName: "Creator",
+      flex: 0.8,
+      align: "center",
+      headerAlign: "center",
+      renderCell: ({ value }) => (
+        <CustomChip
+          size="small"
+          icon={<AccountCircleIcon />}
+          label={value}
+          color="info"
+          variant="outlined"
+        />
+      ),
+    },
 
-      {
-        field: "changeType",
-        headerName: "Type",
-        flex: 0.6,
-        headerAlign: "center",
-        align: "center",
-        renderCell: (p) => {
-          const val = p.value;
-          return (
-            <CustomChip
-              icon={
-                val === "ADD" ? (
-                  <AddBoxIcon />
-                ) : val === "DELETE" ? (
-                  <AutoDeleteIcon />
-                ) : (
-                  <EditDocumentIcon />
-                )
+    {
+      field: "reqDate",
+      headerName: "Date",
+      flex: 1,
+      align: "center",
+      headerAlign: "center",
+      renderCell: ({ value }) => (
+        <Typography sx={styles.requestDate}>
+          {timeStampFormatter(value)}
+        </Typography>
+      ),
+    },
+
+    {
+      field: "actions",
+      headerName: "Actions",
+      flex: 0.8,
+      align: "center",
+      headerAlign: "center",
+      renderCell: ({ row }) => (
+        <Stack direction="row" spacing={1}>
+          <Tooltip title="Approve">
+            <IconButton
+              color="success"
+              onClick={() =>
+                setConfirmDialog({ open: true, type: "accept", rowId: row.id })
               }
-              label={
-                val === "ADD"
-                  ? "Added"
-                  : val === "DELETE"
-                  ? "Deleted"
-                  : "Modified"
+            >
+              <Check />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title="Reject">
+            <IconButton
+              color="error"
+              onClick={() =>
+                setConfirmDialog({ open: true, type: "reject", rowId: row.id })
               }
-              color={
-                val === "ADD"
-                  ? "success"
-                  : val === "DELETE"
-                  ? "error"
-                  : "warning"
-              }
-              size="small"
-              variant="outlined"
-            />
-          );
-        },
-      },
+            >
+              <Clear />
+            </IconButton>
+          </Tooltip>
 
-      {
-        field: "creatorId",
-        headerName: "Creator",
-        flex: 0.8,
-        headerAlign: "center",
-        align: "center",
-        renderCell: (p) => (
-          <CustomChip
-            icon={<AccountCircleIcon />}
-            size="small"
-            color="info"
-            label={p.value}
-            variant="outlined"
-          />
-        ),
-      },
+          <Tooltip title="View">
+            <IconButton onClick={() => handleViewClick(row)}>
+              <Visibility />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
+  ], [columns]);
 
-      {
-        field: "reqDate",
-        headerName: "Date",
-        flex: 1,
-        headerAlign: "center",
-        align: "center",
-        renderCell: (p) => (
-          <Typography variant="body1" component="span" sx={styles.requestDate}>
-            {timeStampFormatter(p.value)}
-          </Typography>
-        ),
-      },
-
-      {
-        field: "actions",
-        headerName: "Actions",
-        flex: 0.7,
-        headerAlign: "center",
-        align: "center",
-        renderCell: (p) => (
-          <Stack
-            direction="row"
-            spacing={1}
-            alignItems="center"
-            justifyContent="center"
-            style={styles.StackStyle}
-          >
-            <Tooltip title="Approve">
-              <IconButton
-                color="success"
-                onClick={() => openConfirmDialog("accept", p.row.id)}
-              >
-                <Check />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title="Reject">
-              <IconButton
-                color="error"
-                onClick={() => openConfirmDialog("reject", p.row.id)}
-              >
-                <Clear />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title="View">
-              <IconButton onClick={() => handleViewClick(p.row)}>
-                <Visibility />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-        ),
-      },
-    ];
-  }, [columns]);
+  const isApprove = confirmDialog.type === "accept";
 
   return (
     <Box sx={styles.container}>
@@ -276,92 +246,94 @@ export default function CommonRequestScreen() {
           pagination: { paginationModel: { pageSize: 5 } },
           sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
         }}
-        getRowId={(row) => row.id}
+        getRowId={(r) => r.id}
         sx={styles.dataGrid}
         slots={{
           noRowsOverlay: () => (
             <Stack height="100%" alignItems="center" justifyContent="center">
-              <InfoIcon sx={{ fontSize: 48, color: "text.secondary", mb: 2 }} />
-              <Typography variant="h6">No Pending Requests Found</Typography>
+              <InfoIcon sx={{ fontSize: 48, mb: 2 }} />
+              <Typography variant="h6">No Pending Requests</Typography>
               <Typography>
-                All {selectedMenuItem.title} have been processed.
+                All {selectedMenuItem?.title} are processed.
               </Typography>
             </Stack>
           ),
         }}
       />
 
-      {/* View Dialog */}
       <ViewRequestDialog
         open={viewOpen}
         handleClose={() => setViewOpen(false)}
         data={viewData}
       />
 
-      {/* Confirm Dialog */}
+      {/* CONFIRM DIALOG */}
       <Dialog
-        maxWidth="sm"
-        fullWidth="true"
         open={confirmDialog.open}
-        onClose={closeConfirmDialog}
+        maxWidth="sm"
+        fullWidth
+        keepMounted={false}
+        onClose={() =>
+          setConfirmDialog({ open: false, type: null, rowId: null })
+        }
       >
         <DialogTitle>
-          {confirmDialog.type === "accept"
-            ? "Confirm Approval"
-            : "Confirm Rejection"}
+          {isApprove ? "Confirm Approval" : "Confirm Rejection"}
         </DialogTitle>
         <Divider />
         <DialogContent>
           <Typography>
-            {confirmDialog.type === "accept"
-              ? "Are you sure you want to approve the request?"
+            {isApprove
+              ? "Are you sure you want to approve this request?"
               : "Please provide remarks to reject this request."}
           </Typography>
 
-          {confirmDialog.type === "reject" && (
+          {!isApprove && (
             <TextField
               fullWidth
-              label="Remarks"
-              value={remarks}
               multiline
               rows={4}
-              onChange={(e) => setRemarks(e.target.value)}
               margin="dense"
-              slotProps={{
-                htmlInput: {
-                  maxLength: 200,
-                },
-              }}
+              label="Remarks"
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value)}
               helperText={
-                remarks?.length !== 0 && remarks?.length < 5
-                  ? "Enter at least 5 characters"
-                  : "Allowed 5-200 characters"
+                remarks && remarks.length < 5
+                  ? "Minimum 5 characters required"
+                  : "Allowed 5–200 characters"
               }
-              error={remarks?.length !== 0 && remarks?.length < 5}
+              error={remarks && remarks.length < 5}
+              inputProps={{ maxLength: 200 }}
             />
           )}
         </DialogContent>
 
         <DialogActions>
-          <Button onClick={closeConfirmDialog}>Cancel</Button>
+          <Button
+            onClick={() =>
+              setConfirmDialog({ open: false, type: null, rowId: null })
+            }
+          >
+            Cancel
+          </Button>
+
           <Button
             variant="contained"
+            color={isApprove ? "success" : "error"}
             onClick={handleConfirm}
-            color={confirmDialog.type === "accept" ? "success" : "error"}
           >
-            {confirmDialog.type === "accept" ? "Approve" : "Reject"}
+            {isApprove ? "Approve" : "Reject"}
           </Button>
         </DialogActions>
       </Dialog>
+
       <LoadingOverlay loading={loading} />
     </Box>
   );
 }
 
-
 import React, { useMemo } from "react";
 import { Box, Typography, Card, Stack, Chip } from "@mui/material";
-
 import {
   PieChart,
   Pie,
@@ -373,152 +345,93 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
+  Legend,
 } from "recharts";
-
 import { analyticsStyles as s } from "./RequestAnalyticsStyles";
 
-const COLORS = ["#d87093", "#6a5acd", "#20b2aa"];
+const COLORS = {
+  ADD: "#4caf50",
+  UPDATE: "#ff9800",
+  DELETE: "#f44336",
+};
 
 const RequestAnalytics = ({ data = [] }) => {
-  const { total, pieData } = useMemo(() => {
-    const counts = { add: 0, modify: 0, delete: 0 };
-
-    data.forEach((d) => {
-      if (d.changeType === "ADD") counts.add++;
-      if (d.changeType === "UPDATE") counts.modify++;
-      if (d.changeType === "DELETE") counts.delete++;
-    });
-
-    return {
-      total: data.length,
-      pieData: [
-        { name: "Add Requests", value: counts.add },
-        { name: "Modify Requests", value: counts.modify },
-        // { name: "Delete Requests", value: counts.delete },
-      ],
-    };
+  /* -------- PIE DATA -------- */
+  const pieData = useMemo(() => {
+    const map = { ADD: 0, UPDATE: 0, DELETE: 0 };
+    data.forEach((d) => map[d.changeType]++);
+    return Object.entries(map)
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => ({ name: k, value: v }));
   }, [data]);
 
-  const histogramData = useMemo(() => {
+  /* -------- BAR DATA (DAY + TYPE) -------- */
+  const barData = useMemo(() => {
     const map = {};
-    data.forEach((item) => {
-      if (item.reqDate) {
-        const date = new Date(item.reqDate).toLocaleDateString("en-GB");
-        map[date] = (map[date] || 0) + 1;
-      }
+    data.forEach((d) => {
+      if (!d.reqDate) return;
+      const day = new Date(d.reqDate).toLocaleDateString("en-GB");
+      map[day] ??= { date: day, ADD: 0, UPDATE: 0, DELETE: 0 };
+      map[day][d.changeType]++;
     });
-
-    return Object.keys(map).map((d) => ({ date: d, count: map[d] }));
+    return Object.values(map);
   }, [data]);
 
   return (
     <Card sx={s.card}>
       <Typography sx={s.headerTitle}>Request Analytics Overview</Typography>
       <Typography variant="caption" sx={s.headerSubtitle}>
-        Requests comparison by type and daily frequency
+        Distribution by request type & daily activity trend
       </Typography>
 
-      {total > 0 ? (
+      {data.length === 0 ? (
+        <Typography>No data available</Typography>
+      ) : (
         <Box sx={s.wrapper}>
-          {/* PIE SECTION */}
+          {/* PIE */}
           <Box sx={s.pieWrapper}>
-            <Box sx={s.pieChartBox}>
-              <ResponsiveContainer>
-                <PieChart>
-                  <defs>
-                    {COLORS.map((color, idx) => (
-                      <linearGradient
-                        key={idx}
-                        id={`gradient-${idx}`}
-                        x1="0"
-                        y1="0"
-                        x2="1"
-                        y2="1"
-                      >
-                        <stop stopColor={color} stopOpacity={0.9} offset="0%" />
-                        <stop
-                          stopColor={color}
-                          stopOpacity={0.5}
-                          offset="100%"
-                        />
-                      </linearGradient>
-                    ))}
-                  </defs>
+            <Typography variant="subtitle2" sx={s.chartCaption}>
+              Request Type Distribution
+            </Typography>
 
-                  <Pie
-                    data={pieData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={55}
-                    outerRadius={80}
-                    paddingAngle={3}
-                    dataKey="value"
-                  >
-                    {pieData.map((_, i) => (
-                      <Cell key={i} fill={`url(#gradient-${i})`} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-
-              {/* Center Label */}
-              <Box sx={s.pieCenterBox}>
-                <Typography variant="caption" sx={s.pieCenterSubtitle}>
-                  Total Requests
-                </Typography>
-                <Typography sx={s.pieCenterValue}>{total}</Typography>
-              </Box>
-            </Box>
-
-            {/* Legend row */}
-            <Stack direction="row" spacing={1.5} sx={s.legendRow}>
-              {pieData.map((p, i) => (
-                <Stack
-                  key={p.name}
-                  direction="row"
-                  alignItems="center"
-                  spacing={0.5}
-                  sx={s.legendChipBox}
+            <ResponsiveContainer height={260}>
+              <PieChart>
+                <Pie
+                  data={pieData}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={60}
+                  outerRadius={90}
                 >
-                  <Box sx={s.legendColorDot(COLORS[i])} />
-                  <Typography variant="caption">{p.name}</Typography>
-                  <Chip
-                    label={p.value}
-                    sx={{ bgcolor: COLORS[i], color: "white" }}
-                    size="small"
-                  />
-                </Stack>
-              ))}
-            </Stack>
+                  {pieData.map((p) => (
+                    <Cell key={p.name} fill={COLORS[p.name]} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
           </Box>
 
-          {/* BAR SECTION */}
+          {/* BAR */}
           <Box sx={s.barChartArea}>
-            <ResponsiveContainer>
-              <BarChart data={histogramData}>
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="rgba(255,255,255,0.3)"
-                />
-                <XAxis
-                  dataKey="date"
-                  stroke="white"
-                  fontSize={10}
-                  tickMargin={4}
-                />
-                <YAxis stroke="white" fontSize={10} />
+            <Typography variant="subtitle2" sx={s.chartCaption}>
+              Daily Request Activity (by type)
+            </Typography>
+
+            <ResponsiveContainer height={260}>
+              <BarChart data={barData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" fontSize={10} />
+                <YAxis fontSize={10} />
                 <Tooltip />
-                <Bar
-                  dataKey="count"
-                  fill="url(#gradient-0)"
-                  radius={[6, 6, 0, 0]}
-                />
+                <Legend />
+                <Bar dataKey="ADD" stackId="a" fill={COLORS.ADD} />
+                <Bar dataKey="UPDATE" stackId="a" fill={COLORS.UPDATE} />
+                <Bar dataKey="DELETE" stackId="a" fill={COLORS.DELETE} />
               </BarChart>
             </ResponsiveContainer>
           </Box>
         </Box>
-      ) : (
-        <Typography>No data to display</Typography>
       )}
     </Card>
   );
