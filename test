@@ -1,33 +1,197 @@
-const histogramData = useMemo(() => {
-  const map = {};
+import React, { useMemo, Suspense } from "react";
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { useSelector } from "react-redux";
+import PrivateRouter from "./PrivateRouter";
 
-  data.forEach((item) => {
-    if (item.reqDate) {
-      const dateStr = new Date(item.reqDate).toLocaleDateString("en-GB"); // dd/mm/yyyy
+// Page Components
+import Login from "../features/auth/pages/Login";
+import Home from "../pages/Home";
+import NotFound from "../pages/NotFound";
+import ServerError from "../pages/ServerError";
+import CommonLayout from "../layout/CommonLayout";
+import FullscreenLayout from "../layout/FullscreenLayout";
+import SubmenuSelectionPage from "../pages/SubmenuSelectionPage";
 
-      if (!map[dateStr]) {
-        map[dateStr] = {
-          date: dateStr,
-          pendingRequests: 0,
-          addRequests: 0,
-          changeType: "—",
-        };
-      }
+import { generateRouteObjects } from "./RouteGenerator";
 
-      map[dateStr].pendingRequests += 1;
+const PageLoader = () => (
+  <div
+    style={{
+      display: "flex",
+      height: "100vh",
+      justifyContent: "center",
+      alignItems: "center",
+    }}
+  >
+    Loading...
+  </div>
+);
 
-      if (item.changeType === "ADD") {
-        map[dateStr].addRequests += 1;
-      }
+const DynamicLayout = () => {
+  const isComponentFullscreen = useSelector(
+    (state) => state.ui.isComponentFullscreen
+  );
+  return !isComponentFullscreen ? <CommonLayout /> : <FullscreenLayout />;
+};
 
-      map[dateStr].changeType = item.changeType || "—";
+const AppRouter = () => {
+  const menus = useSelector((state) => state.menus.menus);
+
+  const router = useMemo(() => {
+    const dynamicRoutes = generateRouteObjects(menus || []);
+
+    const routeConfig = [
+      {
+        path: "/",
+        element: <Login />,
+        errorElement: <ServerError />,
+      },
+      {
+        path: "/server-error",
+        element: <ServerError />,
+      },
+      // Protected Routes
+      {
+        element: <PrivateRouter />,
+        children: [
+          {
+            element: <DynamicLayout />,
+            children: [
+              { path: "/home", element: <Home /> },
+              {
+                path: "/choose-option/:mainMenuTitle",
+                element: <SubmenuSelectionPage />,
+              },
+              ...dynamicRoutes,
+            ],
+          },
+        ].filter(Boolean),
+      },
+      {
+        path: "*",
+        element: <NotFound />,
+      },
+    ];
+
+    return createBrowserRouter(routeConfig);
+  }, [menus]);
+
+  return (
+    <Suspense fallback={<PageLoader />}>
+      <RouterProvider router={router} />
+    </Suspense>
+  );
+};
+
+export default AppRouter;
+
+
+import React, { useMemo, useState, useCallback, useEffect } from "react";
+import { Box, Paper, Typography } from "@mui/material";
+import { Outlet } from "react-router-dom";
+import { useSelector } from "react-redux";
+
+import LayoutHeader from "../components/LayoutHeader";
+import SideBar from "../components/SideBar/SideBar";
+import { getParentMenu } from "../utils/CommonUtilities";
+import { getIconComponent } from "../utils/IconUtils";
+import useNavigateToPage from "../hooks/useNavigateToPage";
+
+const drawerWidth = 270;
+
+const CommonLayout = () => {
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
+  const menus = useSelector((state) => state.menus.menus);
+
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [showComponentTitle, setShowComponentTitle] = useState(true);
+  const { navigateToPage } = useNavigateToPage();
+
+  const handleDrawerToggle = useCallback(() => {
+    setMobileOpen((prev) => !prev);
+  }, []);
+
+  const title = useMemo(() => {
+    if (!selectedMenuItem) return "";
+
+    if (Object.hasOwn(selectedMenuItem, "hasChildren")) {
+      // Top-level menu
+      return selectedMenuItem.title;
     }
-  });
 
-  return Object.values(map).sort((a, b) => {
-    const [d1, m1, y1] = a.date.split("/").map(Number);
-    const [d2, m2, y2] = b.date.split("/").map(Number);
+    const parentMenu = getParentMenu(selectedMenuItem, menus);
 
-    return new Date(y1, m1 - 1, d1) - new Date(y2, m2 - 1, d2);
-  });
-}, [data]);
+    if (!parentMenu) return selectedMenuItem.title;
+
+    return `${parentMenu.title} > ${selectedMenuItem.title}`;
+  }, [menus, selectedMenuItem]);
+
+  const outletContextValue = useMemo(() => ({ setShowComponentTitle }), []);
+
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        minHeight: "100vh",
+      }}
+    >
+      {/* Header */}
+      <LayoutHeader
+        drawerWidth={drawerWidth}
+        title={title}
+        navigateToPage={navigateToPage}
+        handleDrawerToggle={handleDrawerToggle}
+      />
+
+      {/* Sidebar */}
+      <SideBar
+        drawerWidth={drawerWidth}
+        getIconComponent={getIconComponent}
+        mobileOpen={mobileOpen}
+        handleDrawerToggle={handleDrawerToggle}
+      />
+
+      {/* Main Content */}
+      <Box
+        component="main"
+        sx={{
+          flexGrow: 1,
+          width: { xs: "100%", md: `calc(100% - ${drawerWidth}px)` },
+          p: 3,
+          pt: 11,
+          minHeight: "calc(100vh - 88px)",
+        }}
+      >
+        <Box>
+          {showComponentTitle && (
+            <Paper
+              elevation={2}
+              sx={{
+                p: 2,
+                mb: 4,
+                borderRadius: 1,
+              }}
+            >
+              <Typography
+                variant="h4"
+                color="textPrimary"
+                sx={{
+                  fontWeight: 700,
+                  letterSpacing: "-0.02em",
+                }}
+              >
+                {title}
+              </Typography>
+            </Paper>
+          )}
+
+          <Box>
+            <Outlet context={outletContextValue} />
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+  );
+};
+
+export default CommonLayout;
