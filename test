@@ -1,77 +1,348 @@
-import React, { useMemo } from "react";
-import { Breadcrumbs, Link, Typography, Box } from "@mui/material";
-import NavigateNextIcon from "@mui/icons-material/NavigateNext";
+import React, { useState, useEffect } from "react";
+import {
+  Box,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+  Typography,
+  Button,
+  Stack,
+  Tooltip,
+  IconButton,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import { Check, Clear, Visibility } from "@mui/icons-material";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import InfoIcon from "@mui/icons-material/Info";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
+import AccountCircleIcon from "@mui/icons-material/AccountCircle";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import RequestAnalytics from "../common/RequestAnalytics";
+import {
+  timeStampFormatter,
+  toPascalKebabCase,
+} from "../../utils/CommonUtilities";
+import CustomChip from "../../utils/CustomChip";
+import { styles } from "../common/CommonRequestScreenStyles";
+import LoadingOverlay from "../../utils/LoadingOverlay";
 import { useSelector } from "react-redux";
-import { getParentMenu } from "../utils/CommonUtilities";
-import useNavigateToPage from "../hooks/useNavigateToPage";
-import { getMenuIcon } from "../utils/menuIconMapper";
+import RoleRequestView from "./components/RoleRequestView";
 
-const AppBreadcrumbs = () => {
-  const selectedMenuItem = useSelector(
-    (state) => state.menus.selectedMenuItem
-  );
-  const menus = useSelector((state) => state.menus.menus);
-  const { navigateToPage } = useNavigateToPage();
+export default function RoleApprovals() {
+  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const [rows, setRows] = useState([]);
+  const [remarks, setRemarks] = useState("");
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewData, setViewData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [dataGridLoading, setDataGridLoading] = useState(true);
+  const [confirmDialog, setConfirmDialog] = useState(false);
+  const [selectedType, setSelectedType] = useState(null);
+  const [selectedRequestId, setSelectedRequestId] = useState(null);
 
-  const breadcrumbs = useMemo(() => {
-    if (!selectedMenuItem) return [];
-
-    // 🔹 If selected menu has children → show parent + first child
-    if (selectedMenuItem.hasChildren) {
-      const firstChild = selectedMenuItem.children?.[0];
-      return firstChild
-        ? [selectedMenuItem, firstChild]
-        : [selectedMenuItem];
+  const fetchData = async () => {
+    try {
+      const response = await callApi(
+        "/UM/role/pending-role-requests",
+        {},
+        "GET"
+      );
+      const result = response?.result?.pendingRequests || [];
+      const processedResult = result.map((row) => {
+        const parsed = JSON.parse(row.requestPayload) || {};
+        return {
+          ...row,
+          ...parsed,
+          changeType:
+            row.requestType === "CREATE"
+              ? "ADD"
+              : row.requestType === "MODIFY"
+              ? "UPDATE"
+              : row.requestType,
+          reqDate: row.requestDate,
+        };
+      });
+      setRows(processedResult);
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error fetching data", "error");
+    } finally {
+      setDataGridLoading(false);
     }
+  };
 
-    // 🔹 If selected menu is a child → show parent + child
-    const parentMenu = getParentMenu(selectedMenuItem, menus);
-    if (!parentMenu) return [selectedMenuItem];
+  useEffect(() => {
+    fetchData();
+  }, []);
 
-    return [parentMenu, selectedMenuItem];
-  }, [selectedMenuItem, menus]);
+  const handleConfirm = async () => {
+    if (selectedType === "reject" && remarks.trim().length < 5) {
+      showSnackBar(
+        "Please provide minimum 5 characters remarks before rejecting",
+        "warning"
+      );
+      return;
+    }
+    setLoading(true);
 
-  if (!breadcrumbs.length) return null;
+    try {
+      const payload = {
+        requestId: selectedRequestId,
+        actionFlag: selectedType,
+        remarks: selectedType === "reject" ? remarks.trim() : "No Remarks",
+      };
+
+      const res = await callApi(
+        "/UM/role/role-request-action",
+        payload,
+        "POST"
+      );
+
+      if (res?.result?.status) {
+        showSnackBar(res?.result?.message, "success");
+        fetchData();
+      } else {
+        showSnackBar("Failed to process request", "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error while processing request", "error");
+    } finally {
+      closeConfirmDialog();
+      setLoading(false);
+    }
+  };
+
+  const openConfirmDialog = (type, rowId) => {
+    setSelectedType(type);
+    setSelectedRequestId(rowId);
+    setConfirmDialog(true);
+  };
+
+  const closeConfirmDialog = () => {
+    setRemarks("");
+    setConfirmDialog(false);
+  };
+
+  const regex = /^[a-zA-Z0-9\s()&,./\\-]*$/;
+  const handleChange = (e) => {
+    const value = e.target.value;
+    const error = regex.test(value)
+      ? ""
+      : "Only alphabets, spaces and ,()&/-. are allowed!";
+    if (error) {
+      showSnackBar(error, "error");
+      return;
+    }
+    setRemarks(value);
+  };
+
+  const columns = [
+    { field: "roleName", headerName: "Role Name", flex: 0.5 },
+    { field: "description", headerName: "Role Name", flex: 1.2 },
+    {
+      field: "requestType",
+      headerName: "Type",
+      flex: 0.6,
+      headerAlign: "center",
+      align: "center",
+      renderCell: (params) => {
+        const val = params.value;
+        return (
+          <CustomChip
+            icon={
+              val === "CREATE" ? (
+                <AddBoxIcon />
+              ) : val === "DELETE" ? (
+                <AutoDeleteIcon />
+              ) : (
+                <EditDocumentIcon />
+              )
+            }
+            label={toPascalKebabCase(val)}
+            color={
+              val === "CREATE"
+                ? "success"
+                : val === "DELETE"
+                ? "error"
+                : "warning"
+            }
+            size="small"
+            variant="outlined"
+          />
+        );
+      },
+    },
+
+    {
+      field: "requestorUserId",
+      headerName: "Creator",
+      flex: 0.8,
+      headerAlign: "center",
+      align: "center",
+      renderCell: (params) => (
+        <CustomChip
+          icon={<AccountCircleIcon />}
+          size="small"
+          color="info"
+          label={params.value}
+          variant="outlined"
+        />
+      ),
+    },
+    {
+      field: "requestDate",
+      headerName: "Requested Date",
+      flex: 1,
+      headerAlign: "center",
+      align: "center",
+      renderCell: (p) => (
+        <Typography variant="body1" component="span" sx={styles.requestDate}>
+          {timeStampFormatter(p.value)}
+        </Typography>
+      ),
+    },
+    {
+      field: "actions",
+      headerName: "Actions",
+      flex: 0.7,
+      headerAlign: "center",
+      align: "center",
+      filterable: false,
+      sortable: false,
+      disableColumnMenu: true,
+      renderCell: (p) => (
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          justifyContent="center"
+          sx={{ height: "100%" }}
+        >
+          <Tooltip title="View">
+            <IconButton onClick={() => setViewData(p.row) || setViewOpen(true)}>
+              <Visibility />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title="Approve">
+            <IconButton
+              color="success"
+              onClick={() => openConfirmDialog("accept", p.row.requestId)}
+            >
+              <Check />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title="Reject">
+            <IconButton
+              color="error"
+              onClick={() => openConfirmDialog("reject", p.row.requestId)}
+            >
+              <Clear />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
+  ];
 
   return (
-    <Breadcrumbs
-      separator={<NavigateNextIcon fontSize="small" />}
-      aria-label="breadcrumb"
-    >
-      {breadcrumbs.map((item, index) => {
-        const isLast = index === breadcrumbs.length - 1;
-        const IconComponent = getMenuIcon(item.icon);
+    <Box sx={styles.container}>
+      <Box>
+        <RequestAnalytics data={rows} />
+        <DataGrid
+          rows={rows}
+          columns={columns}
+          loading={dataGridLoading}
+          disableRowSelectionOnClick
+          pageSizeOptions={[5, 10, 25, 50]}
+          initialState={{
+            pagination: { paginationModel: { pageSize: 10, page: 0 } },
+            sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
+          }}
+          getRowId={(row) => row.requestId}
+          sx={styles.dataGrid}
+          slots={{
+            noRowsOverlay: () => (
+              <Stack height="100%" alignItems="center" justifyContent="center">
+                <InfoIcon
+                  sx={{ fontSize: 48, color: "text.secondary", mb: 2 }}
+                />
+                <Typography variant="h6">No Pending Requests Found</Typography>
+                <Typography>
+                  All {selectedMenuItem.title} have been processed.
+                </Typography>
+              </Stack>
+            ),
+          }}
+        />
+      </Box>
 
-        const label = (
-          <Box display="flex" alignItems="center" gap={0.75}>
-            <IconComponent fontSize="small" />
-            <span>{item.title}</span>
-          </Box>
-        );
+      <RoleRequestView
+        open={viewOpen}
+        handleClose={() => setViewOpen(false)}
+        data={viewData}
+      />
 
-        return isLast ? (
-          <Typography
-            key={item.id}
-            color="text.primary"
-            fontWeight={600}
-          >
-            {label}
+      <Dialog
+        open={confirmDialog}
+        onClose={closeConfirmDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 600 }}>
+          {selectedType === "accept" ? "Confirm Approval" : "Confirm Rejection"}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ p: 1 }}>
+            {selectedType === "accept"
+              ? "Are you sure you want to approve this request?"
+              : "Are you sure you want to reject this request? Please enter remarks."}
           </Typography>
-        ) : (
-          <Link
-            key={item.id}
-            underline="hover"
-            color="inherit"
-            fontWeight={600}
-            sx={{ cursor: "pointer" }}
-            onClick={() => navigateToPage(item)}
+          {selectedType === "reject" && (
+            <TextField
+              fullWidth
+              label="Rejection Remarks *"
+              value={remarks}
+              onChange={(e) => handleChange(e)}
+              multiline
+              rows={2}
+              margin="dense"
+              slotProps={{
+                htmlInput: {
+                  maxLength: 100,
+                },
+              }}
+              helperText={
+                remarks?.length !== 0 && remarks?.length < 5
+                  ? "Enter at least 5 characters"
+                  : "Allowed 5-100 characters (alphabets, numbers, spaces,()&/-.)"
+              }
+              error={remarks?.length !== 0 && remarks?.length < 5}
+            />
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeConfirmDialog} variant="outlined">
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirm}
+            color={selectedType === "accept" ? "success" : "error"}
+            variant="contained"
           >
-            {label}
-          </Link>
-        );
-      })}
-    </Breadcrumbs>
+            {selectedType === "accept" ? "Approve" : "Reject"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <LoadingOverlay loading={loading} />
+    </Box>
   );
-};
-
-export default AppBreadcrumbs;
+}
