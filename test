@@ -1,560 +1,195 @@
 // useNotifications.js
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import useApi from "./useApi";
 import useStreamApi from "./useStreamApi";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
 
 const BASE_URL = "/NS/notifications";
+const POPUP_DURATION = 5000;
 
 const useNotifications = () => {
   const { callApi } = useApi();
   const { showSnackbar } = useCustomSnackbar();
   const { startStream, stopStream, lastMessage, connected } = useStreamApi();
 
-  const [pageNumber, setPageNumber] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const [popNotification, setPopNotification] = useState(null);
-  const size = 10;
+  const [popupQueue, setPopupQueue] = useState([]);
 
-  /** --- Fetch unread count --- **/
+  const popupTimers = useRef({});
+
+  /** ---------------- FETCH UNREAD COUNT ---------------- */
   const fetchUnreadCount = useCallback(async () => {
     try {
       const data = await callApi(`${BASE_URL}/unread-count`);
       if (data?.count !== undefined) setUnreadCount(data.count);
     } catch (err) {
-      console.error("Failed to fetch unread count:", err);
+      console.error(err);
     }
   }, [callApi]);
 
-  /** --- Fetch notification history (paged) --- **/
-  const fetchHistory = useCallback(
-    async (page = 0) => {
-      try {
-        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
-        const newItems = data?.content || [];
+  /** ---------------- POPUP QUEUE ---------------- */
+  const addPopup = useCallback((notif) => {
+    const popupId = `${notif.id}-${Date.now()}`;
 
-        setNotifications((prev) =>
-          page === 0 ? newItems : [...prev, ...newItems]
-        );
-        setHasMore(!data?.last);
-        setPageNumber(page);
-      } catch (err) {
-        console.error("Failed to fetch notifications:", err);
-      }
-    },
-    [callApi, size]
-  );
+    setPopupQueue((prev) => [...prev, { ...notif, popupId }]);
 
-  /** --- Mark as read --- **/
-  const markAsRead = useCallback(
-    async (id) => {
-      try {
-        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
-        if (response) {
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-          );
-          setUnreadCount((prev) => Math.max(prev - 1, 0));
-        } else {
-          showSnackbar("Failed to mark as read", "error");
-        }
-      } catch (err) {
-        console.error("Mark as read failed:", err);
-      }
-    },
-    [callApi, showSnackbar]
-  );
-
-  /** --- Mark all as read --- **/
-  const markAllAsRead = useCallback(async () => {
-    try {
-      const response = await callApi(`${BASE_URL}/read-all`, {}, "POST");
-      if (response) {
-        setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-        setUnreadCount(0);
-      } else {
-        showSnackbar("Failed to mark all notifications as read", "error");
-      }
-    } catch (err) {
-      console.error("Mark all as read failed:", err);
-    }
-  }, [callApi, showSnackbar]);
-
-  /** --- SSE stream + initial load (run once, not on each menu change) --- **/
-  useEffect(() => {
-    // Initial load
-    fetchUnreadCount();
-    fetchHistory(0); // first page
-
-    // Start live stream
-    startStream(`${BASE_URL}/stream`, {
-      onMessage: (newNotification) => {
-        console.log("newNotification >", newNotification);
-      },
-    });
-
-    // Cleanup on unmount
-    return () => {
-      stopStream();
-    };
-    // We intentionally do NOT add fetchUnreadCount / fetchHistory to deps,
-    // to avoid re-running this effect on every callApi/xRequestType/menu change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startStream, stopStream]);
-
-  /** --- Show popup for 5 seconds --- **/
-  const triggerPopup = useCallback((notif) => {
-    setPopNotification(notif);
-    if (triggerPopup.timer) clearTimeout(triggerPopup.timer);
-    triggerPopup.timer = setTimeout(() => setPopNotification(null), 5000);
+    popupTimers.current[popupId] = setTimeout(() => {
+      removePopup(popupId);
+    }, POPUP_DURATION);
   }, []);
 
-  /** --- When new message arrives via SSE --- **/
-  useEffect(() => {
-    if (lastMessage) {
-      setNotifications((prev) => [lastMessage, ...prev]);
-      setUnreadCount((prev) => prev + 1);
-      triggerPopup(lastMessage);
-    }
-  }, [lastMessage, triggerPopup]);
+  const removePopup = useCallback((popupId) => {
+    setPopupQueue((prev) => prev.filter((p) => p.popupId !== popupId));
 
-  /** --- Pagination helper --- **/
-  const loadMore = useCallback(() => {
-    if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, fetchHistory, pageNumber]);
+    if (popupTimers.current[popupId]) {
+      clearTimeout(popupTimers.current[popupId]);
+      delete popupTimers.current[popupId];
+    }
+  }, []);
+
+  /** ---------------- SSE STREAM ---------------- */
+  useEffect(() => {
+    fetchUnreadCount();
+
+    startStream(`${BASE_URL}/stream`, {
+      onMessage: () => {},
+    });
+
+    return () => stopStream();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** ---------------- ON NEW NOTIFICATION ---------------- */
+  useEffect(() => {
+    if (!lastMessage) return;
+
+    setNotifications((prev) => [lastMessage, ...prev]);
+    setUnreadCount((prev) => prev + 1);
+    addPopup(lastMessage);
+  }, [lastMessage, addPopup]);
 
   return {
     connected,
     notifications,
     unreadCount,
-    fetchUnreadCount,
-    fetchHistory,
-    markAsRead,
-    markAllAsRead,
-    stopStream,
-    loadMore,
-    hasMore,
-    popNotification,
-    setPopNotification,
+    popupQueue,
+    removePopup,
   };
 };
 
 export default useNotifications;
 
-import React, { useCallback, useMemo, useState, memo } from "react";
-import {
-  Box,
-  Drawer,
-  Typography,
-  IconButton,
-  Button,
-  Paper,
-  Tooltip,
-  Stack,
-  Chip,
-  Collapse,
-} from "@mui/material";
+import React from "react";
+import { Stack } from "@mui/material";
+import { AnimatePresence } from "framer-motion";
+import NotificationPopup from "./NotificationPopup";
 
-import {
-  Close,
-  DoneAll,
-  NotificationsNone,
-  ExpandMore,
-  ExpandLess,
-} from "@mui/icons-material";
-
-import ListAltIcon from "@mui/icons-material/ListAlt";
-import MarkEmailUnreadIcon from "@mui/icons-material/MarkEmailUnread";
-import MarkEmailReadIcon from "@mui/icons-material/MarkEmailRead";
-
-import { motion, AnimatePresence } from "framer-motion";
-
-import { formatRelativeTime } from "../utils/CommonUtilities";
-import { useSelector } from "react-redux";
-import useNavigateToPage from "../hooks/useNavigateToPage";
-import { styles } from "./NotificationStyles";
-import { getIconComponent } from "../utils/IconUtils";
-
-const MotionPaper = motion.create(Paper);
-
-/** * OPTIMIZATION: Extracted to a memoized component.
- * This prevents the entire list from re-rendering when you expand a single item.
- */
-const NotificationItem = memo(({ 
-  n, 
-  isExpanded, 
-  menuItems, 
-  onMessageClick, 
-  onToggleExpand 
-}) => {
-  const isRead = n?.read || false;
-  const menu = menuItems.find((m) => m.route === n.linkUrl);
-  const menuTitle = menu?.title || "General";
-  const IconComponent = getIconComponent(menu?.icon || "NotificationsNone");
-
+const NotificationPopupStack = ({ popups, onClose, onClick }) => {
   return (
-    <MotionPaper
-      layout
-      whileInView={{ opacity: [0, 1], y: [200, 0] }}
-      viewport={{ once: false, amount: 0.3 }}
-      transition={{ duration: 0.2 }}
+    <Stack
+      spacing={1.2}
       sx={{
-        ...styles.notificationPaper(isRead),
-        borderRadius: 1,
-        border: "none",
-        p: 1,
+        position: "fixed",
+        top: 16,
+        right: 16,
+        zIndex: 3000,
       }}
     >
-      <Stack direction="row" spacing={2}>
-        <IconComponent sx={{ fontSize: 24, opacity: 0.8 }} />
-
-        <Box sx={{ flex: 1 }}>
-          {isExpanded && (
-            <Box>
-              <Typography
-                variant="subtitle2"
-                onClick={() => onMessageClick(n)}
-                sx={{ fontWeight: 600, cursor: "pointer", mb: 0.5 }}
-              >
-                {menuTitle}
-              </Typography>
-            </Box>
-          )}
-
-          {!isExpanded && (
-            <Box
-              onClick={() => onMessageClick(n)}
-              sx={{ cursor: "pointer" }}
-            >
-              <Typography
-                component="div"
-                variant="body1"
-                sx={{ mb: 1, color: "text.primary" }}
-              >
-                {n.message.length > 50
-                  ? n.message.substring(0, 50) + "..."
-                  : n.message}
-              </Typography>
-
-              <Typography variant="body2" sx={{ color: "text.secondary" }}>
-                {menuTitle}
-                <Typography
-                  variant="caption"
-                  component="span"
-                  sx={{ ml: 2, color: "text.secondary", float: "right" }}
-                >
-                  {formatRelativeTime(n.createdAt)}
-                </Typography>
-              </Typography>
-            </Box>
-          )}
-
-          <Collapse in={isExpanded}>
-            <Typography variant="body2">{n.message}</Typography>
-            <Typography variant="caption" color="text.primary">
-              {formatRelativeTime(n.createdAt)}
-            </Typography>
-          </Collapse>
-        </Box>
-
-        <IconButton
-          sx={{ background: "none", "&:hover": { backgroundColor: "transparent" } }}
-          onClick={() => onToggleExpand(n)}
-        >
-          {isExpanded ? <ExpandLess /> : <ExpandMore />}
-        </IconButton>
-      </Stack>
-    </MotionPaper>
-  );
-});
-
-const NotificationDrawer = ({
-  notificationDrawerOpen,
-  setNotificationDrawerOpen,
-  notifications,
-  markAsRead,
-  markAllAsRead,
-  loadMore,
-  hasMore,
-}) => {
-  const { navigateToPage } = useNavigateToPage();
-  const menuItems = useSelector((state) => state.menus.menus);
-
-  const [filter, setFilter] = useState("all");
-  const [expandedId, setExpandedId] = useState(null);
-
-  const sorted = useMemo(() => {
-    return [...notifications].sort(
-      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-    );
-  }, [notifications]);
-
-  const filteredList = useMemo(() => {
-    if (filter === "read") return sorted.filter((n) => n.read);
-    if (filter === "unread") return sorted.filter((n) => !n.read);
-    return sorted;
-  }, [filter, sorted]);
-
-  const handleMessageClick = useCallback((row) => {
-    markAsRead(row.id);
-    const menu = menuItems.find((m) => m.route === row.linkUrl);
-    if (menu) {
-      navigateToPage(menu);
-      setNotificationDrawerOpen(false);
-    }
-  }, [markAsRead, menuItems, navigateToPage, setNotificationDrawerOpen]);
-
-  const handleToggleExpand = useCallback((row) => {
-    setExpandedId((prev) => (prev === row.id ? null : row.id));
-    markAsRead(row.id);
-  }, [markAsRead]);
-
-  return (
-    <Drawer
-      anchor="right"
-      open={notificationDrawerOpen}
-      onClose={() => setNotificationDrawerOpen(false)}
-      sx={{
-        "& .MuiDrawer-paper": {
-          width: 400,
-          display: "flex",
-          flexDirection: "column",
-        },
-      }}
-    >
-      {/* HEADER */}
-      <Box sx={{ p: 3, borderBottom: "1px solid #E2E8F0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <Typography variant="h6" sx={{ fontWeight: 700 }}>Notifications</Typography>
-        <Stack direction="row" spacing={1}>
-          <Tooltip title="Mark all as read">
-            <IconButton size="small" onClick={markAllAsRead}>
-              <DoneAll color="text.primary" />
-            </IconButton>
-          </Tooltip>
-          <IconButton size="small" onClick={() => setNotificationDrawerOpen(false)}><Close /></IconButton>
-        </Stack>
-      </Box>
-
-      {/* FILTER CHIPS */}
-      <Box sx={{ display: "flex", gap: 2, m: 2 }}>
-        <Chip label="All" icon={<ListAltIcon />} variant={filter === "all" ? "filled" : "outlined"} onClick={() => setFilter("all")} sx={{ flex: 1 }} />
-        <Chip label="Unread" icon={<MarkEmailUnreadIcon />} color="text.primary" variant={filter === "unread" ? "filled" : "outlined"} onClick={() => setFilter("unread")} sx={{ flex: 1 }} />
-        <Chip label="Read" icon={<MarkEmailReadIcon />} color="success" variant={filter === "read" ? "filled" : "outlined"} onClick={() => setFilter("read")} sx={{ flex: 1 }} />
-      </Box>
-
-      {/* EMPTY */}
-      {filteredList.length === 0 && (
-        <Box sx={{ textAlign: "center", mt: 4, opacity: 0.6 }}>
-          <NotificationsNone sx={{ fontSize: 50 }} />
-          <Typography>No notifications yet</Typography>
-        </Box>
-      )}
-
-      {/* LIST */}
-      <Box sx={{ flex: 1, overflowY: "auto" }}>
-        <AnimatePresence initial={false}>
-          {filteredList.map((n) => (
-            <NotificationItem 
-              key={n.id}
-              n={n}
-              isExpanded={expandedId === n.id}
-              menuItems={menuItems}
-              onMessageClick={handleMessageClick}
-              onToggleExpand={handleToggleExpand}
-            />
-          ))}
-        </AnimatePresence>
-      </Box>
-
-      {/* FOOTER */}
-      {filteredList.length > 0 && (
-        <Box sx={{ p: 2, borderTop: "1px solid #E2E8F0" }}>
-          {hasMore ? (
-            <Button color="primary" fullWidth variant="contained" onClick={loadMore}>Show More</Button>
-          ) : (
-            <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 1 }}>No more notifications</Typography>
-          )}
-        </Box>
-      )}
-    </Drawer>
+      <AnimatePresence>
+        {popups.map((popup) => (
+          <NotificationPopup
+            key={popup.popupId}
+            popup={popup}
+            onClose={() => onClose(popup.popupId)}
+            onClick={() => onClick(popup)}
+          />
+        ))}
+      </AnimatePresence>
+    </Stack>
   );
 };
 
-export default NotificationDrawer;
+export default NotificationPopupStack;
 
 import React from "react";
-import { Box, Typography, Avatar, Slide, Paper } from "@mui/material";
+import {
+  Box,
+  Typography,
+  Avatar,
+  Paper,
+  IconButton,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import { motion } from "framer-motion";
 import { getIconComponent } from "../utils/IconUtils";
 import { useSelector } from "react-redux";
 import { formatRelativeTime } from "../utils/CommonUtilities";
-// Import styles from the new file
 import {
   paperStyles,
   avatarStyles,
   iconStyles,
-  menuTitleStyles,
-  messageTextStyles,
-  captionTextStyles,
-} from "./NotificationStyles"; // Adjust path as needed
+} from "./NotificationStyles";
 
-const NotificationPopup = ({ popup, handleNotificationClick }) => {
+const MotionPaper = motion(Paper);
+
+const NotificationPopup = ({ popup, onClose, onClick }) => {
   const menuItems = useSelector((state) => state.menus.menus);
 
-  if (!popup) return null;
-
-  /** Find menu icon & title */
   const menu = menuItems.find((m) => m.route === popup.linkUrl);
   const IconComp = getIconComponent(menu?.icon || "NotificationsActive");
-  const menuTitle = menu?.title || "FinCore";
 
   return (
-    <Slide in={!!popup} direction="left" mountOnEnter unmountOnExit>
-      <Paper
-        onClick={handleNotificationClick}
-        elevation={10}
-        sx={paperStyles} // Use the imported style object
+    <MotionPaper
+      layout
+      initial={{ opacity: 0, x: 80 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 80 }}
+      transition={{ duration: 0.25 }}
+      elevation={10}
+      sx={paperStyles}
+    >
+      <Avatar sx={avatarStyles}>
+        <IconComp style={iconStyles} />
+      </Avatar>
+
+      <Box
+        flex={1}
+        sx={{ cursor: "pointer" }}
+        onClick={onClick}
       >
-        {/* ICON */}
-        <Avatar
-          sx={avatarStyles} // Use the imported style object
-        >
-          <IconComp style={iconStyles} /> {/* Use the imported style object */}
-        </Avatar>
+        <Typography fontWeight={700}>
+          {menu?.title || "Notification"}
+        </Typography>
 
-        {/* TEXTS */}
-        <Box flex={1}>
-          <Typography fontWeight={700} sx={menuTitleStyles}>
-            {menuTitle}
-          </Typography>
+        <Typography variant="body2">
+          {popup.message}
+        </Typography>
 
-          <Typography variant="body2" sx={messageTextStyles}>
-            {popup.message}
-          </Typography>
+        <Typography variant="caption" color="text.secondary">
+          {formatRelativeTime(popup.createdAt)}
+        </Typography>
+      </Box>
 
-          <Typography variant="caption" sx={captionTextStyles}>
-            {formatRelativeTime(popup.createdAt || popup.receivedAt)}
-          </Typography>
-        </Box>
-      </Paper>
-    </Slide>
+      <IconButton size="small" onClick={onClose}>
+        <CloseIcon fontSize="small" />
+      </IconButton>
+    </MotionPaper>
   );
 };
 
 export default NotificationPopup;
 
-import { alpha } from "@mui/material";
+const {
+  popupQueue,
+  removePopup,
+} = useNotifications();
 
-export const styles = {
-  drawerPaper: {
-    width: 400,
-    p: 0,
-    display: "flex",
-    flexDirection: "column",
-  },
-
-  header: {
-    p: 3,
-    borderBottom: "1px solid #E2E8F0",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 1,
-  },
-
-  notificationList: {
-    flex: 1,
-    overflowY: "auto",
-    p: 2,
-    display: "flex",
-    flexDirection: "column",
-    gap: 1.6,
-  },
-
-  emptyWrapper: {
-    flex: 1,
-    textAlign: "center",
-    mt: 4,
-    color: "text.secondary",
-  },
-
-  footer: {
-    p: 2,
-    borderTop: "1px solid #E2E8F0",
-  },
-
-  chipContainer: {
-    display: "flex",
-    gap: 1,
-    mt: 1,
-  },
-
-  chipBox: {
-    m: 1,
-  },
-
-  notificationPaper: (isRead) => ({
-    p: 2,
-    m: 1.3,
-    borderRadius: 2,
-    border: isRead ? "1px solid #E2E8F0" : "1px solid #5D3FD3",
-    backgroundColor: isRead ? alpha("#5D3FD3", 0.06) : "#FFFFFF",
-    transition: "all 0.25s ease",
-    cursor: "pointer",
-    "&:hover": {
-      backgroundColor: isRead ? alpha("#5D3FD3", 0.1) : alpha("#A28DF0", 0.15),
-      transform: "translateY(-2px)",
-    },
-  }),
-};
-
-export const paperStyles = {
-  position: "fixed",
-  top: 16,
-  right: 16,
-  zIndex: 3000,
-  p: 2,
-  pr: 2.5,
-  borderRadius: 1,
-  display: "flex",
-  alignItems: "center",
-  gap: 1.5,
-  width: { xs: "90%", sm: 380 },
-  backgroundColor: "rgba(255,255,255,0.7)",
-  backdropFilter: "blur(10px)",
-  cursor: "pointer",
-  boxShadow: "0 8px 20px rgba(0,0,0,0.15)",
-  transition: "all 0.25s ease",
-  "&:hover": {
-    transform: "scale(1.015)",
-    boxShadow: "0 10px 24px rgba(0,0,0,0.22)",
-  },
-};
-
-export const avatarStyles = {
-  bgcolor: "#5D3FD3",
-  width: 44,
-  height: 44,
-};
-
-export const iconStyles = {
-  fontSize: 22,
-};
-
-export const menuTitleStyles = {
-  mb: 0.2,
-};
-
-export const messageTextStyles = {
-  mb: 0.3,
-  fontSize: "0.85rem",
-  color: "text.primary",
-};
-
-export const captionTextStyles = {
-  color: "text.secondary",
-};
-
-
-
+<NotificationPopupStack
+  popups={popupQueue}
+  onClose={removePopup}
+  onClick={(popup) => {
+    removePopup(popup.popupId);
+    // optional: navigate or mark read
+  }}
+/>
