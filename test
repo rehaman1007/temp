@@ -1,10 +1,11 @@
 // useNotifications.js
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import useApi from "./useApi";
 import useStreamApi from "./useStreamApi";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
 
 const BASE_URL = "/NS/notifications";
+const POPUP_DURATION = 5000;
 
 const useNotifications = () => {
   const { callApi } = useApi();
@@ -15,13 +16,14 @@ const useNotifications = () => {
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const [popNotification, setPopNotification] = useState(null);
-  const [popupQueue, setPopupQueue] = useState([]);
 
+  /** ✅ NEW POPUP QUEUE */
+  const [popupQueue, setPopupQueue] = useState([]);
   const popupTimers = useRef({});
+
   const size = 10;
 
-  /** --- Fetch unread count --- **/
+  /* ---------------- FETCH UNREAD COUNT ---------------- */
   const fetchUnreadCount = useCallback(async () => {
     try {
       const data = await callApi(`${BASE_URL}/unread-count`);
@@ -31,7 +33,7 @@ const useNotifications = () => {
     }
   }, [callApi]);
 
-  /** --- Fetch notification history (paged) --- **/
+  /* ---------------- FETCH HISTORY ---------------- */
   const fetchHistory = useCallback(
     async (page = 0) => {
       try {
@@ -47,10 +49,10 @@ const useNotifications = () => {
         console.error("Failed to fetch notifications:", err);
       }
     },
-    [callApi, size]
+    [callApi]
   );
 
-  /** --- Mark as read --- **/
+  /* ---------------- MARK READ ---------------- */
   const markAsRead = useCallback(
     async (id) => {
       try {
@@ -70,7 +72,6 @@ const useNotifications = () => {
     [callApi, showSnackbar]
   );
 
-  /** --- Mark all as read --- **/
   const markAllAsRead = useCallback(async () => {
     try {
       const response = await callApi(`${BASE_URL}/read-all`, {}, "POST");
@@ -85,36 +86,7 @@ const useNotifications = () => {
     }
   }, [callApi, showSnackbar]);
 
-  /** --- SSE stream + initial load (run once, not on each menu change) --- **/
-  useEffect(() => {
-    // Initial load
-    fetchUnreadCount();
-    fetchHistory(0); // first page
-
-    // Start live stream
-    startStream(`${BASE_URL}/stream`, {
-      onMessage: (newNotification) => {
-        console.log("newNotification >", newNotification);
-      },
-    });
-
-    // Cleanup on unmount
-    return () => {
-      stopStream();
-    };
-    // We intentionally do NOT add fetchUnreadCount / fetchHistory to deps,
-    // to avoid re-running this effect on every callApi/xRequestType/menu change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startStream, stopStream]);
-
-  /** --- Show popup for 5 seconds --- **/
-  const triggerPopup = useCallback((notif) => {
-    setPopNotification(notif);
-    if (triggerPopup.timer) clearTimeout(triggerPopup.timer);
-    triggerPopup.timer = setTimeout(() => setPopNotification(null), 5000);
-  }, []);
-
-  /** ---------------- POPUP QUEUE ---------------- */
+  /* ---------------- POPUP QUEUE ---------------- */
   const addPopup = useCallback((notif) => {
     const popupId = `${notif.id}-${Date.now()}`;
 
@@ -134,16 +106,29 @@ const useNotifications = () => {
     }
   }, []);
 
-  /** --- When new message arrives via SSE --- **/
+  /* ---------------- INITIAL LOAD + SSE ---------------- */
   useEffect(() => {
-    if (lastMessage) {
-      setNotifications((prev) => [lastMessage, ...prev]);
-      setUnreadCount((prev) => prev + 1);
-      triggerPopup(lastMessage);
-    }
-  }, [lastMessage, triggerPopup]);
+    fetchUnreadCount();
+    fetchHistory(0);
 
-  /** --- Pagination helper --- **/
+    startStream(`${BASE_URL}/stream`, { onMessage: () => {} });
+
+    return () => stopStream();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ---------------- ON NEW SSE MESSAGE ---------------- */
+  useEffect(() => {
+    if (!lastMessage) return;
+
+    setNotifications((prev) => [lastMessage, ...prev]);
+    setUnreadCount((prev) => prev + 1);
+
+    /** ✅ QUEUE-BASED POPUP */
+    addPopup(lastMessage);
+  }, [lastMessage, addPopup]);
+
+  /* ---------------- PAGINATION ---------------- */
   const loadMore = useCallback(() => {
     if (hasMore) fetchHistory(pageNumber + 1);
   }, [hasMore, fetchHistory, pageNumber]);
@@ -159,8 +144,10 @@ const useNotifications = () => {
     stopStream,
     loadMore,
     hasMore,
-    popNotification,
-    setPopNotification,
+
+    /** ✅ NEW API */
+    popupQueue,
+    removePopup,
   };
 };
 
