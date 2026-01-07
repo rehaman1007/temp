@@ -1,32 +1,118 @@
 // useNotifications.js
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import useApi from "./useApi";
 import useStreamApi from "./useStreamApi";
 import useCustomSnackbar from "../utils/useCustomSnackbar";
 
 const BASE_URL = "/NS/notifications";
-const POPUP_DURATION = 5000;
 
 const useNotifications = () => {
   const { callApi } = useApi();
   const { showSnackbar } = useCustomSnackbar();
   const { startStream, stopStream, lastMessage, connected } = useStreamApi();
 
+  const [pageNumber, setPageNumber] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [popNotification, setPopNotification] = useState(null);
   const [popupQueue, setPopupQueue] = useState([]);
 
   const popupTimers = useRef({});
+  const size = 10;
 
-  /** ---------------- FETCH UNREAD COUNT ---------------- */
+  /** --- Fetch unread count --- **/
   const fetchUnreadCount = useCallback(async () => {
     try {
       const data = await callApi(`${BASE_URL}/unread-count`);
       if (data?.count !== undefined) setUnreadCount(data.count);
     } catch (err) {
-      console.error(err);
+      console.error("Failed to fetch unread count:", err);
     }
   }, [callApi]);
+
+  /** --- Fetch notification history (paged) --- **/
+  const fetchHistory = useCallback(
+    async (page = 0) => {
+      try {
+        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
+        const newItems = data?.content || [];
+
+        setNotifications((prev) =>
+          page === 0 ? newItems : [...prev, ...newItems]
+        );
+        setHasMore(!data?.last);
+        setPageNumber(page);
+      } catch (err) {
+        console.error("Failed to fetch notifications:", err);
+      }
+    },
+    [callApi, size]
+  );
+
+  /** --- Mark as read --- **/
+  const markAsRead = useCallback(
+    async (id) => {
+      try {
+        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
+        if (response) {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id ? { ...n, read: true } : n))
+          );
+          setUnreadCount((prev) => Math.max(prev - 1, 0));
+        } else {
+          showSnackbar("Failed to mark as read", "error");
+        }
+      } catch (err) {
+        console.error("Mark as read failed:", err);
+      }
+    },
+    [callApi, showSnackbar]
+  );
+
+  /** --- Mark all as read --- **/
+  const markAllAsRead = useCallback(async () => {
+    try {
+      const response = await callApi(`${BASE_URL}/read-all`, {}, "POST");
+      if (response) {
+        setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+        setUnreadCount(0);
+      } else {
+        showSnackbar("Failed to mark all notifications as read", "error");
+      }
+    } catch (err) {
+      console.error("Mark all as read failed:", err);
+    }
+  }, [callApi, showSnackbar]);
+
+  /** --- SSE stream + initial load (run once, not on each menu change) --- **/
+  useEffect(() => {
+    // Initial load
+    fetchUnreadCount();
+    fetchHistory(0); // first page
+
+    // Start live stream
+    startStream(`${BASE_URL}/stream`, {
+      onMessage: (newNotification) => {
+        console.log("newNotification >", newNotification);
+      },
+    });
+
+    // Cleanup on unmount
+    return () => {
+      stopStream();
+    };
+    // We intentionally do NOT add fetchUnreadCount / fetchHistory to deps,
+    // to avoid re-running this effect on every callApi/xRequestType/menu change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startStream, stopStream]);
+
+  /** --- Show popup for 5 seconds --- **/
+  const triggerPopup = useCallback((notif) => {
+    setPopNotification(notif);
+    if (triggerPopup.timer) clearTimeout(triggerPopup.timer);
+    triggerPopup.timer = setTimeout(() => setPopNotification(null), 5000);
+  }, []);
 
   /** ---------------- POPUP QUEUE ---------------- */
   const addPopup = useCallback((notif) => {
@@ -48,148 +134,34 @@ const useNotifications = () => {
     }
   }, []);
 
-  /** ---------------- SSE STREAM ---------------- */
+  /** --- When new message arrives via SSE --- **/
   useEffect(() => {
-    fetchUnreadCount();
+    if (lastMessage) {
+      setNotifications((prev) => [lastMessage, ...prev]);
+      setUnreadCount((prev) => prev + 1);
+      triggerPopup(lastMessage);
+    }
+  }, [lastMessage, triggerPopup]);
 
-    startStream(`${BASE_URL}/stream`, {
-      onMessage: () => {},
-    });
-
-    return () => stopStream();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /** ---------------- ON NEW NOTIFICATION ---------------- */
-  useEffect(() => {
-    if (!lastMessage) return;
-
-    setNotifications((prev) => [lastMessage, ...prev]);
-    setUnreadCount((prev) => prev + 1);
-    addPopup(lastMessage);
-  }, [lastMessage, addPopup]);
+  /** --- Pagination helper --- **/
+  const loadMore = useCallback(() => {
+    if (hasMore) fetchHistory(pageNumber + 1);
+  }, [hasMore, fetchHistory, pageNumber]);
 
   return {
     connected,
     notifications,
     unreadCount,
-    popupQueue,
-    removePopup,
+    fetchUnreadCount,
+    fetchHistory,
+    markAsRead,
+    markAllAsRead,
+    stopStream,
+    loadMore,
+    hasMore,
+    popNotification,
+    setPopNotification,
   };
 };
 
 export default useNotifications;
-
-import React from "react";
-import { Stack } from "@mui/material";
-import { AnimatePresence } from "framer-motion";
-import NotificationPopup from "./NotificationPopup";
-
-const NotificationPopupStack = ({ popups, onClose, onClick }) => {
-  return (
-    <Stack
-      spacing={1.2}
-      sx={{
-        position: "fixed",
-        top: 16,
-        right: 16,
-        zIndex: 3000,
-      }}
-    >
-      <AnimatePresence>
-        {popups.map((popup) => (
-          <NotificationPopup
-            key={popup.popupId}
-            popup={popup}
-            onClose={() => onClose(popup.popupId)}
-            onClick={() => onClick(popup)}
-          />
-        ))}
-      </AnimatePresence>
-    </Stack>
-  );
-};
-
-export default NotificationPopupStack;
-
-import React from "react";
-import {
-  Box,
-  Typography,
-  Avatar,
-  Paper,
-  IconButton,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
-import { motion } from "framer-motion";
-import { getIconComponent } from "../utils/IconUtils";
-import { useSelector } from "react-redux";
-import { formatRelativeTime } from "../utils/CommonUtilities";
-import {
-  paperStyles,
-  avatarStyles,
-  iconStyles,
-} from "./NotificationStyles";
-
-const MotionPaper = motion(Paper);
-
-const NotificationPopup = ({ popup, onClose, onClick }) => {
-  const menuItems = useSelector((state) => state.menus.menus);
-
-  const menu = menuItems.find((m) => m.route === popup.linkUrl);
-  const IconComp = getIconComponent(menu?.icon || "NotificationsActive");
-
-  return (
-    <MotionPaper
-      layout
-      initial={{ opacity: 0, x: 80 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: 80 }}
-      transition={{ duration: 0.25 }}
-      elevation={10}
-      sx={paperStyles}
-    >
-      <Avatar sx={avatarStyles}>
-        <IconComp style={iconStyles} />
-      </Avatar>
-
-      <Box
-        flex={1}
-        sx={{ cursor: "pointer" }}
-        onClick={onClick}
-      >
-        <Typography fontWeight={700}>
-          {menu?.title || "Notification"}
-        </Typography>
-
-        <Typography variant="body2">
-          {popup.message}
-        </Typography>
-
-        <Typography variant="caption" color="text.secondary">
-          {formatRelativeTime(popup.createdAt)}
-        </Typography>
-      </Box>
-
-      <IconButton size="small" onClick={onClose}>
-        <CloseIcon fontSize="small" />
-      </IconButton>
-    </MotionPaper>
-  );
-};
-
-export default NotificationPopup;
-
-const {
-  popupQueue,
-  removePopup,
-} = useNotifications();
-
-<NotificationPopupStack
-  popups={popupQueue}
-  onClose={removePopup}
-  onClick={(popup) => {
-    removePopup(popup.popupId);
-    // optional: navigate or mark read
-  }}
-/>
