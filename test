@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Box,
   Dialog,
@@ -19,6 +19,8 @@ import InfoIcon from "@mui/icons-material/Info";
 import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
 import EditDocumentIcon from "@mui/icons-material/EditDocument";
 import AccountCircleIcon from "@mui/icons-material/AccountCircle";
+import { useSelector } from "react-redux";
+
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
 import RequestAnalytics from "../common/RequestAnalytics";
@@ -29,13 +31,15 @@ import {
 import CustomChip from "../../utils/CustomChip";
 import { styles } from "../common/CommonRequestScreenStyles";
 import LoadingOverlay from "../../utils/LoadingOverlay";
-import { useSelector } from "react-redux";
 import RoleRequestView from "./components/RoleRequestView";
+
+const REMARKS_REGEX = /^[a-zA-Z0-9\s()&,./\\-]*$/;
 
 export default function RoleApprovals() {
   const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
   const { callApi } = useApi();
   const showSnackBar = useCustomSnackbar();
+
   const [rows, setRows] = useState([]);
   const [remarks, setRemarks] = useState("");
   const [viewOpen, setViewOpen] = useState(false);
@@ -46,6 +50,7 @@ export default function RoleApprovals() {
   const [selectedType, setSelectedType] = useState(null);
   const [selectedRequestId, setSelectedRequestId] = useState(null);
 
+  /* -------------------- API -------------------- */
   const fetchData = async () => {
     try {
       const response = await callApi(
@@ -53,9 +58,10 @@ export default function RoleApprovals() {
         {},
         "GET"
       );
+
       const result = response?.result?.pendingRequests || [];
-      const processedResult = result.map((row) => {
-        const parsed = JSON.parse(row.requestPayload) || {};
+      const processed = result.map((row) => {
+        const parsed = JSON.parse(row.requestPayload || "{}");
         return {
           ...row,
           ...parsed,
@@ -68,9 +74,9 @@ export default function RoleApprovals() {
           reqDate: row.requestDate,
         };
       });
-      setRows(processedResult);
+
+      setRows(processed);
     } catch (err) {
-      console.error(err);
       showSnackBar("Error fetching data", "error");
     } finally {
       setDataGridLoading(false);
@@ -81,6 +87,17 @@ export default function RoleApprovals() {
     fetchData();
   }, []);
 
+  /* -------------------- REMARKS (NO LAG) -------------------- */
+  const handleRemarksChange = useCallback((e) => {
+    const value = e.target.value;
+
+    // silently block invalid characters
+    if (!REMARKS_REGEX.test(value)) return;
+
+    setRemarks(value);
+  }, []);
+
+  /* -------------------- CONFIRM -------------------- */
   const handleConfirm = async () => {
     if (selectedType === "reject" && remarks.trim().length < 5) {
       showSnackBar(
@@ -89,8 +106,8 @@ export default function RoleApprovals() {
       );
       return;
     }
-    setLoading(true);
 
+    setLoading(true);
     try {
       const payload = {
         requestId: selectedRequestId,
@@ -105,13 +122,12 @@ export default function RoleApprovals() {
       );
 
       if (res?.result?.status) {
-        showSnackBar(res?.result?.message, "success");
+        showSnackBar(res.result.message, "success");
         fetchData();
       } else {
         showSnackBar("Failed to process request", "error");
       }
     } catch (err) {
-      console.error(err);
       showSnackBar("Error while processing request", "error");
     } finally {
       closeConfirmDialog();
@@ -130,68 +146,52 @@ export default function RoleApprovals() {
     setConfirmDialog(false);
   };
 
-  const regex = /^[a-zA-Z0-9\s()&,./\\-]*$/;
-  const handleChange = (e) => {
-    const value = e.target.value;
-    const error = regex.test(value)
-      ? ""
-      : "Only alphabets, spaces and ,()&/-. are allowed!";
-    if (error) {
-      showSnackBar(error, "error");
-      return;
-    }
-    setRemarks(value);
-  };
-
+  /* -------------------- GRID -------------------- */
   const columns = [
-    { field: "roleName", headerName: "Role Name", flex: 0.5 },
-    { field: "description", headerName: "Role Name", flex: 1.2 },
+    { field: "roleName", headerName: "Role Name", flex: 0.6 },
+    { field: "description", headerName: "Description", flex: 1.2 },
     {
       field: "requestType",
       headerName: "Type",
       flex: 0.6,
-      headerAlign: "center",
       align: "center",
-      renderCell: (params) => {
-        const val = params.value;
-        return (
-          <CustomChip
-            icon={
-              val === "CREATE" ? (
-                <AddBoxIcon />
-              ) : val === "DELETE" ? (
-                <AutoDeleteIcon />
-              ) : (
-                <EditDocumentIcon />
-              )
-            }
-            label={toPascalKebabCase(val)}
-            color={
-              val === "CREATE"
-                ? "success"
-                : val === "DELETE"
-                ? "error"
-                : "warning"
-            }
-            size="small"
-            variant="outlined"
-          />
-        );
-      },
+      headerAlign: "center",
+      renderCell: ({ value }) => (
+        <CustomChip
+          icon={
+            value === "CREATE" ? (
+              <AddBoxIcon />
+            ) : value === "DELETE" ? (
+              <AutoDeleteIcon />
+            ) : (
+              <EditDocumentIcon />
+            )
+          }
+          label={toPascalKebabCase(value)}
+          color={
+            value === "CREATE"
+              ? "success"
+              : value === "DELETE"
+              ? "error"
+              : "warning"
+          }
+          size="small"
+          variant="outlined"
+        />
+      ),
     },
-
     {
       field: "requestorUserId",
       headerName: "Creator",
       flex: 0.8,
-      headerAlign: "center",
       align: "center",
-      renderCell: (params) => (
+      headerAlign: "center",
+      renderCell: ({ value }) => (
         <CustomChip
           icon={<AccountCircleIcon />}
           size="small"
           color="info"
-          label={params.value}
+          label={value}
           variant="outlined"
         />
       ),
@@ -200,11 +200,11 @@ export default function RoleApprovals() {
       field: "requestDate",
       headerName: "Requested Date",
       flex: 1,
-      headerAlign: "center",
       align: "center",
-      renderCell: (p) => (
-        <Typography variant="body1" component="span" sx={styles.requestDate}>
-          {timeStampFormatter(p.value)}
+      headerAlign: "center",
+      renderCell: ({ value }) => (
+        <Typography sx={styles.requestDate}>
+          {timeStampFormatter(value)}
         </Typography>
       ),
     },
@@ -212,21 +212,14 @@ export default function RoleApprovals() {
       field: "actions",
       headerName: "Actions",
       flex: 0.7,
-      headerAlign: "center",
       align: "center",
-      filterable: false,
+      headerAlign: "center",
       sortable: false,
-      disableColumnMenu: true,
-      renderCell: (p) => (
-        <Stack
-          direction="row"
-          spacing={1}
-          alignItems="center"
-          justifyContent="center"
-          sx={{ height: "100%" }}
-        >
+      filterable: false,
+      renderCell: ({ row }) => (
+        <Stack direction="row" spacing={1}>
           <Tooltip title="View">
-            <IconButton onClick={() => setViewData(p.row) || setViewOpen(true)}>
+            <IconButton onClick={() => setViewData(row) || setViewOpen(true)}>
               <Visibility />
             </IconButton>
           </Tooltip>
@@ -234,7 +227,7 @@ export default function RoleApprovals() {
           <Tooltip title="Approve">
             <IconButton
               color="success"
-              onClick={() => openConfirmDialog("accept", p.row.requestId)}
+              onClick={() => openConfirmDialog("accept", row.requestId)}
             >
               <Check />
             </IconButton>
@@ -243,7 +236,7 @@ export default function RoleApprovals() {
           <Tooltip title="Reject">
             <IconButton
               color="error"
-              onClick={() => openConfirmDialog("reject", p.row.requestId)}
+              onClick={() => openConfirmDialog("reject", row.requestId)}
             >
               <Clear />
             </IconButton>
@@ -255,35 +248,32 @@ export default function RoleApprovals() {
 
   return (
     <Box sx={styles.container}>
-      <Box>
-        <RequestAnalytics data={rows} />
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          loading={dataGridLoading}
-          disableRowSelectionOnClick
-          pageSizeOptions={[5, 10, 25, 50]}
-          initialState={{
-            pagination: { paginationModel: { pageSize: 10, page: 0 } },
-            sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
-          }}
-          getRowId={(row) => row.requestId}
-          sx={styles.dataGrid}
-          slots={{
-            noRowsOverlay: () => (
-              <Stack height="100%" alignItems="center" justifyContent="center">
-                <InfoIcon
-                  sx={{ fontSize: 48, color: "text.secondary", mb: 2 }}
-                />
-                <Typography variant="h6">No Pending Requests Found</Typography>
-                <Typography>
-                  All {selectedMenuItem.title} have been processed.
-                </Typography>
-              </Stack>
-            ),
-          }}
-        />
-      </Box>
+      <RequestAnalytics data={rows} />
+
+      <DataGrid
+        rows={rows}
+        columns={columns}
+        loading={dataGridLoading}
+        disableRowSelectionOnClick
+        pageSizeOptions={[5, 10, 25, 50]}
+        getRowId={(row) => row.requestId}
+        initialState={{
+          pagination: { paginationModel: { pageSize: 10, page: 0 } },
+          sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
+        }}
+        sx={styles.dataGrid}
+        slots={{
+          noRowsOverlay: () => (
+            <Stack height="100%" alignItems="center" justifyContent="center">
+              <InfoIcon sx={{ fontSize: 48, mb: 2 }} />
+              <Typography variant="h6">No Pending Requests Found</Typography>
+              <Typography>
+                All {selectedMenuItem.title} have been processed.
+              </Typography>
+            </Stack>
+          ),
+        }}
+      />
 
       <RoleRequestView
         open={viewOpen}
@@ -291,57 +281,55 @@ export default function RoleApprovals() {
         data={viewData}
       />
 
-      <Dialog
-        open={confirmDialog}
-        onClose={closeConfirmDialog}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle sx={{ fontWeight: 600 }}>
+      {/* ---------------- CONFIRM DIALOG ---------------- */}
+      <Dialog open={confirmDialog} onClose={closeConfirmDialog} maxWidth="sm" fullWidth>
+        <DialogTitle fontWeight={600}>
           {selectedType === "accept" ? "Confirm Approval" : "Confirm Rejection"}
         </DialogTitle>
+
         <DialogContent>
-          <Typography sx={{ p: 1 }}>
+          <Typography sx={{ mb: 1 }}>
             {selectedType === "accept"
               ? "Are you sure you want to approve this request?"
-              : "Are you sure you want to reject this request? Please enter remarks."}
+              : "Please provide remarks before rejecting."}
           </Typography>
+
           {selectedType === "reject" && (
             <TextField
               fullWidth
               label="Rejection Remarks *"
               value={remarks}
-              onChange={(e) => handleChange(e)}
+              onChange={handleRemarksChange}
               multiline
-              rows={2}
+              rows={3}
               margin="dense"
-              slotProps={{
-                htmlInput: {
-                  maxLength: 100,
-                },
-              }}
+              inputProps={{ maxLength: 100 }}
+              error={remarks.length > 0 && remarks.length < 5}
               helperText={
-                remarks?.length !== 0 && remarks?.length < 5
+                remarks.length === 0
+                  ? "Allowed 5–100 characters (alphabets, numbers, spaces, () & / - .)"
+                  : remarks.length < 5
                   ? "Enter at least 5 characters"
-                  : "Allowed 5-100 characters (alphabets, numbers, spaces,()&/-.)"
+                  : `${remarks.length}/100 characters`
               }
-              error={remarks?.length !== 0 && remarks?.length < 5}
             />
           )}
         </DialogContent>
+
         <DialogActions>
-          <Button onClick={closeConfirmDialog} variant="outlined">
+          <Button variant="outlined" onClick={closeConfirmDialog}>
             Cancel
           </Button>
           <Button
-            onClick={handleConfirm}
-            color={selectedType === "accept" ? "success" : "error"}
             variant="contained"
+            color={selectedType === "accept" ? "success" : "error"}
+            onClick={handleConfirm}
           >
             {selectedType === "accept" ? "Approve" : "Reject"}
           </Button>
         </DialogActions>
       </Dialog>
+
       <LoadingOverlay loading={loading} />
     </Box>
   );
