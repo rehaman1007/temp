@@ -1,264 +1,140 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import { resolveConfig } from "../config/EnvironmentConfig";
+import { useCallback, useState } from "react";
 
-const useStreamApi = () => {
-  const token = useSelector((state) => state.auth.token);
+export const useTaskProgress = () => {
+  const [tasks, setTasks] = useState({}); 
+  // { taskId: { percentage, status, message } }
 
-  const controllerRef = useRef(null);
-  const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState(null);
-
-  const startStream = useCallback(
-    (url, { onMessage, onOpen, onError } = {}) => {
-      if (!token) return console.warn("No token, cannot start SSE stream");
-      const parts = url.split("/");
-      const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
-      parts[1] = resolved;
-      const Final_Url = parts.slice(1).join("/");
-
-      // Cancel any existing connection
-      if (controllerRef.current) controllerRef.current.abort();
-
-      const controller = new AbortController();
-      controllerRef.current = controller;
-
-      fetchEventSource(Final_Url, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-
-        onopen(response) {
-          if (response.ok && response.status === 200) {
-            console.log("SSE Connection established");
-            setConnected(true);
-            onOpen?.(response);
-          } else {
-            console.error("SSE Connection failed:", response.status);
-          }
-        },
-
-        onmessage(event) {
-          if (event.event === "connected") {
-            // console.log("Server connected:", event.data);
-            return;
-          }
-          if (event.event === "new_notification") {
-            try {
-              const data = JSON.parse(event.data);
-              setLastMessage(data);
-              onMessage?.(data);
-            } catch (err) {
-              console.error("SSE message parse error:", err);
-            }
-          }
-        },
-
-        onerror(err) {
-          console.error("SSE Error:", err);
-          setConnected(false);
-          onError?.(err);
-        },
-      });
-    },
-    [token]
-  );
-
-  const stopStream = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
-      controllerRef.current = null;
-      setConnected(false);
-      console.log("SSE connection stopped.");
-    }
+  const upsertTask = useCallback((task) => {
+    setTasks((prev) => ({
+      ...prev,
+      [task.taskId]: task,
+    }));
   }, []);
 
-  useEffect(() => stopStream, [stopStream]);
+  const removeTask = useCallback((taskId) => {
+    setTasks((prev) => {
+      const copy = { ...prev };
+      delete copy[taskId];
+      return copy;
+    });
+  }, []);
 
-  return { connected, lastMessage, startStream, stopStream };
+  const activeCount = Object.values(tasks).filter(
+    (t) => t.percentage < 100
+  ).length;
+
+  return { tasks, upsertTask, removeTask, activeCount };
 };
 
-export default useStreamApi;
-
-
-import React, { useState } from "react";
 import {
-  Avatar,
-  Badge,
   Box,
+  Badge,
+  CircularProgress,
   IconButton,
-  Toolbar,
-  Typography,
-  useTheme,
-  useMediaQuery,
+  Tooltip,
 } from "@mui/material";
-import { Notifications, Menu as MenuIcon } from "@mui/icons-material";
-import { useSelector } from "react-redux";
+import AutorenewIcon from "@mui/icons-material/Autorenew";
 
-import { userAvatarCreator } from "../utils/userUtilities";
-import NotificationDrawer from "./NotificationDrawer";
-import ProfileDrawer from "./ProfileDrawer";
-import SearchBar from "./search/SearchBar";
-import fLogo from "../assets/Logos/Fincore_transperent.svg";
-import useNotifications from "../hooks/useNotifications";
-import NotificationPopup from "./NotificationPopup";
-
-const LayoutHeader = ({
-  drawerWidth,
-  title, // currently not shown (commented in JSX), but kept for future
-  navigateToPage,
-  handleDrawerToggle,
-}) => {
-  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
-  const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
-
-  const {
-    notifications,
-    markAsRead,
-    markAllAsRead,
-    loadMore,
-    hasMore,
-    unreadCount,
-    popNotification,
-    setPopNotification,
-  } = useNotifications();
-
-  const user = useSelector((state) => state.auth.user);
-  const theme = useTheme();
-  const isSmallScreen = useMediaQuery(theme.breakpoints.down("lg"));
+const TaskProgressIcon = ({ activeCount, onClick }) => {
+  if (!activeCount) return null;
 
   return (
-    <Box
-      position="fixed"
-      sx={{
-        width: { xs: "100%", lg: `calc(100% - ${drawerWidth}px)` },
-        right: 0,
-        top: 0,
-        zIndex: 1200,
-        background:
-          "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
-      }}
-    >
-      <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
-        {/* Left side section */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          {isSmallScreen && (
-            <IconButton
-              onClick={handleDrawerToggle}
-              sx={{ color: "text.primary" }}
-            >
-              <MenuIcon />
-            </IconButton>
-          )}
+    <Tooltip title={`${activeCount} task(s) running`}>
+      <IconButton onClick={onClick}>
+        <Badge badgeContent={activeCount} color="warning">
+          <Box sx={{ position: "relative" }}>
+            <AutorenewIcon sx={{ animation: "spin 1.2s linear infinite" }} />
+            <CircularProgress
+              size={36}
+              sx={{
+                position: "absolute",
+                top: -6,
+                left: -6,
+                zIndex: -1,
+              }}
+            />
+          </Box>
+        </Badge>
 
-          {isSmallScreen && (
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-              <img src={fLogo} alt="Logo" style={{ width: 40, height: 40 }} />
-              <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                FinCore
-              </Typography>
-            </Box>
-          )}
-
-          {/* If you want page title in header (desktop), uncomment this:
-          {!isSmallScreen && (
-            <Typography
-              variant="h6"
-              color="textPrimary"
-              sx={{ fontWeight: 600 }}
-            >
-              {title}
-            </Typography>
-          )} */}
-        </Box>
-
-        {/* Right side section */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <SearchBar navigateToPage={navigateToPage} />
-
-          <IconButton
-            color="inherit"
-            onClick={() => setNotificationDrawerOpen(true)}
-          >
-            {unreadCount > 0 ? (
-              <Badge badgeContent={unreadCount || ""} color="error">
-                <Notifications />
-              </Badge>
-            ) : (
-              <Notifications />
-            )}
-          </IconButton>
-
-          <Avatar
-            onClick={() => setProfileDrawerOpen(true)}
-            sx={{
-              width: 32,
-              height: 32,
-              color: "primary.contrastText",
-              backgroundColor: "primary.main",
-              cursor: "pointer",
-              ml: 1,
-            }}
-          >
-            {userAvatarCreator(user)}
-          </Avatar>
-        </Box>
-      </Toolbar>
-
-      <NotificationDrawer
-        notificationDrawerOpen={notificationDrawerOpen}
-        setNotificationDrawerOpen={setNotificationDrawerOpen}
-        notifications={notifications}
-        markAsRead={markAsRead}
-        markAllAsRead={markAllAsRead}
-        loadMore={loadMore}
-        hasMore={hasMore}
-      />
-
-      <ProfileDrawer
-        profileDrawerOpen={profileDrawerOpen}
-        setProfileDrawerOpen={setProfileDrawerOpen}
-      />
-
-      {popNotification && (
-        <NotificationPopup
-          popup={popNotification}
-          handleNotificationClick={() => {
-            setNotificationDrawerOpen(true);
-            setPopNotification(null);
-          }}
-          onClose={() => {
-            setPopNotification(null);
-          }}
-        />
-      )}
-    </Box>
+        <style>
+          {`@keyframes spin { 100% { transform: rotate(360deg); } }`}
+        </style>
+      </IconButton>
+    </Tooltip>
   );
 };
 
-export default React.memo(LayoutHeader);
+export default TaskProgressIcon;
 
-eventSource.onmessage = (event) => {
-   const data = JSON.parse(event.data);
-   if (event.type === 'new_notification') {
-       // 1. Update Badge Count
-       // 2. Add to Notification List
-       // 3. Show "New Message" Toast
-   }
-   else if (event.type === 'task_progress') {
-       // 1. Find existing "Progress Toast" for this taskId
-       // 2. Update its percentage bar
-       // 3. If percentage === 100, allow it to close after 3 seconds
-       updateProgressToast(data.taskId, data.percentage);
-   }
-};
-// sample task progress structure might be single or can be multiple
-{
- "taskId": "journal_17156291",
- "userId": "1015698",
- "percentage": 45,
- "status": "PROCESSING",
- "message": "Processing row 2500..."
+import {
+  Box,
+  Drawer,
+  LinearProgress,
+  Stack,
+  Typography,
+} from "@mui/material";
+
+const TaskProgressDrawer = ({ open, onClose, tasks }) => (
+  <Drawer anchor="right" open={open} onClose={onClose}>
+    <Box sx={{ width: 360, p: 2 }}>
+      <Typography variant="h6" mb={2}>
+        Running Tasks
+      </Typography>
+
+      <Stack spacing={2}>
+        {Object.values(tasks).map((task) => (
+          <Box key={task.taskId}>
+            <Typography variant="body2" fontWeight={600}>
+              {task.taskId}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {task.message}
+            </Typography>
+            <LinearProgress
+              variant="determinate"
+              value={task.percentage}
+              sx={{ height: 8, borderRadius: 1, mt: 1 }}
+            />
+            <Typography variant="caption">
+              {task.percentage}%
+            </Typography>
+          </Box>
+        ))}
+      </Stack>
+    </Box>
+  </Drawer>
+);
+
+export default TaskProgressDrawer;
+
+const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
+const {
+  tasks,
+  activeCount,
+} = useTaskProgress(); // lift to context in real app
+
+<TaskProgressIcon
+  activeCount={activeCount}
+  onClick={() => setTaskDrawerOpen(true)}
+/>
+
+<TaskProgressDrawer
+  open={taskDrawerOpen}
+  onClose={() => setTaskDrawerOpen(false)}
+  tasks={tasks}
+/>
+
+if (event.event === "task_progress") {
+  const data = JSON.parse(event.data);
+
+  upsertTask({
+    taskId: data.taskId,
+    percentage: data.percentage,
+    status: data.status,
+    message: data.message,
+  });
+
+  if (data.percentage === 100) {
+    setTimeout(() => removeTask(data.taskId), 3000);
+  }
 }
