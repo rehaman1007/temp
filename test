@@ -1,106 +1,241 @@
-const hasDuplicateRoleData = () => {
-  const name = form.roleName?.trim().toLowerCase();
-  const desc = form.description?.trim().toLowerCase();
+import { useEffect, useRef, useState, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import { resolveConfig } from "../config/EnvironmentConfig";
 
-  return rolesList.some((r) => {
-    // Ignore same role while modifying
-    if (form.roleId && r.roleId === form.roleId) return false;
+const useStreamApi = () => {
+  const token = useSelector((state) => state.auth.token);
 
-    const roleNameMatch =
-      r.roleName?.trim().toLowerCase() === name;
+  const controllerRef = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [lastMessage, setLastMessage] = useState(null);
 
-    const roleDescMatch =
-      r.description?.trim().toLowerCase() === desc;
+  const startStream = useCallback(
+    (url, { onMessage, onOpen, onError } = {}) => {
+      if (!token) return console.warn("No token, cannot start SSE stream");
+      const parts = url.split("/");
+      const service = parts[1];
+      const resolved = resolveConfig(`/${service}`);
+      parts[1] = resolved;
+      const Final_Url = parts.slice(1).join("/");
 
-    return roleNameMatch || roleDescMatch;
-  });
-};
+      // Cancel any existing connection
+      if (controllerRef.current) controllerRef.current.abort();
 
-// Duplicate role name / description check
-if (hasDuplicateRoleData()) {
-  snackbar(
-    "Role name or description already exists. Please use unique values.",
-    "warning"
+      const controller = new AbortController();
+      controllerRef.current = controller;
+
+      fetchEventSource(Final_Url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+
+        onopen(response) {
+          if (response.ok && response.status === 200) {
+            console.log("SSE Connection established");
+            setConnected(true);
+            onOpen?.(response);
+          } else {
+            console.error("SSE Connection failed:", response.status);
+          }
+        },
+
+        onmessage(event) {
+          if (event.event === "connected") {
+            // console.log("Server connected:", event.data);
+            return;
+          }
+          if (event.event === "new_notification") {
+            try {
+              const data = JSON.parse(event.data);
+              setLastMessage(data);
+              onMessage?.(data);
+            } catch (err) {
+              console.error("SSE message parse error:", err);
+            }
+          }
+        },
+
+        onerror(err) {
+          console.error("SSE Error:", err);
+          setConnected(false);
+          onError?.(err);
+        },
+      });
+    },
+    [token]
   );
-  return;
-}
 
-const handleSave = async () => {
-  if (!form.roleName || !form.description) {
-    snackbar("Kindly fill all the required fields.", "warning");
-    return;
-  }
-
-  if (form.roleName.trim().length < 3) {
-    snackbar("Kindly provide valid role name.", "warning");
-    return;
-  }
-
-  if (form.description.trim().length < 5) {
-    snackbar("Kindly provide valid role description.", "warning");
-    return;
-  }
-
-  if (selectedPermissions.length < 1) {
-    snackbar(
-      "Please select at least one permission for this role before saving",
-      "warning"
-    );
-    return;
-  }
-
-  // ✅ NEW CHECK
-  if (hasDuplicateRoleData()) {
-    snackbar(
-      "Role name or description already exists. Please use unique values.",
-      "warning"
-    );
-    return;
-  }
-
-  const updatedForm = {
-    ...form,
-    permissions: selectedPermissions.map((p) => ({
-      id: p.id,
-      title: p.title,
-      order: p.order,
-      icon: p.icon,
-      description: p.description,
-      menuSubmenu: p.menuSubmenu,
-    })),
-  };
-
-  // Existing "no change" check
-  if (_.isEqual(initialForm, updatedForm)) {
-    snackbar("Kindly modify the data before saving", "warning");
-    return;
-  }
-
-  setForm(updatedForm);
-
-  const payload = {
-    requestType: form.roleId ? "MODIFY" : "CREATE",
-    targetRoleId: form.roleId || "",
-    requestPayload: JSON.stringify(updatedForm),
-  };
-
-  try {
-    const response = await callApi(
-      "/UM/role/create-role-request",
-      payload,
-      "POST"
-    );
-    if (response?.message) {
-      snackbar(
-        form.roleId
-          ? "Role update request submitted successfully"
-          : "Role creation request submitted successfully",
-        "success"
-      );
-      onClose();
-      fetchRoles();
+  const stopStream = useCallback(() => {
+    if (controllerRef.current) {
+      controllerRef.current.abort();
+      controllerRef.current = null;
+      setConnected(false);
+      console.log("SSE connection stopped.");
     }
-  } catch (error) {
-    snackbar(error?.message || "Request failed", "error");
-  }
+  }, []);
+
+  useEffect(() => stopStream, [stopStream]);
+
+  return { connected, lastMessage, startStream, stopStream };
 };
+
+export default useStreamApi;
+
+
+import React, { useState } from "react";
+import {
+  Avatar,
+  Badge,
+  Box,
+  IconButton,
+  Toolbar,
+  Typography,
+  useTheme,
+  useMediaQuery,
+} from "@mui/material";
+import { Notifications, Menu as MenuIcon } from "@mui/icons-material";
+import { useSelector } from "react-redux";
+
+import { userAvatarCreator } from "../utils/userUtilities";
+import NotificationDrawer from "./NotificationDrawer";
+import ProfileDrawer from "./ProfileDrawer";
+import SearchBar from "./search/SearchBar";
+import fLogo from "../assets/Logos/Fincore_transperent.svg";
+import useNotifications from "../hooks/useNotifications";
+import NotificationPopup from "./NotificationPopup";
+
+const LayoutHeader = ({
+  drawerWidth,
+  title, // currently not shown (commented in JSX), but kept for future
+  navigateToPage,
+  handleDrawerToggle,
+}) => {
+  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
+  const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
+
+  const {
+    notifications,
+    markAsRead,
+    markAllAsRead,
+    loadMore,
+    hasMore,
+    unreadCount,
+    popNotification,
+    setPopNotification,
+  } = useNotifications();
+
+  const user = useSelector((state) => state.auth.user);
+  const theme = useTheme();
+  const isSmallScreen = useMediaQuery(theme.breakpoints.down("lg"));
+
+  return (
+    <Box
+      position="fixed"
+      sx={{
+        width: { xs: "100%", lg: `calc(100% - ${drawerWidth}px)` },
+        right: 0,
+        top: 0,
+        zIndex: 1200,
+        background:
+          "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
+      }}
+    >
+      <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
+        {/* Left side section */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          {isSmallScreen && (
+            <IconButton
+              onClick={handleDrawerToggle}
+              sx={{ color: "text.primary" }}
+            >
+              <MenuIcon />
+            </IconButton>
+          )}
+
+          {isSmallScreen && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <img src={fLogo} alt="Logo" style={{ width: 40, height: 40 }} />
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                FinCore
+              </Typography>
+            </Box>
+          )}
+
+          {/* If you want page title in header (desktop), uncomment this:
+          {!isSmallScreen && (
+            <Typography
+              variant="h6"
+              color="textPrimary"
+              sx={{ fontWeight: 600 }}
+            >
+              {title}
+            </Typography>
+          )} */}
+        </Box>
+
+        {/* Right side section */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <SearchBar navigateToPage={navigateToPage} />
+
+          <IconButton
+            color="inherit"
+            onClick={() => setNotificationDrawerOpen(true)}
+          >
+            {unreadCount > 0 ? (
+              <Badge badgeContent={unreadCount || ""} color="error">
+                <Notifications />
+              </Badge>
+            ) : (
+              <Notifications />
+            )}
+          </IconButton>
+
+          <Avatar
+            onClick={() => setProfileDrawerOpen(true)}
+            sx={{
+              width: 32,
+              height: 32,
+              color: "primary.contrastText",
+              backgroundColor: "primary.main",
+              cursor: "pointer",
+              ml: 1,
+            }}
+          >
+            {userAvatarCreator(user)}
+          </Avatar>
+        </Box>
+      </Toolbar>
+
+      <NotificationDrawer
+        notificationDrawerOpen={notificationDrawerOpen}
+        setNotificationDrawerOpen={setNotificationDrawerOpen}
+        notifications={notifications}
+        markAsRead={markAsRead}
+        markAllAsRead={markAllAsRead}
+        loadMore={loadMore}
+        hasMore={hasMore}
+      />
+
+      <ProfileDrawer
+        profileDrawerOpen={profileDrawerOpen}
+        setProfileDrawerOpen={setProfileDrawerOpen}
+      />
+
+      {popNotification && (
+        <NotificationPopup
+          popup={popNotification}
+          handleNotificationClick={() => {
+            setNotificationDrawerOpen(true);
+            setPopNotification(null);
+          }}
+          onClose={() => {
+            setPopNotification(null);
+          }}
+        />
+      )}
+    </Box>
+  );
+};
+
+export default React.memo(LayoutHeader);
