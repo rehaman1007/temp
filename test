@@ -1,154 +1,73 @@
-// useNotifications.js
-import { useState, useEffect, useCallback, useRef } from "react";
-import useApi from "./useApi";
-import useStreamApi from "./useStreamApi";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
+import React from "react";
+import {
+  Box,
+  Typography,
+  Avatar,
+  Slide,
+  Paper,
+  IconButton,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import { getIconComponent } from "../utils/IconUtils";
+import { useSelector } from "react-redux";
+import { formatRelativeTime } from "../utils/CommonUtilities";
+// Import styles from the new file
+import {
+  paperStyles,
+  avatarStyles,
+  iconStyles,
+  menuTitleStyles,
+  messageTextStyles,
+  captionTextStyles,
+} from "./NotificationStyles"; // Adjust path as needed
 
-const BASE_URL = "/NS/notifications";
-const POPUP_DURATION = 5000;
+const NotificationPopup = ({ popup, handleNotificationClick, onClose }) => {
+  const menuItems = useSelector((state) => state.menus.menus);
 
-const useNotifications = () => {
-  const { callApi } = useApi();
-  const { showSnackbar } = useCustomSnackbar();
-  const { startStream, stopStream, lastMessage, connected } = useStreamApi();
+  if (!popup) return null;
 
-  const [pageNumber, setPageNumber] = useState(0);
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
+  /** Find menu icon & title */
+  const menu = menuItems.find((m) => m.route === popup.linkUrl);
+  const IconComp = getIconComponent(menu?.icon || "NotificationsActive");
+  const menuTitle = menu?.title || "FinCore";
 
-  /** ✅ NEW POPUP QUEUE */
-  const [popupQueue, setPopupQueue] = useState([]);
-  const popupTimers = useRef({});
+  return (
+    <Slide in={!!popup} direction="left" mountOnEnter unmountOnExit>
+      <Paper
+        onClick={handleNotificationClick}
+        elevation={10}
+        sx={paperStyles} // Use the imported style object
+      >
+        {/* ICON */}
+        <Box>
+          <Avatar
+            sx={avatarStyles} // Use the imported style object
+          >
+            <IconComp style={iconStyles} />{" "}
+            {/* Use the imported style object */}
+          </Avatar>
 
-  const size = 10;
+          {/* TEXTS */}
+          <Box flex={1}>
+            <Typography fontWeight={700} sx={menuTitleStyles}>
+              {menuTitle}
+            </Typography>
 
-  /* ---------------- FETCH UNREAD COUNT ---------------- */
-  const fetchUnreadCount = useCallback(async () => {
-    try {
-      const data = await callApi(`${BASE_URL}/unread-count`);
-      if (data?.count !== undefined) setUnreadCount(data.count);
-    } catch (err) {
-      console.error("Failed to fetch unread count:", err);
-    }
-  }, [callApi]);
+            <Typography variant="body2" sx={messageTextStyles}>
+              {popup.message}
+            </Typography>
 
-  /* ---------------- FETCH HISTORY ---------------- */
-  const fetchHistory = useCallback(
-    async (page = 0) => {
-      try {
-        const data = await callApi(`${BASE_URL}?page=${page}&size=${size}`);
-        const newItems = data?.content || [];
-
-        setNotifications((prev) =>
-          page === 0 ? newItems : [...prev, ...newItems]
-        );
-        setHasMore(!data?.last);
-        setPageNumber(page);
-      } catch (err) {
-        console.error("Failed to fetch notifications:", err);
-      }
-    },
-    [callApi]
+            <Typography variant="caption" sx={captionTextStyles}>
+              {formatRelativeTime(popup.createdAt || popup.receivedAt)}
+            </Typography>
+          </Box>
+        </Box>
+        <IconButton size="small" onClick={onClose}>
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </Paper>
+    </Slide>
   );
-
-  /* ---------------- MARK READ ---------------- */
-  const markAsRead = useCallback(
-    async (id) => {
-      try {
-        const response = await callApi(`${BASE_URL}/${id}/read`, {}, "POST");
-        if (response) {
-          setNotifications((prev) =>
-            prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-          );
-          setUnreadCount((prev) => Math.max(prev - 1, 0));
-        } else {
-          showSnackbar("Failed to mark as read", "error");
-        }
-      } catch (err) {
-        console.error("Mark as read failed:", err);
-      }
-    },
-    [callApi, showSnackbar]
-  );
-
-  const markAllAsRead = useCallback(async () => {
-    try {
-      const response = await callApi(`${BASE_URL}/read-all`, {}, "POST");
-      if (response) {
-        setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-        setUnreadCount(0);
-      } else {
-        showSnackbar("Failed to mark all notifications as read", "error");
-      }
-    } catch (err) {
-      console.error("Mark all as read failed:", err);
-    }
-  }, [callApi, showSnackbar]);
-
-  /* ---------------- POPUP QUEUE ---------------- */
-  const addPopup = useCallback((notif) => {
-    const popupId = `${notif.id}-${Date.now()}`;
-
-    setPopupQueue((prev) => [...prev, { ...notif, popupId }]);
-
-    popupTimers.current[popupId] = setTimeout(() => {
-      removePopup(popupId);
-    }, POPUP_DURATION);
-  }, []);
-
-  const removePopup = useCallback((popupId) => {
-    setPopupQueue((prev) => prev.filter((p) => p.popupId !== popupId));
-
-    if (popupTimers.current[popupId]) {
-      clearTimeout(popupTimers.current[popupId]);
-      delete popupTimers.current[popupId];
-    }
-  }, []);
-
-  /* ---------------- INITIAL LOAD + SSE ---------------- */
-  useEffect(() => {
-    fetchUnreadCount();
-    fetchHistory(0);
-
-    startStream(`${BASE_URL}/stream`, { onMessage: () => {} });
-
-    return () => stopStream();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /* ---------------- ON NEW SSE MESSAGE ---------------- */
-  useEffect(() => {
-    if (!lastMessage) return;
-
-    setNotifications((prev) => [lastMessage, ...prev]);
-    setUnreadCount((prev) => prev + 1);
-
-    /** ✅ QUEUE-BASED POPUP */
-    addPopup(lastMessage);
-  }, [lastMessage, addPopup]);
-
-  /* ---------------- PAGINATION ---------------- */
-  const loadMore = useCallback(() => {
-    if (hasMore) fetchHistory(pageNumber + 1);
-  }, [hasMore, fetchHistory, pageNumber]);
-
-  return {
-    connected,
-    notifications,
-    unreadCount,
-    fetchUnreadCount,
-    fetchHistory,
-    markAsRead,
-    markAllAsRead,
-    stopStream,
-    loadMore,
-    hasMore,
-
-    /** ✅ NEW API */
-    popupQueue,
-    removePopup,
-  };
 };
 
-export default useNotifications;
+export default NotificationPopup;
