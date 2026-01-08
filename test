@@ -1,324 +1,408 @@
-import React, { useEffect, useState } from "react";
 import {
   Button,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
-  FormControl,
-  Grid,
-  InputAdornment,
-  InputLabel,
-  MenuItem,
-  Select,
   Stack,
   TextField,
+  Grid,
   Typography,
+  Checkbox,
+  Autocomplete,
+  Divider,
+  List,
+  ListItemIcon,
+  Tooltip,
+  Box,
 } from "@mui/material";
-import PersonIcon from "@mui/icons-material/Person";
+import { useEffect, useState, useCallback } from "react";
+import * as MuiIcons from "@mui/icons-material";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
+import RestoreIcon from "@mui/icons-material/Restore";
+import { validations } from "../../../utils/Validations";
+import { DndProvider } from "react-dnd";
+import { HTML5Backend } from "react-dnd-html5-backend";
 import useApi from "../../../hooks/useApi";
 import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import DraggablePermissionItem from "./DraggablePermissionItem";
 import _ from "lodash";
 
-/* ================= CONSTANTS ================= */
-
-const NAME_ALLOWED_REGEX = /[a-zA-Z.\s]/g; // allowed chars
-const DIGITS_REGEX = /^[0-9]*$/;
-const EMAIL_PREFIX_REGEX = /^[a-zA-Z0-9._]+$/;
-
-const EMAIL_DOMAIN = "@sbi.co.in";
-const EMAIL_PREFIX_MAX = 50;
-
-const FORBIDDEN_ROLE_ID = 11; // f1bog
-
-/* ================= COMPONENT ================= */
-
-export default function UserDialog({
+export default function RolesDialog({
   open,
   onClose,
-  roles,
   form,
   setForm,
-  initialState,
+  fetchRoles,
+  initialForm = {},
+  screenActions = {},
 }) {
   const { callApi } = useApi();
   const snackbar = useCustomSnackbar();
-  const [errors, setErrors] = useState({});
-  const isEdit = Boolean(form.id);
+  const [selectedPermissions, setSelectedPermissions] = useState([]);
+  const [originalOrder, setOriginalOrder] = useState([]);
+  const [isBlocked, setIsBlocked] = useState(form?.roleStatus === "BLOCKED");
 
+  const handleStatusToggle = async () => {
+    const newStatus = form.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE";
+    setIsBlocked(!isBlocked);
+    form.roleStatus = newStatus;
+  };
+
+  const canSave =
+    (form.roleName || "").length > 2 &&
+    (form.description || "").length > 4 &&
+    selectedPermissions.length > 0;
+
+  const [allPermissions, setAllPermissions] = useState([]);
+  const fetchAllPermissions = async () => {
+    try {
+      const responnse = await callApi(
+        "/UM/role/get-all-permissions",
+        {},
+        "GET"
+      );
+      const permits = responnse?.result ?? [];
+      setAllPermissions(permits);
+    } catch (error) {
+      console.error(error);
+      setAllPermissions([]);
+    }
+  };
+
+  /** Initialize permission order + icons */
   useEffect(() => {
-    setErrors({});
+    if (open) {
+      fetchAllPermissions();
+      if (form?.permissions?.length) {
+        const withOrder = form.permissions.map((p, i) => ({
+          ...p,
+          order: p.order ?? i + 1,
+        }));
+        setSelectedPermissions(withOrder);
+        setOriginalOrder(withOrder);
+      } else {
+        setSelectedPermissions([]);
+        setOriginalOrder([]);
+      }
+    }
   }, [open]);
 
-  /* ================= HELPERS ================= */
-
-  const setError = (k, v) => setErrors((p) => ({ ...p, [k]: v }));
-  const clearError = (k) => setErrors((p) => ({ ...p, [k]: "" }));
-
-  /* ================= USER ID ================= */
-
-  const handleUserIdChange = (val) => {
-    if (!DIGITS_REGEX.test(val)) return;
-    if (val.length > 7) return;
-
-    if (val.length !== 7) {
-      setError("USERID", "User ID must be exactly 7 digits");
+  /** Validation handler */
+  const handleChange = (data, key, e, type) => {
+    const result = validations(type, e.target.value);
+    if (result === "") {
+      setForm({ ...data, [key]: e.target.value });
     } else {
-      clearError("USERID");
+      snackbar(result, "warning");
     }
-
-    setForm((p) => ({ ...p, USERID: val }));
   };
 
-  /* ================= NAME HANDLERS (SEPARATE) ================= */
+  /** Move item via DND */
+  const moveItem = useCallback(
+    (from, to) => {
+      const updated = [...selectedPermissions];
+      const [moved] = updated.splice(from, 1);
+      updated.splice(to, 0, moved);
+      const reOrdered = updated.map((item, idx) => ({
+        ...item,
+        order: idx + 1,
+      }));
+      setSelectedPermissions(reOrdered);
+    },
+    [selectedPermissions]
+  );
 
-  const sanitizeName = (value) => {
-    return (value.match(NAME_ALLOWED_REGEX) || []).join("");
+  /** Reset to original order */
+  const handleReset = () => setSelectedPermissions(originalOrder);
+
+  /** Handle Autocomplete selection change */
+  const handlePermissionsSelect = (e, newValue) => {
+    const withOrder = newValue.map((p, idx) => ({
+      ...p,
+      order: idx + 1,
+    }));
+    setSelectedPermissions(withOrder);
   };
 
-  const validateName = (name, value, mandatory) => {
-    if (!value && mandatory) return "This field is required";
-    if (value && value.length < 3 && mandatory)
-      return "Minimum 3 characters required";
-    if (value.length > 30) return "Maximum 30 characters allowed";
-    return "";
-  };
-
-  const handleFirstNameChange = (e) => {
-    const clean = sanitizeName(e.target.value);
-    const err = validateName("FIRST_NAME", clean, true);
-    err ? setError("FIRST_NAME", err) : clearError("FIRST_NAME");
-    setForm((p) => ({ ...p, FIRST_NAME: clean }));
-  };
-
-  const handleMiddleNameChange = (e) => {
-    const clean = sanitizeName(e.target.value);
-    const err = validateName("MIDDLE_NAME", clean, false);
-    err ? setError("MIDDLE_NAME", err) : clearError("MIDDLE_NAME");
-    setForm((p) => ({ ...p, MIDDLE_NAME: clean }));
-  };
-
-  const handleLastNameChange = (e) => {
-    const clean = sanitizeName(e.target.value);
-    const err = validateName("LAST_NAME", clean, true);
-    err ? setError("LAST_NAME", err) : clearError("LAST_NAME");
-    setForm((p) => ({ ...p, LAST_NAME: clean }));
-  };
-
-  /* ================= EMAIL ================= */
-
-  const handleEmailChange = (raw) => {
-    let prefix = raw.replace(EMAIL_DOMAIN, "");
-    if (prefix.includes("@")) return;
-    if (prefix.length > EMAIL_PREFIX_MAX) return;
-
-    if (!prefix) {
-      setError("EMAIL", "Email prefix is required");
-      setForm((p) => ({ ...p, EMAIL: EMAIL_DOMAIN }));
+  /** Save with permissions & order */
+  const handleSave = async () => {
+    if (!form.roleName || !form.description) {
+      snackbar("Kindly fill all the required fields.", "warning");
       return;
     }
-
-    if (!EMAIL_PREFIX_REGEX.test(prefix)) {
-      setError(
-        "EMAIL",
-        "Only letters, numbers, dot (.) and underscore (_) allowed"
+    if (form.roleName?.trim().length < 3) {
+      snackbar("Kindly provide valid role name.", "warning");
+      return;
+    }
+    if (form.description?.trim().length < 5) {
+      snackbar("Kindly provide valid role description.", "warning");
+      return;
+    }
+    if (selectedPermissions?.length < 1) {
+      snackbar(
+        "Please select at least one permission for this role before saving",
+        "warning"
       );
       return;
     }
 
-    if (prefix.length < 3) {
-      setError("EMAIL", "Minimum 3 characters required before @");
-    } else {
-      clearError("EMAIL");
-    }
-
-    setForm((p) => ({ ...p, EMAIL: prefix + EMAIL_DOMAIN }));
-  };
-
-  /* ================= MOBILE ================= */
-
-  const handleMobileChange = (val) => {
-    if (!DIGITS_REGEX.test(val)) return;
-    if (val.length > 10) return;
-
-    if (val && val.length !== 10) {
-      setError("PHONE_NUMBER", "Mobile number must be exactly 10 digits");
-    } else {
-      clearError("PHONE_NUMBER");
-    }
-
-    setForm((p) => ({ ...p, PHONE_NUMBER: val }));
-  };
-
-  /* ================= FINAL VALIDATION ================= */
-
-  const validateFinal = () => {
-    const e = {};
-    if (!form.USERID || form.USERID.length !== 7)
-      e.USERID = "User ID must be exactly 7 digits";
-    if (!form.FIRST_NAME || form.FIRST_NAME.length < 3)
-      e.FIRST_NAME = "First Name is required";
-    if (!form.LAST_NAME || form.LAST_NAME.length < 3)
-      e.LAST_NAME = "Last Name is required";
-
-    const prefix = (form.EMAIL || "").replace(EMAIL_DOMAIN, "");
-    if (!prefix) e.EMAIL = "Email is required";
-
-    if (!form.ROLE_ID) e.ROLE_ID = "Role is required";
-
-    setErrors(e);
-    return Object.keys(e).length === 0;
-  };
-
-  /* ================= SAVE ================= */
-
-  const onSave = async () => {
-    if (!validateFinal()) {
-      snackbar("Please fix validation errors", "error");
+    const updatedForm = {
+      ...form,
+      permissions: selectedPermissions.map((p) => ({
+        id: p.id,
+        title: p.title,
+        order: p.order,
+        icon: p.icon,
+        description: p.description,
+        menuSubmenu: p.menuSubmenu,
+      })),
+    };
+    const isSameData = _.isEqual(initialForm, updatedForm);
+    if (isSameData) {
+      snackbar("Kindly modify the data before saving", "warning");
       return;
     }
-
-    if (_.isEqual(form, initialState)) {
-      snackbar("No changes detected", "warning");
-      return;
+    setForm(updatedForm);
+    const payload = {
+      requestType: form.roleId ? "MODIFY" : "CREATE",
+      targetRoleId: form.roleId || "",
+      requestPayload: JSON.stringify(updatedForm),
+    };
+    try {
+      let response = await callApi(
+        "/UM/role/create-role-request",
+        payload,
+        "POST"
+      );
+      if (response?.message) {
+        snackbar(
+          form.roleId
+            ? "Role update request submitted successfully"
+            : "Role creation request submitted successfully",
+          "success"
+        );
+        onClose();
+        fetchRoles();
+      }
+    } catch (error) {
+      snackbar(error?.message || "Block request failed", "error");
     }
-
-    const wasF1BOG = initialState?.ROLE_ID === FORBIDDEN_ROLE_ID;
-    const isF1BOGNow = form.ROLE_ID === FORBIDDEN_ROLE_ID;
-
-    if (!wasF1BOG && isF1BOGNow) {
-      snackbar("Assignment of role 'f1bog' is restricted", "error");
-      return;
-    }
-
-    await callApi("/UM/user/create-request", {
-      targetUserId: form.USERID,
-      requestType: isEdit ? "MODIFY" : "CREATE",
-      requestPayload: JSON.stringify(form),
-    });
-
-    snackbar(isEdit ? "User updated" : "User created", "success");
-    onClose();
   };
 
-  /* ================= RENDER ================= */
+  /** Render dynamic MUI icon from string name */
+  const renderIcon = (iconName) => {
+    const IconComp = MuiIcons[iconName];
+    return IconComp ? (
+      <IconComp fontSize="small" sx={{ mr: 1 }} />
+    ) : (
+      <MuiIcons.HelpOutline fontSize="small" sx={{ mr: 1 }} />
+    );
+  };
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle>{isEdit ? "Edit User" : "Create User"}</DialogTitle>
+      <DialogTitle>
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <Typography variant="h6" color="primary">
+            {form.roleId ? "Edit " : "Create New "} <b>{form.roleName}</b> Role
+          </Typography>
+          {screenActions.block && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
+            >
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined" // or "contained", "text"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
+                }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+          {screenActions.unblock && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
+            >
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined" // or "contained", "text"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
+                }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+        </Box>
+      </DialogTitle>
+
+      <Divider />
 
       <DialogContent>
         <Stack spacing={2}>
-          <TextField
-            label="User ID *"
-            value={form.USERID}
-            onChange={(e) => handleUserIdChange(e.target.value)}
-            error={!!errors.USERID}
-            helperText={errors.USERID || "7 numeric digits"}
-            fullWidth
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <PersonIcon />
-                </InputAdornment>
-              ),
-            }}
+          {/* Row 1: Role details */}
+          <Grid container spacing={2}>
+            <Grid size={{ xs: 12, md: 4 }} sx={{ width: "27%" }}>
+              <TextField
+                label="Role Name *"
+                value={form.roleName || ""}
+                onChange={(e) =>
+                  handleChange(form, "roleName", e, "inputValue2")
+                }
+                helperText={
+                  form?.roleName?.length !== 0 && form?.roleName?.length < 3
+                    ? "Enter at least 3 characters"
+                    : "Allowed 3-20 characters (alphabets, numbers, spaces)"
+                }
+                error={
+                  form?.roleName?.length !== 0 && form?.roleName?.length < 3
+                }
+                fullWidth
+                slotProps={{
+                  htmlInput: {
+                    maxLength: 20,
+                  },
+                }}
+              />
+            </Grid>
+            <Grid size={{ xs: 12, md: 8 }} sx={{ width: "70%" }}>
+              <TextField
+                label="Description *"
+                value={form.description || ""}
+                onChange={(e) =>
+                  handleChange(form, "description", e, "inputValue2")
+                }
+                helperText={
+                  form?.roleName?.length !== 0 && form?.description?.length < 5
+                    ? "Enter at least 5 characters"
+                    : "Allowed 5-100 characters (alphabets, numbers, spaces,()&/-.)"
+                }
+                error={
+                  form?.description?.length !== 0 &&
+                  form?.description?.length < 5
+                }
+                fullWidth
+                multiline
+                rows={3}
+                slotProps={{
+                  htmlInput: {
+                    maxLength: 200,
+                  },
+                }}
+              />
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ my: 1 }} />
+
+          {/* Row 2: Permission autocomplete */}
+          <Autocomplete
+            multiple
+            options={allPermissions}
+            disableCloseOnSelect
+            getOptionLabel={(option) => option.title}
+            value={selectedPermissions}
+            onChange={handlePermissionsSelect}
+            isOptionEqualToValue={(opt, val) => opt.id === val.id}
+            renderOption={(props, option, { selected }) => (
+              <li {...props} key={option.id}>
+                <Checkbox checked={selected} sx={{ mr: 1 }} />
+                <ListItemIcon sx={{ minWidth: 32 }}>
+                  {renderIcon(option.icon)}
+                </ListItemIcon>
+                {`${option.title}${
+                  option.menuSubmenu ? " (" + option.menuSubmenu + ")" : ""
+                }`}
+              </li>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Role Permissions *"
+                helperText="A role must include one or more permissions"
+                fullWidth
+              />
+            )}
+            renderTags={() => null}
           />
 
-          <Divider />
-
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 4 }}>
-              <TextField
-                label="First Name *"
-                value={form.FIRST_NAME}
-                onChange={handleFirstNameChange}
-                error={!!errors.FIRST_NAME}
-                helperText={errors.FIRST_NAME || "3–30 characters"}
-                fullWidth
-              />
-            </Grid>
-
-            <Grid size={{ xs: 4 }}>
-              <TextField
-                label="Middle Name"
-                value={form.MIDDLE_NAME}
-                onChange={handleMiddleNameChange}
-                error={!!errors.MIDDLE_NAME}
-                helperText={errors.MIDDLE_NAME || "Optional"}
-                fullWidth
-              />
-            </Grid>
-
-            <Grid size={{ xs: 4 }}>
-              <TextField
-                label="Last Name *"
-                value={form.LAST_NAME}
-                onChange={handleLastNameChange}
-                error={!!errors.LAST_NAME}
-                helperText={errors.LAST_NAME || "3–30 characters"}
-                fullWidth
-              />
-            </Grid>
-          </Grid>
-
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 6 }}>
-              <TextField
-                label="Email *"
-                value={form.EMAIL || EMAIL_DOMAIN}
-                onChange={(e) => handleEmailChange(e.target.value)}
-                error={!!errors.EMAIL}
-                helperText={errors.EMAIL}
-                fullWidth
-              />
-            </Grid>
-
-            <Grid size={{ xs: 6 }}>
-              <TextField
-                label="Mobile Number"
-                value={form.PHONE_NUMBER}
-                onChange={(e) => handleMobileChange(e.target.value)}
-                error={!!errors.PHONE_NUMBER}
-                helperText={errors.PHONE_NUMBER}
-                fullWidth
-              />
-            </Grid>
-          </Grid>
-
-          <FormControl fullWidth error={!!errors.ROLE_ID}>
-            <InputLabel>Role *</InputLabel>
-            <Select
-              value={form.ROLE_ID || ""}
-              label="Role *"
-              onChange={(e) => {
-                const r = roles.find((x) => x.id === e.target.value);
-                setForm({ ...form, ROLE_ID: r.id, ROLE_NAME: r.name });
-                clearError("ROLE_ID");
-              }}
+          {/* Row 3: Permission order (DND) */}
+          <Stack spacing={1}>
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
             >
-              {roles.map((r) => (
-                <MenuItem
-                  key={r.id}
-                  value={r.id}
-                  disabled={r.id === FORBIDDEN_ROLE_ID}
+              <Typography variant="subtitle2">
+                Allowed Permissions: {selectedPermissions.length}
+              </Typography>
+              <Tooltip title="Reset Permissions">
+                <Button
+                  size="small"
+                  color="primary"
+                  onClick={handleReset}
+                  variant="outlined" // or "contained", "text"
+                  startIcon={<RestoreIcon />}
+                  sx={{ align: "center", height: "100%" }}
                 >
-                  {r.name}
-                </MenuItem>
-              ))}
-            </Select>
-            <Typography variant="caption" color="error">
-              {errors.ROLE_ID}
-            </Typography>
-          </FormControl>
+                  Reset
+                </Button>
+              </Tooltip>
+            </Stack>
+            <DndProvider backend={HTML5Backend}>
+              <List sx={{ minHeight: 400, overflowY: "auto" }}>
+                {selectedPermissions.map((perm, index) => (
+                  <DraggablePermissionItem
+                    key={perm.id}
+                    id={perm.id}
+                    index={index}
+                    title={`${perm.order}. ${perm.title}${
+                      perm.menuSubmenu ? " (" + perm.menuSubmenu + ")" : ""
+                    }`}
+                    icon={renderIcon(perm.icon)}
+                    moveItem={moveItem}
+                  />
+                ))}
+              </List>
+            </DndProvider>
+          </Stack>
         </Stack>
       </DialogContent>
 
-      <DialogActions>
+      <Divider />
+      <DialogActions sx={{ p: 2 }}>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={onSave}>
-          {isEdit ? "Save Changes" : "Create User"}
+        <Button variant="contained" disabled={!canSave} onClick={handleSave}>
+          {form.roleId ? "Save Changes" : "Create Role"}
         </Button>
       </DialogActions>
     </Dialog>
