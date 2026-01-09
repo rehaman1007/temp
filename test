@@ -1,44 +1,127 @@
-event:connected
-data:Connection established with Fincore-F1 Ultra SSE services...
- 
-event:task_progress
-data:{"taskId":"BULK_UPLOAD_999","userId":"2488766","percentage":5,"status":"PROCESSING","message":"Processing chunk 1..."}
- 
-event:task_progress
-data:{"taskId":"EXPORT_PDF_555","userId":"2488766","percentage":5,"status":"PROCESSING","message":"Processing chunk 1..."}
- 
-event:task_progress
-data:{"taskId":"REPORT_GEN_001","userId":"2488766","percentage":5,"status":"PROCESSING","message":"Processing chunk 1..."}
- 
-event:task_progress
-data:{"taskId":"BULK_UPLOAD_999","userId":"2488766","percentage":10,"status":"PROCESSING","message":"Processing chunk 2..."}
- 
-event:task_progress
-data:{"taskId":"EXPORT_PDF_555","userId":"2488766","percentage":10,"status":"PROCESSING","message":"Processing chunk 2..."}
- 
-event:task_progress
-data:{"taskId":"REPORT_GEN_001","userId":"2488766","percentage":10,"status":"PROCESSING","message":"Processing chunk 2..."}
- 
-event:task_progress
-data:{"taskId":"BULK_UPLOAD_999","userId":"2488766","percentage":15,"status":"PROCESSING","message":"Processing chunk 3..."}
- 
-event:task_progress
-data:{"taskId":"EXPORT_PDF_555","userId":"2488766","percentage":15,"status":"PROCESSING","message":"Processing chunk 3..."}
- 
-event:task_progress
-data:{"taskId":"REPORT_GEN_001","userId":"2488766","percentage":15,"status":"PROCESSING","message":"Processing chunk 3..."}
- 
-event:task_progress
-data:{"taskId":"BULK_UPLOAD_999","userId":"2488766","percentage":20,"status":"PROCESSING","message":"Processing chunk 4..."}
- 
-event:task_progress
-data:{"taskId":"EXPORT_PDF_555","userId":"2488766","percentage":20,"status":"PROCESSING","message":"Processing chunk 4..."}
- 
-event:task_progress
-data:{"taskId":"REPORT_GEN_001","userId":"2488766","percentage":20,"status":"PROCESSING","message":"Processing chunk 4..."}
- 
-event:task_progress
-data:{"taskId":"BULK_UPLOAD_999","userId":"2488766","percentage":25,"status":"PROCESSING","message":"Processing chunk 5..."}
- 
-event:task_progress
-data:{"taskId":"EXPORT_PDF_555","userId":"2488766","percentage":25,"status":"PROCESSING","message":"Processing chunk 5..."}
+import { useEffect, useRef, useState, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import { resolveConfig } from "../config/EnvironmentConfig";
+
+const useStreamApi = () => {
+  const token = useSelector((state) => state.auth.token);
+
+  const controllerRef = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [lastMessage, setLastMessage] = useState(null);
+
+  const startStream = useCallback(
+    (url, { onMessage, onOpen, onError } = {}) => {
+      if (!token) return console.warn("No token, cannot start SSE stream");
+      const parts = url.split("/");
+      const service = parts[1];
+      const resolved = resolveConfig(`/${service}`);
+      parts[1] = resolved;
+      const Final_Url = parts.slice(1).join("/");
+
+      // Cancel any existing connection
+      if (controllerRef.current) controllerRef.current.abort();
+
+      const controller = new AbortController();
+      controllerRef.current = controller;
+
+      fetchEventSource(Final_Url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+
+        onopen(response) {
+          if (response.ok && response.status === 200) {
+            console.log("SSE Connection established");
+            setConnected(true);
+            onOpen?.(response);
+          } else {
+            console.error("SSE Connection failed:", response.status);
+          }
+        },
+
+        onmessage(event) {
+          if (event.event === "connected") {
+            // console.log("Server connected:", event.data);
+            return;
+          }
+          if (event.event === "new_notification") {
+            try {
+              const data = JSON.parse(event.data);
+              setLastMessage(data);
+              onMessage?.(data);
+            } catch (err) {
+              console.error("SSE message parse error:", err);
+            }
+          }
+
+          // if (event.event === "task_progress") {
+          //   const data = JSON.parse(event.data);
+
+          //   upsertTask({
+          //     taskId: data.taskId,
+          //     percentage: data.percentage,
+          //     status: data.status,
+          //     message: data.message,
+          //   });
+
+          //   if (data.percentage === 100) {
+          //     setTimeout(() => removeTask(data.taskId), 3000);
+          //   }
+          // }
+        },
+
+        onerror(err) {
+          console.error("SSE Error:", err);
+          setConnected(false);
+          onError?.(err);
+        },
+      });
+    },
+    [token]
+  );
+
+  const stopStream = useCallback(() => {
+    if (controllerRef.current) {
+      controllerRef.current.abort();
+      controllerRef.current = null;
+      setConnected(false);
+      console.log("SSE connection stopped.");
+    }
+  }, []);
+
+  useEffect(() => stopStream, [stopStream]);
+
+  return { connected, lastMessage, startStream, stopStream };
+};
+
+export default useStreamApi;
+
+
+import { useCallback, useState } from "react";
+
+export const useTaskProgress = () => {
+  const [tasks, setTasks] = useState({});
+  // { taskId: { percentage, status, message } }
+
+  const upsertTask = useCallback((task) => {
+    setTasks((prev) => ({
+      ...prev,
+      [task.taskId]: task,
+    }));
+  }, []);
+
+  const removeTask = useCallback((taskId) => {
+    setTasks((prev) => {
+      const copy = { ...prev };
+      delete copy[taskId];
+      return copy;
+    });
+  }, []);
+
+  const activeCount = Object.values(tasks).filter(
+    (t) => t.percentage < 100
+  ).length;
+
+  return { tasks, upsertTask, removeTask, activeCount };
+};
