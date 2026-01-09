@@ -1,167 +1,56 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import { resolveConfig } from "../config/EnvironmentConfig";
+import {
+  Box,
+  Drawer,
+  LinearProgress,
+  Stack,
+  Typography,
+  IconButton,
+} from "@mui/material";
+import { Close } from "@mui/icons-material";
 
-const useStreamApi = () => {
-  const token = useSelector((state) => state.auth.token);
-  const controllerRef = useRef(null);
+const TaskProgressDrawer = ({ open, onClose, tasks }) => (
+  <Drawer anchor="right" open={open} onClose={onClose}>
+    {/* HEADER */}
+    <Box
+      sx={{
+        p: 3,
+        borderBottom: "1px solid #E2E8F0",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+      }}
+    >
+      <Typography variant="h6" sx={{ fontWeight: 700 }}>
+        Running Tasks
+      </Typography>
+      <Stack direction="row" spacing={1}>
+        <IconButton size="small" onClick={onClose}>
+          <Close />
+        </IconButton>
+      </Stack>
+    </Box>
 
-  const [connected, setConnected] = useState(false);
+    <Box sx={{ width: 360, p: 2 }}>
+      <Stack spacing={2}>
+        {Object.values(tasks).map((task) => (
+          <Box key={task.taskId}>
+            <Typography variant="body2" fontWeight={600}>
+              {task.taskId}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {task.message}
+            </Typography>
+            <LinearProgress
+              variant="determinate"
+              value={task.percentage}
+              sx={{ height: 8, borderRadius: 1, mt: 1 }}
+            />
+            <Typography variant="caption">{task.percentage}%</Typography>
+          </Box>
+        ))}
+      </Stack>
+    </Box>
+  </Drawer>
+);
 
-  const startStream = useCallback(
-    (
-      url,
-      {
-        onNotification,
-        onTaskProgress,
-        onOpen,
-        onError,
-      } = {}
-    ) => {
-      if (!token) {
-        console.warn("No token, cannot start SSE stream");
-        return;
-      }
-
-      // resolve service
-      const parts = url.split("/");
-      const resolved = resolveConfig(`/${parts[1]}`);
-      parts[1] = resolved;
-      const finalUrl = parts.slice(1).join("/");
-
-      // abort old connection
-      controllerRef.current?.abort();
-      controllerRef.current = new AbortController();
-
-      fetchEventSource(finalUrl, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controllerRef.current.signal,
-
-        onopen(response) {
-          if (response.ok) {
-            setConnected(true);
-            onOpen?.();
-          } else {
-            throw new Error("SSE connection failed");
-          }
-        },
-
-        onmessage(event) {
-          if (!event.data) return;
-
-          // 🔹 CONNECT EVENT
-          if (event.event === "connected") return;
-
-          // 🔔 NOTIFICATIONS
-          if (event.event === "new_notification") {
-            onNotification?.(JSON.parse(event.data));
-            return;
-          }
-
-          // ⚙️ TASK PROGRESS
-          if (event.event === "task_progress") {
-            onTaskProgress?.(JSON.parse(event.data));
-          }
-        },
-
-        onerror(err) {
-          console.error("SSE error", err);
-          setConnected(false);
-          onError?.(err);
-        },
-      });
-    },
-    [token]
-  );
-
-  const stopStream = useCallback(() => {
-    controllerRef.current?.abort();
-    controllerRef.current = null;
-    setConnected(false);
-  }, []);
-
-  useEffect(() => stopStream, [stopStream]);
-
-  return { connected, startStream, stopStream };
-};
-
-export default useStreamApi;
-
-import { useCallback, useState } from "react";
-
-export const useTaskProgress = () => {
-  const [tasks, setTasks] = useState({});
-
-  const upsertTask = useCallback((task) => {
-    setTasks((prev) => ({
-      ...prev,
-      [task.taskId]: {
-        ...prev[task.taskId],
-        ...task,
-      },
-    }));
-  }, []);
-
-  const removeTask = useCallback((taskId) => {
-    setTasks((prev) => {
-      const copy = { ...prev };
-      delete copy[taskId];
-      return copy;
-    });
-  }, []);
-
-  const activeCount = Object.values(tasks).filter(
-    (t) => t.percentage < 100
-  ).length;
-
-  return { tasks, upsertTask, removeTask, activeCount };
-};
-
-import { useEffect, useState } from "react";
-import useStreamApi from "./useStreamApi";
-import { useTaskProgress } from "./useTaskProgress";
-
-const useNotifications = () => {
-  const { upsertTask, removeTask } = useTaskProgress();
-
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [popNotification, setPopNotification] = useState(null);
-
-  const { startStream } = useStreamApi();
-
-  useEffect(() => {
-    startStream("/notifications/stream", {
-      onNotification: (data) => {
-        setNotifications((prev) => [data, ...prev]);
-        setUnreadCount((c) => c + 1);
-        setPopNotification(data);
-      },
-
-      onTaskProgress: (data) => {
-        upsertTask({
-          taskId: data.taskId,
-          percentage: data.percentage,
-          status: data.status,
-          message: data.message,
-        });
-
-        // 🧹 cleanup after completion
-        if (data.percentage === 100) {
-          setTimeout(() => removeTask(data.taskId), 3000);
-        }
-      },
-    });
-  }, [startStream, upsertTask, removeTask]);
-
-  return {
-    notifications,
-    unreadCount,
-    popNotification,
-    setPopNotification,
-  };
-};
-
-export default useNotifications;
+export default TaskProgressDrawer;
