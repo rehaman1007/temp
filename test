@@ -5,74 +5,69 @@ import { resolveConfig } from "../config/EnvironmentConfig";
 
 const useStreamApi = () => {
   const token = useSelector((state) => state.auth.token);
-
   const controllerRef = useRef(null);
+
   const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState(null);
 
   const startStream = useCallback(
-    (url, { onMessage, onOpen, onError } = {}) => {
-      if (!token) return console.warn("No token, cannot start SSE stream");
+    (
+      url,
+      {
+        onNotification,
+        onTaskProgress,
+        onOpen,
+        onError,
+      } = {}
+    ) => {
+      if (!token) {
+        console.warn("No token, cannot start SSE stream");
+        return;
+      }
+
+      // resolve service
       const parts = url.split("/");
-      const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
+      const resolved = resolveConfig(`/${parts[1]}`);
       parts[1] = resolved;
-      const Final_Url = parts.slice(1).join("/");
+      const finalUrl = parts.slice(1).join("/");
 
-      // Cancel any existing connection
-      if (controllerRef.current) controllerRef.current.abort();
+      // abort old connection
+      controllerRef.current?.abort();
+      controllerRef.current = new AbortController();
 
-      const controller = new AbortController();
-      controllerRef.current = controller;
-
-      fetchEventSource(Final_Url, {
+      fetchEventSource(finalUrl, {
         method: "GET",
         headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
+        signal: controllerRef.current.signal,
 
         onopen(response) {
-          if (response.ok && response.status === 200) {
-            console.log("SSE Connection established");
+          if (response.ok) {
             setConnected(true);
-            onOpen?.(response);
+            onOpen?.();
           } else {
-            console.error("SSE Connection failed:", response.status);
+            throw new Error("SSE connection failed");
           }
         },
 
         onmessage(event) {
-          if (event.event === "connected") {
-            // console.log("Server connected:", event.data);
+          if (!event.data) return;
+
+          // 🔹 CONNECT EVENT
+          if (event.event === "connected") return;
+
+          // 🔔 NOTIFICATIONS
+          if (event.event === "new_notification") {
+            onNotification?.(JSON.parse(event.data));
             return;
           }
-          if (event.event === "new_notification") {
-            try {
-              const data = JSON.parse(event.data);
-              setLastMessage(data);
-              onMessage?.(data);
-            } catch (err) {
-              console.error("SSE message parse error:", err);
-            }
+
+          // ⚙️ TASK PROGRESS
+          if (event.event === "task_progress") {
+            onTaskProgress?.(JSON.parse(event.data));
           }
-
-          // if (event.event === "task_progress") {
-          //   const data = JSON.parse(event.data);
-
-          //   upsertTask({
-          //     taskId: data.taskId,
-          //     percentage: data.percentage,
-          //     status: data.status,
-          //     message: data.message,
-          //   });
-
-          //   if (data.percentage === 100) {
-          //     setTimeout(() => removeTask(data.taskId), 3000);
-          //   }
-          // }
         },
 
         onerror(err) {
-          console.error("SSE Error:", err);
+          console.error("SSE error", err);
           setConnected(false);
           onError?.(err);
         },
@@ -82,32 +77,30 @@ const useStreamApi = () => {
   );
 
   const stopStream = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
-      controllerRef.current = null;
-      setConnected(false);
-      console.log("SSE connection stopped.");
-    }
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    setConnected(false);
   }, []);
 
   useEffect(() => stopStream, [stopStream]);
 
-  return { connected, lastMessage, startStream, stopStream };
+  return { connected, startStream, stopStream };
 };
 
 export default useStreamApi;
-
 
 import { useCallback, useState } from "react";
 
 export const useTaskProgress = () => {
   const [tasks, setTasks] = useState({});
-  // { taskId: { percentage, status, message } }
 
   const upsertTask = useCallback((task) => {
     setTasks((prev) => ({
       ...prev,
-      [task.taskId]: task,
+      [task.taskId]: {
+        ...prev[task.taskId],
+        ...task,
+      },
     }));
   }, []);
 
@@ -125,3 +118,50 @@ export const useTaskProgress = () => {
 
   return { tasks, upsertTask, removeTask, activeCount };
 };
+
+import { useEffect, useState } from "react";
+import useStreamApi from "./useStreamApi";
+import { useTaskProgress } from "./useTaskProgress";
+
+const useNotifications = () => {
+  const { upsertTask, removeTask } = useTaskProgress();
+
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [popNotification, setPopNotification] = useState(null);
+
+  const { startStream } = useStreamApi();
+
+  useEffect(() => {
+    startStream("/notifications/stream", {
+      onNotification: (data) => {
+        setNotifications((prev) => [data, ...prev]);
+        setUnreadCount((c) => c + 1);
+        setPopNotification(data);
+      },
+
+      onTaskProgress: (data) => {
+        upsertTask({
+          taskId: data.taskId,
+          percentage: data.percentage,
+          status: data.status,
+          message: data.message,
+        });
+
+        // 🧹 cleanup after completion
+        if (data.percentage === 100) {
+          setTimeout(() => removeTask(data.taskId), 3000);
+        }
+      },
+    });
+  }, [startStream, upsertTask, removeTask]);
+
+  return {
+    notifications,
+    unreadCount,
+    popNotification,
+    setPopNotification,
+  };
+};
+
+export default useNotifications;
