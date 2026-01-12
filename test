@@ -1,10 +1,215 @@
-{
-        field: "zoneCode",
-        headerName: "Zone",
-        filterable: false,
-        flex: 2,
-        valueGetter: (params) => {
-          const zone = zones.find((z) => String(z.id) === String(params));
-          return zone ? zone.description : "N/A";
-        },
-      },
+@Slf4j
+@RequiredArgsConstructor
+@Service
+public class ProcessStatusServiceImpl implements ProcessStatusService {
+
+    private final ProcessStatusRepository processStatusRepository;
+    private final ProcessStagesRepository processStagesRepository;
+
+    /** Active SSE clients */
+    private final CopyOnWriteArrayList<SseEmitter> emitters = new CopyOnWriteArrayList<>();
+
+    /** Dedicated executor for SSE (prevents thread leaks) */
+    private final ExecutorService sseExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r);
+                t.setName("process-status-sse-thread");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /* ---------------------------------------------------- */
+    /* INSERT */
+    /* ---------------------------------------------------- */
+
+    @Override
+    public ResponseEntity<ResponseVO<ProcessStatus>> insert(InsertDTO insertDTO) {
+
+        log.info("[INSERT] New process triggered by={}", insertDTO.getTriggeredBy());
+
+        ProcessStatus processStatus = new ProcessStatus();
+        processStatus.setType(insertDTO.getProcessType());
+        processStatus.setProcessStage(insertDTO.getProcessStage());
+        processStatus.setStartTimeStamp(System.currentTimeMillis());
+        processStatus.setStatus(0);
+        processStatus.setTriggeredBy(insertDTO.getTriggeredBy());
+
+        processStatusRepository.save(processStatus);
+
+        sendProcessStatusUpdatesAsync();
+
+        return buildResponse("Data inserted successfully", processStatus);
+    }
+
+    /* ---------------------------------------------------- */
+    /* UPDATE */
+    /* ---------------------------------------------------- */
+
+    @Override
+    public ResponseEntity<ResponseVO<ProcessStatus>> update(UpdateDTO updateDTO) {
+
+        log.info("[UPDATE] Updating process id={} status={}",
+                updateDTO.getId(), updateDTO.getStatus());
+
+        ProcessStatus entity = processStatusRepository.findById(updateDTO.getId())
+                .orElseThrow(() -> new IllegalArgumentException("Invalid process id"));
+
+        entity.setEndTimeStamp(System.currentTimeMillis());
+        entity.setStatus(updateDTO.getStatus());
+        entity.setRemarks(updateDTO.getRemarks());
+
+        ProcessStatus saved = processStatusRepository.save(entity);
+
+        sendProcessStatusUpdatesAsync();
+
+        return buildResponse("Data updated successfully", saved);
+    }
+
+    /* ---------------------------------------------------- */
+    /* SSE ENTRY POINT */
+    /* ---------------------------------------------------- */
+
+    @Override
+    public SseEmitter getProcessDataSSE() {
+
+        log.info("[SSE] Client connected");
+
+        SseEmitter emitter = new SseEmitter(0L); // infinite timeout
+        emitters.add(emitter);
+
+        emitter.onCompletion(() -> {
+            emitters.remove(emitter);
+            log.info("[SSE] Client completed | active={}", emitters.size());
+        });
+
+        emitter.onTimeout(() -> {
+            emitters.remove(emitter);
+            log.warn("[SSE] Client timeout | active={}", emitters.size());
+            emitter.complete();
+        });
+
+        emitter.onError(ex -> {
+            emitters.remove(emitter);
+            log.error("[SSE] Client error | active={}", emitters.size(), ex);
+        });
+
+        // Send initial snapshot
+        sendToEmitter(emitter);
+
+        return emitter;
+    }
+
+    /* ---------------------------------------------------- */
+    /* ASYNC BROADCAST */
+    /* ---------------------------------------------------- */
+
+    private void sendProcessStatusUpdatesAsync() {
+        sseExecutor.execute(this::broadcastToAll);
+    }
+
+    private void broadcastToAll() {
+        List<ProcessDTO> data = getProcessData();
+
+        log.debug("[SSE] Broadcasting update to {} clients", emitters.size());
+
+        for (SseEmitter emitter : emitters) {
+            sendToEmitter(emitter);
+        }
+    }
+
+    private void sendToEmitter(SseEmitter emitter) {
+        try {
+            emitter.send(
+                SseEmitter.event()
+                    .name("process-status")
+                    .data(getProcessData())
+            );
+        } catch (IOException e) {
+            emitters.remove(emitter);
+            log.warn("[SSE] Send failed, removing emitter");
+            emitter.completeWithError(e);
+        }
+    }
+
+    /* ---------------------------------------------------- */
+    /* HEARTBEAT (VERY IMPORTANT) */
+    /* ---------------------------------------------------- */
+
+    @PostConstruct
+    public void startHeartbeat() {
+        Executors.newSingleThreadScheduledExecutor()
+            .scheduleAtFixedRate(() -> {
+                for (SseEmitter emitter : emitters) {
+                    try {
+                        emitter.send(SseEmitter.event().comment("heartbeat"));
+                    } catch (IOException e) {
+                        emitters.remove(emitter);
+                        log.debug("[SSE] Heartbeat failed, removing emitter");
+                    }
+                }
+            }, 15, 15, TimeUnit.SECONDS);
+    }
+
+    /* ---------------------------------------------------- */
+    /* DATA AGGREGATION (UNCHANGED LOGIC) */
+    /* ---------------------------------------------------- */
+
+    private List<ProcessDTO> getProcessData() {
+
+        log.debug("[DATA] Fetching process status data");
+
+        List<Map<String, Object>> rawData = processStatusRepository.getData();
+        List<Map<String, Object>> results =
+                rawData.stream().map(HashMap::new).collect(Collectors.toList());
+
+        Map<String, List<Map<String, Object>>> grouped =
+                results.stream().collect(Collectors.groupingBy(
+                        r -> ((String) r.get("PROCESS_TYPE")).toUpperCase()
+                ));
+
+        return grouped.entrySet().stream().map(entry -> {
+            ProcessDTO dto = new ProcessDTO();
+            dto.setType(entry.getKey());
+            dto.setStageDetails(enrichStages(entry.getValue()));
+            return dto;
+        }).collect(Collectors.toList());
+    }
+
+    private List<Map<String, Object>> enrichStages(List<Map<String, Object>> stages) {
+
+        return stages.stream().map(stage -> {
+
+            String stageId = String.valueOf(stage.get("PROCESS_STAGE"));
+
+            stage.remove("id");
+            stage.remove("processId");
+            stage.remove("type");
+
+            processStagesRepository.findById(Long.parseLong(stageId))
+                .ifPresent(ps -> {
+                    StageDTO s = new StageDTO();
+                    s.setTitle(ps.getTitle());
+                    s.setIcon(ps.getIcon());
+                    stage.put("stage", s);
+                });
+
+            return stage;
+        }).collect(Collectors.toList());
+    }
+
+    /* ---------------------------------------------------- */
+    /* RESPONSE BUILDER */
+    /* ---------------------------------------------------- */
+
+    private ResponseEntity<ResponseVO<ProcessStatus>> buildResponse(
+            String message, ProcessStatus data) {
+
+        ResponseVO<ProcessStatus> vo = new ResponseVO<>();
+        vo.setMessage(message);
+        vo.setStatus(HttpStatus.OK);
+        vo.setData(data);
+        vo.setLocalDatetime(LocalDateTime.now());
+
+        return ResponseEntity.ok(vo);
+    }
+}
