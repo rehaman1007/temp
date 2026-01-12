@@ -1,70 +1,93 @@
 import dayjs from "dayjs";
 import { useEffect, useState } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
 import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
 import ProcessStatusTable from "./components/ProcessStatusTable";
 import { resolveConfig } from "../../config/EnvironmentConfig";
 
+/* ------------------ Data Transformer ------------------ */
 const processResponseData = (data) => {
   const processes = data?.map((process) => ({
     ...process,
     stageDetails: process.stageDetails.map((stageDetail) => ({
       ...stageDetail,
       START_TIME:
-        stageDetail?.START_TIME !== null
-          ? dayjs.unix(stageDetail?.START_TIME / 1000)
+        stageDetail?.START_TIME != null
+          ? dayjs.unix(stageDetail.START_TIME / 1000)
           : null,
       END_TIME:
-        stageDetail?.END_TIME !== null
-          ? dayjs.unix(stageDetail?.END_TIME / 1000)
+        stageDetail?.END_TIME != null
+          ? dayjs.unix(stageDetail.END_TIME / 1000)
           : null,
     })),
   }));
+
   const empty = processes
-    ?.map((process) => process.stageDetails)
-    ?.every((stageDetail) => stageDetail.length === 0);
+    ?.map((p) => p.stageDetails)
+    ?.every((sd) => sd.length === 0);
+
   return empty ? [] : processes;
 };
 
+/* ------------------ Component ------------------ */
 const ProcessStatusPage = () => {
   const [processes, setProcesses] = useState([]);
   const [process, setProcess] = useState(null);
 
   const snackbar = useCustomSnackbar();
+
   const url = "/processes";
   const service = resolveConfig("/PS");
   const finalURL = service + url;
 
   useEffect(() => {
-    const eventSource = new EventSource(finalURL);
+    const controller = new AbortController();
 
-    eventSource.onmessage = (event) => {
-      try {
-        const response = JSON.parse(event.data);
+    fetchEventSource(finalURL, {
+      method: "GET",
+      signal: controller.signal,
 
-        if (response?.length > 0) {
-          const processesResponseData = processResponseData(response);
+      /* ✅ HEADERS SUPPORTED */
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem("token")}`,
+        Accept: "text/event-stream",
+      },
 
-          setProcesses(processesResponseData);
+      /* Called when connection opens */
+      onopen(response) {
+        if (!response.ok) {
+          throw new Error(`SSE connection failed: ${response.status}`);
         }
-      } catch (e) {
-        console.error("Error fetching the processes!", e);
-        if (e.code === "ERR_CANCELED") {
-          return;
+      },
+
+      /* Called on each SSE message */
+      onmessage(event) {
+        try {
+          const response = JSON.parse(event.data);
+          if (Array.isArray(response) && response.length > 0) {
+            setProcesses(processResponseData(response));
+          }
+        } catch (e) {
+          console.error("Error parsing SSE data", e);
         }
-        setProcesses([]);
-        setProcess(null);
+      },
+
+      /* Called on server-side errors */
+      onerror(err) {
+        console.error("SSE error:", err);
         snackbar("Error fetching the processes!");
-      }
-    };
+        throw err; // triggers retry
+      },
 
-    eventSource.onerror = (error) => {
-      console.error("EventSource failed:", error);
-      eventSource.close();
-    };
+      /* Retry logic */
+      retryDelay(attempt) {
+        return Math.min(1000 * 2 ** attempt, 15000);
+      },
+    });
 
     return () => {
-      eventSource.close();
+      controller.abort(); // ✅ clean close
     };
   }, [snackbar]);
 
@@ -74,6 +97,7 @@ const ProcessStatusPage = () => {
         process={process}
         onClose={() => setProcess(null)}
       />
+
       <ProcessStatusTable
         processes={processes}
         actions={{
