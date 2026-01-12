@@ -1,288 +1,461 @@
-package com.fincore.process_status_service.controller;
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  TextField,
+  Grid,
+  Typography,
+  Checkbox,
+  Autocomplete,
+  Divider,
+  List,
+  ListItemIcon,
+  Tooltip,
+  Box,
+} from "@mui/material";
+import { useEffect, useState, useCallback } from "react";
+import * as MuiIcons from "@mui/icons-material";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
+import RestoreIcon from "@mui/icons-material/Restore";
+import { validations } from "../../../utils/Validations";
+import { DndProvider } from "react-dnd";
+import { HTML5Backend } from "react-dnd-html5-backend";
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import DraggablePermissionItem from "./DraggablePermissionItem";
+import _ from "lodash";
 
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+const DESCRIPTION_REGEX = /^(?!.* {2})[a-zA-Z0-9\s/&().,-]*$/;
+export default function RolesDialog({
+  open,
+  form,
+  setForm,
+  fetchRoles,
+  initialForm = {},
+  screenActions = {},
+  onClose,
+  roles = {},
+}) {
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
+  const [selectedPermissions, setSelectedPermissions] = useState([]);
+  const [originalOrder, setOriginalOrder] = useState([]);
+  const [isBlocked, setIsBlocked] = useState(form?.roleStatus === "BLOCKED");
+  const [permissionSearch, setPermissionSearch] = useState("");
 
-import com.fincore.process_status_service.ResponseVO;
-import com.fincore.process_status_service.dto.InsertDTO;
-import com.fincore.process_status_service.dto.UpdateDTO;
-import com.fincore.process_status_service.model.ProcessStatus;
-import com.fincore.process_status_service.service.ProcessStatusService;
+  const handleStatusToggle = async () => {
+    const newStatus = form.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE";
+    setIsBlocked(!isBlocked);
+    form.roleStatus = newStatus;
+  };
 
-import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+  const canSave =
+    (form.roleName || "").length > 2 &&
+    (form.description || "").length > 4 &&
+    selectedPermissions.length > 0;
 
-@Slf4j
-@RequiredArgsConstructor
-@RestController
-@RequestMapping("/api/process-status")
-public class ProcessStatusController {
+  const [allPermissions, setAllPermissions] = useState([]);
 
-    private final ProcessStatusService processStatusService;
+  const fetchAllPermissions = useCallback(async () => {
+    try {
+      const responnse = await callApi(
+        "/UM/role/get-all-permissions",
+        {},
+        "GET"
+      );
+      const permits = responnse?.result ?? [];
+      setAllPermissions(permits);
+    } catch (error) {
+      console.error(error);
+      setAllPermissions([]);
+    }
+  }, [callApi]);
 
-    /* ---------------------------------------------------- */
-    /* INSERT */
-    /* ---------------------------------------------------- */
+  /** Initialize permission order + icons */
+  useEffect(() => {
+    if (open) {
+      fetchAllPermissions();
+      if (form?.permissions?.length) {
+        const withOrder = form.permissions.map((p, i) => ({
+          ...p,
+          order: p.order ?? i + 1,
+        }));
+        setSelectedPermissions(withOrder);
+        setOriginalOrder(withOrder);
+      } else {
+        setSelectedPermissions([]);
+        setOriginalOrder([]);
+      }
+    }
+  }, [fetchAllPermissions, form.permissions, open]);
 
-    @PostMapping("/processes")
-    public ResponseEntity<ResponseVO<ProcessStatus>> insert(
-            @Valid @RequestBody InsertDTO insertDTO) {
+  /** Validation handler */
+  const handleChange = (data, key, e, type) => {
+    const result = validations(type, e.target.value);
+    if (result === "") {
+      setForm({ ...data, [key]: e.target.value });
+    } else {
+      snackbar(result, "warning");
+    }
+  };
 
-        log.info("[API] POST /processes | triggeredBy={}",
-                insertDTO.getTriggeredBy());
+  /** Move item via DND */
+  const moveItem = useCallback(
+    (from, to) => {
+      const updated = [...selectedPermissions];
+      const [moved] = updated.splice(from, 1);
+      updated.splice(to, 0, moved);
+      const reOrdered = updated.map((item, idx) => ({
+        ...item,
+        order: idx + 1,
+      }));
+      setSelectedPermissions(reOrdered);
+    },
+    [selectedPermissions]
+  );
 
-        return processStatusService.insert(insertDTO);
+  /** Reset to original order */
+  const handleReset = () => setSelectedPermissions(originalOrder);
+
+  /** Handle Autocomplete selection change */
+  const handlePermissionsSelect = (e, newValue) => {
+    const withOrder = newValue.map((p, idx) => ({
+      ...p,
+      order: idx + 1,
+    }));
+    setSelectedPermissions(withOrder);
+  };
+
+  const hasDuplicateRoleData = () => {
+    const name = form.roleName?.trim().toLowerCase();
+    const desc = form.description?.trim().toLowerCase();
+
+    return roles.some((r) => {
+      // Ignore same role while modifying
+      if (form.roleId && r.roleId === form.roleId) return false;
+
+      const roleNameMatch = r.roleName?.trim().toLowerCase() === name;
+
+      const roleDescMatch = r.description?.trim().toLowerCase() === desc;
+
+      return roleNameMatch || roleDescMatch;
+    });
+  };
+
+  /** Save with permissions & order */
+  const handleSave = async () => {
+    if (!form.roleName || !form.description) {
+      snackbar("Kindly fill all the required fields.", "warning");
+      return;
     }
 
-    /* ---------------------------------------------------- */
-    /* UPDATE */
-    /* ---------------------------------------------------- */
-
-    @PatchMapping("/processes")
-    public ResponseEntity<ResponseVO<ProcessStatus>> update(
-            @Valid @RequestBody UpdateDTO updateDTO) {
-
-        log.info("[API] PATCH /processes | id={} status={}",
-                updateDTO.getId(), updateDTO.getStatus());
-
-        return processStatusService.update(updateDTO);
+    if (form.roleName.trim().length < 3) {
+      snackbar("Kindly provide valid role name.", "warning");
+      return;
     }
 
-    /* ---------------------------------------------------- */
-    /* SERVER-SENT EVENTS */
-    /* ---------------------------------------------------- */
-
-    @GetMapping(
-        path = "/processes",
-        produces = MediaType.TEXT_EVENT_STREAM_VALUE
-    )
-    public SseEmitter streamProcessStatus() {
-
-        log.info("[API] SSE connection request received");
-
-        SseEmitter emitter = processStatusService.getProcessDataSSE();
-
-        log.info("[API] SSE emitter created");
-
-        return emitter;
-    }
-}
-
-@Slf4j
-@RequiredArgsConstructor
-@Service
-public class ProcessStatusServiceImpl implements ProcessStatusService {
-
-    private final ProcessStatusRepository processStatusRepository;
-    private final ProcessStagesRepository processStagesRepository;
-
-    /** Active SSE clients */
-    private final CopyOnWriteArrayList<SseEmitter> emitters = new CopyOnWriteArrayList<>();
-
-    /** Dedicated executor for SSE (prevents thread leaks) */
-    private final ExecutorService sseExecutor =
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r);
-                t.setName("process-status-sse-thread");
-                t.setDaemon(true);
-                return t;
-            });
-
-    /* ---------------------------------------------------- */
-    /* INSERT */
-    /* ---------------------------------------------------- */
-
-    @Override
-    public ResponseEntity<ResponseVO<ProcessStatus>> insert(InsertDTO insertDTO) {
-
-        log.info("[INSERT] New process triggered by={}", insertDTO.getTriggeredBy());
-
-        ProcessStatus processStatus = new ProcessStatus();
-        processStatus.setType(insertDTO.getProcessType());
-        processStatus.setProcessStage(insertDTO.getProcessStage());
-        processStatus.setStartTimeStamp(System.currentTimeMillis());
-        processStatus.setStatus(0);
-        processStatus.setTriggeredBy(insertDTO.getTriggeredBy());
-
-        processStatusRepository.save(processStatus);
-
-        sendProcessStatusUpdatesAsync();
-
-        return buildResponse("Data inserted successfully", processStatus);
+    if (form.description.trim().length < 5) {
+      snackbar("Kindly provide valid role description.", "warning");
+      return;
     }
 
-    /* ---------------------------------------------------- */
-    /* UPDATE */
-    /* ---------------------------------------------------- */
-
-    @Override
-    public ResponseEntity<ResponseVO<ProcessStatus>> update(UpdateDTO updateDTO) {
-
-        log.info("[UPDATE] Updating process id={} status={}",
-                updateDTO.getId(), updateDTO.getStatus());
-
-        ProcessStatus entity = processStatusRepository.findById(updateDTO.getId())
-                .orElseThrow(() -> new IllegalArgumentException("Invalid process id"));
-
-        entity.setEndTimeStamp(System.currentTimeMillis());
-        entity.setStatus(updateDTO.getStatus());
-        entity.setRemarks(updateDTO.getRemarks());
-
-        ProcessStatus saved = processStatusRepository.save(entity);
-
-        sendProcessStatusUpdatesAsync();
-
-        return buildResponse("Data updated successfully", saved);
+    if (selectedPermissions.length < 1) {
+      snackbar(
+        "Please select at least one permission for this role before saving",
+        "warning"
+      );
+      return;
     }
 
-    /* ---------------------------------------------------- */
-    /* SSE ENTRY POINT */
-    /* ---------------------------------------------------- */
-
-    @Override
-    public SseEmitter getProcessDataSSE() {
-
-        log.info("[SSE] Client connected");
-
-        SseEmitter emitter = new SseEmitter(0L); // infinite timeout
-        emitters.add(emitter);
-
-        emitter.onCompletion(() -> {
-            emitters.remove(emitter);
-            log.info("[SSE] Client completed | active={}", emitters.size());
-        });
-
-        emitter.onTimeout(() -> {
-            emitters.remove(emitter);
-            log.warn("[SSE] Client timeout | active={}", emitters.size());
-            emitter.complete();
-        });
-
-        emitter.onError(ex -> {
-            emitters.remove(emitter);
-            log.error("[SSE] Client error | active={}", emitters.size(), ex);
-        });
-
-        // Send initial snapshot
-        sendToEmitter(emitter);
-
-        return emitter;
+    // NEW CHECK
+    if (hasDuplicateRoleData()) {
+      snackbar(
+        "Role name or description already exists. Please use unique values.",
+        "warning"
+      );
+      return;
     }
 
-    /* ---------------------------------------------------- */
-    /* ASYNC BROADCAST */
-    /* ---------------------------------------------------- */
+    const updatedForm = {
+      ...form,
+      permissions: selectedPermissions.map((p) => ({
+        id: p.id,
+        title: p.title,
+        order: p.order,
+        icon: p.icon,
+        description: p.description,
+        menuSubmenu: p.menuSubmenu,
+      })),
+    };
 
-    private void sendProcessStatusUpdatesAsync() {
-        sseExecutor.execute(this::broadcastToAll);
+    // Existing "no change" check
+    if (_.isEqual(initialForm, updatedForm)) {
+      snackbar("Kindly modify the data before saving", "warning");
+      return;
     }
 
-    private void broadcastToAll() {
-        List<ProcessDTO> data = getProcessData();
+    setForm(updatedForm);
 
-        log.debug("[SSE] Broadcasting update to {} clients", emitters.size());
+    const payload = {
+      requestType: form.roleId ? "MODIFY" : "CREATE",
+      targetRoleId: form.roleId || "",
+      requestPayload: JSON.stringify(updatedForm),
+    };
 
-        for (SseEmitter emitter : emitters) {
-            sendToEmitter(emitter);
-        }
+    try {
+      const response = await callApi(
+        "/UM/role/create-role-request",
+        payload,
+        "POST"
+      );
+      if (response?.message) {
+        snackbar(
+          form.roleId
+            ? "Role update request submitted successfully"
+            : "Role creation request submitted successfully",
+          "success"
+        );
+        onClose();
+        fetchRoles();
+      }
+    } catch (error) {
+      snackbar(error?.message || "Request failed", "error");
     }
+  };
 
-    private void sendToEmitter(SseEmitter emitter) {
-        try {
-            emitter.send(
-                SseEmitter.event()
-                    .name("process-status")
-                    .data(getProcessData())
-            );
-        } catch (IOException e) {
-            emitters.remove(emitter);
-            log.warn("[SSE] Send failed, removing emitter");
-            emitter.completeWithError(e);
-        }
-    }
+  /** Render dynamic MUI icon from string name */
+  const renderIcon = (iconName) => {
+    const IconComp = MuiIcons[iconName];
+    return IconComp ? (
+      <IconComp fontSize="small" sx={{ mr: 1 }} />
+    ) : (
+      <MuiIcons.HelpOutline fontSize="small" sx={{ mr: 1 }} />
+    );
+  };
 
-    /* ---------------------------------------------------- */
-    /* HEARTBEAT (VERY IMPORTANT) */
-    /* ---------------------------------------------------- */
-
-    @PostConstruct
-    public void startHeartbeat() {
-        Executors.newSingleThreadScheduledExecutor()
-            .scheduleAtFixedRate(() -> {
-                for (SseEmitter emitter : emitters) {
-                    try {
-                        emitter.send(SseEmitter.event().comment("heartbeat"));
-                    } catch (IOException e) {
-                        emitters.remove(emitter);
-                        log.debug("[SSE] Heartbeat failed, removing emitter");
-                    }
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle>
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <Typography variant="h6" color="primary">
+            {form.roleId ? "Edit " : "Create New "} <b>{form.roleName}</b> Role
+          </Typography>
+          {screenActions.block && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
+            >
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined" // or "contained", "text"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
                 }
-            }, 15, 15, TimeUnit.SECONDS);
-    }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+          {screenActions.unblock && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
+            >
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined" // or "contained", "text"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
+                }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+        </Box>
+      </DialogTitle>
 
-    /* ---------------------------------------------------- */
-    /* DATA AGGREGATION (UNCHANGED LOGIC) */
-    /* ---------------------------------------------------- */
+      <Divider />
 
-    private List<ProcessDTO> getProcessData() {
+      <DialogContent>
+        <Stack spacing={2}>
+          {/* Row 1: Role details */}
+          <Grid container spacing={2}>
+            <Grid size={{ xs: 12, md: 4 }} sx={{ width: "27%" }}>
+              <TextField
+                label="Role Name *"
+                value={form.roleName || ""}
+                onChange={(e) =>
+                  handleChange(form, "roleName", e, "inputValue2")
+                }
+                helperText={
+                  form?.roleName?.length !== 0 &&
+                  (form.roleName.length < 3 ||
+                    !/[A-Za-z0-9]/.test(form.roleName))
+                    ? "Enter at least 3 characters(all special characters are not allowed)"
+                    : "Allowed 3-20 characters (alphabets, numbers, spaces)"
+                }
+                error={
+                  form?.roleName?.length !== 0 &&
+                  (form?.roleName?.length < 3 ||
+                    !/[A-Za-z0-9]/.test(form.roleName))
+                }
+                fullWidth
+                slotProps={{
+                  htmlInput: {
+                    maxLength: 20,
+                  },
+                }}
+              />
+            </Grid>
+            <Grid size={{ xs: 12, md: 8 }} sx={{ width: "70%" }}>
+              <TextField
+                label="Description *"
+                value={form.description || ""}
+                onChange={(e) =>
+                  handleChange(form, "description", e, "inputValue2")
+                }
+                helperText={
+                  form?.description?.length !== 0 &&
+                  (form?.description?.length < 5 ||
+                    !DESCRIPTION_REGEX.test(form.description))
+                    ? "Enter at least 5 characters(all special characters are not allowed)"
+                    : "Allowed 5-200 characters (alphabets, numbers, spaces(single spaces only between words),()&/-.)"
+                }
+                error={
+                  form?.description?.length !== 0 &&
+                  (form?.description?.length < 5 ||
+                    !DESCRIPTION_REGEX.test(form.description))
+                }
+                fullWidth
+                multiline
+                rows={3}
+                slotProps={{
+                  htmlInput: {
+                    maxLength: 200,
+                  },
+                }}
+              />
+            </Grid>
+          </Grid>
+          <Divider sx={{ my: 1 }} />
+          {/* Row 2: Permission autocomplete */}
+          <Autocomplete
+            multiple
+            options={allPermissions}
+            value={selectedPermissions}
+            inputValue={permissionSearch}
+            clearOnBlur={false} // prevents clearing on select/blur
+            disableClearable // prevents implicit clear
+            filterSelectedOptions={false} // prevents refilter reset
+            disableCloseOnSelect
+            onInputChange={(event, newInputValue, reason) => {
+              // ONLY update when user types
+              if (reason === "input") {
+                setPermissionSearch(newInputValue);
+              }
+            }}
+            onChange={handlePermissionsSelect}
+            isOptionEqualToValue={(opt, val) => opt.id === val.id}
+            getOptionLabel={(option) => option.title}
+            renderOption={(props, option, { selected }) => (
+              <li {...props} key={option.id}>
+                <Checkbox checked={selected} sx={{ mr: 1 }} />
+                <ListItemIcon sx={{ minWidth: 32 }}>
+                  {renderIcon(option.icon)}
+                </ListItemIcon>
+                {`${option.title}${
+                  option.menuSubmenu ? " (" + option.menuSubmenu + ")" : ""
+                }`}
+              </li>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Role Permissions *"
+                helperText="A role must include one or more permissions"
+                fullWidth
+              />
+            )}
+            renderTags={() => null}
+          />
 
-        log.debug("[DATA] Fetching process status data");
+          {/* Row 3: Permission order (DND) */}
+          <Stack spacing={1}>
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
+            >
+              <Typography variant="subtitle2">
+                Allowed Permissions: {selectedPermissions.length}
+              </Typography>
+              <Tooltip title="Reset Permissions">
+                <Button
+                  size="small"
+                  color="primary"
+                  onClick={handleReset}
+                  variant="outlined" // or "contained", "text"
+                  startIcon={<RestoreIcon />}
+                  sx={{ align: "center", height: "100%" }}
+                >
+                  Reset
+                </Button>
+              </Tooltip>
+            </Stack>
+            <DndProvider backend={HTML5Backend}>
+              <List sx={{ minHeight: 400, overflowY: "auto" }}>
+                {selectedPermissions.map((perm, index) => (
+                  <DraggablePermissionItem
+                    key={perm.id}
+                    id={perm.id}
+                    index={index}
+                    title={`${perm.order}. ${perm.title}${
+                      perm.menuSubmenu ? " (" + perm.menuSubmenu + ")" : ""
+                    }`}
+                    icon={renderIcon(perm.icon)}
+                    moveItem={moveItem}
+                  />
+                ))}
+              </List>
+            </DndProvider>
+          </Stack>
+        </Stack>
+      </DialogContent>
 
-        List<Map<String, Object>> rawData = processStatusRepository.getData();
-        List<Map<String, Object>> results =
-                rawData.stream().map(HashMap::new).collect(Collectors.toList());
-
-        Map<String, List<Map<String, Object>>> grouped =
-                results.stream().collect(Collectors.groupingBy(
-                        r -> ((String) r.get("PROCESS_TYPE")).toUpperCase()
-                ));
-
-        return grouped.entrySet().stream().map(entry -> {
-            ProcessDTO dto = new ProcessDTO();
-            dto.setType(entry.getKey());
-            dto.setStageDetails(enrichStages(entry.getValue()));
-            return dto;
-        }).collect(Collectors.toList());
-    }
-
-    private List<Map<String, Object>> enrichStages(List<Map<String, Object>> stages) {
-
-        return stages.stream().map(stage -> {
-
-            String stageId = String.valueOf(stage.get("PROCESS_STAGE"));
-
-            stage.remove("id");
-            stage.remove("processId");
-            stage.remove("type");
-
-            processStagesRepository.findById(Long.parseLong(stageId))
-                .ifPresent(ps -> {
-                    StageDTO s = new StageDTO();
-                    s.setTitle(ps.getTitle());
-                    s.setIcon(ps.getIcon());
-                    stage.put("stage", s);
-                });
-
-            return stage;
-        }).collect(Collectors.toList());
-    }
-
-    /* ---------------------------------------------------- */
-    /* RESPONSE BUILDER */
-    /* ---------------------------------------------------- */
-
-    private ResponseEntity<ResponseVO<ProcessStatus>> buildResponse(
-            String message, ProcessStatus data) {
-
-        ResponseVO<ProcessStatus> vo = new ResponseVO<>();
-        vo.setMessage(message);
-        vo.setStatus(HttpStatus.OK);
-        vo.setData(data);
-        vo.setLocalDatetime(LocalDateTime.now());
-
-        return ResponseEntity.ok(vo);
-    }
+      <Divider />
+      <DialogActions sx={{ p: 2 }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!canSave} onClick={handleSave}>
+          {form.roleId ? "Save Changes" : "Create Role"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
 }
