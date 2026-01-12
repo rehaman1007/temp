@@ -16,20 +16,61 @@ import {
   Tooltip,
   Box,
 } from "@mui/material";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import * as MuiIcons from "@mui/icons-material";
 import LockOpenIcon from "@mui/icons-material/LockOpen";
 import RestoreIcon from "@mui/icons-material/Restore";
-import { validations } from "../../../utils/Validations";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
 import useApi from "../../../hooks/useApi";
 import useCustomSnackbar from "../../../utils/useCustomSnackbar";
-import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import DraggablePermissionItem from "./DraggablePermissionItem";
 import _ from "lodash";
 
-const DESCRIPTION_REGEX = /^(?!.* {2})[a-zA-Z0-9\s/&().,-]*$/;
+/* =======================
+   REGEX & VALIDATIONS
+======================= */
+
+const ROLE_NAME_REGEX = /^[A-Za-z][A-Za-z0-9 ]*$/;
+const DESCRIPTION_START_REGEX = /^[A-Za-z0-9]/;
+const DESCRIPTION_BODY_REGEX = /^(?!.* {2})[A-Za-z0-9\s/&().,-]*$/;
+
+const validateRoleName = (value = "") => {
+  const trimmed = value.trim();
+
+  if (!trimmed) return "Role name is required";
+  if (trimmed.length < 3) return "Role name must be at least 3 characters";
+  if (trimmed.length > 20) return "Role name must not exceed 20 characters";
+
+  if (!ROLE_NAME_REGEX.test(trimmed))
+    return "Role name must start with an alphabet and contain only letters, numbers, and spaces";
+
+  return "";
+};
+
+const validateDescription = (value = "") => {
+  const trimmed = value.trim();
+
+  if (!trimmed) return "Description is required";
+  if (trimmed.length < 5)
+    return "Description must be at least 5 characters";
+  if (trimmed.length > 200)
+    return "Description must not exceed 200 characters";
+
+  if (!DESCRIPTION_START_REGEX.test(trimmed))
+    return "Description must not start with special characters";
+
+  if (!DESCRIPTION_BODY_REGEX.test(trimmed))
+    return "Description contains invalid characters or consecutive spaces";
+
+  return "";
+};
+
+/* =======================
+   COMPONENT
+======================= */
+
 export default function RolesDialog({
   open,
   form,
@@ -38,140 +79,122 @@ export default function RolesDialog({
   initialForm = {},
   screenActions = {},
   onClose,
-  roles = {},
+  roles = [],
 }) {
   const { callApi } = useApi();
   const snackbar = useCustomSnackbar();
-  const [selectedPermissions, setSelectedPermissions] = useState([]);
-  const [originalOrder, setOriginalOrder] = useState([]);
-  const [isBlocked, setIsBlocked] = useState(form?.roleStatus === "BLOCKED");
-  const [permissionSearch, setPermissionSearch] = useState("");
-
-  const handleStatusToggle = async () => {
-    const newStatus = form.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE";
-    setIsBlocked(!isBlocked);
-    form.roleStatus = newStatus;
-  };
-
-  const canSave =
-    (form.roleName || "").length > 2 &&
-    (form.description || "").length > 4 &&
-    selectedPermissions.length > 0;
 
   const [allPermissions, setAllPermissions] = useState([]);
+  const [selectedPermissions, setSelectedPermissions] = useState([]);
+  const [originalOrder, setOriginalOrder] = useState([]);
+  const [permissionSearch, setPermissionSearch] = useState("");
+
+  const isBlocked = form?.roleStatus === "BLOCKED";
+
+  /* =======================
+     API
+  ======================= */
 
   const fetchAllPermissions = useCallback(async () => {
     try {
-      const responnse = await callApi(
-        "/UM/role/get-all-permissions",
-        {},
-        "GET"
-      );
-      const permits = responnse?.result ?? [];
-      setAllPermissions(permits);
-    } catch (error) {
-      console.error(error);
+      const res = await callApi("/UM/role/get-all-permissions", {}, "GET");
+      setAllPermissions(res?.result ?? []);
+    } catch {
       setAllPermissions([]);
     }
   }, [callApi]);
 
-  /** Initialize permission order + icons */
-  useEffect(() => {
-    if (open) {
-      fetchAllPermissions();
-      if (form?.permissions?.length) {
-        const withOrder = form.permissions.map((p, i) => ({
-          ...p,
-          order: p.order ?? i + 1,
-        }));
-        setSelectedPermissions(withOrder);
-        setOriginalOrder(withOrder);
-      } else {
-        setSelectedPermissions([]);
-        setOriginalOrder([]);
-      }
-    }
-  }, [fetchAllPermissions, form.permissions, open]);
+  /* =======================
+     INIT
+  ======================= */
 
-  /** Validation handler */
-  const handleChange = (data, key, e, type) => {
-    const result = validations(type, e.target.value);
-    if (result === "") {
-      setForm({ ...data, [key]: e.target.value });
-    } else {
-      snackbar(result, "warning");
-    }
+  useEffect(() => {
+    if (!open) return;
+
+    fetchAllPermissions();
+
+    const ordered =
+      form?.permissions?.map((p, i) => ({
+        ...p,
+        order: p.order ?? i + 1,
+      })) || [];
+
+    setSelectedPermissions(ordered);
+    setOriginalOrder(ordered);
+  }, [open, fetchAllPermissions, form?.permissions]);
+
+  /* =======================
+     DERIVED STATE
+  ======================= */
+
+  const canSave = useMemo(() => {
+    return (
+      !validateRoleName(form?.roleName) &&
+      !validateDescription(form?.description) &&
+      selectedPermissions.length > 0
+    );
+  }, [form, selectedPermissions]);
+
+  /* =======================
+     HANDLERS
+  ======================= */
+
+  const handleStatusToggle = () => {
+    setForm((prev) => ({
+      ...prev,
+      roleStatus: prev.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE",
+    }));
   };
 
-  /** Move item via DND */
-  const moveItem = useCallback(
-    (from, to) => {
-      const updated = [...selectedPermissions];
+  const handleChange = (key, e) => {
+    const value = e.target.value;
+    let error = "";
+
+    if (key === "roleName") error = validateRoleName(value);
+    if (key === "description") error = validateDescription(value);
+
+    if (error) {
+      snackbar(error, "warning");
+      return;
+    }
+
+    setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handlePermissionsSelect = (_, values) => {
+    setSelectedPermissions(values.map((p, i) => ({ ...p, order: i + 1 })));
+  };
+
+  const moveItem = useCallback((from, to) => {
+    setSelectedPermissions((prev) => {
+      const updated = [...prev];
       const [moved] = updated.splice(from, 1);
       updated.splice(to, 0, moved);
-      const reOrdered = updated.map((item, idx) => ({
-        ...item,
-        order: idx + 1,
-      }));
-      setSelectedPermissions(reOrdered);
-    },
-    [selectedPermissions]
-  );
+      return updated.map((p, i) => ({ ...p, order: i + 1 }));
+    });
+  }, []);
 
-  /** Reset to original order */
   const handleReset = () => setSelectedPermissions(originalOrder);
 
-  /** Handle Autocomplete selection change */
-  const handlePermissionsSelect = (e, newValue) => {
-    const withOrder = newValue.map((p, idx) => ({
-      ...p,
-      order: idx + 1,
-    }));
-    setSelectedPermissions(withOrder);
-  };
-
-  const hasDuplicateRoleData = () => {
+  const hasDuplicateRoleData = useCallback(() => {
     const name = form.roleName?.trim().toLowerCase();
     const desc = form.description?.trim().toLowerCase();
 
     return roles.some((r) => {
-      // Ignore same role while modifying
       if (form.roleId && r.roleId === form.roleId) return false;
-
-      const roleNameMatch = r.roleName?.trim().toLowerCase() === name;
-
-      const roleDescMatch = r.description?.trim().toLowerCase() === desc;
-
-      return roleNameMatch || roleDescMatch;
-    });
-  };
-
-  /** Save with permissions & order */
-  const handleSave = async () => {
-    if (!form.roleName || !form.description) {
-      snackbar("Kindly fill all the required fields.", "warning");
-      return;
-    }
-
-    if (form.roleName.trim().length < 3) {
-      snackbar("Kindly provide valid role name.", "warning");
-      return;
-    }
-
-    if (form.description.trim().length < 5) {
-      snackbar("Kindly provide valid role description.", "warning");
-      return;
-    }
-
-    if (selectedPermissions.length < 1) {
-      snackbar(
-        "Please select at least one permission for this role before saving",
-        "warning"
+      return (
+        r.roleName?.trim().toLowerCase() === name ||
+        r.description?.trim().toLowerCase() === desc
       );
+    });
+  }, [form, roles]);
+
+  const handleSave = async () => {
+    if (!canSave) {
+      snackbar("Please correct validation errors before saving.", "warning");
       return;
     }
 
-    // NEW CHECK
     if (hasDuplicateRoleData()) {
       snackbar(
         "Role name or description already exists. Please use unique values.",
@@ -182,119 +205,80 @@ export default function RolesDialog({
 
     const updatedForm = {
       ...form,
-      permissions: selectedPermissions.map((p) => ({
-        id: p.id,
-        title: p.title,
-        order: p.order,
-        icon: p.icon,
-        description: p.description,
-        menuSubmenu: p.menuSubmenu,
-      })),
+      permissions: selectedPermissions.map(
+        ({ id, title, order, icon, description, menuSubmenu }) => ({
+          id,
+          title,
+          order,
+          icon,
+          description,
+          menuSubmenu,
+        })
+      ),
     };
 
-    // Existing "no change" check
     if (_.isEqual(initialForm, updatedForm)) {
-      snackbar("Kindly modify the data before saving", "warning");
+      snackbar("Kindly modify the data before saving.", "warning");
       return;
     }
 
-    setForm(updatedForm);
-
-    const payload = {
-      requestType: form.roleId ? "MODIFY" : "CREATE",
-      targetRoleId: form.roleId || "",
-      requestPayload: JSON.stringify(updatedForm),
-    };
-
     try {
-      const response = await callApi(
+      await callApi(
         "/UM/role/create-role-request",
-        payload,
+        {
+          requestType: form.roleId ? "MODIFY" : "CREATE",
+          targetRoleId: form.roleId || "",
+          requestPayload: JSON.stringify(updatedForm),
+        },
         "POST"
       );
-      if (response?.message) {
-        snackbar(
-          form.roleId
-            ? "Role update request submitted successfully"
-            : "Role creation request submitted successfully",
-          "success"
-        );
-        onClose();
-        fetchRoles();
-      }
-    } catch (error) {
-      snackbar(error?.message || "Request failed", "error");
+
+      snackbar(
+        form.roleId
+          ? "Role update request submitted successfully"
+          : "Role creation request submitted successfully",
+        "success"
+      );
+
+      onClose();
+      fetchRoles();
+    } catch (err) {
+      snackbar(err?.message || "Request failed", "error");
     }
   };
 
-  /** Render dynamic MUI icon from string name */
   const renderIcon = (iconName) => {
-    const IconComp = MuiIcons[iconName];
-    return IconComp ? (
-      <IconComp fontSize="small" sx={{ mr: 1 }} />
-    ) : (
-      <MuiIcons.HelpOutline fontSize="small" sx={{ mr: 1 }} />
-    );
+    const Icon = MuiIcons[iconName] || MuiIcons.HelpOutline;
+    return <Icon fontSize="small" sx={{ mr: 1 }} />;
   };
+
+  /* =======================
+     JSX
+  ======================= */
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
       <DialogTitle>
-        <Box
-          sx={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
+        <Box display="flex" justifyContent="space-between">
           <Typography variant="h6" color="primary">
-            {form.roleId ? "Edit " : "Create New "} <b>{form.roleName}</b> Role
+            {form.roleId ? "Edit" : "Create"} <b>{form.roleName}</b> Role
           </Typography>
-          {screenActions.block && form.roleId && (
-            <Tooltip
-              title={
-                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
-              }
-            >
+
+          {(screenActions.block || screenActions.unblock) && form.roleId && (
+            <Tooltip title={`${isBlocked ? "Unblock" : "Block"} Role`}>
               <Button
                 size="small"
-                color="secondary"
+                variant="outlined"
                 onClick={handleStatusToggle}
-                variant="outlined" // or "contained", "text"
                 startIcon={
-                  !isBlocked ? (
-                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  isBlocked ? (
+                    <LockOpenIcon color="success" />
                   ) : (
-                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                    <LockOutlinedIcon color="error" />
                   )
                 }
-                sx={{ align: "center", height: "100%" }}
               >
-                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
-              </Button>
-            </Tooltip>
-          )}
-          {screenActions.unblock && form.roleId && (
-            <Tooltip
-              title={
-                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
-              }
-            >
-              <Button
-                size="small"
-                color="secondary"
-                onClick={handleStatusToggle}
-                variant="outlined" // or "contained", "text"
-                startIcon={
-                  !isBlocked ? (
-                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
-                  ) : (
-                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
-                  )
-                }
-                sx={{ align: "center", height: "100%" }}
-              >
-                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+                {isBlocked ? "UN-BLOCK" : "BLOCK"}
               </Button>
             </Tooltip>
           )}
@@ -305,152 +289,96 @@ export default function RolesDialog({
 
       <DialogContent>
         <Stack spacing={2}>
-          {/* Row 1: Role details */}
           <Grid container spacing={2}>
-            <Grid size={{ xs: 12, md: 4 }} sx={{ width: "27%" }}>
+            <Grid item xs={12} md={4}>
               <TextField
                 label="Role Name *"
                 value={form.roleName || ""}
-                onChange={(e) =>
-                  handleChange(form, "roleName", e, "inputValue2")
-                }
+                onChange={(e) => handleChange("roleName", e)}
+                error={!!validateRoleName(form.roleName)}
                 helperText={
-                  form?.roleName?.length !== 0 &&
-                  (form.roleName.length < 3 ||
-                    !/[A-Za-z0-9]/.test(form.roleName))
-                    ? "Enter at least 3 characters(all special characters are not allowed)"
-                    : "Allowed 3-20 characters (alphabets, numbers, spaces)"
-                }
-                error={
-                  form?.roleName?.length !== 0 &&
-                  (form?.roleName?.length < 3 ||
-                    !/[A-Za-z0-9]/.test(form.roleName))
+                  validateRoleName(form.roleName) ||
+                  "3–20 chars, must start with alphabet"
                 }
                 fullWidth
-                slotProps={{
-                  htmlInput: {
-                    maxLength: 20,
-                  },
-                }}
+                inputProps={{ maxLength: 20 }}
               />
             </Grid>
-            <Grid size={{ xs: 12, md: 8 }} sx={{ width: "70%" }}>
+
+            <Grid item xs={12} md={8}>
               <TextField
                 label="Description *"
                 value={form.description || ""}
-                onChange={(e) =>
-                  handleChange(form, "description", e, "inputValue2")
-                }
+                onChange={(e) => handleChange("description", e)}
+                error={!!validateDescription(form.description)}
                 helperText={
-                  form?.description?.length !== 0 &&
-                  (form?.description?.length < 5 ||
-                    !DESCRIPTION_REGEX.test(form.description))
-                    ? "Enter at least 5 characters(all special characters are not allowed)"
-                    : "Allowed 5-200 characters (alphabets, numbers, spaces(single spaces only between words),()&/-.)"
-                }
-                error={
-                  form?.description?.length !== 0 &&
-                  (form?.description?.length < 5 ||
-                    !DESCRIPTION_REGEX.test(form.description))
+                  validateDescription(form.description) ||
+                  "5–200 chars, no special character at start"
                 }
                 fullWidth
                 multiline
                 rows={3}
-                slotProps={{
-                  htmlInput: {
-                    maxLength: 200,
-                  },
-                }}
+                inputProps={{ maxLength: 200 }}
               />
             </Grid>
           </Grid>
-          <Divider sx={{ my: 1 }} />
-          {/* Row 2: Permission autocomplete */}
+
+          <Divider />
+
           <Autocomplete
             multiple
             options={allPermissions}
             value={selectedPermissions}
             inputValue={permissionSearch}
-            clearOnBlur={false} // prevents clearing on select/blur
-            disableClearable // prevents implicit clear
-            filterSelectedOptions={false} // prevents refilter reset
             disableCloseOnSelect
-            onInputChange={(event, newInputValue, reason) => {
-              // ONLY update when user types
-              if (reason === "input") {
-                setPermissionSearch(newInputValue);
-              }
-            }}
+            onInputChange={(e, val, reason) =>
+              reason === "input" && setPermissionSearch(val)
+            }
             onChange={handlePermissionsSelect}
-            isOptionEqualToValue={(opt, val) => opt.id === val.id}
-            getOptionLabel={(option) => option.title}
+            isOptionEqualToValue={(o, v) => o.id === v.id}
+            getOptionLabel={(o) => o.title}
             renderOption={(props, option, { selected }) => (
-              <li {...props} key={option.id}>
-                <Checkbox checked={selected} sx={{ mr: 1 }} />
-                <ListItemIcon sx={{ minWidth: 32 }}>
-                  {renderIcon(option.icon)}
-                </ListItemIcon>
-                {`${option.title}${
-                  option.menuSubmenu ? " (" + option.menuSubmenu + ")" : ""
-                }`}
+              <li {...props}>
+                <Checkbox checked={selected} />
+                <ListItemIcon>{renderIcon(option.icon)}</ListItemIcon>
+                {option.title}
               </li>
             )}
             renderInput={(params) => (
-              <TextField
-                {...params}
-                label="Role Permissions *"
-                helperText="A role must include one or more permissions"
-                fullWidth
-              />
+              <TextField {...params} label="Role Permissions *" />
             )}
             renderTags={() => null}
           />
 
-          {/* Row 3: Permission order (DND) */}
-          <Stack spacing={1}>
-            <Stack
-              direction="row"
-              justifyContent="space-between"
-              alignItems="center"
-            >
-              <Typography variant="subtitle2">
-                Allowed Permissions: {selectedPermissions.length}
-              </Typography>
-              <Tooltip title="Reset Permissions">
-                <Button
-                  size="small"
-                  color="primary"
-                  onClick={handleReset}
-                  variant="outlined" // or "contained", "text"
-                  startIcon={<RestoreIcon />}
-                  sx={{ align: "center", height: "100%" }}
-                >
-                  Reset
-                </Button>
-              </Tooltip>
-            </Stack>
-            <DndProvider backend={HTML5Backend}>
-              <List sx={{ minHeight: 400, overflowY: "auto" }}>
-                {selectedPermissions.map((perm, index) => (
-                  <DraggablePermissionItem
-                    key={perm.id}
-                    id={perm.id}
-                    index={index}
-                    title={`${perm.order}. ${perm.title}${
-                      perm.menuSubmenu ? " (" + perm.menuSubmenu + ")" : ""
-                    }`}
-                    icon={renderIcon(perm.icon)}
-                    moveItem={moveItem}
-                  />
-                ))}
-              </List>
-            </DndProvider>
-          </Stack>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<RestoreIcon />}
+            onClick={handleReset}
+          >
+            Reset Permissions
+          </Button>
+
+          <DndProvider backend={HTML5Backend}>
+            <List sx={{ maxHeight: 350, overflow: "auto" }}>
+              {selectedPermissions.map((perm, index) => (
+                <DraggablePermissionItem
+                  key={perm.id}
+                  id={perm.id}
+                  index={index}
+                  title={`${perm.order}. ${perm.title}`}
+                  icon={renderIcon(perm.icon)}
+                  moveItem={moveItem}
+                />
+              ))}
+            </List>
+          </DndProvider>
         </Stack>
       </DialogContent>
 
       <Divider />
-      <DialogActions sx={{ p: 2 }}>
+
+      <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="contained" disabled={!canSave} onClick={handleSave}>
           {form.roleId ? "Save Changes" : "Create Role"}
