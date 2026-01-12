@@ -1,113 +1,46 @@
-import dayjs from "dayjs";
-import { useEffect, useState } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import { resolveConfig } from "../../config/EnvironmentConfig";
+package com.fincore.process_status_service.controller;
 
-/* ------------------ Data Transformer ------------------ */
-const processResponseData = (data) => {
-  const processes = data?.map((process) => ({
-    ...process,
-    stageDetails: process.stageDetails.map((stageDetail) => ({
-      ...stageDetail,
-      START_TIME:
-        stageDetail?.START_TIME != null
-          ? dayjs.unix(stageDetail.START_TIME / 1000)
-          : null,
-      END_TIME:
-        stageDetail?.END_TIME != null
-          ? dayjs.unix(stageDetail.END_TIME / 1000)
-          : null,
-    })),
-  }));
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-  const empty = processes
-    ?.map((p) => p.stageDetails)
-    ?.every((sd) => sd.length === 0);
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fincore.commonutilities.jwt.JwtUtil;
+import com.fincore.process_status_service.ResponseVO;
+import com.fincore.process_status_service.dto.InsertDTO;
+import com.fincore.process_status_service.dto.UpdateDTO;
+import com.fincore.process_status_service.model.ProcessStatus;
+import com.fincore.process_status_service.service.ProcessStatusService;
 
-  return empty ? [] : processes;
-};
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
-/* ------------------ Component ------------------ */
-const ProcessStatusPage = () => {
-  const [processes, setProcesses] = useState([]);
-  const [process, setProcess] = useState(null);
+@Slf4j
+@RequiredArgsConstructor
+@RestController
+@RequestMapping("/api/process-status")
+public class ProcessStatusController {
 
-  const snackbar = useCustomSnackbar();
+	private final ProcessStatusService processStatusService;
 
-  const url = "/processes";
-  const service = resolveConfig("/PS");
-  const finalURL = service + url;
+	@PostMapping("/processes")
+	public ResponseEntity<ResponseVO<ProcessStatus>> insert(
+			@Valid @RequestBody InsertDTO insertDTO
+	) {
+		ResponseEntity<ResponseVO<ProcessStatus>> responseEntity = processStatusService.insert(insertDTO);
+		return responseEntity;
+	}
 
-  useEffect(() => {
-    const controller = new AbortController();
+	@PatchMapping("/processes")
+	public ResponseEntity<ResponseVO<ProcessStatus>> update(@Valid @RequestBody UpdateDTO updateDTO) {
+		ResponseEntity<ResponseVO<ProcessStatus>> responseEntity = processStatusService.update(updateDTO);
+		return responseEntity;
+	}
 
-    fetchEventSource(finalURL, {
-      method: "GET",
-      signal: controller.signal,
-
-      /* ✅ HEADERS SUPPORTED */
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem("token")}`,
-        Accept: "text/event-stream",
-      },
-
-      /* Called when connection opens */
-      onopen(response) {
-        if (!response.ok) {
-          throw new Error(`SSE connection failed: ${response.status}`);
-        }
-      },
-
-      /* Called on each SSE message */
-      onmessage(event) {
-        try {
-          const response = JSON.parse(event.data);
-          if (Array.isArray(response) && response.length > 0) {
-            setProcesses(processResponseData(response));
-          }
-        } catch (e) {
-          console.error("Error parsing SSE data", e);
-        }
-      },
-
-      /* Called on server-side errors */
-      onerror(err) {
-        console.error("SSE error:", err);
-        snackbar("Error fetching the processes!");
-        throw err; // triggers retry
-      },
-
-      /* Retry logic */
-      retryDelay(attempt) {
-        return Math.min(1000 * 2 ** attempt, 15000);
-      },
-    });
-
-    return () => {
-      controller.abort(); // ✅ clean close
-    };
-  }, [snackbar]);
-
-  return (
-    <>
-      <ProcessDetailsDialog
-        process={process}
-        onClose={() => setProcess(null)}
-      />
-
-      <ProcessStatusTable
-        processes={processes}
-        actions={{
-          onStop: () => {},
-          onRestart: () => {},
-          onView: (process) => setProcess(process),
-        }}
-      />
-    </>
-  );
-};
-
-export default ProcessStatusPage;
+	@GetMapping(path = "/processes", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+	public SseEmitter getProcessData() throws JsonProcessingException {
+		return processStatusService.getProcessDataSSE();
+	}
+}
