@@ -1,389 +1,130 @@
-import {
-  Button,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  Stack,
-  TextField,
-  Grid,
-  Typography,
-  Checkbox,
-  Autocomplete,
-  Divider,
-  List,
-  ListItemIcon,
-  Tooltip,
-  Box,
-} from "@mui/material";
-import { useEffect, useState, useCallback, useMemo } from "react";
-import * as MuiIcons from "@mui/icons-material";
-import LockOpenIcon from "@mui/icons-material/LockOpen";
-import RestoreIcon from "@mui/icons-material/Restore";
-import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
-import { DndProvider } from "react-dnd";
-import { HTML5Backend } from "react-dnd-html5-backend";
-import useApi from "../../../hooks/useApi";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
-import DraggablePermissionItem from "./DraggablePermissionItem";
-import _ from "lodash";
+import dayjs from "dayjs";
+import { useEffect, useState } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import { useSelector } from "react-redux";
 
-/* =======================
-   REGEX & VALIDATIONS
-======================= */
+/* ------------------ Data Transformer ------------------ */
+const processResponseData = (data) => {
+  const processes = data?.map((process) => ({
+    ...process,
+    stageDetails: process.stageDetails.map((stageDetail) => ({
+      ...stageDetail,
+      START_TIME:
+        stageDetail?.START_TIME != null
+          ? dayjs.unix(stageDetail.START_TIME / 1000)
+          : null,
+      END_TIME:
+        stageDetail?.END_TIME != null
+          ? dayjs.unix(stageDetail.END_TIME / 1000)
+          : null,
+    })),
+  }));
 
-const ROLE_NAME_REGEX = /^[A-Za-z][A-Za-z0-9 ]*$/;
-const DESCRIPTION_START_REGEX = /^[A-Za-z0-9]/;
-const DESCRIPTION_BODY_REGEX = /^(?!.* {2})[A-Za-z0-9\s/&().,-]*$/;
+  const empty = processes
+    ?.map((p) => p.stageDetails)
+    ?.every((sd) => sd.length === 0);
 
-const validateRoleName = (value = "") => {
-  const trimmed = value.trim();
-
-  if (!trimmed) return "Role name is required";
-  if (trimmed.length < 3) return "Role name must be at least 3 characters";
-  if (trimmed.length > 20) return "Role name must not exceed 20 characters";
-
-  if (!ROLE_NAME_REGEX.test(trimmed))
-    return "Role name must start with an alphabet and contain only letters, numbers, and spaces";
-
-  return "";
+  return empty ? [] : processes;
 };
 
-const validateDescription = (value = "") => {
-  const trimmed = value.trim();
+/* ------------------ Component ------------------ */
+const ProcessStatusPage = () => {
+  const [processes, setProcesses] = useState([]);
+  const [process, setProcess] = useState(null);
 
-  if (!trimmed) return "Description is required";
-  if (trimmed.length < 5)
-    return "Description must be at least 5 characters";
-  if (trimmed.length > 200)
-    return "Description must not exceed 200 characters";
-
-  if (!DESCRIPTION_START_REGEX.test(trimmed))
-    return "Description must not start with special characters";
-
-  if (!DESCRIPTION_BODY_REGEX.test(trimmed))
-    return "Description contains invalid characters or consecutive spaces";
-
-  return "";
-};
-
-/* =======================
-   COMPONENT
-======================= */
-
-export default function RolesDialog({
-  open,
-  form,
-  setForm,
-  fetchRoles,
-  initialForm = {},
-  screenActions = {},
-  onClose,
-  roles = [],
-}) {
-  const { callApi } = useApi();
   const snackbar = useCustomSnackbar();
 
-  const [allPermissions, setAllPermissions] = useState([]);
-  const [selectedPermissions, setSelectedPermissions] = useState([]);
-  const [originalOrder, setOriginalOrder] = useState([]);
-  const [permissionSearch, setPermissionSearch] = useState("");
-
-  const isBlocked = form?.roleStatus === "BLOCKED";
-
-  /* =======================
-     API
-  ======================= */
-
-  const fetchAllPermissions = useCallback(async () => {
-    try {
-      const res = await callApi("/UM/role/get-all-permissions", {}, "GET");
-      setAllPermissions(res?.result ?? []);
-    } catch {
-      setAllPermissions([]);
-    }
-  }, [callApi]);
-
-  /* =======================
-     INIT
-  ======================= */
+  const url = "/process/processes";
+  const service = resolveConfig("/PS");
+  const finalURL = service + url;
+  const token = useSelector((state) => state.auth.token);
 
   useEffect(() => {
-    if (!open) return;
+    const controller = new AbortController();
 
-    fetchAllPermissions();
+    fetchEventSource(finalURL, {
+      method: "GET",
+      signal: controller.signal,
 
-    const ordered =
-      form?.permissions?.map((p, i) => ({
-        ...p,
-        order: p.order ?? i + 1,
-      })) || [];
+      /* HEADERS SUPPORTED */
+      headers: {
+        Authorization: `Bearer ${token}`,
+        // FIX: Explicitly request text/event-stream to avoid 406 Not Acceptable
+        Accept: "text/event-stream",
+      },
 
-    setSelectedPermissions(ordered);
-    setOriginalOrder(ordered);
-  }, [open, fetchAllPermissions, form?.permissions]);
+      /* Called when connection opens */
+      onopen(response) {
+        if (
+          !response.ok &&
+          response.headers.get("content-type") !== "text/event-stream"
+        ) {
+          throw new Error(
+            `SSE connection failed for process status: ${response.status}`
+          );
+        }
+      },
 
-  /* =======================
-     DERIVED STATE
-  ======================= */
+      /* Called on each SSE message */
+      onmessage(event) {
+        // Ignore the initial "connected" message if it's just a string,
+        // or ensure your JSON parser handles it gracefully.
+        if (event.event === "connected") {
+          console.log("SSE Connected: ", event.data);
+          return;
+        }
 
-  const canSave = useMemo(() => {
-    return (
-      !validateRoleName(form?.roleName) &&
-      !validateDescription(form?.description) &&
-      selectedPermissions.length > 0
-    );
-  }, [form, selectedPermissions]);
+        try {
+          const response = JSON.parse(event.data);
+          if (Array.isArray(response) && response.length > 0) {
+            setProcesses(processResponseData(response));
+          }
+        } catch (e) {
+          console.error("Error parsing SSE data for process status", e);
+        }
+      },
 
-  /* =======================
-     HANDLERS
-  ======================= */
+      /* Called on server-side errors */
+      onerror(err) {
+        // console.error("SSE error:", err);
+        // snackbar("Error fetching the processes!");
+        // Note: fetchEventSource retries automatically on error.
+        // Showing a snackbar on every retry attempt might be spammy.
+        throw err; // triggers retry
+      },
 
-  const handleStatusToggle = () => {
-    setForm((prev) => ({
-      ...prev,
-      roleStatus: prev.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE",
-    }));
-  };
-
-  const handleChange = (key, e) => {
-    const value = e.target.value;
-    let error = "";
-
-    if (key === "roleName") error = validateRoleName(value);
-    if (key === "description") error = validateDescription(value);
-
-    if (error) {
-      snackbar(error, "warning");
-      return;
-    }
-
-    setForm((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const handlePermissionsSelect = (_, values) => {
-    setSelectedPermissions(values.map((p, i) => ({ ...p, order: i + 1 })));
-  };
-
-  const moveItem = useCallback((from, to) => {
-    setSelectedPermissions((prev) => {
-      const updated = [...prev];
-      const [moved] = updated.splice(from, 1);
-      updated.splice(to, 0, moved);
-      return updated.map((p, i) => ({ ...p, order: i + 1 }));
+      /* Retry logic */
+      retryDelay(attempt) {
+        return Math.min(1000 * 2 ** attempt, 15000);
+      },
     });
-  }, []);
 
-  const handleReset = () => setSelectedPermissions(originalOrder);
-
-  const hasDuplicateRoleData = useCallback(() => {
-    const name = form.roleName?.trim().toLowerCase();
-    const desc = form.description?.trim().toLowerCase();
-
-    return roles.some((r) => {
-      if (form.roleId && r.roleId === form.roleId) return false;
-      return (
-        r.roleName?.trim().toLowerCase() === name ||
-        r.description?.trim().toLowerCase() === desc
-      );
-    });
-  }, [form, roles]);
-
-  const handleSave = async () => {
-    if (!canSave) {
-      snackbar("Please correct validation errors before saving.", "warning");
-      return;
-    }
-
-    if (hasDuplicateRoleData()) {
-      snackbar(
-        "Role name or description already exists. Please use unique values.",
-        "warning"
-      );
-      return;
-    }
-
-    const updatedForm = {
-      ...form,
-      permissions: selectedPermissions.map(
-        ({ id, title, order, icon, description, menuSubmenu }) => ({
-          id,
-          title,
-          order,
-          icon,
-          description,
-          menuSubmenu,
-        })
-      ),
+    return () => {
+      controller.abort(); // clean close
     };
-
-    if (_.isEqual(initialForm, updatedForm)) {
-      snackbar("Kindly modify the data before saving.", "warning");
-      return;
-    }
-
-    try {
-      await callApi(
-        "/UM/role/create-role-request",
-        {
-          requestType: form.roleId ? "MODIFY" : "CREATE",
-          targetRoleId: form.roleId || "",
-          requestPayload: JSON.stringify(updatedForm),
-        },
-        "POST"
-      );
-
-      snackbar(
-        form.roleId
-          ? "Role update request submitted successfully"
-          : "Role creation request submitted successfully",
-        "success"
-      );
-
-      onClose();
-      fetchRoles();
-    } catch (err) {
-      snackbar(err?.message || "Request failed", "error");
-    }
-  };
-
-  const renderIcon = (iconName) => {
-    const Icon = MuiIcons[iconName] || MuiIcons.HelpOutline;
-    return <Icon fontSize="small" sx={{ mr: 1 }} />;
-  };
-
-  /* =======================
-     JSX
-  ======================= */
+  }, [snackbar, finalURL, token]); // Added dependencies for safety
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle>
-        <Box display="flex" justifyContent="space-between">
-          <Typography variant="h6" color="primary">
-            {form.roleId ? "Edit" : "Create"} <b>{form.roleName}</b> Role
-          </Typography>
+    <>
+      <ProcessDetailsDialog
+        process={process}
+        onClose={() => setProcess(null)}
+      />
 
-          {(screenActions.block || screenActions.unblock) && form.roleId && (
-            <Tooltip title={`${isBlocked ? "Unblock" : "Block"} Role`}>
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={handleStatusToggle}
-                startIcon={
-                  isBlocked ? (
-                    <LockOpenIcon color="success" />
-                  ) : (
-                    <LockOutlinedIcon color="error" />
-                  )
-                }
-              >
-                {isBlocked ? "UN-BLOCK" : "BLOCK"}
-              </Button>
-            </Tooltip>
-          )}
-        </Box>
-      </DialogTitle>
-
-      <Divider />
-
-      <DialogContent>
-        <Stack spacing={2}>
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={4}>
-              <TextField
-                label="Role Name *"
-                value={form.roleName || ""}
-                onChange={(e) => handleChange("roleName", e)}
-                error={!!validateRoleName(form.roleName)}
-                helperText={
-                  validateRoleName(form.roleName) ||
-                  "3–20 chars, must start with alphabet"
-                }
-                fullWidth
-                inputProps={{ maxLength: 20 }}
-              />
-            </Grid>
-
-            <Grid item xs={12} md={8}>
-              <TextField
-                label="Description *"
-                value={form.description || ""}
-                onChange={(e) => handleChange("description", e)}
-                error={!!validateDescription(form.description)}
-                helperText={
-                  validateDescription(form.description) ||
-                  "5–200 chars, no special character at start"
-                }
-                fullWidth
-                multiline
-                rows={3}
-                inputProps={{ maxLength: 200 }}
-              />
-            </Grid>
-          </Grid>
-
-          <Divider />
-
-          <Autocomplete
-            multiple
-            options={allPermissions}
-            value={selectedPermissions}
-            inputValue={permissionSearch}
-            disableCloseOnSelect
-            onInputChange={(e, val, reason) =>
-              reason === "input" && setPermissionSearch(val)
-            }
-            onChange={handlePermissionsSelect}
-            isOptionEqualToValue={(o, v) => o.id === v.id}
-            getOptionLabel={(o) => o.title}
-            renderOption={(props, option, { selected }) => (
-              <li {...props}>
-                <Checkbox checked={selected} />
-                <ListItemIcon>{renderIcon(option.icon)}</ListItemIcon>
-                {option.title}
-              </li>
-            )}
-            renderInput={(params) => (
-              <TextField {...params} label="Role Permissions *" />
-            )}
-            renderTags={() => null}
-          />
-
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={<RestoreIcon />}
-            onClick={handleReset}
-          >
-            Reset Permissions
-          </Button>
-
-          <DndProvider backend={HTML5Backend}>
-            <List sx={{ maxHeight: 350, overflow: "auto" }}>
-              {selectedPermissions.map((perm, index) => (
-                <DraggablePermissionItem
-                  key={perm.id}
-                  id={perm.id}
-                  index={index}
-                  title={`${perm.order}. ${perm.title}`}
-                  icon={renderIcon(perm.icon)}
-                  moveItem={moveItem}
-                />
-              ))}
-            </List>
-          </DndProvider>
-        </Stack>
-      </DialogContent>
-
-      <Divider />
-
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={!canSave} onClick={handleSave}>
-          {form.roleId ? "Save Changes" : "Create Role"}
-        </Button>
-      </DialogActions>
-    </Dialog>
+      <ProcessStatusTable
+        processes={processes}
+        actions={{
+          onStop: () => {},
+          onRestart: () => {},
+          onView: (process) => setProcess(process),
+        }}
+      />
+    </>
   );
-}
+};
+
+export default ProcessStatusPage;
