@@ -1,233 +1,161 @@
-import axios from "axios";
-
-class DownloadManager {
-  constructor() {
-    this.activeDownloads = {};
-  }
-
-  startDownload({ id, url, payload, onProgress, onComplete, onError }) {
-    if (this.activeDownloads[id]) return;
-
-    const controller = new AbortController();
-    this.activeDownloads[id] = controller;
-
-    axios.post(url, payload, {
-      responseType: "blob",
-      signal: controller.signal,
-      onDownloadProgress: (event) => {
-        if (event?.loaded) {
-          onProgress(event.loaded);
-        }
-      },
-    })
-      .then((response) => {
-        onComplete(response);
-        delete this.activeDownloads[id];
-      })
-      .catch((err) => {
-        if (!axios.isCancel(err)) {
-          onError(err);
-        }
-        delete this.activeDownloads[id];
-      });
-  }
-
-  cancelDownload(id) {
-    this.activeDownloads[id]?.abort();
-    delete this.activeDownloads[id];
-  }
-
-  isDownloading(id) {
-    return Boolean(this.activeDownloads[id]);
-  }
-}
-
-export default new DownloadManager();
-
-import { createSlice } from "@reduxjs/toolkit";
-
-const initialState = {
-  active: false,
-  downloadedBytes: 0,
-  meta: null, // reportName, date, fileName
-};
-
-const downloadSlice = createSlice({
-  name: "download",
-  initialState,
-  reducers: {
-    startDownload(state, action) {
-      state.active = true;
-      state.downloadedBytes = 0;
-      state.meta = action.payload;
-    },
-    updateProgress(state, action) {
-      state.downloadedBytes = action.payload;
-    },
-    finishDownload(state) {
-      state.active = false;
-      state.downloadedBytes = 0;
-      state.meta = null;
-    },
-  },
-});
-
-export const {
-  startDownload,
-  updateProgress,
-  finishDownload,
-} = downloadSlice.actions;
-
-export default downloadSlice.reducer;
-
-import { configureStore } from "@reduxjs/toolkit";
-import downloadReducer from "./downloadSlice";
-import authReducer from "./authSlice"; // already exists
-
-export const store = configureStore({
-  reducer: {
-    auth: authReducer,
-    download: downloadReducer,
-  },
-});
-
-import { useSelector } from "react-redux";
-
-export default function useDownloadStatus() {
-  return useSelector((state) => state.download);
-}
-
-import { useEffect, useState } from "react";
 import {
-  Box,
-  Typography,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
-  Stack,
-  Button,
-  Card,
-  LinearProgress,
-  Grow,
-  Fade,
-} from "@mui/material";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import {
-  Summarize,
-  CloudDownloadTwoTone,
-  LooksOne,
-  LooksTwo,
-  Looks3,
+  Close,
+  Email,
+  Help,
+  Logout,
+  Phone,
+  Security,
 } from "@mui/icons-material";
-import dayjs from "dayjs";
-import { useSelector, useDispatch } from "react-redux";
-
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import downloadManager from "../../utils/downloadManager";
 import {
-  startDownload,
-  updateProgress,
-  finishDownload,
-} from "../../store/downloadSlice";
-import GlifReportsStyles from "./GlifReportsStyles";
-import CustomChip from "../../utils/CustomChip";
-import { useTheme } from "@mui/material/styles";
+  Avatar,
+  Box,
+  Card,
+  CardContent,
+  Chip,
+  Divider,
+  Drawer,
+  IconButton,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
+  Stack,
+  Typography,
+} from "@mui/material";
+import { useSelector } from "react-redux";
+import { useNavigate } from "react-router-dom";
+import { userAvatarCreator } from "../utils/userUtilities";
+import { useContext } from "react";
+import { AuthContext } from "../context/AuthContext";
 
-export default function GlifReports() {
-  const { callApi } = useApi();
-  const showSnackBar = useCustomSnackbar();
+const ProfileDrawer = ({ profileDrawerOpen, setProfileDrawerOpen }) => {
   const user = useSelector((state) => state.auth.user);
-  const download = useSelector((state) => state.download);
-  const dispatch = useDispatch();
-
-  const [repTypes, setRepTypes] = useState([]);
-  const [selectedReport, setReport] = useState(null);
-  const [selectedDate, setDate] = useState(null);
-  const [minDate, setMinDate] = useState("");
-
-  const theme = useTheme();
-  const styles = GlifReportsStyles(theme);
-
-  const downloadedMB =
-    download.downloadedBytes > 0
-      ? (download.downloadedBytes / (1024 * 1024)).toFixed(2)
-      : null;
-
-  useEffect(() => {
-    callApi("/RS/reports/types", { roleId: user.role }, "POST")
-      .then((res) => {
-        setRepTypes(res.data || []);
-        setMinDate(res.data?.[0]?.selectedDate || "2025-10-01");
-      });
-  }, [callApi, user.role]);
-
-  const handleFetchReportData = () => {
-    const downloadId = `${selectedReport.fileName}_${selectedDate.format("YYYYMMDD")}`;
-
-    if (downloadManager.isDownloading(downloadId)) return;
-
-    dispatch(startDownload({
-      reportName: selectedReport.reportName,
-      date: selectedDate.format("YYYY-MM-DD"),
-      fileName: selectedReport.fileName,
-    }));
-
-    downloadManager.startDownload({
-      id: downloadId,
-      url: "/RS/reports/download",
-      payload: {
-        fileName: selectedReport.fileName,
-        date: selectedDate.format("YYYY-MM-DD"),
-        roleId: user.role,
-      },
-      onProgress: (bytes) => dispatch(updateProgress(bytes)),
-      onComplete: (response) => {
-        const blob = response.data;
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "report.zip";
-        a.click();
-        URL.revokeObjectURL(url);
-        dispatch(finishDownload());
-      },
-      onError: () => {
-        dispatch(finishDownload());
-        showSnackBar("Download failed", "error");
-      },
-    });
-  };
+  const navigate = useNavigate();
+  const { logout } = useContext(AuthContext);
 
   return (
-    <Grow in timeout={500}>
-      <Card sx={styles.card}>
-        <Button
-          variant="contained"
-          disabled={download.active}
-          onClick={handleFetchReportData}
-          endIcon={<CloudDownloadTwoTone />}
+    <Drawer
+      anchor="right"
+      open={profileDrawerOpen}
+      onClose={() => setProfileDrawerOpen(false)}
+      sx={{
+        "& .MuiDrawer-paper": {
+          width: 380,
+          p: 0,
+        },
+      }}
+    >
+      <Box sx={{ p: 3, borderBottom: "1px solid #E2E8F0" }}>
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
         >
-          {download.active ? "Downloading..." : "Fetch & Download"}
-        </Button>
+          <Typography variant="h6" sx={{ fontWeight: 600 }}>
+            Profile
+          </Typography>
+          <IconButton onClick={() => setProfileDrawerOpen(false)} size="small">
+            <Close />
+          </IconButton>
+        </Box>
+      </Box>
 
-        <Fade in={download.active}>
-          <Box sx={styles.progressContainer}>
-            <Typography>
-              Downloading {download.meta?.reportName}
+      <Box sx={{ p: 3 }}>
+        <Box sx={{ textAlign: "center", mb: 3 }}>
+          <Avatar
+            sx={{
+              width: 80,
+              height: 80,
+              mx: "auto",
+              mb: 2,
+              color: "primary.contrastText",
+              backgroundColor: "primary.main",
+              fontSize: "2rem",
+            }}
+          >
+            {userAvatarCreator(user)}
+          </Avatar>
+          <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>
+            {user.firstName +
+              " " +
+              (!user?.middleName ? "" : user.middleName + " ") +
+              user.lastName}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            User ID: {user.userId}
+          </Typography>
+          <Chip
+            label={user.roleName}
+            size="small"
+            sx={{
+              backgroundColor: "#10B981",
+              color: "white",
+              fontWeight: 500,
+            }}
+          />
+        </Box>
+
+        <Card sx={{ mb: 3 }}>
+          <CardContent>
+            <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 2 }}>
+              Contact Information
             </Typography>
-            <Typography variant="caption">
-              {downloadedMB
-                ? `${downloadedMB} MB downloaded`
-                : "Preparing stream..."}
-            </Typography>
-            <LinearProgress />
-          </Box>
-        </Fade>
-      </Card>
-    </Grow>
+            <Stack spacing={2}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <Email sx={{ color: "text.secondary" }} />
+                <Box>
+                  <Typography variant="body2" color="text.secondary">
+                    Email
+                  </Typography>
+                  <Typography variant="body2">{user.email}</Typography>
+                </Box>
+              </Box>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <Phone sx={{ color: "text.secondary" }} />
+                <Box>
+                  <Typography variant="body2" color="text.secondary">
+                    Contact No
+                  </Typography>
+                  <Typography variant="body2">{user.phoneNumber}</Typography>
+                </Box>
+              </Box>
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <List sx={{ p: 0, bottom: 0 }}>
+          <ListItem disablePadding>
+            <ListItemButton
+              onClick={() => {
+                navigate("/help");
+              }}
+            >
+              <ListItemIcon>
+                <Help />
+              </ListItemIcon>
+              <ListItemText primary="Help & Support" />
+            </ListItemButton>
+          </ListItem>
+          <Divider sx={{ my: 1 }} />
+          <ListItem disablePadding>
+            <ListItemButton
+              sx={{ color: "error.main" }}
+              onClick={() => {
+                logout();
+              }}
+            >
+              <ListItemIcon sx={{ color: "error.main" }}>
+                <Logout />
+              </ListItemIcon>
+              <ListItemText primary="Sign Out" />
+            </ListItemButton>
+          </ListItem>
+        </List>
+      </Box>
+    </Drawer>
   );
-}
+};
+export default ProfileDrawer;
