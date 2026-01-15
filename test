@@ -1,130 +1,316 @@
-import dayjs from "dayjs";
 import { useEffect, useState } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import { resolveConfig } from "../../config/EnvironmentConfig";
+import {
+  Box,
+  Typography,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Stack,
+  Button,
+  Card,
+  LinearProgress,
+  Grow,
+  Fade,
+} from "@mui/material";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import {
+  Summarize,
+  CloudDownloadTwoTone,
+  LooksOne,
+  LooksTwo,
+  Looks3,
+} from "@mui/icons-material";
+import useApi from "../../hooks/useApi";
+import dayjs from "dayjs";
 import { useSelector } from "react-redux";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { useTheme } from "@mui/material/styles";
+import CustomChip from "../../utils/CustomChip";
+import GlifReportsStyles from "./GlifReportsStyles";
 
-/* ------------------ Data Transformer ------------------ */
-const processResponseData = (data) => {
-  const processes = data?.map((process) => ({
-    ...process,
-    stageDetails: process.stageDetails.map((stageDetail) => ({
-      ...stageDetail,
-      START_TIME:
-        stageDetail?.START_TIME != null
-          ? dayjs.unix(stageDetail.START_TIME / 1000)
-          : null,
-      END_TIME:
-        stageDetail?.END_TIME != null
-          ? dayjs.unix(stageDetail.END_TIME / 1000)
-          : null,
-    })),
-  }));
+export default function GlifReports() {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const user = useSelector((state) => state.auth.user);
 
-  const empty = processes
-    ?.map((p) => p.stageDetails)
-    ?.every((sd) => sd.length === 0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [repTypes, setRepTypes] = useState([]);
+  const [selectedReport, setReport] = useState(null);
+  const [selectedDate, setDate] = useState(null);
 
-  return empty ? [] : processes;
-};
+  // NEW: streaming progress state
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+  const [minDate, setMinDate] = useState("");
 
-/* ------------------ Component ------------------ */
-const ProcessStatusPage = () => {
-  const [processes, setProcesses] = useState([]);
-  const [process, setProcess] = useState(null);
+  const theme = useTheme();
+  const styles = GlifReportsStyles(theme);
 
-  const snackbar = useCustomSnackbar();
+  const disableInputs = isLoading || isDownloading;
 
-  const url = "/process/processes";
-  const service = resolveConfig("/PS");
-  const finalURL = service + url;
-  const token = useSelector((state) => state.auth.token);
+  const downloadedMB =
+    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
 
+  //Getting Reports Types list
   useEffect(() => {
-    const controller = new AbortController();
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        const data = await callApi(
+          "/RS/reports/types",
+          { roleId: user.role },
+          "POST"
+        );
+        setRepTypes(data.data || []);
+        setMinDate(data.data[0]?.selectedDate || "2025-10-01");
+      } catch (error) {
+        console.error("Failed to fetch report types:", error);
+      }
+      setIsLoading(false);
+    }
+    fetchData();
+  }, [callApi, user.role]);
 
-    fetchEventSource(finalURL, {
-      method: "GET",
-      signal: controller.signal,
+  const handleSelect = (report) => {
+    setReport(report);
+  };
 
-      /* HEADERS SUPPORTED */
-      headers: {
-        Authorization: `Bearer ${token}`,
-        // FIX: Explicitly request text/event-stream to avoid 406 Not Acceptable
-        Accept: "text/event-stream",
-      },
+  const handleFetchReportData = async () => {
+    if (!selectedReport?.fileName || !selectedDate) return;
 
-      /* Called when connection opens */
-      onopen(response) {
-        if (
-          !response.ok &&
-          response.headers.get("content-type") !== "text/event-stream"
-        ) {
-          throw new Error(
-            `SSE connection failed for process status: ${response.status}`
-          );
-        }
-      },
+    setIsLoading(true);
+    setIsDownloading(true);
+    setDownloadedBytes(0);
 
-      /* Called on each SSE message */
-      onmessage(event) {
-        // Ignore the initial "connected" message if it's just a string,
-        // or ensure your JSON parser handles it gracefully.
-        if (event.event === "connected") {
-          console.log("SSE Connected: ", event.data);
-          return;
-        }
-
-        try {
-          const response = JSON.parse(event.data);
-          if (Array.isArray(response) && response.length > 0) {
-            setProcesses(processResponseData(response));
-          }
-        } catch (e) {
-          console.error("Error parsing SSE data for process status", e);
-        }
-      },
-
-      /* Called on server-side errors */
-      onerror(err) {
-        // console.error("SSE error:", err);
-        // snackbar("Error fetching the processes!");
-        // Note: fetchEventSource retries automatically on error.
-        // Showing a snackbar on every retry attempt might be spammy.
-        throw err; // triggers retry
-      },
-
-      /* Retry logic */
-      retryDelay(attempt) {
-        return Math.min(1000 * 2 ** attempt, 15000);
-      },
-    });
-
-    return () => {
-      controller.abort(); // clean close
+    const payload = {
+      fileName: selectedReport.fileName,
+      date: selectedDate.format("YYYY-MM-DD"),
+      roleId: user.role,
     };
-  }, [snackbar, finalURL, token]); // Added dependencies for safety
+
+    try {
+      const response = await callApi(
+        "/RS/reports/download",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          // axios streaming progress (no total because no Content-Length)
+          onDownloadProgress: (event) => {
+            setIsDownloading(true);
+            if (event && typeof event.loaded === "number") {
+              setDownloadedBytes(event.loaded);
+            }
+          },
+        },
+        false // get full axios response, not only data
+      );
+
+      if (response.data && response.data.size > 22) {
+        // axios headers is a plain object, not Headers
+        const contentDisposition =
+          response.headers["content-disposition"] ||
+          response.headers["Content-Disposition"];
+
+        let filename = "report.zip";
+        if (
+          contentDisposition &&
+          contentDisposition.indexOf("attachment") !== -1
+        ) {
+          const filenameMatch = contentDisposition.match(/filename="(.+?)"/);
+          if (filenameMatch && filenameMatch.length > 1) {
+            filename = filenameMatch[1];
+          }
+        }
+
+        const downloadUrl = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+      } else {
+        showSnackBar(
+          "No reports found matching your current filter criteria",
+          "warning"
+        );
+      }
+    } catch (error) {
+      console.error("Failed to fetch report data:", error);
+    } finally {
+      setIsLoading(false);
+      setIsDownloading(false);
+      setDownloadedBytes(0);
+    }
+  };
 
   return (
     <>
-      <ProcessDetailsDialog
-        process={process}
-        onClose={() => setProcess(null)}
-      />
+      <Grow in timeout={500}>
+        <Stack spacing={4}>
+          <Box sx={styles.rootBox} elevation={10}>
+            <Stack
+              spacing={3}
+              direction={"column"}
+              alignItems="center"
+              justifyContent="center"
+            >
+              <Card sx={styles.card}>
+                <Box sx={styles.headerContainer}>
+                  <Box sx={styles.headerIconWrapper}>
+                    <Summarize sx={styles.summaryIcon} />
+                  </Box>
+                  <Box sx={styles.headerTextBox}>
+                    <Typography
+                      variant="h5"
+                      fontWeight="bold"
+                      sx={styles.headerTitle}
+                    >
+                      Reports Generation
+                    </Typography>
+                    <Typography variant="body2" sx={styles.headerSubtitle}>
+                      Choose a specific required report type and date using the
+                      criteria below to download reports
+                      {/* on-demand with streaming delivery. */}
+                    </Typography>
+                  </Box>
+                </Box>
+                {/* Steps description */}
+                <Box sx={styles.noteContainer}>
+                  <Typography variant="body2" sx={styles.noteText}>
+                    Note: The generated reports cannot be viewed on-screen it
+                    can only be downloaded.
+                  </Typography>
+                  <Stack direction="row" spacing={2} sx={styles.stepsStack}>
+                    <CustomChip
+                      label="Select a report"
+                      variant="outlined"
+                      icon={<LooksOne />}
+                      color="info"
+                    />
+                    <CustomChip
+                      label="Select the report date for which you would like to download"
+                      variant="outlined"
+                      icon={<LooksTwo />}
+                      color="info"
+                    />
+                    <CustomChip
+                      label="Click Fetch & Download button"
+                      variant="outlined"
+                      icon={<Looks3 />}
+                      color="info"
+                    />
+                  </Stack>
+                </Box>
 
-      <ProcessStatusTable
-        processes={processes}
-        actions={{
-          onStop: () => {},
-          onRestart: () => {},
-          onView: (process) => setProcess(process),
-        }}
-      />
+                <Box sx={styles.inputOuterBox}>
+                  <Box sx={styles.inputInnerBox}>
+                    {/* Dropdown Menu */}
+                    <FormControl sx={styles.formControl}>
+                      <InputLabel id="menu-select-label">
+                        Select a report
+                      </InputLabel>
+                      <Select
+                        labelId="menu-select-label"
+                        id="menu-select"
+                        value={selectedReport}
+                        label="Select a report"
+                        onChange={(row) => handleSelect(row.target.value)}
+                        disabled={repTypes.length === 0 || disableInputs}
+                      >
+                        {repTypes.map((item) => (
+                          <MenuItem key={item.fileName} value={item}>
+                            {item.reportName}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+
+                    {/* Date Picker */}
+                    <FormControl sx={styles.formControl}>
+                      <LocalizationProvider dateAdapter={AdapterDayjs}>
+                        <DatePicker
+                          label="Select report date"
+                          value={selectedDate}
+                          onChange={(newDate) => setDate(newDate)}
+                          maxDate={dayjs()}
+                          minDate={dayjs(minDate)}
+                          disabled={repTypes.length === 0 || disableInputs}
+                          slotProps={{ textField: { readOnly: true } }}
+                        />
+                      </LocalizationProvider>
+                    </FormControl>
+                  </Box>
+                </Box>
+
+                <Box sx={styles.buttonContainer}>
+                  <Button
+                    sx={styles.downloadButton}
+                    endIcon={<CloudDownloadTwoTone />}
+                    variant="contained"
+                    onClick={handleFetchReportData}
+                    disabled={disableInputs || !selectedReport || !selectedDate}
+                  >
+                    {isDownloading ? "Downloading..." : "Fetch & Download"}
+                  </Button>
+
+                  {/* Customised progress UI */}
+                  <Fade in={isDownloading} unmountOnExit>
+                    <Box sx={styles.progressContainer}>
+                      {/* Status header */}
+                      <Box sx={styles.progressHeader}>
+                        <Box sx={styles.progressIconWrapper}>
+                          <CloudDownloadTwoTone sx={styles.innerDownloadIcon} />
+                        </Box>
+                        <Box sx={styles.progressHeaderTextBox}>
+                          <Typography variant="body2" fontWeight={600}>
+                            Downloading{" "}
+                            {selectedReport?.reportName ??
+                              "the selected report"}{" "}
+                            for the period{" "}
+                            {selectedDate?.format("YYYY-MM-DD") ??
+                              "an unknown period"}{" "}
+                            is in progress.
+                          </Typography>
+
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={styles.progressCaption}
+                          >
+                            {downloadedMB
+                              ? `Streaming report data… ${downloadedMB} MB received`
+                              : "Preparing your report stream…"}
+                          </Typography>
+                        </Box>
+
+                        {downloadedMB && (
+                          <CustomChip
+                            color="error"
+                            label={`${downloadedMB} MB downloaded`}
+                            variant="filled"
+                          />
+                        )}
+                      </Box>
+                      {/* Fancy progress bar */}
+                      <LinearProgress
+                        variant="indeterminate"
+                        sx={styles.progressBar}
+                      />
+                    </Box>
+                  </Fade>
+                </Box>
+              </Card>
+            </Stack>
+          </Box>
+        </Stack>
+      </Grow>
     </>
   );
-};
-
-export default ProcessStatusPage;
+}
