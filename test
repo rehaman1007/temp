@@ -1,112 +1,159 @@
-import React, { useMemo } from "react";
-import { Breadcrumbs, Link, Typography, Box } from "@mui/material";
-import NavigateNextIcon from "@mui/icons-material/NavigateNext";
-import { useSelector } from "react-redux";
-import { getParentMenu } from "../utils/CommonUtilities";
-import useNavigateToPage from "../hooks/useNavigateToPage";
-import { getIconComponent } from "../utils/IconUtils";
+import axios from "axios";
 
-/**
- * Static breadcrumb definitions for routes
- * that are NOT part of menu configuration
- */
-const STATIC_BREADCRUMBS = {
-  "/help": {
-    id: "help",
-    title: "Help",
-    icon: "Help",
-    route: "/help",
-  },
-};
+class ReportDownloadService {
+  constructor() {
+    this.activeDownload = null;
+    this.listeners = new Set();
+    this.state = {
+      isDownloading: false,
+      downloadedBytes: 0,
+      meta: null,
+    };
+  }
 
-const AppBreadcrumbs = () => {
-  const selectedMenuItem = useSelector(
-    (state) => state.menus.selectedMenuItem
+  subscribe(listener) {
+    this.listeners.add(listener);
+    listener(this.state); // send current state immediately
+    return () => this.listeners.delete(listener);
+  }
+
+  notify() {
+    this.listeners.forEach((l) => l(this.state));
+  }
+
+  startDownload({ payload, onComplete, onError }) {
+    if (this.activeDownload) return; // already running
+
+    const controller = new AbortController();
+
+    this.activeDownload = controller;
+    this.state = {
+      isDownloading: true,
+      downloadedBytes: 0,
+      meta: payload,
+    };
+    this.notify();
+
+    axios.post("/RS/reports/download", payload, {
+      responseType: "blob",
+      signal: controller.signal,
+      onDownloadProgress: (e) => {
+        if (e?.loaded) {
+          this.state.downloadedBytes = e.loaded;
+          this.notify();
+        }
+      },
+    })
+      .then((response) => {
+        this.reset();
+        onComplete(response);
+      })
+      .catch((err) => {
+        this.reset();
+        if (!axios.isCancel(err)) onError(err);
+      });
+  }
+
+  reset() {
+    this.activeDownload = null;
+    this.state = {
+      isDownloading: false,
+      downloadedBytes: 0,
+      meta: null,
+    };
+    this.notify();
+  }
+
+  getState() {
+    return this.state;
+  }
+}
+
+export default new ReportDownloadService();
+
+import { useEffect, useState } from "react";
+import {
+  Box,
+  Button,
+  Fade,
+  LinearProgress,
+  Typography,
+} from "@mui/material";
+import { CloudDownloadTwoTone } from "@mui/icons-material";
+import dayjs from "dayjs";
+
+import reportDownloadService from "../../services/reportDownloadService";
+import { saveBlob } from "../../utils/downloadHelpers";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+
+export default function GlifReports() {
+  const showSnackBar = useCustomSnackbar();
+
+  const [downloadState, setDownloadState] = useState(
+    reportDownloadService.getState()
   );
-  const menus = useSelector((state) => state.menus.menus);
-  const { navigateToPage } = useNavigateToPage();
-  const currentPathname = window.location.pathname;
 
-  const breadcrumbs = useMemo(() => {
-    /* ------------------------------------
-     * 1️⃣ Static routes (Help, About, etc.)
-     * ------------------------------------ */
-    if (STATIC_BREADCRUMBS[currentPathname]) {
-      return [STATIC_BREADCRUMBS[currentPathname]];
-    }
+  // 🔗 Attach listener when screen opens
+  useEffect(() => {
+    const unsubscribe = reportDownloadService.subscribe(setDownloadState);
+    return unsubscribe; // detach when leaving screen
+  }, []);
 
-    /* ------------------------------------
-     * 2️⃣ Menu-driven routes
-     * ------------------------------------ */
-    if (!selectedMenuItem) return [];
+  const handleFetchReportData = () => {
+    reportDownloadService.startDownload({
+      payload: {
+        fileName: selectedReport.fileName,
+        date: selectedDate.format("YYYY-MM-DD"),
+        roleId: user.role,
+      },
+      onComplete: (response) => {
+        saveBlob(response.data);
+      },
+      onError: () => {
+        showSnackBar("Download failed", "error");
+      },
+    });
+  };
 
-    // If selected menu has children & matches route
-    if (
-      selectedMenuItem.hasChildren &&
-      selectedMenuItem.route === currentPathname
-    ) {
-      const firstChild = selectedMenuItem.children?.[0];
-      return firstChild
-        ? [selectedMenuItem, firstChild]
-        : [selectedMenuItem];
-    }
-
-    // If top-level menu with children
-    if (selectedMenuItem.hasChildren) {
-      return [selectedMenuItem];
-    }
-
-    // If selected menu is child → show parent + child
-    const parentMenu = getParentMenu(selectedMenuItem, menus);
-
-    if (!parentMenu) {
-      return [selectedMenuItem];
-    }
-
-    return [parentMenu, selectedMenuItem];
-  }, [selectedMenuItem, currentPathname, menus]);
-
-  if (!breadcrumbs.length) return null;
+  const downloadedMB =
+    downloadState.downloadedBytes > 0
+      ? (downloadState.downloadedBytes / (1024 * 1024)).toFixed(2)
+      : null;
 
   return (
-    <Breadcrumbs
-      separator={<NavigateNextIcon fontSize="small" />}
-      aria-label="breadcrumb"
-    >
-      {breadcrumbs.map((item, index) => {
-        const isLast = index === breadcrumbs.length - 1;
-        const IconComponent = getIconComponent(item.icon || "Apps");
+    <>
+      <Button
+        variant="contained"
+        onClick={handleFetchReportData}
+        disabled={downloadState.isDownloading}
+        endIcon={<CloudDownloadTwoTone />}
+      >
+        {downloadState.isDownloading ? "Downloading..." : "Fetch & Download"}
+      </Button>
 
-        const label = (
-          <Box display="flex" alignItems="center" gap={0.75}>
-            <IconComponent fontSize="small" />
-            <span>{item.title}</span>
-          </Box>
-        );
-
-        return isLast ? (
-          <Typography
-            key={item.id}
-            color="text.primary"
-            fontWeight={600}
-          >
-            {label}
+      {/* ONLY SHOW WHEN SCREEN IS OPEN */}
+      <Fade in={downloadState.isDownloading}>
+        <Box mt={2}>
+          <Typography variant="body2">
+            Download in progress…
           </Typography>
-        ) : (
-          <Link
-            key={item.id}
-            underline="hover"
-            color="inherit"
-            fontWeight={600}
-            sx={{ cursor: "pointer" }}
-            onClick={() => navigateToPage(item)}
-          >
-            {label}
-          </Link>
-        );
-      })}
-    </Breadcrumbs>
+          <Typography variant="caption">
+            {downloadedMB
+              ? `${downloadedMB} MB received`
+              : "Preparing stream…"}
+          </Typography>
+          <LinearProgress />
+        </Box>
+      </Fade>
+    </>
   );
-};
+}
 
-export default AppBreadcrumbs;
+export const saveBlob = (blob, filename = "report.zip") => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
