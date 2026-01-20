@@ -1,402 +1,112 @@
-import { useEffect, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import CircularProgress from "@mui/material/CircularProgress";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import { resolveConfig } from "../../config/EnvironmentConfig";
-import { timeStampFormatter } from "../../utils/CommonUtilities";
+import {
+  Stepper,
+  Step,
+  StepLabel,
+  StepContent,
+  Typography,
+  Box,
+  Button,
+} from "@mui/material";
+import { getIconComponent } from "../../../utils/IconUtils";
+import { StageStatus } from "../util/StageStatus";
 
-/* ------------------ Data Transformer ------------------ */
-const processResponseData = (data = []) =>
-  data.map((process) => ({
-    ...process,
-    stageDetails: process.stageDetails.map((stage) => ({
-      ...stage,
-      START_TIME: stage.START_TIME
-        ? timeStampFormatter(stage.START_TIME)
-        : null,
-      END_TIME: stage.END_TIME
-        ? timeStampFormatter(stage.END_TIME)
-        : null,
-    })),
-  }));
+/* ------------------ Step Label Content ------------------ */
+const ProcessStepContent = ({ stage, active, onClick }) => {
+  const notStarted =
+    !stage.STATUS || stage.STATUS === StageStatus.NOT_STARTED;
+  const started = stage.STATUS === StageStatus.STARTED;
+  const error = stage.STATUS === StageStatus.ERROR;
+  const completed = stage.STATUS === StageStatus.COMPLETED;
 
-/* ------------------ Merge Helper ------------------ */
-const mergeProcesses = (prev = [], incoming = []) => {
-  const map = new Map(prev.map((p) => [p.type, p]));
-  incoming.forEach((p) => map.set(p.type, p));
-  return Array.from(map.values());
-};
-
-const ProcessStatusPage = () => {
-  const [processes, setProcesses] = useState([]);
-  const [selectedProcess, setSelectedProcess] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  const snackbar = useCustomSnackbar();
-  const token = useSelector((state) => state.auth.token);
-
-  const service = resolveConfig("/PS");
-  const URL = `${service}/process/processes`;
-
-  /* ------------------ Initial Load ------------------ */
-  useEffect(() => {
-    let mounted = true;
-
-    fetch(URL, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error();
-        return res.json();
-      })
-      .then((data) => mounted && setProcesses(processResponseData(data)))
-      .catch(() => snackbar("Failed to load processes"))
-      .finally(() => mounted && setLoading(false));
-
-    return () => (mounted = false);
-  }, [URL, token]);
-
-  /* ------------------ SSE Stream ------------------ */
-  const onStreamUpdate = useCallback((incoming) => {
-    setProcesses((prev) => mergeProcesses(prev, incoming));
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    fetchEventSource(URL, {
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
-
-      onopen(res) {
-        if (!res.ok) throw new Error("SSE connection failed");
-      },
-
-      onmessage(ev) {
-        if (ev.event === "connected") return;
-        try {
-          const data = JSON.parse(ev.data);
-          if (Array.isArray(data)) {
-            onStreamUpdate(processResponseData(data));
-          }
-        } catch {}
-      },
-
-      retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 15000),
-    });
-
-    return () => controller.abort();
-  }, [URL, token, onStreamUpdate]);
+  const statusText = notStarted
+    ? "Not Started"
+    : started
+    ? "Started"
+    : error
+    ? "Failed"
+    : "Completed";
 
   return (
     <>
-      <ProcessDetailsDialog
-        process={selectedProcess}
-        onClose={() => setSelectedProcess(null)}
-      />
+      <StepLabel
+        error={error}
+        optional={
+          <Typography
+            variant="caption"
+            color={error ? "error.main" : "text.secondary"}
+          >
+            {statusText}
+          </Typography>
+        }
+        icon={
+          <Box
+            component={getIconComponent(stage.stage.icon)}
+            sx={(theme) => ({
+              color: error
+                ? theme.palette.error.main
+                : completed
+                ? theme.palette.success.main
+                : theme.palette.text.secondary,
+            })}
+          />
+        }
+      >
+        <Typography variant="subtitle2">
+          {stage.stage.title}
+        </Typography>
+      </StepLabel>
 
-      <ProcessStatusTable
-        loading={loading}
-        processes={processes}
-        actions={{
-          onView: setSelectedProcess,
-          onStop: () => {},
-          onRestart: () => {},
-        }}
-      />
+      <StepContent>
+        {!notStarted && !active && (
+          <Button size="small" onClick={onClick}>
+            View Details
+          </Button>
+        )}
+      </StepContent>
     </>
   );
 };
 
-export default ProcessStatusPage;
-
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Paper,
-  IconButton,
-  Tooltip,
-  Typography,
-  CircularProgress,
-} from "@mui/material";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
-import StopIcon from "@mui/icons-material/Stop";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import ProcessStatusChip from "./ProcessStatusChip";
-import { StageStatus } from "../util/StageStatus";
-
-const Action = ({ title, icon, disabled, onClick }) => (
-  <Tooltip title={title}>
-    <span>
-      <IconButton disabled={disabled} onClick={onClick}>
-        {icon}
-      </IconButton>
-    </span>
-  </Tooltip>
-);
-
-const ProcessStatusTable = ({ processes, actions, loading }) => {
+/* ------------------ Progress Stepper ------------------ */
+const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
   return (
-    <TableContainer component={Paper}>
-      <Table size="small">
-        <TableHead>
-          <TableRow>
-            <TableCell>Process</TableCell>
-            <TableCell align="center">Status</TableCell>
-            <TableCell>Stage</TableCell>
-            <TableCell>Started</TableCell>
-            <TableCell>Ended</TableCell>
-            <TableCell align="center">Actions</TableCell>
-          </TableRow>
-        </TableHead>
+    <Stepper orientation="vertical" sx={{ minWidth: 260 }}>
+      {stageDetails.map((stage, index) => {
+        const active = index === activeStep;
 
-        <TableBody>
-          {loading && (
-            <TableRow>
-              <TableCell colSpan={6} align="center">
-                <CircularProgress size={20} />
-                <Typography variant="caption" ml={1}>
-                  Loading processes...
-                </Typography>
-              </TableCell>
-            </TableRow>
-          )}
-
-          {!loading &&
-            processes.map((p) => {
-              const lastStage = p.stageDetails[p.stageDetails.length - 1];
-              if (!lastStage) return null;
-
-              return (
-                <TableRow
-                  key={p.type}
-                  sx={{
-                    bgcolor:
-                      lastStage.STATUS === StageStatus.STARTED
-                        ? "action.hover"
-                        : "inherit",
-                  }}
-                >
-                  <TableCell>{p.type}</TableCell>
-                  <TableCell align="center">
-                    <ProcessStatusChip status={lastStage.STATUS} />
-                  </TableCell>
-                  <TableCell>{lastStage.stage.title}</TableCell>
-                  <TableCell>{lastStage.START_TIME}</TableCell>
-                  <TableCell>{lastStage.END_TIME}</TableCell>
-                  <TableCell align="center">
-                    <Action
-                      title="Stop"
-                      icon={<StopIcon />}
-                      disabled={lastStage.STATUS !== StageStatus.STARTED}
-                      onClick={actions.onStop}
-                    />
-                    <Action
-                      title="Restart"
-                      icon={<RestartAltIcon />}
-                      disabled={lastStage.STATUS !== StageStatus.ERROR}
-                      onClick={actions.onRestart}
-                    />
-                    <Action
-                      title="View"
-                      icon={<VisibilityIcon />}
-                      onClick={() => actions.onView(p)}
-                    />
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-
-          {!loading && processes.length === 0 && (
-            <TableRow>
-              <TableCell colSpan={6} align="center">
-                <Typography color="error.light">
-                  Processes Not Available
-                </Typography>
-              </TableCell>
-            </TableRow>
-          )}
-        </TableBody>
-      </Table>
-    </TableContainer>
+        return (
+          <Step
+            key={index}
+            active
+            data-step={index}
+            sx={(theme) =>
+              active
+                ? {
+                    backgroundImage: `linear-gradient(to right, transparent, ${theme.palette.divider})`,
+                    position: "relative",
+                    "&::after": {
+                      content: '""',
+                      position: "absolute",
+                      right: -8,
+                      top: 0,
+                      width: 8,
+                      height: "100%",
+                      backgroundColor: theme.palette.divider,
+                    },
+                  }
+                : {}
+            }
+          >
+            <ProcessStepContent
+              stage={stage}
+              active={active}
+              onClick={() => onStageClick(index)}
+            />
+          </Step>
+        );
+      })}
+    </Stepper>
   );
 };
 
-export default ProcessStatusTable;
-
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  Stack,
-  IconButton,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
-import StopIcon from "@mui/icons-material/Stop";
-import { useEffect, useState } from "react";
-import ProgressStepper from "./ProgressStepper";
-import StageDetails from "./StageDetails";
-import { StageStatus } from "../util/StageStatus";
-
-const ProcessDetailsDialog = ({ process, onClose }) => {
-  const [activeStep, setActiveStep] = useState(0);
-
-  useEffect(() => {
-    if (!process) return;
-    const idx =
-      process.stageDetails.findLastIndex(
-        (s) =>
-          s.STATUS === StageStatus.ERROR ||
-          s.STATUS === StageStatus.STARTED
-      ) || 0;
-    setActiveStep(idx);
-  }, [process]);
-
-  if (!process) return null;
-
-  const lastStatus =
-    process.stageDetails[process.stageDetails.length - 1]?.STATUS;
-
-  return (
-    <Dialog open={!!process} fullWidth maxWidth="md" onClose={onClose}>
-      <DialogTitle>
-        {process.type} – Process Details
-        <IconButton
-          onClick={onClose}
-          sx={{ position: "absolute", right: 12, top: 8 }}
-        >
-          <CloseIcon />
-        </IconButton>
-      </DialogTitle>
-
-      <DialogContent dividers>
-        <Stack direction="row" gap={2}>
-          <ProgressStepper
-            stageDetails={process.stageDetails}
-            activeStep={activeStep}
-            onStageClick={setActiveStep}
-          />
-          <StageDetails
-            stage={process.stageDetails[activeStep]}
-            activeIndex={activeStep}
-            totalStages={process.stageDetails.length}
-          />
-        </Stack>
-      </DialogContent>
-
-      <DialogActions>
-        <Button
-          startIcon={<StopIcon />}
-          disabled={lastStatus !== StageStatus.STARTED}
-        >
-          Stop
-        </Button>
-        <Button
-          startIcon={<RestartAltIcon />}
-          disabled={lastStatus !== StageStatus.ERROR}
-        >
-          Restart
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default ProcessDetailsDialog;
-
-import { Stack, Grid, Typography } from "@mui/material";
-
-const formatDuration = (start, end) => {
-  if (!start || !end) return null;
-  const diff = new Date(end) - new Date(start);
-  const s = Math.floor(diff / 1000) % 60;
-  const m = Math.floor(diff / (1000 * 60)) % 60;
-  const h = Math.floor(diff / (1000 * 60 * 60));
-  return [h && `${h} hr`, m && `${m} min`, s && `${s} sec`]
-    .filter(Boolean)
-    .join(" ");
-};
-
-const Detail = ({ title, value }) =>
-  value ? (
-    <Grid>
-      <Typography variant="caption">{title}</Typography>
-      <Typography>{value}</Typography>
-    </Grid>
-  ) : null;
-
-const StageDetails = ({ stage }) => {
-  const duration = formatDuration(stage.START_TIME, stage.END_TIME);
-
-  return (
-    <Stack flex={1} p={2}>
-      <Grid container spacing={2}>
-        <Detail title="Start Time" value={stage.START_TIME} />
-        <Detail title="End Time" value={stage.END_TIME} />
-        <Detail title="Time Taken" value={duration} />
-        <Detail title="Remarks" value={stage.EXECUTION_REMARKS} />
-        <Detail title="Triggered By" value={stage.TRIGGERED_BY} />
-      </Grid>
-    </Stack>
-  );
-};
-
-export default StageDetails;
-
-import Chip from "@mui/material/Chip";
-import DoneIcon from "@mui/icons-material/Done";
-import ErrorIcon from "@mui/icons-material/Error";
-import HourglassTopIcon from "@mui/icons-material/HourglassTop";
-import GppMaybeIcon from "@mui/icons-material/GppMaybe";
-import { StageStatus } from "../util/StageStatus";
-
-const config = {
-  [StageStatus.NOT_STARTED]: {
-    label: "Not Started",
-    icon: <GppMaybeIcon />,
-  },
-  [StageStatus.STARTED]: {
-    label: "In Progress",
-    icon: <HourglassTopIcon />,
-    color: "info",
-  },
-  [StageStatus.COMPLETED]: {
-    label: "Completed",
-    icon: <DoneIcon />,
-    color: "success",
-  },
-  [StageStatus.ERROR]: {
-    label: "Failed",
-    icon: <ErrorIcon />,
-    color: "error",
-  },
-};
-
-const ProcessStatusChip = ({ status }) => {
-  const c = config[status];
-  if (!c) return null;
-  return (
-    <Chip
-      size="small"
-      icon={c.icon}
-      label={c.label}
-      color={c.color}
-      variant="outlined"
-    />
-  );
-};
-
-export default ProcessStatusChip;
+export default ProgressStepper;
