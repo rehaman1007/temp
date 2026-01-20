@@ -1,19 +1,169 @@
+import { useEffect, useState, useCallback, useRef } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
+import useApi from "../../hooks/useApi";
+
+/* ================= STAGE NORMALIZER ================= */
+const normalizeStageDetails = (stageDetails = []) => {
+  const stageMap = new Map();
+
+  stageDetails.forEach((stage) => {
+    const key = stage.PROCESS_STAGE;
+    const existing = stageMap.get(key);
+
+    if (
+      !existing ||
+      new Date(stage.START_TIME) > new Date(existing.START_TIME)
+    ) {
+      stageMap.set(key, stage);
+    }
+  });
+
+  return Array.from(stageMap.values())
+    .sort((a, b) => a.PROCESS_STAGE - b.PROCESS_STAGE)
+    .map((stage) => ({
+      ...stage,
+
+      // ✅ RAW timestamps (for calculations)
+      _START_TIME_RAW: stage.START_TIME,
+      _END_TIME_RAW: stage.END_TIME,
+
+      // ✅ Formatted timestamps (for display)
+      START_TIME: stage.START_TIME
+        ? timeStampFormatter(stage.START_TIME)
+        : null,
+      END_TIME: stage.END_TIME
+        ? timeStampFormatter(stage.END_TIME)
+        : null,
+    }));
+};
+
+const processResponseData = (data = []) =>
+  data.map((process) => ({
+    ...process,
+    stageDetails: normalizeStageDetails(process.stageDetails),
+  }));
+
+/* ================= MERGE (SSE) ================= */
+const mergeProcesses = (prev = [], incoming = []) => {
+  const map = new Map(prev.map((p) => [p.type, p]));
+  incoming.forEach((p) => map.set(p.type, p));
+  return Array.from(map.values());
+};
+
+const ProcessStatusPage = () => {
+  const [processes, setProcesses] = useState([]);
+  const [selectedProcess, setSelectedProcess] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((state) => state.auth.token);
+  const { callApi } = useApi();
+
+  const service = resolveConfig("/PS");
+  const INITIAL_URL = "/PS/process/data";
+  const STREAM_URL = `${service}/process/processes`;
+
+  /* ================= INITIAL LOAD ================= */
+  const initialFetchDone = useRef(false);
+
+  useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+
+    let mounted = true;
+
+    callApi(INITIAL_URL, null)
+      .then((res) => res.json())
+      .then((data) => mounted && setProcesses(processResponseData(data)))
+      .catch(() => snackbar("Failed to load processes"))
+      .finally(() => mounted && setLoading(false));
+
+    return () => (mounted = false);
+  }, []);
+
+  /* ================= SSE STREAM ================= */
+  const onStreamUpdate = useCallback((incoming) => {
+    setProcesses((prev) => mergeProcesses(prev, incoming));
+  }, []);
+
+  useEffect(() => {
+    if (loading) return;
+
+    const controller = new AbortController();
+
+    fetchEventSource(STREAM_URL, {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
+      },
+
+      onmessage(event) {
+        if (event.event === "connected") return;
+        const data = JSON.parse(event.data);
+        if (Array.isArray(data)) {
+          onStreamUpdate(processResponseData(data));
+        }
+      },
+    });
+
+    return () => controller.abort();
+  }, [loading, STREAM_URL, token, onStreamUpdate]);
+
+  return (
+    <>
+      <ProcessDetailsDialog
+        process={selectedProcess}
+        onClose={() => setSelectedProcess(null)}
+      />
+
+      <ProcessStatusTable
+        loading={loading}
+        processes={processes}
+        actions={{
+          onView: setSelectedProcess,
+          onStop: () => {},
+          onRestart: () => {},
+        }}
+      />
+    </>
+  );
+};
+
+export default ProcessStatusPage;
+
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  Stack,
+  IconButton,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import { useEffect, useState, useMemo } from "react";
+import ProgressStepper from "./ProgressStepper";
+import StageDetails from "./StageDetails";
+import { StageStatus } from "../util/StageStatus";
+
 const resolveInitialActiveStep = (stages = []) => {
   if (!stages.length) return 0;
 
-  // 1️⃣ In-progress always wins
-  const startedIndex = stages.findIndex(
-    (s) => s.STATUS === StageStatus.STARTED
-  );
-  if (startedIndex !== -1) return startedIndex;
+  const started = stages.findIndex((s) => s.STATUS === StageStatus.STARTED);
+  if (started !== -1) return started;
 
-  // 2️⃣ Error next priority
-  const errorIndex = stages.findIndex(
-    (s) => s.STATUS === StageStatus.ERROR
-  );
-  if (errorIndex !== -1) return errorIndex;
+  const error = stages.findIndex((s) => s.STATUS === StageStatus.ERROR);
+  if (error !== -1) return error;
 
-  // 3️⃣ All completed → pick LAST completed stage
   const completedIndexes = stages
     .map((s, i) => (s.STATUS === StageStatus.COMPLETED ? i : -1))
     .filter((i) => i !== -1);
@@ -22,6 +172,134 @@ const resolveInitialActiveStep = (stages = []) => {
     return completedIndexes[completedIndexes.length - 1];
   }
 
-  // 4️⃣ Safe fallback
   return 0;
 };
+
+const ProcessDetailsDialog = ({ process, onClose }) => {
+  const stages = useMemo(() => process?.stageDetails || [], [process]);
+  const [activeStep, setActiveStep] = useState(0);
+
+  useEffect(() => {
+    if (stages.length) {
+      setActiveStep(resolveInitialActiveStep(stages));
+    }
+  }, [stages]);
+
+  if (!process) return null;
+
+  const lastStatus = stages[stages.length - 1]?.STATUS;
+
+  return (
+    <Dialog open={!!process} fullWidth maxWidth="md" onClose={onClose}>
+      <DialogTitle>
+        {process.type} – Process Details
+        <IconButton
+          onClick={onClose}
+          sx={{ position: "absolute", right: 12, top: 8 }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+
+      <DialogContent dividers>
+        <Stack
+          direction="row"
+          sx={(theme) => ({
+            border: `1px solid ${theme.palette.divider}`,
+            borderRadius: 2,
+            overflow: "hidden",
+          })}
+        >
+          <ProgressStepper
+            stageDetails={stages}
+            activeStep={activeStep}
+            onStageClick={setActiveStep}
+          />
+
+          <StageDetails stages={stages} activeStep={activeStep} />
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button
+          startIcon={<StopIcon />}
+          disabled={lastStatus !== StageStatus.STARTED}
+        >
+          Stop
+        </Button>
+        <Button
+          startIcon={<RestartAltIcon />}
+          disabled={lastStatus !== StageStatus.ERROR}
+        >
+          Restart
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default ProcessDetailsDialog;
+
+import { Stack, Grid, Typography } from "@mui/material";
+
+const formatDuration = (start, end) => {
+  if (!start || !end) return null;
+
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+
+  if (isNaN(startMs) || isNaN(endMs) || endMs < startMs) return null;
+
+  const diff = endMs - startMs;
+  const s = Math.floor(diff / 1000) % 60;
+  const m = Math.floor(diff / (1000 * 60)) % 60;
+  const h = Math.floor(diff / (1000 * 60 * 60));
+
+  return [h && `${h} hr`, m && `${m} min`, s && `${s} sec`]
+    .filter(Boolean)
+    .join(" ");
+};
+
+const Detail = ({ title, value }) =>
+  value ? (
+    <Grid>
+      <Typography variant="caption" color="text.secondary">
+        {title}
+      </Typography>
+      <Typography>{value}</Typography>
+    </Grid>
+  ) : null;
+
+const StageDetails = ({ stages = [], activeStep }) => {
+  const stage = stages[activeStep];
+  if (!stage) return null;
+
+  return (
+    <Stack
+      flex={1}
+      p={2}
+      sx={(theme) => ({
+        backgroundColor: theme.palette.action.hover,
+        borderLeft: `1px solid ${theme.palette.divider}`,
+      })}
+    >
+      <Grid container spacing={2}>
+        <Detail title="Stage" value={stage.stage?.title} />
+        <Detail title="Start Time" value={stage.START_TIME} />
+        <Detail title="End Time" value={stage.END_TIME} />
+        <Detail
+          title="Time Taken"
+          value={formatDuration(
+            stage._START_TIME_RAW,
+            stage._END_TIME_RAW
+          )}
+        />
+        <Detail title="Remarks" value={stage.EXECUTION_REMARKS} />
+        <Detail title="Triggered By" value={stage.TRIGGERED_BY} />
+      </Grid>
+    </Stack>
+  );
+};
+
+export default StageDetails;
+
