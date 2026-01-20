@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { useSelector } from "react-redux";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
@@ -17,7 +17,9 @@ const processResponseData = (data = []) =>
       START_TIME: stage.START_TIME
         ? timeStampFormatter(stage.START_TIME)
         : null,
-      END_TIME: stage.END_TIME ? timeStampFormatter(stage.END_TIME) : null,
+      END_TIME: stage.END_TIME
+        ? timeStampFormatter(stage.END_TIME)
+        : null,
     })),
   }));
 
@@ -32,36 +34,54 @@ const ProcessStatusPage = () => {
   const [processes, setProcesses] = useState([]);
   const [selectedProcess, setSelectedProcess] = useState(null);
   const [loading, setLoading] = useState(true);
+
   const snackbar = useCustomSnackbar();
   const token = useSelector((state) => state.auth.token);
   const { callApi } = useApi();
+
   const service = resolveConfig("/PS");
   const INITIAL_URL = "/PS/process/data";
   const STREAM_URL = `${service}/process/processes`;
 
-  /* ------------------ Initial Load ------------------ */
+  /* -----------------------------------------------------
+     Initial Load (RUNS ONLY ONCE – StrictMode safe)
+  ----------------------------------------------------- */
+  const initialFetchDone = useRef(false);
+
   useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+
     let mounted = true;
 
     callApi(INITIAL_URL, null)
       .then((res) => {
-        console.log(res);
         if (!res.ok) throw new Error();
         return res.json();
       })
-      .then((data) => mounted && setProcesses(processResponseData(data)))
+      .then((data) => {
+        if (mounted) {
+          setProcesses(processResponseData(data));
+        }
+      })
       .catch(() => snackbar("Failed to load processes"))
       .finally(() => mounted && setLoading(false));
 
-    return () => (mounted = false);
-  }, [callApi, snackbar]);
+    return () => {
+      mounted = false;
+    };
+  }, []); // 👈 intentionally EMPTY
 
-  /* ------------------ SSE Stream ------------------ */
+  /* -----------------------------------------------------
+     SSE Stream (STARTS AFTER INITIAL LOAD)
+  ----------------------------------------------------- */
   const onStreamUpdate = useCallback((incoming) => {
     setProcesses((prev) => mergeProcesses(prev, incoming));
   }, []);
 
   useEffect(() => {
+    if (loading) return; // ⛔ wait for initial snapshot
+
     const controller = new AbortController();
 
     fetchEventSource(STREAM_URL, {
@@ -72,18 +92,21 @@ const ProcessStatusPage = () => {
       },
 
       onopen(res) {
-        if (!res.ok) throw new Error("SSE connection failed");
+        if (!res.ok) {
+          throw new Error("SSE connection failed");
+        }
       },
 
-      onmessage(ev) {
-        if (ev.event === "connected") return;
+      onmessage(event) {
+        if (event.event === "connected") return;
+
         try {
-          const data = JSON.parse(ev.data);
+          const data = JSON.parse(event.data);
           if (Array.isArray(data)) {
             onStreamUpdate(processResponseData(data));
           }
         } catch (e) {
-          console.error(e);
+          console.error("SSE parse error", e);
         }
       },
 
@@ -91,7 +114,9 @@ const ProcessStatusPage = () => {
     });
 
     return () => controller.abort();
-  }, [token, onStreamUpdate, STREAM_URL]);
+  }, [loading, STREAM_URL, token, onStreamUpdate]);
+
+  /* ----------------------------------------------------- */
 
   return (
     <>
