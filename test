@@ -1,170 +1,45 @@
-import { useEffect, useState, useCallback, useRef } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import { resolveConfig } from "../../config/EnvironmentConfig";
-import { timeStampFormatter } from "../../utils/CommonUtilities";
-import useApi from "../../hooks/useApi";
+import { Stack, Grid, Typography } from "@mui/material";
 
-/* ======================================================
-   STAGE NORMALIZER (LATEST PER PROCESS_STAGE)
-====================================================== */
-const normalizeStageDetails = (stageDetails = []) => {
-  const stageMap = new Map();
-
-  stageDetails.forEach((stage) => {
-    const key = stage.PROCESS_STAGE;
-    const existing = stageMap.get(key);
-
-    // keep latest execution for each stage
-    if (
-      !existing ||
-      new Date(stage.START_TIME) > new Date(existing.START_TIME)
-    ) {
-      stageMap.set(key, stage);
-    }
-  });
-
-  return Array.from(stageMap.values())
-    .sort((a, b) => a.PROCESS_STAGE - b.PROCESS_STAGE)
-    .map((stage) => ({
-      ...stage,
-      START_TIME: stage.START_TIME
-        ? timeStampFormatter(stage.START_TIME)
-        : null,
-      END_TIME: stage.END_TIME
-        ? timeStampFormatter(stage.END_TIME)
-        : null,
-    }));
+const formatDuration = (start, end) => {
+  if (!start || !end) return null;
+  const diff = new Date(end) - new Date(start);
+  const s = Math.floor(diff / 1000) % 60;
+  const m = Math.floor(diff / (1000 * 60)) % 60;
+  const h = Math.floor(diff / (1000 * 60 * 60));
+  return [h && `${h} hr`, m && `${m} min`, s && `${s} sec`]
+    .filter(Boolean)
+    .join(" ");
 };
 
-/* ======================================================
-   PROCESS NORMALIZER
-====================================================== */
-const processResponseData = (data = []) =>
-  data.map((process) => ({
-    ...process,
-    stageDetails: normalizeStageDetails(process.stageDetails),
-  }));
+const Detail = ({ title, value }) =>
+  value ? (
+    <Grid>
+      <Typography variant="caption" color="text.secondary">
+        {title}
+      </Typography>
+      <Typography>{value}</Typography>
+    </Grid>
+  ) : null;
 
-/* ======================================================
-   MERGE HELPER (FOR SSE UPDATES)
-====================================================== */
-const mergeProcesses = (prev = [], incoming = []) => {
-  const map = new Map(prev.map((p) => [p.type, p]));
-  incoming.forEach((p) => map.set(p.type, p));
-  return Array.from(map.values());
-};
+const StageDetails = ({ stages = [], activeStep }) => {
+  const stage = stages[activeStep];
+  if (!stage) return null;
 
-const ProcessStatusPage = () => {
-  const [processes, setProcesses] = useState([]);
-  const [selectedProcess, setSelectedProcess] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  const snackbar = useCustomSnackbar();
-  const token = useSelector((state) => state.auth.token);
-  const { callApi } = useApi();
-
-  const service = resolveConfig("/PS");
-  const INITIAL_URL = "/PS/process/data";
-  const STREAM_URL = `${service}/process/processes`;
-
-  /* ======================================================
-     INITIAL LOAD (RUNS ONCE ONLY)
-  ====================================================== */
-  const initialFetchDone = useRef(false);
-
-  useEffect(() => {
-    if (initialFetchDone.current) return;
-    initialFetchDone.current = true;
-
-    let mounted = true;
-
-    callApi(INITIAL_URL, null)
-      .then((res) => {
-        if (!res.ok) throw new Error();
-        return res.json();
-      })
-      .then((data) => {
-        if (mounted) {
-          setProcesses(processResponseData(data));
-        }
-      })
-      .catch(() => snackbar("Failed to load processes"))
-      .finally(() => mounted && setLoading(false));
-
-    return () => {
-      mounted = false;
-    };
-  }, []); // ⛔ intentionally empty (StrictMode safe)
-
-  /* ======================================================
-     SSE STREAM (STARTS AFTER INITIAL LOAD)
-  ====================================================== */
-  const onStreamUpdate = useCallback((incoming) => {
-    setProcesses((prev) => mergeProcesses(prev, incoming));
-  }, []);
-
-  useEffect(() => {
-    if (loading) return; // wait for snapshot
-
-    const controller = new AbortController();
-
-    fetchEventSource(STREAM_URL, {
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
-
-      onopen(res) {
-        if (!res.ok) {
-          throw new Error("SSE connection failed");
-        }
-      },
-
-      onmessage(event) {
-        if (event.event === "connected") return;
-
-        try {
-          const data = JSON.parse(event.data);
-          if (Array.isArray(data)) {
-            onStreamUpdate(processResponseData(data));
-          }
-        } catch (e) {
-          console.error("SSE parse error", e);
-        }
-      },
-
-      retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 15000),
-    });
-
-    return () => controller.abort();
-  }, [loading, STREAM_URL, token, onStreamUpdate]);
-
-  /* ======================================================
-     RENDER
-  ====================================================== */
   return (
-    <>
-      <ProcessDetailsDialog
-        process={selectedProcess}
-        onClose={() => setSelectedProcess(null)}
-      />
-
-      <ProcessStatusTable
-        loading={loading}
-        processes={processes}
-        actions={{
-          onView: setSelectedProcess,
-          onStop: () => {},
-          onRestart: () => {},
-        }}
-      />
-    </>
+    <Stack flex={1} p={2}>
+      <Grid container spacing={2}>
+        <Detail title="Stage" value={stage.stage?.title} />
+        <Detail title="Start Time" value={stage.START_TIME} />
+        <Detail title="End Time" value={stage.END_TIME} />
+        <Detail
+          title="Time Taken"
+          value={formatDuration(stage.START_TIME, stage.END_TIME)}
+        />
+        <Detail title="Remarks" value={stage.EXECUTION_REMARKS} />
+        <Detail title="Triggered By" value={stage.TRIGGERED_BY} />
+      </Grid>
+    </Stack>
   );
 };
 
-export default ProcessStatusPage;
+export default StageDetails;
