@@ -1,13 +1,150 @@
-event:connected
-data:Connection established
+import { useEffect, useState, useRef } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
+import useApi from "../../hooks/useApi";
 
-data:[{"processType":"Jailabdin","dagId":null,"airflowRunId":"195","executionDate":null,"stageDetails":[{"id":4616,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"195","differenceSummary":null,"remarks":null,"startTime":1768993061531,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]}]
+/* ======================================================
+   NORMALIZE STAGES (LATEST PER processStage)
+====================================================== */
+const normalizeStageDetails = (stageDetails = []) => {
+  const stageMap = new Map();
 
-data:[{"processType":"Jailabdin","dagId":null,"airflowRunId":"195","executionDate":null,"stageDetails":[{"id":4616,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"195","differenceSummary":null,"remarks":null,"startTime":1768993061531,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehaman Testing","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4617,"processId":null,"processStage":1,"status":0,"triggeredBy":"Rehaman","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768993070635,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]}]
+  stageDetails.forEach((stage) => {
+    const key = stage.processStage;
+    const existing = stageMap.get(key);
 
-data:[{"processType":"Jailabdin","dagId":null,"airflowRunId":"195","executionDate":null,"stageDetails":[{"id":4616,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"195","differenceSummary":null,"remarks":null,"startTime":1768993061531,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehaman Testing","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4617,"processId":null,"processStage":1,"status":2,"triggeredBy":"Rehaman","airflowRunId":"18","differenceSummary":null,"remarks":"Completed","startTime":1768993070635,"endTime":1768993107699,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]}]
+    if (!existing || stage.startTime > existing.startTime) {
+      stageMap.set(key, stage);
+    }
+  });
 
-data:[{"processType":"Jailabdin","dagId":null,"airflowRunId":"195","executionDate":null,"stageDetails":[{"id":4616,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"195","differenceSummary":null,"remarks":null,"startTime":1768993061531,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehaman Testing","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4617,"processId":null,"processStage":1,"status":2,"triggeredBy":"Rehaman","airflowRunId":"18","differenceSummary":null,"remarks":"Completed","startTime":1768993070635,"endTime":1768993107699,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}},{"id":4618,"processId":null,"processStage":2,"status":0,"triggeredBy":"Rehaman","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768993202365,"endTime":0,"executionDate":null,"stage":{"title":"File Moving","icon":"MoveDown"}}]}]
+  return Array.from(stageMap.values())
+    .sort((a, b) => a.processStage - b.processStage)
+    .map((stage) => ({
+      ...stage,
+      _START_TIME_RAW: stage.startTime,
+      _END_TIME_RAW: stage.endTime,
+      startTime: stage.startTime
+        ? timeStampFormatter(stage.startTime)
+        : null,
+      endTime: stage.endTime
+        ? timeStampFormatter(stage.endTime)
+        : null,
+    }));
+};
 
-data:[{"processType":"Jailabdin","dagId":null,"airflowRunId":"195","executionDate":null,"stageDetails":[{"id":4616,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"195","differenceSummary":null,"remarks":null,"startTime":1768993061531,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehaman Testing","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4617,"processId":null,"processStage":1,"status":2,"triggeredBy":"Rehaman","airflowRunId":"18","differenceSummary":null,"remarks":"Completed","startTime":1768993070635,"endTime":1768993107699,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}},{"id":4618,"processId":null,"processStage":2,"status":1,"triggeredBy":"Rehaman","airflowRunId":"18","differenceSummary":null,"remarks":"Completed","startTime":1768993202365,"endTime":0,"executionDate":null,"stage":{"title":"File Moving","icon":"MoveDown"}}]}]
+/* ======================================================
+   NORMALIZE PROCESS SNAPSHOT
+====================================================== */
+const normalizeProcesses = (data = []) =>
+  data.map((p) => ({
+    ...p,
+    type: p.type ?? p.processType,
+    stageDetails: normalizeStageDetails(p.stageDetails),
+  }));
 
+/* ======================================================
+   MERGE SNAPSHOTS (PROCESS LEVEL ONLY)
+====================================================== */
+const mergeProcesses = (prev = [], incoming = []) => {
+  const map = new Map(prev.map((p) => [p.type, p]));
+  incoming.forEach((p) => map.set(p.type, p)); // 🔥 replace
+  return Array.from(map.values());
+};
+
+const ProcessStatusPage = () => {
+  const [processes, setProcesses] = useState([]);
+  const [selectedProcess, setSelectedProcess] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((state) => state.auth.token);
+  const { callApi } = useApi();
+
+  const service = resolveConfig("/PS");
+  const INITIAL_URL = "/PS/process/processes/data";
+  const STREAM_URL = `${service}/process/processes-testing`;
+
+  /* ================= INITIAL LOAD ================= */
+  const initialFetchDone = useRef(false);
+
+  useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+
+    let mounted = true;
+
+    callApi(INITIAL_URL, null)
+      .then((data) => {
+        if (mounted && Array.isArray(data)) {
+          setProcesses(normalizeProcesses(data));
+        }
+      })
+      .catch(() => snackbar("Failed to load processes"))
+      .finally(() => mounted && setLoading(false));
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  /* ================= SSE STREAM ================= */
+  useEffect(() => {
+    if (loading) return;
+
+    const controller = new AbortController();
+
+    fetchEventSource(STREAM_URL, {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
+      },
+
+      onmessage(event) {
+        if (event.event === "connected") return;
+
+        try {
+          const raw = JSON.parse(event.data);
+          if (!Array.isArray(raw)) return;
+
+          const normalized = normalizeProcesses(raw);
+
+          setProcesses((prev) =>
+            mergeProcesses(prev, normalized)
+          );
+        } catch (e) {
+          console.error("SSE parse error", e);
+        }
+      },
+    });
+
+    return () => controller.abort();
+  }, [loading, STREAM_URL, token]);
+
+  return (
+    <>
+      <ProcessDetailsDialog
+        process={selectedProcess}
+        onClose={() => setSelectedProcess(null)}
+      />
+
+      <ProcessStatusTable
+        loading={loading}
+        processes={processes}
+        actions={{
+          onView: setSelectedProcess,
+          onStop: () => {},
+          onRestart: () => {},
+        }}
+      />
+    </>
+  );
+};
+
+export default ProcessStatusPage;
