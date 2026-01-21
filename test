@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { useSelector } from "react-redux";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
@@ -7,44 +7,45 @@ import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
 import { resolveConfig } from "../../config/EnvironmentConfig";
 import { timeStampFormatter } from "../../utils/CommonUtilities";
 import useApi from "../../hooks/useApi";
-import { Grid, Box, Button, Paper } from "@mui/material";
-import AccessTimeIcon from "@mui/icons-material/AccessTime";
+import {
+  Grid,
+  Box,
+  Button,
+  Paper,
+  Stack,
+  Tooltip,
+} from "@mui/material";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import TaskAltIcon from "@mui/icons-material/TaskAlt";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import dayjs from "dayjs";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import TaskAltIcon from "@mui/icons-material/TaskAlt";
 
-/* ======================================================
-   NORMALIZE STAGES (LATEST PER processStage)
-====================================================== */
+/* ================= NORMALIZERS ================= */
 const normalizeStageDetails = (stageDetails = []) => {
-  const stageMap = new Map();
+  const map = new Map();
 
-  stageDetails.forEach((stage) => {
-    const key = stage.processStage;
-    const existing = stageMap.get(key);
-
-    if (!existing || stage.startTime > existing.startTime) {
-      stageMap.set(key, stage);
+  stageDetails.forEach((s) => {
+    const key = s.processStage;
+    const existing = map.get(key);
+    if (!existing || s.startTime > existing.startTime) {
+      map.set(key, s);
     }
   });
 
-  return Array.from(stageMap.values())
+  return Array.from(map.values())
     .sort((a, b) => a.processStage - b.processStage)
-    .map((stage) => ({
-      ...stage,
-      _START_TIME_RAW: stage.startTime,
-      _END_TIME_RAW: stage.endTime,
-      startTime: stage.startTime ? timeStampFormatter(stage.startTime) : null,
-      endTime: stage.endTime ? timeStampFormatter(stage.endTime) : null,
+    .map((s) => ({
+      ...s,
+      _START_TIME_RAW: s.startTime,
+      _END_TIME_RAW: s.endTime,
+      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
     }));
 };
 
-/* ======================================================
-   NORMALIZE PROCESS SNAPSHOT
-====================================================== */
 const normalizeProcesses = (data = []) =>
   data.map((p) => ({
     ...p,
@@ -52,12 +53,9 @@ const normalizeProcesses = (data = []) =>
     stageDetails: normalizeStageDetails(p.stageDetails),
   }));
 
-/* ======================================================
-   MERGE SNAPSHOTS (PROCESS LEVEL ONLY)
-====================================================== */
 const mergeProcesses = (prev = [], incoming = []) => {
   const map = new Map(prev.map((p) => [p.type, p]));
-  incoming.forEach((p) => map.set(p.type, p)); // replace
+  incoming.forEach((p) => map.set(p.type, p));
   return Array.from(map.values());
 };
 
@@ -65,7 +63,7 @@ const ProcessStatusPage = () => {
   const [processes, setProcesses] = useState([]);
   const [selectedProcess, setSelectedProcess] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [selectedDate, setSelectedDate] = useState("2026-01-21");
+  const [selectedDate, setSelectedDate] = useState(dayjs());
 
   const snackbar = useCustomSnackbar();
   const token = useSelector((state) => state.auth.token);
@@ -82,23 +80,13 @@ const ProcessStatusPage = () => {
     if (initialFetchDone.current) return;
     initialFetchDone.current = true;
 
-    let mounted = true;
-
-    callApi(INITIAL_URL, null)
-      .then((data) => {
-        if (mounted && Array.isArray(data)) {
-          setProcesses(normalizeProcesses(data));
-        }
-      })
+    callApi(INITIAL_URL)
+      .then((data) => setProcesses(normalizeProcesses(data || [])))
       .catch(() => snackbar("Failed to load processes"))
-      .finally(() => mounted && setLoading(false));
-
-    return () => {
-      mounted = false;
-    };
+      .finally(() => setLoading(false));
   }, []);
 
-  /* ================= SSE STREAM ================= */
+  /* ================= SSE ================= */
   useEffect(() => {
     if (loading) return;
 
@@ -110,94 +98,121 @@ const ProcessStatusPage = () => {
         Authorization: `Bearer ${token}`,
         Accept: "text/event-stream",
       },
-
-      onmessage(event) {
-        if (event.event === "connected") return;
-
-        try {
-          const raw = JSON.parse(event.data);
-          if (!Array.isArray(raw)) return;
-
-          const normalized = normalizeProcesses(raw);
-
-          setProcesses((prev) => mergeProcesses(prev, normalized));
-        } catch (e) {
-          console.error("SSE parse error", e);
-        }
+      onmessage(e) {
+        if (e.event === "connected") return;
+        const raw = JSON.parse(e.data);
+        setProcesses((prev) =>
+          mergeProcesses(prev, normalizeProcesses(raw))
+        );
       },
     });
 
     return () => controller.abort();
-  }, [loading, STREAM_URL, token]);
+  }, [loading, token]);
+
+  /* ================= DERIVED UI STATES ================= */
+  const hasProcesses = processes.length > 0;
+
+  const allCompleted = useMemo(
+    () =>
+      processes.length > 0 &&
+      processes.every((p) =>
+        p.stageDetails.every((s) => s.status === 2)
+      ),
+    [processes]
+  );
+
+  const differenceSummary = useMemo(() => {
+    const diff = processes.find((p) => p.type === "DIFFERENCE");
+    if (!diff) return null;
+
+    const stage7 = diff.stageDetails[6];
+    if (stage7?.status === 2 && stage7?.differenceSummary) {
+      return stage7.differenceSummary;
+    }
+    return null;
+  }, [processes]);
 
   return (
-    <Paper sx={{ p: 2, minHeight: "70vh" }}>
-      <Box sx={{ m: 2 }}>
-        <Grid container spacing={2} alignItems="center" justifyContent="center">
-          {/* First Row: Centered Date Picker */}
-          <Grid
-            size={{ xs: 12 }}
-            sx={{ display: "flex", justifyContent: "center" }}
-          >
-            <LocalizationProvider dateAdapter={AdapterDayjs}>
-              <DatePicker label="ETL Date" defaultValue={dayjs(selectedDate)} />
-            </LocalizationProvider>
+    <Paper sx={{ p: 3, minHeight: "75vh" }}>
+      {/* ================= TOP CONTROLS ================= */}
+      <Stack spacing={3} alignItems="center">
+        <LocalizationProvider dateAdapter={AdapterDayjs}>
+          <DatePicker
+            label="ETL Date"
+            value={selectedDate}
+            onChange={setSelectedDate}
+          />
+        </LocalizationProvider>
+
+        <Grid container spacing={2} justifyContent="center">
+          <Grid>
+            <Tooltip title={hasProcesses ? "EOD already started" : ""}>
+              <span>
+                <Button
+                  variant="contained"
+                  size="large"
+                  startIcon={<PlayArrowIcon />}
+                  disabled={hasProcesses}
+                >
+                  Start EOD
+                </Button>
+              </span>
+            </Tooltip>
           </Grid>
 
-          {/* Second Row: Icon Button */}
-          <Grid size={{ xs: 12, md: 6 }} sx={{ textAlign: "center" }}>
-            <Button
-              variant="contained"
-              size="large"
-              startIcon={<PlayArrowIcon />}
-              sx={{
-                fontWeight: "bold",
-                fontSize: "1.1rem",
-                boxShadow: " rgb(38, 57, 77) 0px 20px 30px -10px",
-                "&:hover": {
-                  boxShadow: "0 6px 20px rgba(30, 60, 114, 0.4)",
-                },
-                transition: "all 0.3s ease",
-              }}
+          <Grid>
+            <Tooltip
+              title={!allCompleted ? "Processes still running" : ""}
             >
-              Start EOD
-            </Button>
+              <span>
+                <Button
+                  variant="contained"
+                  size="large"
+                  startIcon={<TaskAltIcon />}
+                  disabled={!allCompleted}
+                  color="success"
+                >
+                  Finish EOD
+                </Button>
+              </span>
+            </Tooltip>
           </Grid>
 
-          <Grid size={{ xs: 12, md: 6 }} sx={{ textAlign: "center" }}>
-            <Button
-              variant="contained"
-              size="large"
-              startIcon={<TaskAltIcon />}
-              sx={{
-                fontWeight: "bold",
-                fontSize: "1.1rem",
-                boxShadow: " rgb(38, 57, 77) 0px 20px 30px -10px",
-                "&:hover": {
-                  boxShadow: "0 6px 20px rgba(30, 60, 114, 0.4)",
-                },
-                transition: "all 0.3s ease",
-              }}
-            >
-              Finish EOD
-            </Button>
-          </Grid>
+          {differenceSummary && (
+            <Grid>
+              <Button
+                variant="outlined"
+                startIcon={<VisibilityOutlinedIcon />}
+                onClick={() => {
+                  snackbar("Showing difference summary");
+                  // open dialog / drawer later
+                }}
+              >
+                View Summary
+              </Button>
+            </Grid>
+          )}
         </Grid>
-      </Box>
+      </Stack>
+
+      {/* ================= CONTENT ================= */}
       <ProcessDetailsDialog
         process={selectedProcess}
         onClose={() => setSelectedProcess(null)}
       />
 
-      <ProcessStatusTable
-        loading={loading}
-        processes={processes}
-        actions={{
-          onView: setSelectedProcess,
-          onStop: () => {},
-          onRestart: () => {},
-        }}
-      />
+      <Box mt={4}>
+        <ProcessStatusTable
+          loading={loading}
+          processes={processes}
+          actions={{
+            onView: setSelectedProcess,
+            onStop: () => {},
+            onRestart: () => {},
+          }}
+        />
+      </Box>
     </Paper>
   );
 };
