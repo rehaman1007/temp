@@ -9,40 +9,96 @@ import { timeStampFormatter } from "../../utils/CommonUtilities";
 import useApi from "../../hooks/useApi";
 
 /* ======================================================
-   STAGE NORMALIZER (LATEST PER processStage)
+   NORMALIZE STAGE DETAILS (LATEST PER processStage)
 ====================================================== */
 const normalizeStageDetails = (stageDetails = []) => {
-  return Array.from(stageDetails.values())
+  const stageMap = new Map();
+
+  stageDetails.forEach((stage) => {
+    const key = stage.processStage;
+    const existing = stageMap.get(key);
+
+    if (
+      !existing ||
+      stage.startTime > existing.startTime
+    ) {
+      stageMap.set(key, stage);
+    }
+  });
+
+  return Array.from(stageMap.values())
     .sort((a, b) => a.processStage - b.processStage)
     .map((stage) => ({
       ...stage,
 
-      // RAW timestamps (for calculations)
+      /* RAW timestamps (logic) */
       _START_TIME_RAW: stage.startTime,
       _END_TIME_RAW: stage.endTime,
 
-      // Formatted timestamps (for display)
-      startTime: stage.startTime ? timeStampFormatter(stage.startTime) : null,
-      endTime: stage.endTime ? timeStampFormatter(stage.endTime) : null,
+      /* DISPLAY timestamps */
+      startTime: stage.startTime
+        ? timeStampFormatter(stage.startTime)
+        : null,
+      endTime: stage.endTime
+        ? timeStampFormatter(stage.endTime)
+        : null,
     }));
 };
 
 /* ======================================================
-   PROCESS NORMALIZER
+   NORMALIZE PROCESS SHAPE (KEY FIX)
 ====================================================== */
-const processResponseData = (data = []) =>
-  data.map((process) => ({
-    ...process,
-    stageDetails: normalizeStageDetails(process.stageDetails),
+const normalizeProcesses = (data = []) =>
+  data.map((p) => ({
+    ...p,
+    type: p.type ?? p.processType, // 🔥 critical fix
+    stageDetails: normalizeStageDetails(p.stageDetails),
   }));
 
 /* ======================================================
-   MERGE HELPER (FOR SSE UPDATES)
+   DEEP MERGE PROCESSES + STAGES (SSE SAFE)
 ====================================================== */
 const mergeProcesses = (prev = [], incoming = []) => {
-  const map = new Map(prev.map((p) => [p.type, p]));
-  incoming.forEach((p) => map.set(p.type, p));
-  return Array.from(map.values());
+  const processMap = new Map();
+
+  /* Seed existing processes */
+  prev.forEach((p) => {
+    processMap.set(p.type, {
+      ...p,
+      stageDetails: [...p.stageDetails],
+    });
+  });
+
+  /* Merge incoming updates */
+  incoming.forEach((p) => {
+    const existing = processMap.get(p.type);
+
+    if (!existing) {
+      processMap.set(p.type, p);
+      return;
+    }
+
+    const stageMap = new Map(
+      existing.stageDetails.map((s) => [s.processStage, s])
+    );
+
+    p.stageDetails.forEach((stage) => {
+      const old = stageMap.get(stage.processStage);
+
+      if (
+        !old ||
+        stage._START_TIME_RAW > old._START_TIME_RAW
+      ) {
+        stageMap.set(stage.processStage, stage);
+      }
+    });
+
+    existing.stageDetails = Array.from(stageMap.values()).sort(
+      (a, b) => a.processStage - b.processStage
+    );
+  });
+
+  return Array.from(processMap.values());
 };
 
 const ProcessStatusPage = () => {
@@ -59,7 +115,7 @@ const ProcessStatusPage = () => {
   const STREAM_URL = `${service}/process/processes-testing`;
 
   /* ======================================================
-     INITIAL LOAD (RUNS ONCE ONLY)
+     INITIAL LOAD (STRICTMODE SAFE)
   ====================================================== */
   const initialFetchDone = useRef(false);
 
@@ -71,8 +127,8 @@ const ProcessStatusPage = () => {
 
     callApi(INITIAL_URL, null)
       .then((data) => {
-        if (data && mounted) {
-          setProcesses(processResponseData(data));
+        if (mounted && Array.isArray(data)) {
+          setProcesses(normalizeProcesses(data));
         }
       })
       .catch(() => snackbar("Failed to load processes"))
@@ -81,18 +137,13 @@ const ProcessStatusPage = () => {
     return () => {
       mounted = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally empty (StrictMode safe)
-
-  /* ======================================================
-     SSE STREAM (STARTS AFTER INITIAL LOAD)
-  ====================================================== */
-  const onStreamUpdate = useCallback((incoming) => {
-    setProcesses((prev) => mergeProcesses(prev, incoming));
   }, []);
 
+  /* ======================================================
+     SSE STREAM (REALTIME MERGE)
+  ====================================================== */
   useEffect(() => {
-    if (loading) return; // wait for snapshot
+    if (loading) return;
 
     const controller = new AbortController();
 
@@ -113,10 +164,14 @@ const ProcessStatusPage = () => {
         if (event.event === "connected") return;
 
         try {
-          const data = JSON.parse(event.data);
-          if (Array.isArray(data)) {
-            onStreamUpdate(processResponseData(data));
-          }
+          const raw = JSON.parse(event.data);
+          if (!Array.isArray(raw)) return;
+
+          const normalized = normalizeProcesses(raw);
+
+          setProcesses((prev) =>
+            mergeProcesses(prev, normalized)
+          );
         } catch (e) {
           console.error("SSE parse error", e);
         }
@@ -126,7 +181,7 @@ const ProcessStatusPage = () => {
     });
 
     return () => controller.abort();
-  }, [loading, STREAM_URL, token, onStreamUpdate]);
+  }, [loading, STREAM_URL, token]);
 
   /* ======================================================
      RENDER
@@ -152,11 +207,3 @@ const ProcessStatusPage = () => {
 };
 
 export default ProcessStatusPage;
-
-
-// event data from stream
-data:[{"processType":"NEW","dagId":null,"airflowRunId":"19","executionDate":null,"stageDetails":[{"id":4586,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"19","differenceSummary":null,"remarks":null,"startTime":1768979965308,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"ETL-SPARK","dagId":"0","airflowRunId":"oracle_logs_entry","executionDate":null,"stageDetails":[{"id":4577,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"oracle_logs_entry","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id oracle_logs_entry has started","startTime":1768916825871,"endTime":1768916828430,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4578,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:13.070652+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:13.070652+00:00 has started","startTime":1768936766901,"endTime":1768936769389,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4579,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:21.671027+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:21.671027+00:00 has started","startTime":1768936826324,"endTime":1768936828954,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4580,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:50:09.904928+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:50:09.904928+00:00 has started","startTime":1768936885660,"endTime":1768936887378,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4581,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:32.687907+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:32.687907+00:00 has started","startTime":1768937126561,"endTime":1768937129465,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}}]},{"processType":"BNC","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4583,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768979328495,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW3","dagId":null,"airflowRunId":"190","executionDate":null,"stageDetails":[{"id":4587,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"190","differenceSummary":null,"remarks":null,"startTime":1768982573928,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW23","dagId":null,"airflowRunId":"190","executionDate":null,"stageDetails":[{"id":4588,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"190","differenceSummary":null,"remarks":null,"startTime":1768982614838,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehamnan","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4589,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768982916771,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]}]
-
-data:[{"processType":"Rehaman","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4590,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768982933617,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW","dagId":null,"airflowRunId":"19","executionDate":null,"stageDetails":[{"id":4586,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"19","differenceSummary":null,"remarks":null,"startTime":1768979965308,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"ETL-SPARK","dagId":"0","airflowRunId":"oracle_logs_entry","executionDate":null,"stageDetails":[{"id":4577,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"oracle_logs_entry","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id oracle_logs_entry has started","startTime":1768916825871,"endTime":1768916828430,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4578,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:13.070652+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:13.070652+00:00 has started","startTime":1768936766901,"endTime":1768936769389,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4579,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:21.671027+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:21.671027+00:00 has started","startTime":1768936826324,"endTime":1768936828954,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4580,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:50:09.904928+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:50:09.904928+00:00 has started","startTime":1768936885660,"endTime":1768936887378,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4581,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:32.687907+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:32.687907+00:00 has started","startTime":1768937126561,"endTime":1768937129465,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}}]},{"processType":"BNC","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4583,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768979328495,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW3","dagId":null,"airflowRunId":"190","executionDate":null,"stageDetails":[{"id":4587,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"190","differenceSummary":null,"remarks":null,"startTime":1768982573928,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW23","dagId":null,"airflowRunId":"190","executionDate":null,"stageDetails":[{"id":4588,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"190","differenceSummary":null,"remarks":null,"startTime":1768982614838,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehamnan","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4589,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768982916771,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]}]
-
-data:[{"processType":"Rehaman","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4590,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768982933617,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW","dagId":null,"airflowRunId":"19","executionDate":null,"stageDetails":[{"id":4586,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"19","differenceSummary":null,"remarks":null,"startTime":1768979965308,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehaman42","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4591,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768982949148,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"ETL-SPARK","dagId":"0","airflowRunId":"oracle_logs_entry","executionDate":null,"stageDetails":[{"id":4577,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"oracle_logs_entry","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id oracle_logs_entry has started","startTime":1768916825871,"endTime":1768916828430,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4578,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:13.070652+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:13.070652+00:00 has started","startTime":1768936766901,"endTime":1768936769389,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4579,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:21.671027+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:21.671027+00:00 has started","startTime":1768936826324,"endTime":1768936828954,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4580,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:50:09.904928+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:50:09.904928+00:00 has started","startTime":1768936885660,"endTime":1768936887378,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}},{"id":4581,"processId":1,"processStage":3,"status":2,"triggeredBy":"AIRFLOW","airflowRunId":"manual__2026-01-20T13:49:32.687907+00:00","differenceSummary":null,"remarks":"the process  oracle_logs_entry and run_id manual__2026-01-20T13:49:32.687907+00:00 has started","startTime":1768937126561,"endTime":1768937129465,"executionDate":null,"stage":{"title":"ETL Pipeline","icon":"Calculate"}}]},{"processType":"BNC","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4583,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768979328495,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW3","dagId":null,"airflowRunId":"190","executionDate":null,"stageDetails":[{"id":4587,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"190","differenceSummary":null,"remarks":null,"startTime":1768982573928,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"NEW23","dagId":null,"airflowRunId":"190","executionDate":null,"stageDetails":[{"id":4588,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"190","differenceSummary":null,"remarks":null,"startTime":1768982614838,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]},{"processType":"Rehamnan","dagId":null,"airflowRunId":"18","executionDate":null,"stageDetails":[{"id":4589,"processId":null,"processStage":1,"status":0,"triggeredBy":"SYSTEM","airflowRunId":"18","differenceSummary":null,"remarks":null,"startTime":1768982916771,"endTime":0,"executionDate":null,"stage":{"title":"File Reception","icon":"InsertDriveFile"}}]}]
