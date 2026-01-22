@@ -1,8 +1,9 @@
+npm install xlsx jspdf jspdf-autotable html-to-image
+
+
 import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  DialogActions,
   Button,
   Table,
   TableHead,
@@ -13,9 +14,19 @@ import {
   Paper,
   Typography,
   Box,
+  Stack,
+  IconButton,
+  Divider,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
-import IconButton from "@mui/material/IconButton";
+import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
+import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import * as XLSX from "xlsx";
+import jsPDF from "jspdf";
+import "jspdf-autotable";
+import { toPng } from "html-to-image";
+import { useRef } from "react";
 
 /* ================= NUMBER FORMAT ================= */
 const formatAmount = (num) =>
@@ -25,84 +36,204 @@ const formatAmount = (num) =>
 const ProcessSummary = ({ open, data, onClose }) => {
   if (!data) return null;
 
-  console.log(data);
+  const reportRef = useRef(null);
 
   const { RECON_RUN_DATE, summary = [] } = data;
 
   const totalEntries = summary.reduce(
-    (sum, row) => sum + (row.Total_no_of_entries || 0),
-    0,
+    (sum, r) => sum + (r.Total_no_of_entries || 0),
+    0
   );
   const totalNewEntries = summary.reduce(
-    (sum, row) => sum + (row["new entry"] || 0),
-    0,
+    (sum, r) => sum + (r["new entry"] || 0),
+    0
   );
+
+  /* ================= EXPORT EXCEL ================= */
+  const exportExcel = () => {
+    const rows = summary.map((r) => ({
+      HEAD: r.HEAD,
+      "Total Entries": r.Total_no_of_entries,
+      "New Entries": r["new entry"],
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Summary");
+
+    XLSX.writeFile(wb, `Difference_Summary_${RECON_RUN_DATE}.xlsx`);
+  };
+
+  /* ================= EXPORT PDF ================= */
+  const exportPDF = () => {
+    const doc = new jsPDF("p", "pt");
+
+    doc.setFontSize(14);
+    doc.text("Difference Summary Report", 40, 40);
+    doc.setFontSize(10);
+    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
+
+    doc.autoTable({
+      startY: 80,
+      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
+      body: summary.map((r) => [
+        r.HEAD,
+        formatAmount(r.Total_no_of_entries),
+        formatAmount(r["new entry"]),
+      ]),
+      styles: { halign: "right" },
+      headStyles: { fillColor: [33, 150, 243] },
+      columnStyles: { 0: { halign: "left" } },
+    });
+
+    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
+  };
+
+  /* ================= EXPORT PNG ================= */
+  const exportPNG = async () => {
+    if (!reportRef.current) return;
+
+    const dataUrl = await toPng(reportRef.current, {
+      cacheBust: true,
+      backgroundColor: "#ffffff",
+    });
+
+    const link = document.createElement("a");
+    link.download = `Difference_Summary_${RECON_RUN_DATE}.png`;
+    link.href = dataUrl;
+    link.click();
+  };
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle>
-        Difference Summary
-        <IconButton
-          onClick={onClose}
-          sx={{ position: "absolute", right: 12, top: 8 }}
-        >
-          <CloseIcon />
-        </IconButton>
-      </DialogTitle>
+      {/* ================= REPORT HEADER ================= */}
+      <Box
+        sx={{
+          position: "sticky",
+          top: 0,
+          zIndex: 2,
+          bgcolor: "background.paper",
+          borderBottom: 1,
+          borderColor: "divider",
+          px: 3,
+          py: 2,
+        }}
+      >
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Box>
+            <Typography variant="h6" fontWeight={700}>
+              Difference Summary Report
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Reconciliation Date: {RECON_RUN_DATE}
+            </Typography>
+          </Box>
 
-      <DialogContent dividers>
-        {/* ================= META ================= */}
-        <Box mb={2}>
-          <Typography variant="caption" color="text.secondary">
-            Reconciliation of ETL date
-          </Typography>
-          <Typography fontWeight={600}>{RECON_RUN_DATE}</Typography>
-        </Box>
+          <Stack direction="row" spacing={1}>
+            <IconButton title="Export Excel" onClick={exportExcel}>
+              <FileDownloadOutlinedIcon />
+            </IconButton>
+            <IconButton title="Export PDF" onClick={exportPDF}>
+              <PictureAsPdfOutlinedIcon />
+            </IconButton>
+            <IconButton title="Export Image" onClick={exportPNG}>
+              <ImageOutlinedIcon />
+            </IconButton>
+            <IconButton onClick={onClose}>
+              <CloseIcon />
+            </IconButton>
+          </Stack>
+        </Stack>
+      </Box>
 
-        {/* ================= TABLE ================= */}
-        <TableContainer component={Paper} sx={{ maxHeight: 420 }}>
-          <Table stickyHeader>
-            <TableHead>
-              <TableRow>
-                <TableCell>Head</TableCell>
-                <TableCell align="right">Total Entries</TableCell>
-                <TableCell align="right">New Entries</TableCell>
-              </TableRow>
-            </TableHead>
-
-            <TableBody>
-              {summary.map((row, idx) => (
-                <TableRow key={idx} hover>
-                  <TableCell sx={{ fontWeight: 500 }}>{row.HEAD}</TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row.Total_no_of_entries)}
+      {/* ================= REPORT BODY ================= */}
+      <DialogContent
+        sx={{
+          p: 0,
+          height: "70vh",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <Box ref={reportRef} sx={{ flex: 1 }}>
+          <TableContainer
+            component={Paper}
+            sx={{ height: "100%", borderRadius: 0 }}
+          >
+            <Table stickyHeader size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 600 }}>
+                    TOTAL ENTRIES
                   </TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row["new entry"])}
+                  <TableCell align="right" sx={{ fontWeight: 600 }}>
+                    NEW ENTRIES
                   </TableCell>
                 </TableRow>
-              ))}
+              </TableHead>
 
-              {/* ================= TOTAL ================= */}
-              <TableRow>
-                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalEntries)}
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalNewEntries)}
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </TableContainer>
+              <TableBody>
+                {summary.map((row, idx) => (
+                  <TableRow key={idx} hover>
+                    <TableCell sx={{ fontWeight: 500 }}>
+                      {row.HEAD}
+                    </TableCell>
+                    <TableCell align="right">
+                      {formatAmount(row.Total_no_of_entries)}
+                    </TableCell>
+                    <TableCell align="right">
+                      {formatAmount(row["new entry"])}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Box>
+
+        {/* ================= STICKY TOTAL FOOTER ================= */}
+        <Box
+          sx={{
+            position: "sticky",
+            bottom: 0,
+            bgcolor: "background.paper",
+            borderTop: 1,
+            borderColor: "divider",
+            px: 3,
+            py: 2,
+          }}
+        >
+          <Divider sx={{ mb: 1 }} />
+          <Stack direction="row" justifyContent="space-between">
+            <Typography fontWeight={700}>TOTAL</Typography>
+            <Stack direction="row" spacing={6}>
+              <Typography fontWeight={700}>
+                {formatAmount(totalEntries)}
+              </Typography>
+              <Typography fontWeight={700}>
+                {formatAmount(totalNewEntries)}
+              </Typography>
+            </Stack>
+          </Stack>
+        </Box>
       </DialogContent>
 
-      <DialogActions>
+      {/* ================= ACTIONS ================= */}
+      <Box
+        sx={{
+          px: 3,
+          py: 2,
+          borderTop: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "flex-end",
+        }}
+      >
         <Button onClick={onClose} variant="outlined">
           Close
         </Button>
-      </DialogActions>
+      </Box>
     </Dialog>
   );
 };
