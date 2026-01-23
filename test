@@ -1,111 +1,228 @@
-import { Box, Typography, Divider } from "@mui/material";
+import { useEffect, useState, useRef, useMemo } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
+import useApi from "../../hooks/useApi";
+import { Grid, Box, Button, Paper, Stack, Tooltip } from "@mui/material";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import TaskAltIcon from "@mui/icons-material/TaskAlt";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
+import dayjs from "dayjs";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import ProcessSummary from "./components/ProcessSummary";
+import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
+import ProcessStatusHeader from "./components/ProcessStatusHeader";
 
-const ProcessStatusHeader = () => (
-  <Box sx={{ mb: 3 }}>
-    <Typography variant="h5" fontWeight={700}>
-      End of Day – Process Status
-    </Typography>
+/* ================= NORMALIZERS ================= */
+const normalizeStageDetails = (stageDetails = []) => {
+  return Array.from(stageDetails.values()).map((s) => ({
+    ...s,
+    _START_TIME_RAW: s.startTime,
+    _END_TIME_RAW: s.endTime,
+    startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+    endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
+  }));
+};
 
-    <Typography color="text.secondary" sx={{ mt: 0.5 }}>
-      Monitor stage-wise execution of ETL, reconciliation, and downstream
-      processes in real time.
-    </Typography>
+const normalizeProcesses = (data = []) =>
+  data.map((p) => ({
+    ...p,
+    type: p.type ?? p.processType,
+    stageDetails: normalizeStageDetails(p.stageDetails),
+  }));
 
-    <Divider sx={{ mt: 2 }} />
-  </Box>
-);
+const mergeProcesses = (prev = [], incoming = []) => {
+  const map = new Map(prev.map((p) => [p.type, p]));
+  incoming.forEach((p) => map.set(p.type, p));
+  return Array.from(map.values());
+};
 
-export default ProcessStatusHeader;
+const ProcessStatusPage = () => {
+  const [processes, setProcesses] = useState([]);
+  const [selectedProcess, setSelectedProcess] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedDate, setSelectedDate] = useState(dayjs());
+  const [summaryData, setSummaryData] = useState(null);
 
-import { Box, Typography, Stack, Chip } from "@mui/material";
-import TimelineIcon from "@mui/icons-material/Timeline";
-import SyncIcon from "@mui/icons-material/Sync";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((state) => state.auth.token);
+  const { callApi } = useApi();
 
-const ProcessStatusHeader = ({ processes = [] }) => {
-  const running = processes.some(p =>
-    p.stageDetails?.some(s => s.status === 1)
+  const service = resolveConfig("/PS");
+  const INITIAL_URL = "/PS/process/processes/data";
+  const STREAM_URL = `${service}/process/processes`;
+
+  /* ================= INITIAL LOAD ================= */
+  const initialFetchDone = useRef(false);
+
+  useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+
+    callApi(INITIAL_URL)
+      .then((data) => setProcesses(normalizeProcesses(data || [])))
+      .catch(() => snackbar("Failed to load processes"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  /* ================= SSE ================= */
+  useEffect(() => {
+    if (loading) return;
+
+    const controller = new AbortController();
+
+    fetchEventSource(STREAM_URL, {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
+      },
+      onmessage(e) {
+        if (e.event === "connected") return;
+        const raw = JSON.parse(e.data);
+        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
+      },
+    });
+
+    return () => controller.abort();
+  }, [STREAM_URL, loading, token]);
+
+  /* ================= DERIVED UI STATES ================= */
+  const hasProcesses = processes.length > 0;
+
+  const allCompleted = useMemo(
+    () =>
+      processes.length > 0 &&
+      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
+    [processes],
   );
-  const completed =
-    processes.length > 0 &&
-    processes.every(p =>
-      p.stageDetails?.every(s => s.status === 2)
+
+  const differenceSummary = useMemo(() => {
+    console.log("Checking difference condition", processes);
+    const diff = processes.find((p) => p.type == "DIFFERENCE");
+    console.log("diff >", diff);
+    if (!diff) return null;
+
+    const stage6Process = diff?.stageDetails?.find(
+      (p) => p.processStage == "6",
     );
+    console.log("stage6Process >", stage6Process);
+    const stage6 = diff?.stageDetails
+      ?.sort((a, b) => b.id - a.id)
+      .find((p) => p.processStage == "6");
+    console.log("latestRecord >", stage6);
+
+    if (stage6?.status == "2" && stage6?.differenceSummary) {
+      setSummaryData(stage6.differenceSummary);
+      return stage6.differenceSummary;
+    }
+    return null;
+  }, [processes]);
 
   return (
-    <Box
-      sx={{
-        mb: 3,
-        p: 3,
-        borderRadius: 3,
-        background: "linear-gradient(135deg, #1e3c72 0%, #2a5298 100%)",
-        color: "#fff",
-        boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
-      }}
-    >
-      <Stack spacing={1}>
-        <Stack direction="row" spacing={1} alignItems="center">
-          <TimelineIcon />
-          <Typography variant="h5" fontWeight={700}>
-            Process Execution Monitor
-          </Typography>
-        </Stack>
+    <Paper sx={{ p: 3, minHeight: "75vh" }}>
+      <ProcessStatusHeader processes={processes} />
 
-        <Typography sx={{ opacity: 0.9 }}>
-          Track real-time ETL and reconciliation jobs, stage-wise execution,
-          and system progress for the selected business date.
-        </Typography>
+      {/* ================= TOP CONTROLS ================= */}
+      <Stack spacing={3} alignItems="center">
+        <LocalizationProvider dateAdapter={AdapterDayjs}>
+          <DatePicker
+            label="ETL Date"
+            value={selectedDate}
+            onChange={setSelectedDate}
+          />
+        </LocalizationProvider>
 
-        <Stack direction="row" spacing={1} mt={1}>
-          {running && (
-            <Chip
-              icon={<SyncIcon />}
-              label="Processes Running"
-              sx={{ bgcolor: "warning.main", color: "#fff" }}
-            />
+        <Grid container spacing={2} justifyContent="center">
+          <Grid>
+            <Tooltip title={hasProcesses ? "EOD already started" : ""}>
+              <span>
+                <Button
+                  variant="contained"
+                  size="large"
+                  startIcon={<PlayArrowIcon />}
+                  disabled={hasProcesses}
+                >
+                  Start EOD
+                </Button>
+              </span>
+            </Tooltip>
+          </Grid>
+
+          {differenceSummary && (
+            <Grid>
+              <Tooltip title={!allCompleted ? "View Difference Summary" : ""}>
+                <span>
+                  <Button
+                    variant="outlined"
+                    size="large"
+                    startIcon={<VisibilityOutlinedIcon />}
+                    onClick={() => {
+                      setSummaryData(differenceSummary);
+                    }}
+                  >
+                    View Summary
+                  </Button>
+                </span>
+              </Tooltip>
+            </Grid>
           )}
-          {completed && (
-            <Chip
-              icon={<CheckCircleOutlineIcon />}
-              label="All Processes Completed"
-              sx={{ bgcolor: "success.main", color: "#fff" }}
-            />
-          )}
-        </Stack>
+
+          <Grid>
+            <Tooltip title={!allCompleted ? "Processes still running" : ""}>
+              <span>
+                <Button
+                  variant="contained"
+                  size="large"
+                  startIcon={<TaskAltIcon />}
+                  disabled={!allCompleted}
+                  color="success"
+                >
+                  Finish EOD
+                </Button>
+              </span>
+            </Tooltip>
+          </Grid>
+        </Grid>
       </Stack>
-    </Box>
+
+      {/* ================= CONTENT ================= */}
+      <ProcessDetailsDialog
+        process={selectedProcess}
+        onClose={() => setSelectedProcess(null)}
+      />
+
+      {/* <ProcessSummary
+        open={!!summaryData}
+        data={summaryData}
+        onClose={() => setSummaryData(null)}
+      /> */}
+
+      <ProcessSummaryDialog
+        open={!!summaryData}
+        data={summaryData}
+        onClose={() => setSummaryData(null)}
+      />
+
+      <Box mt={4}>
+        <ProcessStatusTable
+          loading={loading}
+          processes={processes}
+          actions={{
+            onView: setSelectedProcess,
+            onStop: () => {},
+            onRestart: () => {},
+          }}
+        />
+      </Box>
+    </Paper>
   );
 };
 
-export default ProcessStatusHeader;
-
-import { Box, Typography, Stack } from "@mui/material";
-import TrendingUpIcon from "@mui/icons-material/TrendingUp";
-
-const ProcessStatusHeader = () => (
-  <Box
-    sx={{
-      mb: 3,
-      p: 3,
-      borderRadius: 2,
-      bgcolor: "background.paper",
-      boxShadow: 2,
-      borderLeft: "6px solid",
-      borderColor: "primary.main",
-    }}
-  >
-    <Stack direction="row" spacing={2} alignItems="center">
-      <TrendingUpIcon color="primary" fontSize="large" />
-      <Box>
-        <Typography variant="h6" fontWeight={700}>
-          Process Status Overview
-        </Typography>
-        <Typography color="text.secondary">
-          Live view of execution stages, timings, and outcomes for today’s EOD run.
-        </Typography>
-      </Box>
-    </Stack>
-  </Box>
-);
-
-export default ProcessStatusHeader;
+export default ProcessStatusPage;
