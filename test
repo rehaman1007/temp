@@ -1,257 +1,3 @@
-import { useEffect, useState, useRef, useMemo } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import { resolveConfig } from "../../config/EnvironmentConfig";
-import { timeStampFormatter } from "../../utils/CommonUtilities";
-import useApi from "../../hooks/useApi";
-import {
-  Grid,
-  Box,
-  Button,
-  Paper,
-  Stack,
-  Tooltip,
-  Typography,
-} from "@mui/material";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import TaskAltIcon from "@mui/icons-material/TaskAlt";
-import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
-import EventOutlinedIcon from "@mui/icons-material/EventOutlined";
-import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
-import ProcessStatusHeader from "./components/ProcessStatusHeader";
-
-/* ================= NORMALIZERS ================= */
-const normalizeStageDetails = (stageDetails = []) => {
-  const map = new Map();
-
-  stageDetails.forEach((s) => {
-    const existing = map.get(s.processStage);
-    if (!existing || s.startTime > existing.startTime) {
-      map.set(s.processStage, s);
-    }
-  });
-
-  return Array.from(map.values())
-    .sort((a, b) => a.processStage - b.processStage)
-    .map((s) => ({
-      ...s,
-      _START_TIME_RAW: s.startTime,
-      _END_TIME_RAW: s.endTime,
-      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
-      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
-    }));
-};
-
-const normalizeProcesses = (data = []) =>
-  data.map((p) => ({
-    ...p,
-    type: p.type ?? p.processType,
-    stageDetails: normalizeStageDetails(p.stageDetails || []),
-  }));
-
-const mergeProcesses = (prev = [], incoming = []) => {
-  const map = new Map(prev.map((p) => [p.type, p]));
-  incoming.forEach((p) => map.set(p.type, p));
-  return Array.from(map.values());
-};
-
-const ProcessStatusPage = () => {
-  const [fincoreDate, setFincoreDate] = useState(null);
-  const [processes, setProcesses] = useState([]);
-  const [selectedProcessType, setSelectedProcessType] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [summaryData, setSummaryData] = useState(null);
-
-  const snackbar = useCustomSnackbar();
-  const token = useSelector((state) => state.auth.token);
-  const { callApi } = useApi();
-
-  const service = resolveConfig("/PS");
-  const INITIAL_URL = "/PS/process/processes/data";
-  const STREAM_URL = `${service}/process/processes`;
-
-  /* ================= INITIAL LOAD ================= */
-  const initialFetchDone = useRef(false);
-
-  useEffect(() => {
-    if (initialFetchDone.current) return;
-    initialFetchDone.current = true;
-
-    callApi(INITIAL_URL)
-      .then((data) => {
-        setFincoreDate(data?.fincoreDate || null);
-        setProcesses(normalizeProcesses(data?.initialData || []));
-      })
-      .catch(() => snackbar("Failed to load processes"))
-      .finally(() => setLoading(false));
-  }, [callApi, snackbar]);
-
-  /* ================= SSE ================= */
-  useEffect(() => {
-    if (loading) return;
-
-    const controller = new AbortController();
-
-    fetchEventSource(STREAM_URL, {
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
-      onmessage(e) {
-        if (e.event === "connected") return;
-        const raw = JSON.parse(e.data);
-        setProcesses((prev) =>
-          mergeProcesses(prev, normalizeProcesses(raw?.initialData || raw)),
-        );
-      },
-    });
-
-    return () => controller.abort();
-  }, [STREAM_URL, loading, token]);
-
-  /* ================= LIVE SELECTED PROCESS ================= */
-  const selectedProcess = useMemo(() => {
-    if (!selectedProcessType) return null;
-    return processes.find((p) => p.type === selectedProcessType) || null;
-  }, [processes, selectedProcessType]);
-
-  /* ================= DERIVED UI STATES ================= */
-  const hasProcesses = processes.length > 0;
-
-  const allCompleted = useMemo(
-    () =>
-      processes.length > 0 &&
-      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
-    [processes],
-  );
-
-  const differenceSummary = useMemo(() => {
-    const diff = processes.find((p) => p.type === "DIFFERENCE");
-    if (!diff) return null;
-
-    const latestStage = [...diff.stageDetails]
-      .sort((a, b) => b.id - a.id)
-      .find((s) => s.processStage === 6);
-
-    if (latestStage?.status === 2 && latestStage?.differenceSummary) {
-      setSummaryData(latestStage.differenceSummary);
-      return latestStage.differenceSummary;
-    }
-    return null;
-  }, [processes]);
-
-  return (
-    <Paper sx={{ p: 3, minHeight: "75vh" }}>
-      <ProcessStatusHeader processes={processes} />
-
-      {/* ================= ETL DATE ================= */}
-      {fincoreDate?.etlDate && (
-        <Stack alignItems="center" mt={2} mb={3}>
-          <Paper
-            elevation={3}
-            sx={{
-              px: 3,
-              py: 1.5,
-              display: "flex",
-              alignItems: "center",
-              gap: 1.5,
-              borderRadius: 2,
-            }}
-          >
-            <EventOutlinedIcon color="primary" />
-            <Box>
-              <Typography variant="caption" color="text.secondary">
-                ETL Date (System Generated)
-              </Typography>
-              <Typography fontWeight={600}>
-                {fincoreDate.etlDate}
-              </Typography>
-            </Box>
-          </Paper>
-        </Stack>
-      )}
-
-      {/* ================= ACTION BUTTONS ================= */}
-      <Grid container spacing={2} justifyContent="center" mb={3}>
-        <Grid>
-          <Tooltip title={hasProcesses ? "EOD already started" : ""}>
-            <span>
-              <Button
-                variant="contained"
-                size="large"
-                startIcon={<PlayArrowIcon />}
-                disabled={hasProcesses}
-              >
-                Start EOD
-              </Button>
-            </span>
-          </Tooltip>
-        </Grid>
-
-        {differenceSummary && (
-          <Grid>
-            <Button
-              variant="outlined"
-              size="large"
-              startIcon={<VisibilityOutlinedIcon />}
-              onClick={() => setSummaryData(differenceSummary)}
-            >
-              View Summary
-            </Button>
-          </Grid>
-        )}
-
-        <Grid>
-          <Tooltip title={!allCompleted ? "Processes still running" : ""}>
-            <span>
-              <Button
-                variant="contained"
-                size="large"
-                startIcon={<TaskAltIcon />}
-                disabled={!allCompleted}
-                color="success"
-              >
-                Finish EOD
-              </Button>
-            </span>
-          </Tooltip>
-        </Grid>
-      </Grid>
-
-      {/* ================= DIALOGS ================= */}
-      <ProcessDetailsDialog
-        process={selectedProcess}
-        onClose={() => setSelectedProcessType(null)}
-      />
-
-      <ProcessSummaryDialog
-        open={!!summaryData}
-        data={summaryData}
-        onClose={() => setSummaryData(null)}
-      />
-
-      {/* ================= TABLE ================= */}
-      <Box mt={4}>
-        <ProcessStatusTable
-          loading={loading}
-          processes={processes}
-          actions={{
-            onView: setSelectedProcessType,
-            onStop: () => {},
-            onRestart: () => {},
-          }}
-        />
-      </Box>
-    </Paper>
-  );
-};
-
-export default ProcessStatusPage;
-
 import {
   Table,
   TableBody,
@@ -275,6 +21,10 @@ import ProcessStatusChip from "./ProcessStatusChip";
 import { StageStatus } from "../util/StageStatus";
 import { useState, useMemo } from "react";
 
+/* ================= CONSTANT ================= */
+const MIN_PAGE_SIZE = 5;
+
+/* ------------------ Action Button ------------------ */
 const Action = ({ title, icon, disabled, onClick }) => (
   <Tooltip title={title}>
     <span>
@@ -287,21 +37,32 @@ const Action = ({ title, icon, disabled, onClick }) => (
 
 const ProcessStatusTable = ({ processes = [], actions, loading }) => {
   const [page, setPage] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(5);
+  const [rowsPerPage, setRowsPerPage] = useState(MIN_PAGE_SIZE);
 
+  /* ================= FILTER ================= */
   const validProcesses = useMemo(
     () => processes.filter((p) => p.stageDetails?.length),
-    [processes],
+    [processes]
   );
 
+  /* ================= PAGINATION ================= */
   const paginatedData = useMemo(
     () =>
       validProcesses.slice(
         page * rowsPerPage,
-        page * rowsPerPage + rowsPerPage,
+        page * rowsPerPage + rowsPerPage
       ),
-    [validProcesses, page, rowsPerPage],
+    [validProcesses, page, rowsPerPage]
   );
+
+  const handleChangePage = (_, newPage) => {
+    setPage(newPage);
+  };
+
+  const handleChangeRowsPerPage = (event) => {
+    setRowsPerPage(parseInt(event.target.value, 10));
+    setPage(0);
+  };
 
   return (
     <Paper elevation={1}>
@@ -319,6 +80,7 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
           </TableHead>
 
           <TableBody>
+            {/* ---------- LOADING ---------- */}
             {loading && (
               <TableRow>
                 <TableCell colSpan={6} align="center">
@@ -332,6 +94,7 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
               </TableRow>
             )}
 
+            {/* ---------- DATA ---------- */}
             {!loading &&
               paginatedData.map((p) => {
                 const lastStage = p.stageDetails.at(-1);
@@ -390,6 +153,7 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
                 );
               })}
 
+            {/* ---------- EMPTY ---------- */}
             {!loading && validProcesses.length === 0 && (
               <TableRow>
                 <TableCell colSpan={6} align="center">
@@ -403,18 +167,17 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
         </Table>
       </TableContainer>
 
-      {!loading && validProcesses.length > rowsPerPage && (
+      {/* ================= PAGINATION (FIXED) ================= */}
+      {!loading && validProcesses.length > MIN_PAGE_SIZE && (
         <TablePagination
           component="div"
           count={validProcesses.length}
           page={page}
-          onPageChange={(_, p) => setPage(p)}
+          onPageChange={handleChangePage}
           rowsPerPage={rowsPerPage}
-          onRowsPerPageChange={(e) => {
-            setRowsPerPage(+e.target.value);
-            setPage(0);
-          }}
+          onRowsPerPageChange={handleChangeRowsPerPage}
           rowsPerPageOptions={[5, 10, 25]}
+          labelRowsPerPage="Rows"
         />
       )}
     </Paper>
