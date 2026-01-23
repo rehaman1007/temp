@@ -1,287 +1,232 @@
-import {
-  Dialog,
-  DialogContent,
-  Button,
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  Stack,
-  IconButton,
-  Tooltip,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
-import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
-import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import * as XLSX from "xlsx";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { toPng } from "html-to-image";
-import { useRef, useState } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
+import useApi from "../../hooks/useApi";
+import { Grid, Box, Button, Paper, Stack, Tooltip } from "@mui/material";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import TaskAltIcon from "@mui/icons-material/TaskAlt";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
+import dayjs from "dayjs";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import ProcessSummary from "./components/ProcessSummary";
+import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
+import ProcessStatusHeader from "./components/ProcessStatusHeader";
 
-/* ================= FORMAT ================= */
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
+/* ================= NORMALIZERS ================= */
+const normalizeStageDetails = (stageDetails = []) => {
+  return Array.from(stageDetails.values()).map((s) => ({
+    ...s,
+    _START_TIME_RAW: s.startTime,
+    _END_TIME_RAW: s.endTime,
+    startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+    endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
+  }));
+};
 
-const ProcessSummaryDialog = ({ open, data, onClose }) => {
-  /* ✅ hooks first */
-  const reportRef = useRef(null);
-  const copyTimeoutRef = useRef(null);
-  const [copied, setCopied] = useState(false);
+const normalizeProcesses = (data = []) =>
+  data.map((p) => ({
+    ...p,
+    type: p.type ?? p.processType,
+    stageDetails: normalizeStageDetails(p.stageDetails),
+  }));
 
-  if (!data) return null;
+const mergeProcesses = (prev = [], incoming = []) => {
+  const map = new Map(prev.map((p) => [p.type, p]));
+  incoming.forEach((p) => map.set(p.type, p));
+  return Array.from(map.values());
+};
 
-  const { RECON_RUN_DATE, summary = [] } = data;
+const ProcessStatusPage = () => {
+  const [finCoreDate, setFinCoreDate] = useState([]);
+  const [processes, setProcesses] = useState([]);
+  const [selectedProcess, setSelectedProcess] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedDate, setSelectedDate] = useState(dayjs(finCoreDate?.etlDate));
+  const [summaryData, setSummaryData] = useState(null);
 
-  const totalEntries = summary.reduce(
-    (sum, r) => sum + (r.Total_no_of_entries || 0),
-    0
-  );
-  const totalNewEntries = summary.reduce(
-    (sum, r) => sum + (r["new entry"] || 0),
-    0
-  );
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((state) => state.auth.token);
+  const { callApi } = useApi();
 
-  /* ================= EXCEL ================= */
-  const exportExcel = () => {
-    const rows = [
-      ...summary.map((r) => ({
-        HEAD: r.HEAD,
-        "Total Entries": r.Total_no_of_entries,
-        "New Entries": r["new entry"],
-      })),
-      {
-        HEAD: "TOTAL",
-        "Total Entries": totalEntries,
-        "New Entries": totalNewEntries,
+  const service = resolveConfig("/PS");
+  const INITIAL_URL = "/PS/process/processes/data";
+  const STREAM_URL = `${service}/process/processes`;
+
+  /* ================= INITIAL LOAD ================= */
+  const initialFetchDone = useRef(false);
+
+  useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+
+    callApi(INITIAL_URL)
+      .then((data) => {
+        setFinCoreDate(data?.fincoreDate);
+        setProcesses(normalizeProcesses(data?.initialData || []));
+      })
+      .catch(() => snackbar("Failed to load processes"))
+      .finally(() => setLoading(false));
+  }, [callApi, snackbar]);
+
+  /* ================= SSE ================= */
+  useEffect(() => {
+    if (loading) return;
+
+    const controller = new AbortController();
+
+    fetchEventSource(STREAM_URL, {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
       },
-    ];
-
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Summary");
-
-    XLSX.writeFile(wb, `Difference_Summary_${RECON_RUN_DATE}.xlsx`);
-  };
-
-  /* ================= PDF ================= */
-  const exportPDF = () => {
-    const doc = new jsPDF("p", "pt");
-
-    doc.setFontSize(14);
-    doc.text("Difference Summary Report", 40, 40);
-    doc.setFontSize(10);
-    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
-
-    autoTable(doc, {
-      startY: 80,
-      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
-      body: [
-        ...summary.map((r) => [
-          r.HEAD,
-          formatAmount(r.Total_no_of_entries),
-          formatAmount(r["new entry"]),
-        ]),
-        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
-      ],
-      styles: { halign: "right", fontSize: 9 },
-      headStyles: { fillColor: [33, 150, 243] },
-      columnStyles: { 0: { halign: "left" } },
-      didParseCell: (data) => {
-        if (data.row.index === summary.length) {
-          data.cell.styles.fontStyle = "bold";
-        }
+      onmessage(e) {
+        if (e.event === "connected") return;
+        const raw = JSON.parse(e.data);
+        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
       },
     });
 
-    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
-  };
+    return () => controller.abort();
+  }, [STREAM_URL, loading, token]);
 
-  /* ================= COPY PNG ================= */
-  const copyPNGToClipboard = async () => {
-    if (!reportRef.current) return;
+  /* ================= DERIVED UI STATES ================= */
+  const hasProcesses = processes.length > 0;
 
-    const node = reportRef.current;
+  const allCompleted = useMemo(
+    () =>
+      processes.length > 0 &&
+      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
+    [processes],
+  );
 
-    const originalOverflow = node.style.overflow;
-    const originalHeight = node.style.height;
+  const differenceSummary = useMemo(() => {
+    console.log("Checking difference condition", processes);
+    const diff = processes.find((p) => p.type == "DIFFERENCE");
+    console.log("diff >", diff);
+    if (!diff) return null;
 
-    node.style.overflow = "visible";
-    node.style.height = `${node.scrollHeight}px`;
+    const stage6Process = diff?.stageDetails?.find(
+      (p) => p.processStage == "6",
+    );
+    console.log("stage6Process >", stage6Process);
+    const stage6 = diff?.stageDetails
+      ?.sort((a, b) => b.id - a.id)
+      .find((p) => p.processStage == "6");
+    console.log("latestRecord >", stage6);
 
-    try {
-      const dataUrl = await toPng(node, {
-        cacheBust: true,
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
-
-      const blob = await (await fetch(dataUrl)).blob();
-
-      await navigator.clipboard.write([
-        new ClipboardItem({ "image/png": blob }),
-      ]);
-
-      /* ✅ UX feedback */
-      setCopied(true);
-      clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => {
-        setCopied(false);
-      }, 2000);
-    } catch (err) {
-      console.error("Copy PNG failed", err);
-    } finally {
-      node.style.overflow = originalOverflow;
-      node.style.height = originalHeight;
+    if (stage6?.status == "2" && stage6?.differenceSummary) {
+      setSummaryData(stage6.differenceSummary);
+      return stage6.differenceSummary;
     }
-  };
+    return null;
+  }, [processes]);
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      {/* ================= HEADER ================= */}
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderBottom: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <Box>
-          <Typography variant="h6" fontWeight={700}>
-            Difference Summary Report
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Reconciliation Date: {RECON_RUN_DATE}
-          </Typography>
-        </Box>
+    <Paper sx={{ p: 3, minHeight: "75vh" }}>
+      <ProcessStatusHeader processes={processes} />
 
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Tooltip title="Export Excel">
-            <IconButton onClick={exportExcel}>
-              <FileDownloadOutlinedIcon />
-            </IconButton>
-          </Tooltip>
+      {/* ================= TOP CONTROLS ================= */}
+      <Stack spacing={3} alignItems="center">
+        <LocalizationProvider dateAdapter={AdapterDayjs}>
+          <DatePicker
+            label="ETL Date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+          />
+        </LocalizationProvider>
 
-          <Tooltip title="Export PDF">
-            <IconButton onClick={exportPDF}>
-              <PictureAsPdfOutlinedIcon />
-            </IconButton>
-          </Tooltip>
-
-          <Tooltip title={copied ? "Copied!" : "Copy report image"}>
-            <IconButton
-              onClick={copyPNGToClipboard}
-              sx={{
-                color: copied ? "success.main" : "inherit",
-                transition: "all 0.3s ease",
-              }}
-            >
-              {copied ? (
-                <CheckCircleOutlineIcon />
-              ) : (
-                <ImageOutlinedIcon />
-              )}
-            </IconButton>
-          </Tooltip>
-
-          <IconButton onClick={onClose}>
-            <CloseIcon />
-          </IconButton>
-        </Stack>
-      </Box>
-
-      {/* ================= BODY ================= */}
-      <DialogContent sx={{ p: 0, height: "70vh" }}>
-        <TableContainer
-          component={Paper}
-          sx={{ height: "100%", overflow: "auto" }}
-          ref={reportRef}
-        >
-          <Table stickyHeader size="small">
-            <TableHead
-              sx={{
-                position: "sticky",
-                top: 0,
-                zIndex: 2,
-                backgroundColor: "background.paper",
-                boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
-              }}
-            >
-              <TableRow>
-                <TableCell sx={{ fontWeight: 600, bgcolor: "background.paper" }}>
-                  HEAD
-                </TableCell>
-                <TableCell
-                  align="right"
-                  sx={{ fontWeight: 600, bgcolor: "background.paper" }}
+        <Grid container spacing={2} justifyContent="center">
+          <Grid>
+            <Tooltip title={hasProcesses ? "EOD already started" : ""}>
+              <span>
+                <Button
+                  variant="contained"
+                  size="large"
+                  startIcon={<PlayArrowIcon />}
+                  disabled={hasProcesses}
                 >
-                  TOTAL ENTRIES
-                </TableCell>
-                <TableCell
-                  align="right"
-                  sx={{ fontWeight: 600, bgcolor: "background.paper" }}
+                  Start EOD
+                </Button>
+              </span>
+            </Tooltip>
+          </Grid>
+
+          {differenceSummary && (
+            <Grid>
+              <Tooltip title={!allCompleted ? "View Difference Summary" : ""}>
+                <span>
+                  <Button
+                    variant="outlined"
+                    size="large"
+                    startIcon={<VisibilityOutlinedIcon />}
+                    onClick={() => {
+                      setSummaryData(differenceSummary);
+                    }}
+                  >
+                    View Summary
+                  </Button>
+                </span>
+              </Tooltip>
+            </Grid>
+          )}
+
+          <Grid>
+            <Tooltip title={!allCompleted ? "Processes still running" : ""}>
+              <span>
+                <Button
+                  variant="contained"
+                  size="large"
+                  startIcon={<TaskAltIcon />}
+                  disabled={!allCompleted}
+                  color="success"
                 >
-                  NEW ENTRIES
-                </TableCell>
-              </TableRow>
-            </TableHead>
+                  Finish EOD
+                </Button>
+              </span>
+            </Tooltip>
+          </Grid>
+        </Grid>
+      </Stack>
 
-            <TableBody>
-              {summary.map((row, idx) => (
-                <TableRow key={idx} hover>
-                  <TableCell>{row.HEAD}</TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row.Total_no_of_entries)}
-                  </TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row["new entry"])}
-                  </TableCell>
-                </TableRow>
-              ))}
+      {/* ================= CONTENT ================= */}
+      <ProcessDetailsDialog
+        process={selectedProcess}
+        onClose={() => setSelectedProcess(null)}
+      />
 
-              {/* TOTAL ROW */}
-              <TableRow sx={{ bgcolor: "action.hover" }}>
-                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalEntries)}
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalNewEntries)}
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </DialogContent>
+      {/* <ProcessSummary
+        open={!!summaryData}
+        data={summaryData}
+        onClose={() => setSummaryData(null)}
+      /> */}
 
-      {/* ================= FOOTER ================= */}
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderTop: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "flex-end",
-        }}
-      >
-        <Button onClick={onClose} variant="outlined">
-          Close
-        </Button>
+      <ProcessSummaryDialog
+        open={!!summaryData}
+        data={summaryData}
+        onClose={() => setSummaryData(null)}
+      />
+
+      <Box mt={4}>
+        <ProcessStatusTable
+          loading={loading}
+          processes={processes}
+          actions={{
+            onView: setSelectedProcess,
+            onStop: () => {},
+            onRestart: () => {},
+          }}
+        />
       </Box>
-    </Dialog>
+    </Paper>
   );
 };
 
-export default ProcessSummaryDialog;
+export default ProcessStatusPage;
