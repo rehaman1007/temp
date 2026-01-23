@@ -25,20 +25,31 @@ import ProcessStatusHeader from "./components/ProcessStatusHeader";
 
 /* ================= NORMALIZERS ================= */
 const normalizeStageDetails = (stageDetails = []) => {
-  return Array.from(stageDetails.values()).map((s) => ({
-    ...s,
-    _START_TIME_RAW: s.startTime,
-    _END_TIME_RAW: s.endTime,
-    startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
-    endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
-  }));
+  const map = new Map();
+
+  stageDetails.forEach((s) => {
+    const existing = map.get(s.processStage);
+    if (!existing || s.startTime > existing.startTime) {
+      map.set(s.processStage, s);
+    }
+  });
+
+  return Array.from(map.values())
+    .sort((a, b) => a.processStage - b.processStage)
+    .map((s) => ({
+      ...s,
+      _START_TIME_RAW: s.startTime,
+      _END_TIME_RAW: s.endTime,
+      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
+    }));
 };
 
 const normalizeProcesses = (data = []) =>
   data.map((p) => ({
     ...p,
     type: p.type ?? p.processType,
-    stageDetails: normalizeStageDetails(p.stageDetails),
+    stageDetails: normalizeStageDetails(p.stageDetails || []),
   }));
 
 const mergeProcesses = (prev = [], incoming = []) => {
@@ -47,64 +58,10 @@ const mergeProcesses = (prev = [], incoming = []) => {
   return Array.from(map.values());
 };
 
-const formattedDate = (dateString) =>
-  new Intl.DateTimeFormat("en-GB")
-    .format(new Date(dateString))
-    .replace(/\//g, "-");
-
-function formatCustomDate(dateString) {
-  const date = new Date(dateString);
-
-  const getOrdinalSuffix = (day) => {
-    if (day > 3 && day < 21) return "th";
-    switch (day % 10) {
-      case 1:
-        return "st";
-      case 2:
-        return "nd";
-      case 3:
-        return "rd";
-      default:
-        return "th";
-    }
-  };
-
-  const monthNames = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-  ];
-  const dayNames = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-  ];
-
-  const dayOfMonth = date.getDate();
-  const month = monthNames[date.getMonth()];
-  const year = date.getFullYear();
-  const dayOfWeek = dayNames[date.getDay()];
-
-  return `${dayOfMonth}${getOrdinalSuffix(dayOfMonth)} ${month} ${year} (${dayOfWeek})`;
-}
-
 const ProcessStatusPage = () => {
   const [fincoreDate, setFincoreDate] = useState(null);
   const [processes, setProcesses] = useState([]);
-  const [selectedProcess, setSelectedProcess] = useState(null);
+  const [selectedProcessType, setSelectedProcessType] = useState(null);
   const [loading, setLoading] = useState(true);
   const [summaryData, setSummaryData] = useState(null);
 
@@ -148,13 +105,19 @@ const ProcessStatusPage = () => {
         if (e.event === "connected") return;
         const raw = JSON.parse(e.data);
         setProcesses((prev) =>
-          mergeProcesses(prev, normalizeProcesses(raw?.initialData)),
+          mergeProcesses(prev, normalizeProcesses(raw?.initialData || raw)),
         );
       },
     });
 
     return () => controller.abort();
   }, [STREAM_URL, loading, token]);
+
+  /* ================= LIVE SELECTED PROCESS ================= */
+  const selectedProcess = useMemo(() => {
+    if (!selectedProcessType) return null;
+    return processes.find((p) => p.type === selectedProcessType) || null;
+  }, [processes, selectedProcessType]);
 
   /* ================= DERIVED UI STATES ================= */
   const hasProcesses = processes.length > 0;
@@ -170,9 +133,9 @@ const ProcessStatusPage = () => {
     const diff = processes.find((p) => p.type === "DIFFERENCE");
     if (!diff) return null;
 
-    const latestStage = [...(diff.stageDetails || [])]
+    const latestStage = [...diff.stageDetails]
       .sort((a, b) => b.id - a.id)
-      .find((s) => s.processStage === "6");
+      .find((s) => s.processStage === 6);
 
     if (latestStage?.status === 2 && latestStage?.differenceSummary) {
       setSummaryData(latestStage.differenceSummary);
@@ -185,36 +148,31 @@ const ProcessStatusPage = () => {
     <Paper sx={{ p: 3, minHeight: "75vh" }}>
       <ProcessStatusHeader processes={processes} />
 
-      {/* ================= ETL DATE CARD ================= */}
+      {/* ================= ETL DATE ================= */}
       {fincoreDate?.etlDate && (
-        <Tooltip
-          title={`ETL run date for ${formatCustomDate(fincoreDate.etlDate)}`}
-        >
-          <Stack alignItems="center" mt={2} mb={3}>
-            <Paper
-              elevation={3}
-              sx={{
-                px: 3,
-                py: 1.5,
-                display: "flex",
-                alignItems: "center",
-                gap: 1.5,
-                borderRadius: 2,
-                bgcolor: "background.paper",
-              }}
-            >
-              <EventOutlinedIcon color="primary" />
-              <Box>
-                <Typography variant="caption" color="text.secondary">
-                  ETL Date (System Generated)
-                </Typography>
-                <Typography fontWeight={600}>
-                  {formattedDate(fincoreDate.etlDate)}
-                </Typography>
-              </Box>
-            </Paper>
-          </Stack>
-        </Tooltip>
+        <Stack alignItems="center" mt={2} mb={3}>
+          <Paper
+            elevation={3}
+            sx={{
+              px: 3,
+              py: 1.5,
+              display: "flex",
+              alignItems: "center",
+              gap: 1.5,
+              borderRadius: 2,
+            }}
+          >
+            <EventOutlinedIcon color="primary" />
+            <Box>
+              <Typography variant="caption" color="text.secondary">
+                ETL Date (System Generated)
+              </Typography>
+              <Typography fontWeight={600}>
+                {fincoreDate.etlDate}
+              </Typography>
+            </Box>
+          </Paper>
+        </Stack>
       )}
 
       {/* ================= ACTION BUTTONS ================= */}
@@ -267,7 +225,7 @@ const ProcessStatusPage = () => {
       {/* ================= DIALOGS ================= */}
       <ProcessDetailsDialog
         process={selectedProcess}
-        onClose={() => setSelectedProcess(null)}
+        onClose={() => setSelectedProcessType(null)}
       />
 
       <ProcessSummaryDialog
@@ -282,7 +240,7 @@ const ProcessStatusPage = () => {
           loading={loading}
           processes={processes}
           actions={{
-            onView: setSelectedProcess,
+            onView: setSelectedProcessType,
             onStop: () => {},
             onRestart: () => {},
           }}
@@ -293,7 +251,6 @@ const ProcessStatusPage = () => {
 };
 
 export default ProcessStatusPage;
-
 
 import {
   Table,
@@ -318,7 +275,6 @@ import ProcessStatusChip from "./ProcessStatusChip";
 import { StageStatus } from "../util/StageStatus";
 import { useState, useMemo } from "react";
 
-/* ------------------ Action Button ------------------ */
 const Action = ({ title, icon, disabled, onClick }) => (
   <Tooltip title={title}>
     <span>
@@ -333,17 +289,11 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(5);
 
-  /* ======================================================
-     FILTER FIRST (IMPORTANT FIX)
-  ====================================================== */
   const validProcesses = useMemo(
-    () => processes.filter((p) => p.stageDetails && p.stageDetails.length > 0),
+    () => processes.filter((p) => p.stageDetails?.length),
     [processes],
   );
 
-  /* ======================================================
-     PAGINATE AFTER FILTER
-  ====================================================== */
   const paginatedData = useMemo(
     () =>
       validProcesses.slice(
@@ -353,23 +303,9 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
     [validProcesses, page, rowsPerPage],
   );
 
-  const handleChangePage = (_, newPage) => {
-    setPage(newPage);
-  };
-
-  const handleChangeRowsPerPage = (event) => {
-    setRowsPerPage(parseInt(event.target.value, 10));
-    setPage(0);
-  };
-
   return (
     <Paper elevation={1}>
-      <TableContainer
-        component={Paper}
-        sx={{
-          maxHeight: 420,
-        }}
-      >
+      <TableContainer sx={{ maxHeight: 420 }}>
         <Table stickyHeader size="small">
           <TableHead>
             <TableRow>
@@ -383,35 +319,26 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
           </TableHead>
 
           <TableBody>
-            {/* ------------------ Loading ------------------ */}
             {loading && (
               <TableRow>
                 <TableCell colSpan={6} align="center">
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      py: 2,
-                    }}
-                  >
+                  <Box py={2}>
                     <CircularProgress size={20} />
                     <Typography variant="caption" ml={1}>
-                      Loading processes, please wait…
+                      Loading processes…
                     </Typography>
                   </Box>
                 </TableCell>
               </TableRow>
             )}
 
-            {/* ------------------ Data ------------------ */}
             {!loading &&
               paginatedData.map((p) => {
-                const lastStage = p.stageDetails[p.stageDetails.length - 1];
+                const lastStage = p.stageDetails.at(-1);
 
                 return (
                   <TableRow
-                    key={p.processType}
+                    key={p.type}
                     hover
                     sx={{
                       bgcolor:
@@ -420,21 +347,14 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
                           : "inherit",
                     }}
                   >
-                    <TableCell
-                      sx={{
-                        fontWeight: 500,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {p.processType}
-                    </TableCell>
+                    <TableCell fontWeight={500}>{p.type}</TableCell>
 
                     <TableCell align="center">
                       <ProcessStatusChip status={lastStage.status} />
                     </TableCell>
 
-                    <TableCell align="center" sx={{ whiteSpace: "nowrap" }}>
-                      {lastStage.stage.title}
+                    <TableCell align="center">
+                      {lastStage.stage?.title}
                     </TableCell>
 
                     <TableCell align="center">
@@ -462,7 +382,7 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
                         <Action
                           title="View"
                           icon={<VisibilityIcon fontSize="small" />}
-                          onClick={() => actions.onView(p)}
+                          onClick={() => actions.onView(p.type)}
                         />
                       </Stack>
                     </TableCell>
@@ -470,7 +390,6 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
                 );
               })}
 
-            {/* ------------------ Empty State ------------------ */}
             {!loading && validProcesses.length === 0 && (
               <TableRow>
                 <TableCell colSpan={6} align="center">
@@ -484,17 +403,18 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
         </Table>
       </TableContainer>
 
-      {/* ------------------ Pagination ------------------ */}
       {!loading && validProcesses.length > rowsPerPage && (
         <TablePagination
           component="div"
           count={validProcesses.length}
           page={page}
-          onPageChange={handleChangePage}
+          onPageChange={(_, p) => setPage(p)}
           rowsPerPage={rowsPerPage}
-          onRowsPerPageChange={handleChangeRowsPerPage}
+          onRowsPerPageChange={(e) => {
+            setRowsPerPage(+e.target.value);
+            setPage(0);
+          }}
           rowsPerPageOptions={[5, 10, 25]}
-          labelRowsPerPage="Rows"
         />
       )}
     </Paper>
@@ -502,5 +422,3 @@ const ProcessStatusTable = ({ processes = [], actions, loading }) => {
 };
 
 export default ProcessStatusTable;
-
-
