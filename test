@@ -28,9 +28,7 @@ import { toPascalKebabCase } from "../../../../utils/CommonUtilities";
 /* ---------------- CONSTANTS ---------------- */
 
 const dataTypes = ["DATE", "STRING", "NUMBER", "BOOLEAN"];
-
 const modes = ["INPUT", "EXPRESSION", "QUERY"];
-
 const queryTypes = [
   "DB_VALUE",
   "DB_COUNT",
@@ -39,6 +37,9 @@ const queryTypes = [
   "DB_MIN",
   "DB_MAX",
 ];
+
+const NAME_REGEX = /^[A-Z0-9_]+$/;
+const LABEL_REGEX = /^[A-Za-z0-9 _-]+$/;
 
 const emptyState = {
   name: "",
@@ -60,7 +61,7 @@ const emptyState = {
 export const GlobalVariableDialog = ({
   open,
   globalVariable,
-  globals,
+  globals = [],
   onClose,
   onSave,
 }) => {
@@ -69,13 +70,15 @@ export const GlobalVariableDialog = ({
   const [form, setForm] = useState(emptyState);
   const [errors, setErrors] = useState({});
 
-  /* Load Edit / Reset */
+  const isEdit = Boolean(globalVariable);
+
   useEffect(() => {
     setForm(globalVariable || emptyState);
     setErrors({});
   }, [globalVariable, open]);
 
-  /* Update Helper */
+  /* ---------------- UPDATE ---------------- */
+
   const update = (key, val) => {
     if (key.startsWith("source.")) {
       const k = key.split(".")[1];
@@ -85,15 +88,45 @@ export const GlobalVariableDialog = ({
     }
   };
 
-  /* Validation */
-  const validate = () => {
+  /* ---------------- FIELD VALIDATION ---------------- */
+
+  const validateName = (value) => {
+    if (!value) return "Variable name required";
+    if (value.length < 3) return "Minimum 3 characters";
+    if (value.length > 40) return "Maximum 40 characters";
+    if (!NAME_REGEX.test(value))
+      return "Only A-Z, 0-9 and _ allowed";
+
+    const duplicate = globals.some(
+      (g) => g.name === value && g.name !== globalVariable?.name,
+    );
+
+    if (duplicate) return "Variable already exists";
+
+    return "";
+  };
+
+  const validateLabel = (value) => {
+    if (!value) return "Label required";
+    if (value.length < 3) return "Minimum 3 characters";
+    if (value.length > 60) return "Maximum 60 characters";
+    if (!LABEL_REGEX.test(value))
+      return "Only letters, numbers, space, - and _ allowed";
+
+    return "";
+  };
+
+  const validateForm = () => {
     const e = {};
 
-    if (!form.name) e.name = "Variable name required";
-    if (!form.label) e.label = "Label required";
+    e.name = validateName(form.name);
+    e.label = validateLabel(form.label);
+
     if (!form.description) e.description = "Description required";
+    if (form.description.length > 200)
+      e.description = "Max 200 characters";
+
     if (!form.dataType) e.dataType = "Select data type";
-    if (!form.mode) e.mode = "Select mode";
 
     if (form.mode === "EXPRESSION" && !form.expression)
       e.expression = "Expression required";
@@ -104,29 +137,34 @@ export const GlobalVariableDialog = ({
       if (!form.source.column) e.column = "Select column";
     }
 
+    Object.keys(e).forEach((k) => !e[k] && delete e[k]);
     setErrors(e);
+
     return Object.keys(e).length === 0;
   };
 
   const handleSave = () => {
-    if (!validate()) return;
+    if (!validateForm()) return;
     onSave(form);
     onClose();
   };
 
-  /* Derived */
+  /* ---------------- DERIVED ---------------- */
+
   const selectedTable = tableConfigs?.find(
     (t) => t.tableName === form.source.table,
   );
 
-  const columns = selectedTable ? getSelectableColumns(form.source.table) : [];
+  const columns = selectedTable
+    ? getSelectableColumns(form.source.table)
+    : [];
 
   /* ---------------- UI ---------------- */
 
   return (
     <Dialog open={open} maxWidth="md" fullWidth>
       <DialogTitle>
-        {globalVariable ? "Edit Variable" : "Add Global Variable"}
+        {isEdit ? "Edit Variable" : "Add Global Variable"}
         <IconButton
           onClick={onClose}
           sx={{ position: "absolute", right: 16, top: 12 }}
@@ -136,22 +174,53 @@ export const GlobalVariableDialog = ({
       </DialogTitle>
 
       <DialogContent dividers>
+
         {/* NAME + LABEL */}
         <Box display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
           <TextField
             label="Variable Name"
             value={form.name}
+            disabled={isEdit}
             error={!!errors.name}
-            helperText={errors.name || "Used as $G{VAR} and G.VAR"}
-            onChange={(e) => update("name", e.target.value.toUpperCase())}
+            helperText={
+              errors.name ||
+              "3–40 chars, A-Z, 0-9, _. Used as $G{VAR} and G.VAR"
+            }
+            onBlur={(e) =>
+              setErrors((p) => ({
+                ...p,
+                name: validateName(e.target.value),
+              }))
+            }
+            onChange={(e) =>
+              update(
+                "name",
+                e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""),
+              )
+            }
           />
 
           <TextField
             label="Label"
             value={form.label}
+            disabled={isEdit}
             error={!!errors.label}
-            helperText={errors.label}
-            onChange={(e) => update("label", e.target.value)}
+            helperText={
+              errors.label ||
+              "3–60 chars, letters, numbers, space, - and _"
+            }
+            onBlur={(e) =>
+              setErrors((p) => ({
+                ...p,
+                label: validateLabel(e.target.value),
+              }))
+            }
+            onChange={(e) =>
+              update(
+                "label",
+                e.target.value.replace(/[^A-Za-z0-9 _-]/g, ""),
+              )
+            }
           />
         </Box>
 
@@ -164,15 +233,14 @@ export const GlobalVariableDialog = ({
           rows={2}
           value={form.description}
           error={!!errors.description}
-          helperText={errors.description}
+          helperText={errors.description || "Max 200 characters"}
           onChange={(e) => update("description", e.target.value)}
         />
 
         {/* DATA TYPE */}
-
         <Box width="100%" sx={{ mt: 2 }}>
           <FormControl>
-            <FormLabel>Choose Variable Data Type:</FormLabel>
+            <FormLabel>Choose Variable Data Type</FormLabel>
             <RadioGroup
               row
               value={form.dataType}
@@ -184,7 +252,6 @@ export const GlobalVariableDialog = ({
                   value={m}
                   control={<Radio />}
                   label={toPascalKebabCase(m)}
-                  sx={{ mr: 5 }}
                 />
               ))}
             </RadioGroup>
@@ -194,7 +261,7 @@ export const GlobalVariableDialog = ({
         {/* MODE */}
         <Box width="100%" sx={{ mt: 2 }}>
           <FormControl>
-            <FormLabel>Choose Variable Mode:</FormLabel>
+            <FormLabel>Choose Variable Mode</FormLabel>
             <RadioGroup
               row
               value={form.mode}
@@ -206,7 +273,6 @@ export const GlobalVariableDialog = ({
                   value={m}
                   control={<Radio />}
                   label={toPascalKebabCase(m)}
-                  sx={{ mr: 5 }}
                 />
               ))}
             </RadioGroup>
@@ -220,8 +286,7 @@ export const GlobalVariableDialog = ({
           <Box display="flex">
             <WarningIcon color="warning" sx={{ mr: 1 }} />
             <Typography color="text.secondary">
-              Selecting <b>Input</b> mode requires the value to be entered by
-              the user at runtime.
+              User will provide value at runtime.
             </Typography>
           </Box>
         )}
@@ -236,7 +301,6 @@ export const GlobalVariableDialog = ({
               placeholder="e.g. #{ 1000 * G.USD_RATE }"
               onChange={(v) => update("expression", v)}
             />
-
             {errors.expression && (
               <Typography color="error" variant="caption">
                 {errors.expression}
@@ -248,7 +312,6 @@ export const GlobalVariableDialog = ({
         {/* QUERY MODE */}
         {form.mode === "QUERY" && (
           <>
-            {/* TYPE */}
             <TextField
               select
               fullWidth
@@ -256,7 +319,9 @@ export const GlobalVariableDialog = ({
               value={form.source.type}
               error={!!errors.type}
               helperText={errors.type}
-              onChange={(e) => update("source.type", e.target.value)}
+              onChange={(e) =>
+                update("source.type", e.target.value)
+              }
             >
               {queryTypes.map((q) => (
                 <MenuItem key={q} value={q}>
@@ -265,12 +330,15 @@ export const GlobalVariableDialog = ({
               ))}
             </TextField>
 
-            {/* TABLE + COLUMN */}
             <Box mt={2} display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
               <Autocomplete
                 options={tableConfigs || []}
-                getOptionLabel={(o) => o?.label || o?.tableName || ""}
-                onChange={(_, v) => update("source.table", v?.tableName)}
+                getOptionLabel={(o) =>
+                  o?.label || o?.tableName || ""
+                }
+                onChange={(_, v) =>
+                  update("source.table", v?.tableName)
+                }
                 renderInput={(p) => (
                   <TextField
                     {...p}
@@ -283,8 +351,12 @@ export const GlobalVariableDialog = ({
 
               <Autocomplete
                 options={columns || []}
-                getOptionLabel={(o) => o?.label || o?.columnName || ""}
-                onChange={(_, v) => update("source.column", v?.columnName)}
+                getOptionLabel={(o) =>
+                  o?.label || o?.columnName || ""
+                }
+                onChange={(_, v) =>
+                  update("source.column", v?.columnName)
+                }
                 renderInput={(p) => (
                   <TextField
                     {...p}
@@ -296,13 +368,14 @@ export const GlobalVariableDialog = ({
               />
             </Box>
 
-            {/* FILTERS */}
             {form.source.column && (
               <Box mt={2}>
                 <FilterBuilder
                   tableName={form.source.table}
                   filters={form.source.filters}
-                  onFiltersChange={(f) => update("source.filters", f)}
+                  onFiltersChange={(f) =>
+                    update("source.filters", f)
+                  }
                 />
               </Box>
             )}
