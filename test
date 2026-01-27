@@ -1,37 +1,316 @@
-[
-  {
-    "name": "REPORT_DATE",
-    "mode": "INPUT",
-    "dataType": "DATE",
-    "label": "Report Date"
-  },
-  {
-    "name": "MONTH_START",
-    "mode": "EXPRESSION", 
-    "dataType": "DATE",
-    "expression": "#{ DateUtils.startOfMonth(G.REPORT_DATE) }"
-  },
-  {
-    "name": "USD_RATE",
-    "mode": "QUERY",
-    "dataType": "NUMBER",
-    "label": "USD Exchange Rate",
-    "source": {
-      "type": "DB_SUM",
-      "table": "EXCHANGE_RATES",
-      "column": "CONVERSION_RATE",
-      "filters": {
-        "CURRENCY_CODE": "USD",
-        // Dependency on previous param!
-        "EFFECTIVE_DATE": "$G{MONTH_START}" 
-      }
+import { useState } from "react";
+import { TextField, Popper, Paper, List, ListItemButton } from "@mui/material";
+
+export default function GlobalVariableAutocomplete({
+  value,
+  onChange,
+  variables = [],
+  placeholder,
+  multiline = false,
+}) {
+  const [anchorEl, setAnchorEl] = useState(null);
+  const [open, setOpen] = useState(false);
+
+  const handleChange = (e) => {
+    const val = e.target.value;
+    onChange(val);
+
+    if (val.endsWith("$G") || val.endsWith("G.")) {
+      setAnchorEl(e.target);
+      setOpen(true);
     }
+  };
+
+  const insertVariable = (v) => {
+    const suffix = value.endsWith("$G")
+      ? `{${v.name}}`
+      : value.endsWith("G.")
+      ? v.name
+      : "";
+
+    onChange(value + suffix);
+    setOpen(false);
+  };
+
+  return (
+    <>
+      <TextField
+        fullWidth
+        multiline={multiline}
+        rows={multiline ? 3 : 1}
+        value={value}
+        placeholder={placeholder}
+        onChange={handleChange}
+      />
+
+      <Popper open={open} anchorEl={anchorEl}>
+        <Paper sx={{ maxHeight: 200, overflow: "auto", width: 250 }}>
+          <List dense>
+            {variables.map((v) => (
+              <ListItemButton
+                key={v.name}
+                onClick={() => insertVariable(v)}
+              >
+                {v.name} ({v.dataType})
+              </ListItemButton>
+            ))}
+          </List>
+        </Paper>
+      </Popper>
+    </>
+  );
+}
+
+import { useState, useEffect } from "react";
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  Box,
+  Typography,
+  IconButton,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  FormControl,
+  FormLabel,
+  MenuItem,
+  Autocomplete,
+  Divider,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import FilterBuilder from "../filter-builder/FilterBuilder";
+import GlobalVariableAutocomplete from "./GlobalVariableAutocomplete";
+import { useTableConfig } from "../../hooks/useTableConfig";
+
+const dataTypes = ["STRING", "NUMBER", "DATE", "BOOLEAN"];
+
+const modes = ["INPUT", "EXPRESSION", "QUERY"];
+
+const queryTypes = [
+  "DB_VALUE",
+  "DB_COUNT",
+  "DB_SUM",
+  "DB_AVG",
+  "DB_MIN",
+  "DB_MAX",
+];
+
+const emptyState = {
+  name: "",
+  label: "",
+  description: "",
+  dataType: "",
+  mode: "INPUT",
+  expression: "",
+  source: {
+    type: "",
+    table: "",
+    column: "",
+    filters: {},
   },
-  {
-    "name": "TARGET_REVENUE_INR",
-    "mode": "EXPRESSION",
-    "dataType": "NUMBER",
-    // Uses the DB fetched value
-    "expression": "#{ 1000 * G.USD_RATE }" 
-  }
-]
+};
+
+export const GlobalVariableDialog = ({
+  open,
+  globalVariable,
+  variables, // all existing variables list
+  onClose,
+  onSave,
+}) => {
+  const { tableConfigs, getSelectableColumns, getAllowedAggFuncs } =
+    useTableConfig();
+
+  const [form, setForm] = useState(emptyState);
+
+  useEffect(() => {
+    setForm(globalVariable || emptyState);
+  }, [globalVariable, open]);
+
+  const update = (key, val) => {
+    if (key.startsWith("source.")) {
+      const k = key.split(".")[1];
+      setForm((p) => ({ ...p, source: { ...p.source, [k]: val } }));
+    } else {
+      setForm((p) => ({ ...p, [key]: val }));
+    }
+  };
+
+  const selectedTable = tableConfigs?.find(
+    (t) => t.tableName === form.source.table,
+  );
+
+  const columns = selectedTable
+    ? getSelectableColumns(form.source.table)
+    : [];
+
+  const handleSave = () => {
+    onSave(form);
+    onClose();
+  };
+
+  return (
+    <Dialog open={open} maxWidth="md" fullWidth>
+      <DialogTitle>
+        {globalVariable ? "Edit Variable" : "Add Global Variable"}
+        <IconButton
+          onClick={onClose}
+          sx={{ position: "absolute", right: 16, top: 12 }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+
+      <DialogContent dividers>
+
+        {/* NAME + LABEL */}
+        <Box display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
+          <TextField
+            label="Variable Name"
+            value={form.name}
+            helperText="Used as $G{VAR} and G.VAR"
+            onChange={(e) =>
+              update("name", e.target.value.toUpperCase())
+            }
+          />
+
+          <TextField
+            label="Label"
+            value={form.label}
+            onChange={(e) => update("label", e.target.value)}
+          />
+        </Box>
+
+        {/* DESCRIPTION */}
+        <TextField
+          sx={{ mt: 2 }}
+          label="Description"
+          fullWidth
+          multiline
+          rows={2}
+          value={form.description}
+          onChange={(e) => update("description", e.target.value)}
+        />
+
+        {/* DATA TYPE */}
+        <TextField
+          sx={{ mt: 2 }}
+          select
+          fullWidth
+          label="Data Type"
+          value={form.dataType}
+          onChange={(e) => update("dataType", e.target.value)}
+        >
+          {dataTypes.map((d) => (
+            <MenuItem key={d} value={d}>
+              {d}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        {/* MODE */}
+        <FormControl sx={{ mt: 2 }}>
+          <FormLabel>Variable Mode</FormLabel>
+          <RadioGroup row value={form.mode} onChange={(e) => update("mode", e.target.value)}>
+            {modes.map((m) => (
+              <FormControlLabel key={m} value={m} control={<Radio />} label={m} />
+            ))}
+          </RadioGroup>
+        </FormControl>
+
+        <Divider sx={{ my: 2 }} />
+
+        {/* INPUT MODE */}
+        {form.mode === "INPUT" && (
+          <Typography color="text.secondary">
+            Value will be provided by user at runtime.
+          </Typography>
+        )}
+
+        {/* EXPRESSION MODE */}
+        {form.mode === "EXPRESSION" && (
+          <GlobalVariableAutocomplete
+            multiline
+            variables={variables}
+            value={form.expression}
+            placeholder="e.g. #{ 1000 * G.USD_RATE }"
+            onChange={(v) => update("expression", v)}
+          />
+        )}
+
+        {/* QUERY MODE */}
+        {form.mode === "QUERY" && (
+          <>
+            {/* TYPE */}
+            <TextField
+              select
+              fullWidth
+              label="Query Type"
+              value={form.source.type}
+              onChange={(e) => update("source.type", e.target.value)}
+            >
+              {queryTypes.map((q) => (
+                <MenuItem key={q} value={q}>
+                  {q}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            {/* TABLE + COLUMN */}
+            <Box
+              mt={2}
+              display="grid"
+              gridTemplateColumns="1fr 1fr"
+              gap={2}
+            >
+              <Autocomplete
+                options={tableConfigs || []}
+                getOptionLabel={(o) => o.label}
+                onChange={(_, v) =>
+                  update("source.table", v?.tableName)
+                }
+                renderInput={(p) => (
+                  <TextField {...p} label="Table" />
+                )}
+              />
+
+              <Autocomplete
+                options={columns || []}
+                getOptionLabel={(o) => o.label}
+                onChange={(_, v) =>
+                  update("source.column", v?.columnName)
+                }
+                renderInput={(p) => (
+                  <TextField {...p} label="Column" />
+                )}
+              />
+            </Box>
+
+            {/* FILTERS */}
+            {form.source.column && (
+              <Box mt={2}>
+                <FilterBuilder
+                  tableName={form.source.table}
+                  filters={form.source.filters}
+                  onFiltersChange={(f) =>
+                    update("source.filters", f)
+                  }
+                />
+              </Box>
+            )}
+          </>
+        )}
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={handleSave}>
+          Save
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
