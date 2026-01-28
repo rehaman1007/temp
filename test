@@ -1,75 +1,397 @@
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-  Button,
-  Typography,
-  Box,
-  IconButton,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
+import { memo, useState, useCallback } from "react";
+import Paper from "@mui/material/Paper";
 
-export const DeleteConfirmDialog = ({
-  open,
-  deleteDialog,
-  onClose,
-  onConfirmRow,
-  onConfirmColumn,
-}) => {
-  if (!deleteDialog) return null;
+/* ---------------- REDUX ---------------- */
+
+import { useAppDispatch, useAppSelector } from "../../store";
+
+import {
+  selectTemplateMeta,
+  selectReportMeta,
+  selectColumns,
+  selectRows,
+  selectVariants,
+  selectTableNames,
+  selectDynamicRowIds,
+  selectExistingRowIds,
+  selectGlobals,
+} from "../../store/selectors";
+
+import {
+  setTemplateMeta,
+  setReportMeta,
+  addColumn,
+  updateColumn,
+  updateColumnFormat,
+  removeColumn,
+  addRow,
+  removeRow,
+  reorderRows,
+  addVariant,
+  updateVariant,
+  removeVariant,
+  addGlobalVariable,
+  updateGlobalVariable,
+  removeGlobalVariable,
+} from "../../store/templateSlice";
+
+/* ---------------- PANELS ---------------- */
+
+import { MetadataPanel } from "./MetadataPanel";
+import { ColumnsPanel } from "./ColumnsPanel";
+import { RowsPanel } from "./RowsPanel";
+import { GlobalsPanel } from "./GlobalsPanel";
+import { VariantsPanel } from "./VariantsPanel";
+
+/* ---------------- DIALOGS ---------------- */
+
+import { AddRowDialog } from "./AddRowDialog";
+import { VariantDialog } from "./VariantDialog";
+import { GlobalVariableDialog } from "./GlobalVariableDialog";
+import { Box, Typography } from "@mui/material";
+
+/* ------------------------------------------------ */
+
+export const LeftPanel = memo(() => {
+  const dispatch = useAppDispatch();
+
+  /* ---------------- STORE ---------------- */
+
+  const templateMeta = useAppSelector(selectTemplateMeta);
+  const reportMeta = useAppSelector(selectReportMeta);
+  const columns = useAppSelector(selectColumns);
+  const rows = useAppSelector(selectRows);
+  const variants = useAppSelector(selectVariants);
+  const globals = useAppSelector(selectGlobals);
+  const tableNames = useAppSelector(selectTableNames);
+  const dynamicRowIds = useAppSelector(selectDynamicRowIds);
+  const existingRowIds = useAppSelector(selectExistingRowIds);
+
+  /* ---------------- PANEL EXPANSION ---------------- */
+
+  const [expandedPanels, setExpandedPanels] = useState({
+    metadata: true,
+    columns: false,
+    rows: false,
+    globals: false,
+    variants: false,
+  });
+
+  const handleExpand = useCallback((panel) => {
+    setExpandedPanels((p) => ({ ...p, [panel]: !p[panel] }));
+  }, []);
+
+  /* ---------------- METADATA ---------------- */
+
+  const updateMetadata = useCallback(
+    (field, value) => {
+      if (field.startsWith("reportMeta.")) {
+        dispatch(setReportMeta({ [field.split(".")[1]]: value }));
+      } else {
+        dispatch(setTemplateMeta({ [field.split(".")[1]]: value }));
+      }
+    },
+    [dispatch],
+  );
+
+  /* ---------------- COLUMNS ---------------- */
+
+  const [editingColumn, setEditingColumn] = useState(null);
+
+  const handleAddColumn = useCallback(() => {
+    dispatch(addColumn());
+  }, [dispatch]);
+
+  const handleUpdateColumn = useCallback(
+    (index, field, value) => {
+      if (field.includes(".")) {
+        const [, formatKey] = field.split(".");
+        dispatch(
+          updateColumnFormat({
+            index,
+            format: { [formatKey]: value },
+          }),
+        );
+      } else {
+        dispatch(updateColumn({ index, column: { [field]: value } }));
+      }
+    },
+    [dispatch],
+  );
+
+  const handleRemoveColumn = useCallback(
+    (colId, index) => {
+      dispatch(removeColumn({ colId, index }));
+    },
+    [dispatch],
+  );
+
+  /* ---------------- ROWS ---------------- */
+
+  const [draggedRowIndex, setDraggedRowIndex] = useState(null);
+  const [dropTargetIndex, setDropTargetIndex] = useState(null);
+
+  const [addRowDialogState, setAddRowDialogState] = useState({
+    open: false,
+    rowType: "",
+    insertAt: 0,
+  });
+
+  const openAddRowDialog = useCallback(
+    (type, insertAt = rows.length) => {
+      setAddRowDialogState({ open: true, rowType: type, insertAt });
+    },
+    [rows.length],
+  );
+
+  const handleAddRow = useCallback(
+    (rowId) => {
+      const { rowType, insertAt } = addRowDialogState;
+
+      const newRow = { id: rowId, rowType };
+
+      if (rowType === "DYNAMIC") {
+        newRow.dynamicConfig = {
+          type: "DB_LIST",
+          table: "",
+          select: [],
+          filters: {},
+          columnMappings: [],
+        };
+      }
+
+      dispatch(addRow({ row: newRow, insertAt }));
+      setAddRowDialogState({ open: false, rowType: "", insertAt: 0 });
+    },
+    [dispatch, addRowDialogState],
+  );
+
+  const handleRemoveRow = useCallback(
+    (rowId) => {
+      dispatch(removeRow({ rowId }));
+    },
+    [dispatch],
+  );
+
+  const handleDragStart = useCallback((index) => {
+    setDraggedRowIndex(index);
+  }, []);
+
+  const handleDragOver = useCallback((e, index) => {
+    e.preventDefault();
+    setDropTargetIndex(index);
+  }, []);
+
+  const handleDragEnd = useCallback(() => {
+    if (
+      draggedRowIndex !== null &&
+      dropTargetIndex !== null &&
+      draggedRowIndex !== dropTargetIndex
+    ) {
+      dispatch(
+        reorderRows({
+          fromIndex: draggedRowIndex,
+          toIndex: dropTargetIndex,
+        }),
+      );
+    }
+    setDraggedRowIndex(null);
+    setDropTargetIndex(null);
+  }, [dispatch, draggedRowIndex, dropTargetIndex]);
+
+  /* ---------------- VARIANTS ---------------- */
+
+  const [variantDialogOpen, setVariantDialogOpen] = useState(false);
+  const [editingVariant, setEditingVariant] = useState(null);
+  const [editingVariantIndex, setEditingVariantIndex] = useState(null);
+
+  const openAddVariantDialog = () => {
+    setEditingVariant(null);
+    setEditingVariantIndex(null);
+    setVariantDialogOpen(true);
+  };
+
+  const openEditVariantDialog = (variant, index) => {
+    setEditingVariant(variant);
+    setEditingVariantIndex(index);
+    setVariantDialogOpen(true);
+  };
+
+  const handleSaveVariant = useCallback(
+    (variant) => {
+      if (editingVariantIndex !== null) {
+        dispatch(updateVariant({ index: editingVariantIndex, variant }));
+      } else {
+        dispatch(addVariant(variant));
+      }
+      setVariantDialogOpen(false);
+      setEditingVariant(null);
+      setEditingVariantIndex(null);
+    },
+    [dispatch, editingVariantIndex],
+  );
+
+  const handleRemoveVariant = useCallback(
+    (index) => {
+      dispatch(removeVariant(index));
+    },
+    [dispatch],
+  );
+
+  /* ---------------- GLOBAL VARIABLES ---------------- */
+
+  const [globalDialogOpen, setGlobalDialogOpen] = useState(false);
+  const [editingGlobal, setEditingGlobal] = useState(null);
+  const [editingGlobalIndex, setEditingGlobalIndex] = useState(null);
+
+  const openAddGlobalVariableDialog = () => {
+    setEditingGlobal(null);
+    setEditingGlobalIndex(null);
+    setGlobalDialogOpen(true);
+  };
+
+  const openEditGlobalVariableDialog = (global, index) => {
+    setEditingGlobal(global);
+    setEditingGlobalIndex(index);
+    setGlobalDialogOpen(true);
+  };
+
+  const handleSaveGlobalVariable = useCallback(
+    (global) => {
+      if (editingGlobalIndex !== null) {
+        dispatch(
+          updateGlobalVariable({
+            index: editingGlobalIndex,
+            global,
+          }),
+        );
+      } else {
+        dispatch(addGlobalVariable(global));
+      }
+      setGlobalDialogOpen(false);
+      setEditingGlobal(null);
+      setEditingGlobalIndex(null);
+    },
+    [dispatch, editingGlobalIndex],
+  );
+
+  const handleRemoveGlobalVariable = useCallback(
+    (index) => {
+      dispatch(removeGlobalVariable(index));
+    },
+    [dispatch],
+  );
+
+  /* ---------------- RENDER ---------------- */
 
   return (
-    <Dialog open={open} onClose={onClose}>
-      <DialogTitle>
-        Confirm Deletion
-        <IconButton
-          onClick={onClose}
-          sx={{ position: "absolute", right: 16, top: 10 }}
+    <Paper
+      elevation={0}
+      sx={{
+        width: 340,
+        overflow: "auto",
+        borderRadius: 0,
+      }}
+    >
+      <Box sx={{ p: 2 }}>
+        <Typography
+          variant="subtitle2"
+          fontWeight={600}
+          gutterBottom
+          sx={{ color: "text.secondary" }}
         >
-          <CloseIcon />
-        </IconButton>
-      </DialogTitle>
+          REPORT STRUCTURE
+        </Typography>
 
-      <DialogContent>
-        <DialogContentText>
-          {deleteDialog.type === "row"
-            ? "This row is referenced in:"
-            : "This column is referenced in:"}
-        </DialogContentText>
+        <MetadataPanel
+          expanded={expandedPanels.metadata}
+          onToggle={() => handleExpand("metadata")}
+          templateMeta={templateMeta}
+          reportMeta={reportMeta}
+          onUpdate={updateMetadata}
+        />
 
-        <Box mt={1} maxHeight={200} overflow="auto">
-          {deleteDialog.references.map((r, i) => (
-            <Typography key={i} color="error">
-              • {r}
-            </Typography>
-          ))}
-        </Box>
+        <ColumnsPanel
+          expanded={expandedPanels.columns}
+          onToggle={() => handleExpand("columns")}
+          columns={columns}
+          editingColumn={editingColumn}
+          setEditingColumn={setEditingColumn}
+          onAddColumn={handleAddColumn}
+          onRemoveColumn={handleRemoveColumn}
+          onUpdateColumn={handleUpdateColumn}
+        />
 
-        <DialogContentText sx={{ mt: 2 }}>
-          Deleting will remove these references. Continue?
-        </DialogContentText>
-      </DialogContent>
+        <RowsPanel
+          expanded={expandedPanels.rows}
+          onToggle={() => handleExpand("rows")}
+          rows={rows}
+          draggedRowIndex={draggedRowIndex}
+          dropTargetIndex={dropTargetIndex}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+          onRemoveRow={handleRemoveRow}
+          openAddRowDialog={openAddRowDialog}
+        />
 
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button
-          color="error"
-          variant="contained"
-          onClick={() => {
-            if (deleteDialog.type === "row")
-              onConfirmRow(deleteDialog.rowId);
-            else
-              onConfirmColumn(
-                deleteDialog.colId,
-                deleteDialog.index,
-              );
-          }}
-        >
-          Delete Anyway
-        </Button>
-      </DialogActions>
-    </Dialog>
+        <GlobalsPanel
+          expanded={expandedPanels.globals}
+          onToggle={() => handleExpand("globals")}
+          globals={globals}
+          onAdd={openAddGlobalVariableDialog}
+          onEdit={openEditGlobalVariableDialog}
+          onRemove={handleRemoveGlobalVariable}
+        />
+
+        <VariantsPanel
+          expanded={expandedPanels.variants}
+          onToggle={() => handleExpand("variants")}
+          variants={variants}
+          onAdd={openAddVariantDialog}
+          onEdit={openEditVariantDialog}
+          onRemove={handleRemoveVariant}
+        />
+      </Box>
+
+      {/* ---------------- DIALOGS ---------------- */}
+
+      <AddRowDialog
+        open={addRowDialogState.open}
+        rowType={addRowDialogState.rowType}
+        existingRowIds={existingRowIds}
+        onClose={() =>
+          setAddRowDialogState({ open: false, rowType: "", insertAt: 0 })
+        }
+        onConfirm={handleAddRow}
+      />
+
+      <VariantDialog
+        open={variantDialogOpen}
+        variant={editingVariant}
+        tableNames={tableNames}
+        dynamicRowIds={dynamicRowIds}
+        onClose={() => {
+          setVariantDialogOpen(false);
+          setEditingVariant(null);
+          setEditingVariantIndex(null);
+        }}
+        onSave={handleSaveVariant}
+      />
+
+      <GlobalVariableDialog
+        open={globalDialogOpen}
+        globalVariable={editingGlobal}
+        globals={globals}
+        onClose={() => {
+          setGlobalDialogOpen(false);
+          setEditingGlobal(null);
+          setEditingGlobalIndex(null);
+        }}
+        onSave={handleSaveGlobalVariable}
+      />
+    </Paper>
   );
-};
+});
+
+LeftPanel.displayName = "LeftPanel";
