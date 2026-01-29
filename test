@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import {
   TextField,
   Popper,
@@ -6,25 +6,73 @@ import {
   List,
   ListItemButton,
   Box,
+  Typography,
 } from "@mui/material";
 
-/**
- * Triggers suggestions when user types:
- *  - G.
- *  - {{
- * Inserts variable at cursor position
- */
+/*
+  Allowed Token:
+  $G{{VAR_NAME}}
+*/
+
+const TOKEN_REGEX = /\$G\{\{([A-Z0-9_]+)\}\}/gi;
+
 export default function ExpressionEditorWithVariables({
   value,
   onChange,
   globals = [],
   placeholder,
 }) {
-  const textAreaRef = useRef(null); // actual textarea
-  const wrapperRef = useRef(null); // anchor for popper
+  const inputRef = useRef(null);
+  const anchorRef = useRef(null);
 
   const [open, setOpen] = useState(false);
-  const [trigger, setTrigger] = useState(null);
+  const [searchText, setSearchText] = useState("");
+
+  /* ---------------- GLOBAL LOOKUP ---------------- */
+
+  const globalNames = useMemo(
+    () => globals.map((g) => g.name.toUpperCase()),
+    [globals],
+  );
+
+  /* ---------------- PARSE TOKENS ---------------- */
+
+  const parsed = useMemo(() => {
+    const parts = [];
+    let lastIndex = 0;
+
+    for (const match of value.matchAll(TOKEN_REGEX)) {
+      const start = match.index;
+      const full = match[0];
+      const name = match[1];
+
+      if (start > lastIndex) {
+        parts.push({
+          type: "text",
+          value: value.slice(lastIndex, start),
+        });
+      }
+
+      parts.push({
+        type: "var",
+        value: full,
+        valid: globalNames.includes(name.toUpperCase()),
+      });
+
+      lastIndex = start + full.length;
+    }
+
+    if (lastIndex < value.length) {
+      parts.push({
+        type: "text",
+        value: value.slice(lastIndex),
+      });
+    }
+
+    return parts;
+  }, [value, globalNames]);
+
+  /* ---------------- INPUT HANDLER ---------------- */
 
   const handleChange = (e) => {
     const val = e.target.value;
@@ -32,56 +80,89 @@ export default function ExpressionEditorWithVariables({
 
     onChange(val);
 
-    const lastTwo = val.slice(cursor - 2, cursor);
+    const before = val.slice(0, cursor);
+    const match = before.match(/\$G\{\{([A-Z0-9_]*)$/i);
 
-    if (lastTwo === "G." || lastTwo === "g.") {
-      setTrigger("G.");
+    if (match) {
+      setSearchText(match[1] || "");
       setOpen(true);
-      return;
+    } else {
+      setOpen(false);
     }
-
-    if (
-      lastTwo === "$G" ||
-      lastTwo === "$g" ||
-      lastTwo === "G{" ||
-      lastTwo === "g{"
-    ) {
-      setTrigger("$G");
-      setOpen(true);
-      return;
-    }
-
-    setOpen(false);
   };
 
-  const insertVariable = (variable) => {
-    const textarea = textAreaRef.current;
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
+  /* ---------------- INSERT VARIABLE ---------------- */
 
-    let insertText = "";
+  const insertVariable = (v) => {
+    const input = inputRef.current;
+    const cursor = input.selectionStart;
 
-    if (trigger === "G.") insertText = variable.name;
-    if (trigger === "$G") insertText = `{${variable.name}}`;
+    const before = value.slice(0, cursor);
+    const after = value.slice(cursor);
 
-    const newValue =
-      value.substring(0, start) + insertText + value.substring(end);
+    const replaced = before.replace(
+      /\$G\{\{([A-Z0-9_]*)$/i,
+      `$G{{${v.name}}}`,
+    );
+
+    const newValue = replaced + after;
 
     onChange(newValue);
     setOpen(false);
 
-    // restore caret
     setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(
-        start + insertText.length,
-        start + insertText.length,
-      );
+      const pos = replaced.length;
+      input.focus();
+      input.setSelectionRange(pos, pos);
     }, 0);
   };
 
+  /* ---------------- FILTERED LIST ---------------- */
+
+  const filteredGlobals = globals.filter((g) =>
+    g.name.toUpperCase().includes(searchText.toUpperCase()),
+  );
+
+  const hasInvalid = parsed.some(
+    (p) => p.type === "var" && !p.valid,
+  );
+
+  /* ---------------- UI ---------------- */
+
   return (
-    <Box ref={wrapperRef}>
+    <Box ref={anchorRef}>
+      {/* Highlight Layer */}
+      <Box
+        sx={{
+          position: "absolute",
+          pointerEvents: "none",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          fontFamily: "monospace",
+          padding: "16.5px 14px",
+          width: "100%",
+          minHeight: 84,
+          color: "transparent",
+        }}
+      >
+        {parsed.map((p, i) =>
+          p.type === "text" ? (
+            <span key={i}>{p.value}</span>
+          ) : (
+            <span
+              key={i}
+              style={{
+                color: p.valid ? "#2e7d32" : "#d32f2f",
+                fontWeight: 600,
+              }}
+            >
+              {p.value}
+            </span>
+          ),
+        )}
+      </Box>
+
+      {/* Real Input */}
       <TextField
         fullWidth
         multiline
@@ -89,22 +170,35 @@ export default function ExpressionEditorWithVariables({
         placeholder={placeholder}
         value={value}
         onChange={handleChange}
-        InputProps={{
-          inputRef: textAreaRef,
+        inputRef={inputRef}
+        sx={{
+          fontFamily: "monospace",
         }}
+        helperText={
+          hasInvalid
+            ? "Invalid global variable detected"
+            : "Use format: $G{{VARIABLE_NAME}}"
+        }
+        error={hasInvalid}
       />
 
+      {/* Suggestion Popper */}
       <Popper
-        open={open}
-        anchorEl={wrapperRef.current}
+        open={open && filteredGlobals.length > 0}
+        anchorEl={anchorRef.current}
         placement="bottom-start"
-        disablePortal // IMPORTANT inside dialogs
+        disablePortal
       >
-        <Paper sx={{ width: 280, maxHeight: 220, overflow: "auto" }}>
+        <Paper sx={{ width: 260, maxHeight: 220, overflow: "auto" }}>
           <List dense>
-            {globals.map((v) => (
-              <ListItemButton key={v.name} onClick={() => insertVariable(v)}>
-                {v.name} ({v.dataType})
+            {filteredGlobals.map((v) => (
+              <ListItemButton
+                key={v.name}
+                onClick={() => insertVariable(v)}
+              >
+                <Typography fontFamily="monospace">
+                  {v.name}
+                </Typography>
               </ListItemButton>
             ))}
           </List>
