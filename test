@@ -1,3 +1,106 @@
+// ----------------------------------------------------------------------------------
+    // 1. DOWNLOAD STREAM WITH PROGRESS
+    // ----------------------------------------------------------------------------------
+    @Transactional
+    @Override
+    public ReportStreamResponse downloadReportStream(String fileName, LocalDate date, int userRoleId, String userId, String branchCode) {
+        // 1. Authorization Check
+        ReportType reportType = reportTypeRepository.findByFileNameAndRoles_roleId(fileName, userRoleId)
+                .orElseThrow(() -> {
+                    log.warn("Access Denied: User {} -> Report {}", userId, fileName);
+                    sendNotification(userId, "Access Denied for report: " + fileName, "/glif-reports", fileName + "_" + date);
+                    return new AccessDeniedException("Access Denied for report: " + fileName);
+                });
+
+        log.info("Fetched report from db : {}", reportType);
+        // This is the human-readable name (e.g., "Daily Balance Sheet")
+        String reportDisplayName = reportType.getReportName();
+
+        // Construct task id
+        String safeReportName = reportDisplayName.replaceAll("[^a-zA-Z0-9]", "").toLowerCase();
+        String safeDate = date.format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+        String taskId = String.format("%s_%s_%d", safeReportName, safeDate, System.currentTimeMillis());
+
+
+        // 2. Prepare Paths with the CORRECT format "dd-MM-yyyy"
+        String formattedDate = date.format(DateTimeFormatter.ISO_LOCAL_DATE);
+        String fileNamePrefix = fileName + "_" + date.format(DateTimeFormatter.ofPattern("ddMMyyyy"));
+
+        Path searchDirectory;
+        if(branchCode == null || branchCode.isBlank()){
+            //For Whole Bank Reports
+            searchDirectory =new Path(reportsBasePath,formattedDate);
+            log.info("Searching HDFS directory {} for files with prefix '{}'...", searchDirectory, fileNamePrefix);
+        }
+        else{
+            //For Branch-Wise Reports
+            searchDirectory = new Path(reportsBasePath+ "/" + formattedDate + "/" + "nwsa-inr-converted", branchCode);
+            log.info("Searching HDFS directory {} for files with prefix '{}'...", searchDirectory, fileNamePrefix);
+        }
+
+        // 3. Define the Streaming Logic
+        StreamingResponseBody streamingBody = outputStream -> {
+            try (ZipOutputStream zipOut = new ZipOutputStream(outputStream)) {
+                if (!hdfsFileSystem.exists(searchDirectory)) {
+                    log.info("Directory not found in HDFS: {}", searchDirectory);
+                    // Throw immediately so a proper HTTP 404 is sent to the client
+                    throw new ResourceNotFoundException("Reports directory not found: " + searchDirectory);
+                }
+
+                sendProgress(taskId, userId, 0, "Starting download...", "PROCESSING");
+
+
+                FileStatus[] fileStatuses = hdfsFileSystem.listStatus(searchDirectory);
+                boolean fileFound = false;
+
+                for (FileStatus status : fileStatuses) {
+                    if (!status.isFile()) continue;
+                    String actualFileName = status.getPath().getName();
+
+                    if (actualFileName.startsWith(fileNamePrefix)) {
+                        fileFound = true;
+                        ZipEntry zipEntry = new ZipEntry(actualFileName);
+                        zipOut.putNextEntry(zipEntry);
+
+                        try (FSDataInputStream hdfsStream = hdfsFileSystem.open(status.getPath())) {
+                            StreamUtils.copy(hdfsStream, zipOut);
+                        } finally {
+                            zipOut.closeEntry();
+                        }
+                        log.info("Streamed file {} into zip response.", actualFileName);
+                    }
+                }
+
+                if (!fileFound) {
+                    log.info("No report files found matching prefix: " + fileNamePrefix);
+                    // Throw immediately so a proper HTTP 404 is sent to the client
+                    throw new ResourceNotFoundException("No report files found matching prefix: " + fileNamePrefix);
+                }
+
+                // Notification is only sent AFTER all files are confirmed found and streamed
+                String successMsg = String.format("%s downloaded successfully.", reportDisplayName);
+                sendProgress(taskId, userId, 100, "Download Complete", "COMPLETED");
+
+                sendNotification(userId, successMsg, "/glif-reports", fileName + "_" + date);
+//                sendNotification(userId, "Report(s) downloaded successfully.", "/glif-reports", fileName + "_" + date);
+
+            } catch (ResourceNotFoundException e) {
+                // If a resource error happens before streaming starts, it's caught here
+                log.error("Resource not found error: {}", e.getMessage());
+                sendNotification(userId, reportDisplayName+" is not available.", "/glif-reports", fileName + "_" + date);
+                // Note: The controller must catch this exception to return a proper 404
+            } catch (IOException e) {
+                // If an I/O error happens DURING streaming, the client will see a failed download
+                // Includes the internet/network-down , HDFS down and NameNode not reachable cases
+                log.error("Streaming I/O error for user {}: {}", userId, e.getMessage(), e);
+                sendNotification(userId, "Download failed due to a streaming or internet issue. Please check your connection and try again.", "/glif-reports", fileName + "_" + date);
+            }
+        };
+
+        String downloadName = fileName + "_" + formattedDate + ".zip";
+        return new ReportStreamResponse(downloadName, streamingBody);
+    }
+
 import { useEffect, useState } from "react";
 import {
   Box,
