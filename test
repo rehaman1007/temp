@@ -4,9 +4,12 @@ import { useSelector } from "react-redux";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
 import ProcessStatusTable from "./components/ProcessStatusTable";
 import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
+import ProcessStatusHeader from "./components/ProcessStatusHeader";
 import { resolveConfig } from "../../config/EnvironmentConfig";
 import { timeStampFormatter } from "../../utils/CommonUtilities";
 import useApi from "../../hooks/useApi";
+
 import {
   Grid,
   Box,
@@ -17,24 +20,24 @@ import {
   Typography,
   TextField,
 } from "@mui/material";
+
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import TaskAltIcon from "@mui/icons-material/TaskAlt";
-import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import EventOutlinedIcon from "@mui/icons-material/EventOutlined";
-import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
-import ProcessStatusHeader from "./components/ProcessStatusHeader";
+
 import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import dayjs from "dayjs";
 
 /* ================= NORMALIZERS ================= */
-const normalizeStageDetails = (stageDetails = []) => {
+
+const normalizeStageDetails = (stages = []) => {
   const map = new Map();
 
-  stageDetails.forEach((s) => {
-    const existing = map.get(s.processStage);
-    if (!existing || s.startTime > existing.startTime) {
+  stages.forEach((s) => {
+    const prev = map.get(s.processStage);
+    if (!prev || s.startTime > prev.startTime) {
       map.set(s.processStage, s);
     }
   });
@@ -63,96 +66,71 @@ const mergeProcesses = (prev = [], incoming = []) => {
   return Array.from(map.values());
 };
 
-const formatDate = (isoDateString) => {
-  const dateObj = new Date(isoDateString);
-
-  // Helper function to get the ordinal suffix (st, nd, rd, th)
-  const getOrdinalSuffix = (day) => {
-    if (day > 3 && day < 21) return "th"; // accounts for 11th, 12th, 13th
-    switch (day % 10) {
-      case 1:
-        return "st";
-      case 2:
-        return "nd";
-      case 3:
-        return "rd";
-      default:
-        return "th";
-    }
-  };
-
-  // Month names array
-  const months = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-  ];
-
-  // Day names array
-  const days = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-  ];
-
-  const dayName = days[dateObj.getDay()];
-  const dayOfMonth = dateObj.getDate();
-  const monthName = months[dateObj.getMonth()];
-  const year = dateObj.getFullYear();
-  const ordinalDay = dayOfMonth + getOrdinalSuffix(dayOfMonth);
-
-  return `${ordinalDay} ${monthName} ${year} (${dayName})`;
-};
+/* ===================================================== */
 
 const ProcessStatusPage = () => {
-  const [fincoreDate, setFincoreDate] = useState(null);
-  const [selectedEtlDate, setSelectedEtlDate] = useState(null);
-  const [processes, setProcesses] = useState([]);
-  const [selectedProcessType, setSelectedProcessType] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [summaryData, setSummaryData] = useState(null);
-
   const snackbar = useCustomSnackbar();
-  const token = useSelector((state) => state.auth.token);
+  const token = useSelector((s) => s.auth.token);
   const { callApi } = useApi();
 
   const service = resolveConfig("/PS");
-  const INITIAL_URL = "/PS/process/processes/data";
+  const BASE_URL = "/PS/process/processes/data";
   const STREAM_URL = `${service}/process/processes`;
 
-  /* ================= INITIAL LOAD ================= */
+  const [currentEtlDate, setCurrentEtlDate] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(null);
+
+  const [processes, setProcesses] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const [selectedProcessType, setSelectedProcessType] = useState(null);
+  const [summaryData, setSummaryData] = useState(null);
+
   const initialFetchDone = useRef(false);
+
+  /* ================= INITIAL LOAD ================= */
 
   useEffect(() => {
     if (initialFetchDone.current) return;
     initialFetchDone.current = true;
 
-    callApi(INITIAL_URL)
-      .then((data) => {
-        setFincoreDate(data?.fincoreDate || null);
-        setSelectedEtlDate(data?.fincoreDate?.etlDate || null);
-        setProcesses(normalizeProcesses(data?.initialData || []));
-      })
-      .catch(() => snackbar("Failed to load processes"))
-      .finally(() => setLoading(false));
-  }, [callApi, snackbar]);
+    loadByDate(null);
+  }, []);
 
-  /* ================= SSE ================= */
+  /* ================= LOAD BY DATE ================= */
+
+  const loadByDate = async (date) => {
+    setLoading(true);
+    try {
+      const res = await callApi(BASE_URL, {
+        etlDate: date ? date.format("YYYY-MM-DD") : null,
+      });
+
+      setCurrentEtlDate(res?.fincoreDate?.etlDate);
+      setSelectedDate(
+        dayjs(res?.fincoreDate?.etlDate || new Date())
+      );
+
+      setProcesses(normalizeProcesses(res?.initialData || []));
+    } catch {
+      snackbar("Failed to load processes");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /* ================= SSE (ONLY FOR CURRENT DATE) ================= */
+
   useEffect(() => {
     if (loading) return;
+
+    if (
+      selectedDate &&
+      currentEtlDate &&
+      selectedDate.format("YYYY-MM-DD") !== currentEtlDate
+    ) {
+      return; // past date → no streaming
+    }
 
     const controller = new AbortController();
 
@@ -166,188 +144,117 @@ const ProcessStatusPage = () => {
         if (e.event === "connected") return;
         const raw = JSON.parse(e.data);
         setProcesses((prev) =>
-          mergeProcesses(prev, normalizeProcesses(raw?.initialData || raw)),
+          mergeProcesses(prev, normalizeProcesses(raw))
         );
       },
     });
 
     return () => controller.abort();
-  }, [STREAM_URL, loading, token]);
+  }, [STREAM_URL, loading, token, selectedDate, currentEtlDate]);
 
   /* ================= LIVE SELECTED PROCESS ================= */
+
   const selectedProcess = useMemo(() => {
     if (!selectedProcessType) return null;
-    return processes.find((p) => p.type === selectedProcessType) || null;
+    return processes.find((p) => p.type === selectedProcessType);
   }, [processes, selectedProcessType]);
 
-  /* ================= DERIVED UI STATES ================= */
-  const hasProcesses = processes.length > 0;
+  /* ================= FLAGS ================= */
+
+  const isCurrentDate =
+    selectedDate &&
+    currentEtlDate &&
+    selectedDate.format("YYYY-MM-DD") === currentEtlDate;
 
   const allCompleted = useMemo(
     () =>
-      processes.length > 0 &&
-      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
-    [processes],
+      processes.length &&
+      processes.every((p) =>
+        p.stageDetails.every((s) => s.status === 2)
+      ),
+    [processes]
   );
 
-  const differenceSummary = useMemo(() => {
-    const diff = processes.find((p) => p.type === "DIFFERENCE");
-    if (!diff) return null;
+  /* ================= TABLE SUMMARY HANDLER ================= */
 
-    const latestStage = [...diff.stageDetails]
+  const handleOpenSummary = (row) => {
+    const stage6 = [...row.stageDetails]
       .sort((a, b) => b.id - a.id)
       .find((s) => s.processStage === 6);
 
-    if (latestStage?.status === 2 && latestStage?.differenceSummary) {
-      setSummaryData(latestStage.differenceSummary);
-      return latestStage.differenceSummary;
-    }
-    return null;
-  }, [processes]);
-
-  const [selectedDate, setSelectedDate] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-
-  const handleDateChange = (newDate) => {
-    setSelectedDate(newDate); // Update the local state
-
-    // Trigger the API call
-    if (newDate && newDate.isValid()) {
-      triggerApiCall(newDate);
+    if (stage6?.status === 2 && stage6?.differenceSummary) {
+      setSummaryData(stage6.differenceSummary);
+    } else {
+      snackbar("Summary not available");
     }
   };
 
-  const triggerApiCall = async (date) => {
-    setIsLoading(true);
-    // Format the date to a string suitable for your API
-    const formattedDate = date.format("YYYY-MM-DD");
-    console.log(`API call triggered for date: ${formattedDate}`);
-
-    try {
-      // Replace with your actual API endpoint and logic
-      // Example:
-      // const response = await fetch('YOUR_API_ENDPOINT', {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify({ date: formattedDate }),
-      // });
-      // const data = await response.json();
-      // console.log('API response:', data);
-
-      // Simulating an API call with a timeout
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      console.log("Mock API call complete");
-    } catch (error) {
-      console.error("API call error:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  /* ===================================================== */
 
   return (
     <Paper sx={{ p: 3, minHeight: "75vh" }}>
+
       <ProcessStatusHeader processes={processes} />
 
-      {/* ================= ETL DATE ================= */}
-      {fincoreDate?.etlDate && (
-        <Tooltip
-          title={`ETL processs run date ${formatDate(fincoreDate.etlDate)}`}
-        >
-          <Stack alignItems="center" mt={2} mb={3}>
-            <Paper
-              elevation={3}
-              sx={{
-                px: 3,
-                py: 1.5,
-                display: "flex",
-                alignItems: "center",
-                gap: 1.5,
-                borderRadius: 2,
-              }}
-            >
-              <EventOutlinedIcon color="primary" />
-              <Box>
-                <Typography variant="caption" color="text.secondary">
-                  ETL Date (System Generated)
-                </Typography>
-                <Typography fontWeight={600}>
-                  {fincoreDate.etlDate.split("-").reverse().join("-")}
-                </Typography>
-              </Box>
-            </Paper>
-          </Stack>
-        </Tooltip>
+      {/* ================= ETL DATE CARD ================= */}
+
+      {currentEtlDate && (
+        <Stack alignItems="center" mt={2}>
+          <Paper sx={{ px: 3, py: 1.5, display: "flex", gap: 1.5 }}>
+            <EventOutlinedIcon color="primary" />
+            <Box>
+              <Typography variant="caption">Current ETL Date</Typography>
+              <Typography fontWeight={600}>{currentEtlDate}</Typography>
+            </Box>
+          </Paper>
+        </Stack>
       )}
 
-      <Stack alignItems="center" sx={{ m: 2 }}>
+      {/* ================= DATE SELECTOR ================= */}
+
+      <Stack alignItems="center" mt={3}>
         <LocalizationProvider dateAdapter={AdapterDayjs}>
           <DatePicker
             label="Select ETL Date"
             value={selectedDate}
-            format="DD/MM/YYYY"
-            views={["year", "month", "day"]}
-            onChange={handleDateChange}
-            required // Makes the field required
-            fullWidth
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                fullWidth
-                helperText={isLoading ? "Loading data..." : params.helperText}
-              />
-            )}
+            onChange={(d) => {
+              setSelectedDate(d);
+              loadByDate(d);
+            }}
+            renderInput={(p) => <TextField {...p} />}
           />
         </LocalizationProvider>
       </Stack>
 
-      {/* ================= ACTION BUTTONS ================= */}
-      <Grid container spacing={2} justifyContent="center" mb={2}>
-        <Grid>
-          <Tooltip title={hasProcesses ? "EOD already started" : ""}>
-            <span>
-              <Button
-                variant="contained"
-                size="large"
-                startIcon={<PlayArrowIcon />}
-                disabled={hasProcesses}
-              >
-                Start EOD
-              </Button>
-            </span>
-          </Tooltip>
-        </Grid>
+      {/* ================= EOD BUTTONS (ONLY CURRENT DATE) ================= */}
 
-        {differenceSummary && (
+      {isCurrentDate && (
+        <Grid container justifyContent="center" spacing={2} my={3}>
           <Grid>
             <Button
-              variant="outlined"
-              size="large"
-              startIcon={<VisibilityOutlinedIcon />}
-              onClick={() => setSummaryData(differenceSummary)}
+              variant="contained"
+              startIcon={<PlayArrowIcon />}
+              disabled={processes.length > 0}
             >
-              View Summary
+              Start EOD
             </Button>
           </Grid>
-        )}
 
-        <Grid>
-          <Tooltip title={!allCompleted ? "Processes still running" : ""}>
-            <span>
-              <Button
-                variant="contained"
-                size="large"
-                startIcon={<TaskAltIcon />}
-                disabled={!allCompleted}
-                color="success"
-              >
-                Finish EOD
-              </Button>
-            </span>
-          </Tooltip>
+          <Grid>
+            <Button
+              variant="contained"
+              color="success"
+              startIcon={<TaskAltIcon />}
+              disabled={!allCompleted}
+            >
+              Finish EOD
+            </Button>
+          </Grid>
         </Grid>
-      </Grid>
+      )}
 
       {/* ================= DIALOGS ================= */}
+
       <ProcessDetailsDialog
         process={selectedProcess}
         onClose={() => setSelectedProcessType(null)}
@@ -360,17 +267,18 @@ const ProcessStatusPage = () => {
       />
 
       {/* ================= TABLE ================= */}
+
       <Box mt={2}>
         <ProcessStatusTable
           loading={loading}
           processes={processes}
           actions={{
             onView: setSelectedProcessType,
-            onStop: () => {},
-            onRestart: () => {},
+            onSummary: handleOpenSummary, // 🔥 NEW
           }}
         />
       </Box>
+
     </Paper>
   );
 };
