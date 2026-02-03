@@ -1,183 +1,307 @@
-import { DataGrid } from "@mui/x-data-grid";
-import { Box, IconButton, Stack, Tooltip, Typography } from "@mui/material";
-import InfoIcon from "@mui/icons-material/Info";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
-import StopIcon from "@mui/icons-material/Stop";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
+import { useEffect, useState, useRef, useMemo, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import dayjs from "dayjs";
 
-import { StageStatus } from "../util/StageStatus";
-import ProcessStatusChip from "./ProcessStatusChip";
+import { Grid, Button, Paper, Stack, TextField } from "@mui/material";
 
-/* ================= UTILS ================= */
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import TaskAltIcon from "@mui/icons-material/TaskAlt";
 
-const buildRowId = (p) => {
-  if (p.processId) return String(p.processId);
-  return `${p.type}_${p.dag || ""}_${p.airflowRunId || ""}`;
-};
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 
-/* ================= MAIN COMPONENT ================= */
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import useApi from "../../hooks/useApi";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
 
-const ProcessStatusTable = ({ processes = [], actions, loading }) => {
-  const rows = processes.map((p) => {
-    const lastStage = p.stageDetails.at(-1);
+import ProcessStatusHeader from "./components/ProcessStatusHeader";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
+import LoadingOverlay from "../../utils/LoadingOverlay";
 
-    const hasSummary =
-      p.type === "DIFFERENCE" &&
-      p.stageDetails.some(
-        (s) =>
-          s.processStage === 6 &&
-          s.status === StageStatus.COMPLETED
-      );
+/* =====================================================
+   NORMALIZATION HELPERS
+===================================================== */
 
-    return {
-      id: buildRowId(p),
-      processId: p.processId,
-      type: p.type,
-      status: lastStage?.status,
-      stage: lastStage?.stage?.title,
-      startTime: lastStage?.startTime,
-      endTime: lastStage?.endTime,
-      raw: p,
-      hasSummary,
-    };
+const normalizeStageDetails = (stages = []) => {
+  const map = new Map();
+
+  stages.forEach((s) => {
+    const prev = map.get(s.processStage);
+    if (!prev || s.startTime > prev.startTime) {
+      map.set(s.processStage, s);
+    }
   });
 
-  const columns = [
-    { field: "processId", headerName: "ID", flex: 0.4 },
-    { field: "type", headerName: "Process", flex: 1 },
-    {
-      field: "status",
-      headerName: "Status",
-      flex: 0.7,
-      renderCell: (p) => (
-        <ProcessStatusChip status={p.value} />
-      ),
-    },
-    { field: "stage", headerName: "Stage", flex: 1 },
-    { field: "startTime", headerName: "Started", flex: 1 },
-    { field: "endTime", headerName: "Ended", flex: 1 },
-    {
-      field: "actions",
-      headerName: "Actions",
-      flex: 0.8,
-      sortable: false,
-      renderCell: (params) => {
-        const row = params.row.raw;
-        const lastStage = row.stageDetails.at(-1);
+  return Array.from(map.values())
+    .sort((a, b) => a.processStage - b.processStage)
+    .map((s) => ({
+      ...s,
+      _START_TIME_RAW: s.startTime,
+      _END_TIME_RAW: s.endTime,
+      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
+    }));
+};
 
-        const showRestart =
-          lastStage?.status !== StageStatus.STARTED;
-        const showStop =
-          lastStage?.status === StageStatus.STARTED;
+const normalizeProcesses = (data = []) =>
+  data.map((p) => ({
+    ...p,
+    type: p.type ?? p.processType,
+    stageDetails: normalizeStageDetails(p.stageDetails || []),
+  }));
 
-        return (
-          <Stack direction="row" spacing={1}>
-            {showRestart && (
-              <Tooltip title="Restart">
-                <IconButton
-                  size="small"
-                  onClick={() => actions.onStart(row)}
-                >
-                  <RestartAltIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            )}
+const mergeProcesses = (prev = [], incoming = []) => {
+  const map = new Map(prev.map((p) => [p.type, p]));
+  incoming.forEach((p) => map.set(p.type, p));
+  return Array.from(map.values());
+};
 
-            {showStop && (
-              <Tooltip title="Stop">
-                <IconButton
-                  size="small"
-                  onClick={() => actions.onStop(row)}
-                >
-                  <StopIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            )}
+/* =====================================================
+   MAIN COMPONENT
+===================================================== */
 
-            <Tooltip title="View">
-              <IconButton
-                size="small"
-                onClick={() =>
-                  actions.onView(row.type)
-                }
-              >
-                <VisibilityIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
+const ProcessStatusPage = () => {
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((s) => s.auth.token);
+  const { callApi } = useApi();
 
-            {params.row.hasSummary && (
-              <Tooltip title="Summary">
-                <IconButton
-                  size="small"
-                  onClick={() =>
-                    actions.onSummary(row)
-                  }
-                >
-                  <SummarizeOutlinedIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            )}
-          </Stack>
+  const INITIAL_DATA_URL = "/PS/process/processes/data";
+  const TRIGGER_DAG_URL = "/PS/airflow/trigger/";
+  const FINISH_EOD_URL = "/PS/process/finish-eod";
+
+  const service = resolveConfig("/PS");
+  const STREAM_URL = `${service}/process/processes`;
+
+  const [currentEtlDate, setCurrentEtlDate] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(null);
+
+  const [processes, setProcesses] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [apiLoading, setApiLoading] = useState(false);
+
+  const [selectedProcessType, setSelectedProcessType] = useState(null);
+  const [summaryData, setSummaryData] = useState(null);
+
+  const initialFetchDone = useRef(false);
+
+  /* ================= LOAD BY DATE ================= */
+
+  const loadByDate = useCallback(
+    async (date) => {
+      setLoading(true);
+      try {
+        const res = await callApi(
+          INITIAL_DATA_URL,
+          { etlDate: date ? date.format("YYYY-MM-DD") : "" },
+          "GET",
         );
-      },
+
+        setCurrentEtlDate(res?.fincoreDate?.etlDate);
+        setSelectedDate(date || dayjs(res?.fincoreDate?.etlDate));
+        setProcesses(normalizeProcesses(res?.initialData || []));
+      } catch {
+        snackbar("Failed to load processes", "error");
+      } finally {
+        setLoading(false);
+      }
     },
-  ];
+    [callApi, snackbar],
+  );
+
+  /* ================= INITIAL LOAD ================= */
+
+  useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+    loadByDate(null);
+  }, [loadByDate]);
+
+  /* ================= SSE (ONLY CURRENT DATE) ================= */
+
+  useEffect(() => {
+    if (loading) return;
+
+    if (
+      selectedDate &&
+      currentEtlDate &&
+      selectedDate.format("YYYY-MM-DD") !== currentEtlDate
+    ) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    fetchEventSource(STREAM_URL, {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
+      },
+      onmessage(e) {
+        if (e.event === "connected") return;
+        const raw = JSON.parse(e.data);
+        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
+      },
+    });
+
+    return () => controller.abort();
+  }, [STREAM_URL, token, loading, selectedDate, currentEtlDate]);
+
+  /* ================= LIVE SELECTED PROCESS ================= */
+
+  const selectedProcess = useMemo(() => {
+    if (!selectedProcessType) return null;
+    return processes.find((p) => p.type === selectedProcessType) || null;
+  }, [processes, selectedProcessType]);
+
+  /* ================= FLAGS ================= */
+
+  const isCurrentDate =
+    selectedDate &&
+    currentEtlDate &&
+    selectedDate.format("YYYY-MM-DD") === currentEtlDate;
+
+  const allCompleted = useMemo(
+    () =>
+      processes.length &&
+      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
+    [processes],
+  );
+
+  /* ================= DAG TRIGGER ================= */
+
+  const triggerDag = async (dag) => {
+    setApiLoading(true);
+    try {
+      const res = await callApi(TRIGGER_DAG_URL + dag, {}, "POST");
+      if (res?.success) snackbar(`Triggered ${dag}`, "success");
+    } catch {
+      snackbar("Trigger failed", "error");
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  const handleStartProcess = (p) => triggerDag(p.dag);
+  const handleStopProcess = (p) => triggerDag(p.dag);
+
+  const handleFinishEod = async () => {
+    setApiLoading(true);
+    try {
+      const res = await callApi(FINISH_EOD_URL, {}, "POST");
+      if (res?.success) snackbar("Finished EOD", "success");
+    } catch {
+      snackbar("Finish failed", "error");
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  /* ================= SUMMARY HANDLER ================= */
+
+  const handleOpenSummary = (row) => {
+    const stage6 = [...row.stageDetails]
+      .sort((a, b) => b.id - a.id)
+      .find((s) => s.processStage === 6);
+
+    if (stage6?.differenceSummary) {
+      setSummaryData(stage6.differenceSummary);
+    } else {
+      snackbar("Summary not available");
+    }
+  };
+
+  /* ================================================= */
 
   return (
-    <Box
-      sx={{
-        height: 380, // ✅ fits 5 rows nicely
-        "& .MuiDataGrid-columnHeaders": {
-          backgroundColor: "#b4a7d6",
-          fontWeight: 600,
-        },
-        "& .MuiDataGrid-row:hover": {
-          backgroundColor: "action.hover",
-        },
-      }}
-    >
-      <DataGrid
-        rows={rows}
-        columns={columns}
-        rowHeight={52}
-        pageSizeOptions={[5, 10, 25, 50]}
-        initialState={{
-          pagination: {
-            paginationModel: {
-              pageSize: 5,
-              page: 0,
-            },
-          },
-        }}
-        loading={loading}
-        disableRowSelectionOnClick
-        slots={{
-          noRowsOverlay: () => (
-            <Stack
-              height="100%"
-              alignItems="center"
-              justifyContent="center"
-            >
-              <InfoIcon
-                sx={{
-                  fontSize: 48,
-                  color: "text.secondary",
-                  mb: 1,
+    <>
+      <Paper sx={{ p: 3 }}>
+        <ProcessStatusHeader etlDate={currentEtlDate} />
+
+        {/* DATE PICKER */}
+        {selectedDate && (
+          <Stack alignItems="center" mt={3} mb={2}>
+            <LocalizationProvider dateAdapter={AdapterDayjs}>
+              <DatePicker
+                label="Select ETL Date"
+                value={selectedDate}
+                onChange={(d) => {
+                  setSelectedDate(d);
+                  loadByDate(d);
                 }}
+                renderInput={(p) => <TextField {...p} />}
               />
-              <Typography variant="h6">
-                No processes available
-              </Typography>
-              <Typography variant="body2">
-                Processes not found for the ETL date.
-              </Typography>
-            </Stack>
-          ),
-        }}
-      />
-    </Box>
+            </LocalizationProvider>
+          </Stack>
+        )}
+
+        {/* EOD BUTTONS */}
+        {isCurrentDate && (
+          <Grid container justifyContent="center" spacing={2} my={3}>
+            <Grid>
+              <Button
+                variant="contained"
+                startIcon={<PlayArrowIcon />}
+                disabled={processes.length > 0}
+                onClick={() =>
+                  handleStartProcess({ dag: "orchestrator_v2_dag" })
+                }
+              >
+                Start EOD
+              </Button>
+            </Grid>
+
+            <Grid>
+              <Button
+                variant="contained"
+                color="success"
+                startIcon={<TaskAltIcon />}
+                disabled={!allCompleted}
+                onClick={handleFinishEod}
+              >
+                Finish EOD
+              </Button>
+            </Grid>
+          </Grid>
+        )}
+
+        {/* DIALOGS */}
+        <ProcessDetailsDialog
+          process={selectedProcess}
+          onClose={() => setSelectedProcessType(null)}
+          onStart={handleStartProcess}
+          onStop={handleStopProcess}
+        />
+
+        <ProcessSummaryDialog
+          open={!!summaryData}
+          data={summaryData}
+          onClose={() => setSummaryData(null)}
+        />
+
+        {/* TABLE */}
+        <Paper>
+          <ProcessStatusTable
+            loading={loading}
+            processes={processes}
+            actions={{
+              onStart: handleStartProcess,
+              onStop: handleStopProcess,
+              onView: setSelectedProcessType,
+              onSummary: handleOpenSummary,
+            }}
+          />
+        </Paper>
+      </Paper>
+
+      <LoadingOverlay loading={apiLoading} />
+    </>
   );
 };
 
-export default ProcessStatusTable;
+export default ProcessStatusPage;
