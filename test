@@ -1,213 +1,177 @@
+import { DataGrid } from "@mui/x-data-grid";
 import {
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Paper, IconButton, Tooltip, Typography, CircularProgress,
-  TablePagination, Box, Stack, LinearProgress, Dialog,
-  DialogTitle, DialogContent, DialogActions, Button
+  Box,
+  IconButton,
+  Stack,
+  Tooltip,
+  Typography,
 } from "@mui/material";
 
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import StopIcon from "@mui/icons-material/Stop";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
-import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
-import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
 
 import { StageStatus } from "../util/StageStatus";
 import ProcessStatusChip from "./ProcessStatusChip";
-import { useState, useMemo, useEffect } from "react";
 
-const MIN_PAGE_SIZE = 5;
-
-/* ---------------- CONFIRM DIALOG ---------------- */
-const ConfirmDialog = ({ open, title, onClose, onConfirm }) => (
-  <Dialog open={open} onClose={onClose}>
-    <DialogTitle>{title}</DialogTitle>
-    <DialogContent>Are you sure?</DialogContent>
-    <DialogActions>
-      <Button onClick={onClose}>Cancel</Button>
-      <Button variant="contained" onClick={onConfirm}>Confirm</Button>
-    </DialogActions>
-  </Dialog>
+/* ================= NO ROWS OVERLAY ================= */
+const NoRowsOverlay = () => (
+  <Stack height="100%" alignItems="center" justifyContent="center">
+    <Typography color="text.secondary">
+      No processes available
+    </Typography>
+  </Stack>
 );
 
-/* ---------------- PROGRESS % ---------------- */
-const calcProgress = (stages=[]) => {
-  const done = stages.filter(s=>s.status===StageStatus.COMPLETED).length;
-  return Math.round((done / stages.length) * 100);
-};
+/* ================= MAIN COMPONENT ================= */
+const ProcessStatusTable = ({ processes = [], actions, loading }) => {
 
-/* ---------------- MAIN TABLE ---------------- */
-const ProcessStatusTable = ({ processes=[], actions, loading }) => {
+  const rows = processes.map((p, i) => {
+    const lastStage = p.stageDetails.at(-1);
 
-  const [page,setPage] = useState(0);
-  const [rowsPerPage,setRowsPerPage] = useState(MIN_PAGE_SIZE);
-  const [sortBy,setSortBy] = useState("processId");
-  const [sortDir,setSortDir] = useState("asc");
-  const [confirm,setConfirm] = useState(null);
+    const hasSummary =
+      p.type === "DIFFERENCE" &&
+      p.stageDetails.some(
+        (s) => s.processStage === 6 && s.status === StageStatus.COMPLETED
+      );
 
-  /* -------- SORTING -------- */
-  const sorted = useMemo(()=>{
-    return [...processes].sort((a,b)=>{
-      const v1=a[sortBy], v2=b[sortBy];
-      if(v1<v2) return sortDir==="asc"?-1:1;
-      if(v1>v2) return sortDir==="asc"?1:-1;
-      return 0;
-    });
-  },[processes,sortBy,sortDir]);
+    return {
+      id: p.processId || `${p.type}-${i}`,
+      processId: p.processId,
+      type: p.type,
+      status: lastStage.status,
+      stage: lastStage.stage?.title,
+      startTime: lastStage.startTime,
+      endTime: lastStage.endTime,
+      raw: p,
+      hasSummary,
+    };
+  });
 
-  const paged = sorted.slice(page*rowsPerPage,page*rowsPerPage+rowsPerPage);
+  const columns = [
+    {
+      field: "processId",
+      headerName: "Process ID",
+      width: 130,
+    },
+    {
+      field: "type",
+      headerName: "Process",
+      flex: 1,
+    },
+    {
+      field: "status",
+      headerName: "Status",
+      width: 140,
+      renderCell: (p) => (
+        <ProcessStatusChip status={p.value} />
+      ),
+    },
+    {
+      field: "stage",
+      headerName: "Stage",
+      flex: 1,
+    },
+    {
+      field: "startTime",
+      headerName: "Started",
+      width: 180,
+    },
+    {
+      field: "endTime",
+      headerName: "Ended",
+      width: 180,
+    },
+    {
+      field: "actions",
+      headerName: "Actions",
+      width: 200,
+      sortable: false,
+      renderCell: (params) => {
+        const row = params.row.raw;
+        const lastStage = row.stageDetails.at(-1);
 
-  const toggleSort = (col)=>{
-    setSortBy(col);
-    setSortDir(d=>d==="asc"?"desc":"asc");
-  };
+        const showRestart =
+          lastStage.status !== StageStatus.STARTED;
 
-  /* -------- KEYBOARD NAV -------- */
-  const handleKey = (e,row)=>{
-    if(e.key==="Enter") actions.onView(row.type);
-  };
+        const showStop =
+          lastStage.status === StageStatus.STARTED;
+
+        return (
+          <Stack direction="row" spacing={1}>
+            {showRestart && (
+              <Tooltip title="Restart">
+                <IconButton
+                  size="small"
+                  onClick={() => actions.onStart(row)}
+                >
+                  <RestartAltIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
+
+            {showStop && (
+              <Tooltip title="Stop">
+                <IconButton
+                  size="small"
+                  onClick={() => actions.onStop(row)}
+                >
+                  <StopIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
+
+            <Tooltip title="View">
+              <IconButton
+                size="small"
+                onClick={() =>
+                  actions.onView(row.type)
+                }
+              >
+                <VisibilityIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+
+            {params.row.hasSummary && (
+              <Tooltip title="Summary">
+                <IconButton
+                  size="small"
+                  onClick={() =>
+                    actions.onSummary(row)
+                  }
+                >
+                  <SummarizeOutlinedIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
+          </Stack>
+        );
+      },
+    },
+  ];
 
   return (
-    <Paper>
-
-      <TableContainer sx={{maxHeight:420}}>
-        <Table stickyHeader size="small">
-
-          <TableHead>
-            <TableRow>
-              {["processId","type"].map(col=>(
-                <TableCell key={col} onClick={()=>toggleSort(col)}
-                  sx={{cursor:"pointer"}}>
-                  {col.toUpperCase()}
-                  {sortBy===col &&
-                    (sortDir==="asc"
-                      ? <ArrowUpwardIcon fontSize="small"/>
-                      : <ArrowDownwardIcon fontSize="small"/>)}
-                </TableCell>
-              ))}
-              <TableCell>Status</TableCell>
-              <TableCell>Stage</TableCell>
-              <TableCell width={160}>Progress</TableCell>
-              <TableCell align="center">Actions</TableCell>
-            </TableRow>
-          </TableHead>
-
-          <TableBody>
-
-          {loading &&
-            <TableRow>
-              <TableCell colSpan={6} align="center">
-                <CircularProgress size={22}/>
-              </TableCell>
-            </TableRow>
-          }
-
-          {!loading && paged.map(p=>{
-            const last=p.stageDetails.at(-1);
-            const progress=calcProgress(p.stageDetails);
-
-            const showRestart = last.status!==StageStatus.STARTED;
-            const showStop = last.status===StageStatus.STARTED;
-
-            return(
-              <TableRow key={p.processId} hover tabIndex={0}
-                onKeyDown={(e)=>handleKey(e,p)}>
-
-                <TableCell>{p.processId}</TableCell>
-                <TableCell>{p.type}</TableCell>
-
-                <TableCell>
-                  <ProcessStatusChip status={last.status}/>
-                </TableCell>
-
-                <TableCell>{last.stage?.title}</TableCell>
-
-                <TableCell>
-                  <Stack spacing={0.5}>
-                    <LinearProgress variant="determinate" value={progress}/>
-                    <Typography variant="caption">{progress}%</Typography>
-                  </Stack>
-                </TableCell>
-
-                <TableCell align="center">
-                  <Stack direction="row" spacing={1} justifyContent="center">
-
-                    {showRestart &&
-                      <Tooltip title="Restart">
-                        <IconButton size="small"
-                          onClick={()=>setConfirm(
-                            ()=>()=>actions.onStart(p)
-                          )}>
-                          <RestartAltIcon fontSize="small"/>
-                        </IconButton>
-                      </Tooltip>
-                    }
-
-                    {showStop &&
-                      <Tooltip title="Stop">
-                        <IconButton size="small"
-                          onClick={()=>setConfirm(
-                            ()=>()=>actions.onStop(p)
-                          )}>
-                          <StopIcon fontSize="small"/>
-                        </IconButton>
-                      </Tooltip>
-                    }
-
-                    <Tooltip title="View">
-                      <IconButton size="small"
-                        onClick={()=>actions.onView(p.type)}>
-                        <VisibilityIcon fontSize="small"/>
-                      </IconButton>
-                    </Tooltip>
-
-                    {p.type==="DIFFERENCE" &&
-                      p.stageDetails.some(s=>s.processStage===6 && s.status===2) &&
-                      <Tooltip title="Summary">
-                        <IconButton size="small"
-                          onClick={()=>actions.onSummary(p)}>
-                          <SummarizeOutlinedIcon fontSize="small"/>
-                        </IconButton>
-                      </Tooltip>
-                    }
-
-                  </Stack>
-                </TableCell>
-              </TableRow>
-            );
-          })}
-
-          </TableBody>
-        </Table>
-      </TableContainer>
-
-      <TablePagination
-        component="div"
-        count={processes.length}
-        page={page}
-        rowsPerPage={rowsPerPage}
-        onPageChange={(_,p)=>setPage(p)}
-        onRowsPerPageChange={e=>{
-          setRowsPerPage(+e.target.value);
-          setPage(0);
+    <Box sx={{ height: 500 }}>
+      <DataGrid
+        rows={rows}
+        columns={columns}
+        pageSizeOptions={[5, 10, 25]}
+        initialState={{
+          pagination: {
+            paginationModel: {
+              pageSize: 5,
+              page: 0,
+            },
+          },
         }}
-        rowsPerPageOptions={[5,10,25]}
+        loading={loading}
+        disableRowSelectionOnClick
+        slots={{
+          noRowsOverlay: NoRowsOverlay,
+        }}
       />
-
-      {/* CONFIRMATION */}
-      {confirm && (
-        <ConfirmDialog
-          open
-          title="Confirm Action"
-          onClose={()=>setConfirm(null)}
-          onConfirm={()=>{
-            confirm();
-            setConfirm(null);
-          }}
-        />
-      )}
-
-    </Paper>
+    </Box>
   );
 };
 
