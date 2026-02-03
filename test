@@ -1,9 +1,94 @@
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  Stack,
+  Typography,
+} from "@mui/material";
+import { useState, useEffect } from "react";
+
+const ActionConfirmDialog = ({
+  open,
+  actionType,        // start | stop | restart | finishEod
+  processName,
+  onConfirm,
+  onClose,
+}) => {
+  const [remarks, setRemarks] = useState("");
+
+  useEffect(() => {
+    if (open) setRemarks("");
+  }, [open]);
+
+  const titleMap = {
+    start: "Start Process",
+    stop: "Stop Process",
+    restart: "Restart Process",
+    finishEod: "Finish EOD",
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>{titleMap[actionType]}</DialogTitle>
+
+      <DialogContent dividers>
+        <Stack spacing={2}>
+          <Typography>
+            Are you sure you want to{" "}
+            <b>{titleMap[actionType]}</b>
+            {processName && (
+              <>
+                {" "}for <b>{processName}</b>
+              </>
+            )}
+            ?
+          </Typography>
+
+          <TextField
+            label="Remarks *"
+            placeholder="Enter remarks"
+            multiline
+            minRows={3}
+            value={remarks}
+            onChange={(e) => setRemarks(e.target.value)}
+            fullWidth
+            required
+          />
+        </Stack>
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+
+        <Button
+          variant="contained"
+          disabled={!remarks.trim()}
+          onClick={() => onConfirm(remarks)}
+        >
+          Confirm
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default ActionConfirmDialog;
+
 import { useEffect, useState, useRef, useMemo, useCallback } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { useSelector } from "react-redux";
 import dayjs from "dayjs";
 
-import { Grid, Button, Paper, Stack, TextField } from "@mui/material";
+import {
+  Grid,
+  Button,
+  Paper,
+  Stack,
+  TextField,
+} from "@mui/material";
 
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import TaskAltIcon from "@mui/icons-material/TaskAlt";
@@ -21,10 +106,11 @@ import ProcessStatusHeader from "./components/ProcessStatusHeader";
 import ProcessStatusTable from "./components/ProcessStatusTable";
 import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
 import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
+import ActionConfirmDialog from "./components/ActionConfirmDialog";
 import LoadingOverlay from "../../utils/LoadingOverlay";
 
 /* =====================================================
-   NORMALIZATION HELPERS
+   NORMALIZATION
 ===================================================== */
 
 const normalizeStageDetails = (stages = []) => {
@@ -43,8 +129,12 @@ const normalizeStageDetails = (stages = []) => {
       ...s,
       _START_TIME_RAW: s.startTime,
       _END_TIME_RAW: s.endTime,
-      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
-      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
+      startTime: s.startTime
+        ? timeStampFormatter(s.startTime)
+        : null,
+      endTime: s.endTime
+        ? timeStampFormatter(s.endTime)
+        : null,
     }));
 };
 
@@ -62,7 +152,7 @@ const mergeProcesses = (prev = [], incoming = []) => {
 };
 
 /* =====================================================
-   MAIN COMPONENT
+   MAIN PAGE
 ===================================================== */
 
 const ProcessStatusPage = () => {
@@ -87,9 +177,13 @@ const ProcessStatusPage = () => {
   const [selectedProcessType, setSelectedProcessType] = useState(null);
   const [summaryData, setSummaryData] = useState(null);
 
+  const [confirmConfig, setConfirmConfig] = useState(null);
+
   const initialFetchDone = useRef(false);
 
-  /* ================= LOAD BY DATE ================= */
+  /* =====================================================
+     LOAD BY DATE
+  ===================================================== */
 
   const loadByDate = useCallback(
     async (date) => {
@@ -98,7 +192,7 @@ const ProcessStatusPage = () => {
         const res = await callApi(
           INITIAL_DATA_URL,
           { etlDate: date ? date.format("YYYY-MM-DD") : "" },
-          "GET",
+          "GET"
         );
 
         setCurrentEtlDate(res?.fincoreDate?.etlDate);
@@ -110,10 +204,8 @@ const ProcessStatusPage = () => {
         setLoading(false);
       }
     },
-    [callApi, snackbar],
+    [callApi, snackbar]
   );
-
-  /* ================= INITIAL LOAD ================= */
 
   useEffect(() => {
     if (initialFetchDone.current) return;
@@ -121,7 +213,9 @@ const ProcessStatusPage = () => {
     loadByDate(null);
   }, [loadByDate]);
 
-  /* ================= SSE (ONLY CURRENT DATE) ================= */
+  /* =====================================================
+     SSE (ONLY CURRENT DATE)
+  ===================================================== */
 
   useEffect(() => {
     if (loading) return;
@@ -145,21 +239,23 @@ const ProcessStatusPage = () => {
       onmessage(e) {
         if (e.event === "connected") return;
         const raw = JSON.parse(e.data);
-        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
+        setProcesses((prev) =>
+          mergeProcesses(prev, normalizeProcesses(raw))
+        );
       },
     });
 
     return () => controller.abort();
   }, [STREAM_URL, token, loading, selectedDate, currentEtlDate]);
 
-  /* ================= LIVE SELECTED PROCESS ================= */
+  /* =====================================================
+     DERIVED
+  ===================================================== */
 
   const selectedProcess = useMemo(() => {
     if (!selectedProcessType) return null;
     return processes.find((p) => p.type === selectedProcessType) || null;
   }, [processes, selectedProcessType]);
-
-  /* ================= FLAGS ================= */
 
   const isCurrentDate =
     selectedDate &&
@@ -169,40 +265,61 @@ const ProcessStatusPage = () => {
   const allCompleted = useMemo(
     () =>
       processes.length &&
-      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
-    [processes],
+      processes.every((p) =>
+        p.stageDetails.every((s) => s.status === 2)
+      ),
+    [processes]
   );
 
-  /* ================= DAG TRIGGER ================= */
+  /* =====================================================
+     CONFIRMATION ACTION HANDLING
+  ===================================================== */
 
-  const triggerDag = async (dag) => {
+  const executeDag = async (dag, remarks) => {
     setApiLoading(true);
     try {
-      const res = await callApi(TRIGGER_DAG_URL + dag, {}, "POST");
-      if (res?.success) snackbar(`Triggered ${dag}`, "success");
+      const res = await callApi(
+        TRIGGER_DAG_URL + dag,
+        { remarks },
+        "POST"
+      );
+      if (res?.success)
+        snackbar("Action executed successfully", "success");
     } catch {
-      snackbar("Trigger failed", "error");
+      snackbar("Action failed", "error");
     } finally {
       setApiLoading(false);
     }
   };
 
-  const handleStartProcess = (p) => triggerDag(p.dag);
-  const handleStopProcess = (p) => triggerDag(p.dag);
+  const handleConfirmAction = async (remarks) => {
+    const { action, process } = confirmConfig;
 
-  const handleFinishEod = async () => {
-    setApiLoading(true);
-    try {
-      const res = await callApi(FINISH_EOD_URL, {}, "POST");
-      if (res?.success) snackbar("Finished EOD", "success");
-    } catch {
-      snackbar("Finish failed", "error");
-    } finally {
-      setApiLoading(false);
+    if (action === "finishEod") {
+      try {
+        setApiLoading(true);
+        const res = await callApi(
+          FINISH_EOD_URL,
+          { remarks },
+          "POST"
+        );
+        if (res?.success)
+          snackbar("Finished EOD successfully", "success");
+      } catch {
+        snackbar("Finish EOD failed", "error");
+      } finally {
+        setApiLoading(false);
+      }
+    } else {
+      await executeDag(process.dag, remarks);
     }
+
+    setConfirmConfig(null);
   };
 
-  /* ================= SUMMARY HANDLER ================= */
+  /* =====================================================
+     SUMMARY
+  ===================================================== */
 
   const handleOpenSummary = (row) => {
     const stage6 = [...row.stageDetails]
@@ -216,7 +333,9 @@ const ProcessStatusPage = () => {
     }
   };
 
-  /* ================================================= */
+  /* =====================================================
+     RENDER
+  ===================================================== */
 
   return (
     <>
@@ -249,7 +368,10 @@ const ProcessStatusPage = () => {
                 startIcon={<PlayArrowIcon />}
                 disabled={processes.length > 0}
                 onClick={() =>
-                  handleStartProcess({ dag: "orchestrator_v2_dag" })
+                  setConfirmConfig({
+                    action: "start",
+                    process: { dag: "orchestrator_v2_dag" },
+                  })
                 }
               >
                 Start EOD
@@ -262,7 +384,12 @@ const ProcessStatusPage = () => {
                 color="success"
                 startIcon={<TaskAltIcon />}
                 disabled={!allCompleted}
-                onClick={handleFinishEod}
+                onClick={() =>
+                  setConfirmConfig({
+                    action: "finishEod",
+                    process: null,
+                  })
+                }
               >
                 Finish EOD
               </Button>
@@ -270,14 +397,19 @@ const ProcessStatusPage = () => {
           </Grid>
         )}
 
-        {/* DIALOGS */}
+        {/* DETAILS */}
         <ProcessDetailsDialog
           process={selectedProcess}
           onClose={() => setSelectedProcessType(null)}
-          onStart={handleStartProcess}
-          onStop={handleStopProcess}
+          onStart={(p) =>
+            setConfirmConfig({ action: "restart", process: p })
+          }
+          onStop={(p) =>
+            setConfirmConfig({ action: "stop", process: p })
+          }
         />
 
+        {/* SUMMARY */}
         <ProcessSummaryDialog
           open={!!summaryData}
           data={summaryData}
@@ -290,14 +422,25 @@ const ProcessStatusPage = () => {
             loading={loading}
             processes={processes}
             actions={{
-              onStart: handleStartProcess,
-              onStop: handleStopProcess,
+              onStart: (p) =>
+                setConfirmConfig({ action: "restart", process: p }),
+              onStop: (p) =>
+                setConfirmConfig({ action: "stop", process: p }),
               onView: setSelectedProcessType,
               onSummary: handleOpenSummary,
             }}
           />
         </Paper>
       </Paper>
+
+      {/* CONFIRM DIALOG */}
+      <ActionConfirmDialog
+        open={!!confirmConfig}
+        actionType={confirmConfig?.action}
+        processName={confirmConfig?.process?.type}
+        onConfirm={handleConfirmAction}
+        onClose={() => setConfirmConfig(null)}
+      />
 
       <LoadingOverlay loading={apiLoading} />
     </>
