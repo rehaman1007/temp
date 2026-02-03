@@ -1,317 +1,231 @@
-import { useEffect, useState, useRef, useMemo, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import dayjs from "dayjs";
-
 import {
-  Grid,
-  Box,
-  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
   Paper,
-  Stack,
+  IconButton,
   Tooltip,
-  TextField,
+  Typography,
+  CircularProgress,
+  TablePagination,
+  Box,
+  Stack,
 } from "@mui/material";
 
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import TaskAltIcon from "@mui/icons-material/TaskAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
 
-import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import ProcessStatusChip from "./ProcessStatusChip";
+import { StageStatus } from "../util/StageStatus";
+import { useState, useMemo, useEffect } from "react";
 
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import useApi from "../../hooks/useApi";
-import { resolveConfig } from "../../config/EnvironmentConfig";
-import { timeStampFormatter } from "../../utils/CommonUtilities";
+const MIN_PAGE_SIZE = 5;
 
-import ProcessStatusHeader from "./components/ProcessStatusHeader";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
-import LoadingOverlay from "../../utils/LoadingOverlay";
+/* ---------------- ACTION BUTTON ---------------- */
+const Action = ({ title, icon, disabled, onClick }) => (
+  <Tooltip title={title}>
+    <span>
+      <IconButton size="small" disabled={disabled} onClick={onClick}>
+        {icon}
+      </IconButton>
+    </span>
+  </Tooltip>
+);
 
-/* =====================================================
-   NORMALIZATION HELPERS
-===================================================== */
+const ProcessStatusTable = ({ processes = [], actions, loading }) => {
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(MIN_PAGE_SIZE);
 
-const normalizeStageDetails = (stages = []) => {
-  const map = new Map();
-
-  stages.forEach((s) => {
-    const prev = map.get(s.processStage);
-    if (!prev || s.startTime > prev.startTime) {
-      map.set(s.processStage, s);
-    }
-  });
-
-  return Array.from(map.values())
-    .sort((a, b) => a.processStage - b.processStage)
-    .map((s) => ({
-      ...s,
-      _START_TIME_RAW: s.startTime,
-      _END_TIME_RAW: s.endTime,
-      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
-      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
-    }));
-};
-
-const normalizeProcesses = (data = []) =>
-  data.map((p) => ({
-    ...p,
-    type: p.type ?? p.processType,
-    stageDetails: normalizeStageDetails(p.stageDetails || []),
-  }));
-
-const mergeProcesses = (prev = [], incoming = []) => {
-  const map = new Map(prev.map((p) => [p.type, p]));
-  incoming.forEach((p) => map.set(p.type, p));
-  return Array.from(map.values());
-};
-
-/* =====================================================
-   MAIN COMPONENT
-===================================================== */
-
-const ProcessStatusPage = () => {
-  const snackbar = useCustomSnackbar();
-  const token = useSelector((s) => s.auth.token);
-  const { callApi } = useApi();
-
-  const INITIAL_DATA_URL = "/PS/process/processes/data";
-  const TRIGGER_DAG_URL = "/PS/airflow/trigger/";
-  const FINISH_EOD_URL = "/PS/process/finish-eod";
-
-  const service = resolveConfig("/PS");
-  const STREAM_URL = `${service}/process/processes`;
-
-  const [currentEtlDate, setCurrentEtlDate] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(null);
-
-  const [processes, setProcesses] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [apiLoading, setApiLoading] = useState(false);
-
-  const [selectedProcessType, setSelectedProcessType] = useState(null);
-  const [summaryData, setSummaryData] = useState(null);
-
-  const initialFetchDone = useRef(false);
-
-  /* ================= LOAD BY DATE ================= */
-
-  const loadByDate = useCallback(
-    async (date) => {
-      setLoading(true);
-      try {
-        const res = await callApi(
-          INITIAL_DATA_URL,
-          { etlDate: date ? date.format("YYYY-MM-DD") : "" },
-          "GET"
-        );
-
-        setCurrentEtlDate(res?.fincoreDate?.etlDate);
-        setSelectedDate(dayjs(res?.fincoreDate?.etlDate));
-        setProcesses(normalizeProcesses(res?.initialData || []));
-      } catch {
-        snackbar("Failed to load processes", "error");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [callApi, snackbar]
-  );
-
-  /* ================= INITIAL LOAD ================= */
-
-  useEffect(() => {
-    if (initialFetchDone.current) return;
-    initialFetchDone.current = true;
-    loadByDate(null);
-  }, [loadByDate]);
-
-  /* ================= SSE (ONLY CURRENT DATE) ================= */
-
-  useEffect(() => {
-    if (loading) return;
-
-    if (
-      selectedDate &&
-      currentEtlDate &&
-      selectedDate.format("YYYY-MM-DD") !== currentEtlDate
-    ) {
-      return;
-    }
-
-    const controller = new AbortController();
-
-    fetchEventSource(STREAM_URL, {
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
-      onmessage(e) {
-        if (e.event === "connected") return;
-        const raw = JSON.parse(e.data);
-        setProcesses((prev) =>
-          mergeProcesses(prev, normalizeProcesses(raw))
-        );
-      },
-    });
-
-    return () => controller.abort();
-  }, [STREAM_URL, token, loading, selectedDate, currentEtlDate]);
-
-  /* ================= LIVE SELECTED PROCESS ================= */
-
-  const selectedProcess = useMemo(() => {
-    if (!selectedProcessType) return null;
-    return processes.find((p) => p.type === selectedProcessType) || null;
-  }, [processes, selectedProcessType]);
-
-  /* ================= FLAGS ================= */
-
-  const isCurrentDate =
-    selectedDate &&
-    currentEtlDate &&
-    selectedDate.format("YYYY-MM-DD") === currentEtlDate;
-
-  const allCompleted = useMemo(
-    () =>
-      processes.length &&
-      processes.every((p) =>
-        p.stageDetails.every((s) => s.status === 2)
-      ),
+  /* ================= FILTER ================= */
+  const validProcesses = useMemo(
+    () => processes.filter((p) => p.stageDetails?.length),
     [processes]
   );
 
-  /* ================= DAG TRIGGER ================= */
-
-  const triggerDag = async (dag) => {
-    setApiLoading(true);
-    try {
-      const res = await callApi(TRIGGER_DAG_URL + dag, {}, "POST");
-      if (res?.success) snackbar(`Triggered ${dag}`, "success");
-    } catch {
-      snackbar("Trigger failed", "error");
-    } finally {
-      setApiLoading(false);
+  /* ================= PAGINATION FIX ================= */
+  useEffect(() => {
+    if (page * rowsPerPage >= validProcesses.length) {
+      setPage(0);
     }
-  };
+  }, [validProcesses.length, page, rowsPerPage]);
 
-  const handleStartProcess = (p) => triggerDag(p.dag);
-  const handleStopProcess = (p) => triggerDag(p.dag);
+  const paginatedData = useMemo(
+    () =>
+      validProcesses.slice(
+        page * rowsPerPage,
+        page * rowsPerPage + rowsPerPage
+      ),
+    [validProcesses, page, rowsPerPage]
+  );
 
-  const handleFinishEod = async () => {
-    setApiLoading(true);
-    try {
-      const res = await callApi(FINISH_EOD_URL, {}, "POST");
-      if (res?.success) snackbar("Finished EOD", "success");
-    } catch {
-      snackbar("Finish failed", "error");
-    } finally {
-      setApiLoading(false);
-    }
-  };
+  /* ================= SUMMARY CHECK ================= */
+  const hasDifferenceSummary = (process) => {
+    if (process.type !== "DIFFERENCE") return false;
 
-  /* ================= SUMMARY HANDLER ================= */
-
-  const handleOpenSummary = (row) => {
-    const stage6 = [...row.stageDetails]
+    const stage6 = [...process.stageDetails]
       .sort((a, b) => b.id - a.id)
       .find((s) => s.processStage === 6);
 
-    if (stage6?.differenceSummary) {
-      setSummaryData(stage6.differenceSummary);
-    } else {
-      snackbar("Summary not available");
-    }
+    return stage6?.status === StageStatus.COMPLETED;
   };
 
   /* ================================================= */
 
   return (
-    <>
-      <Paper sx={{ p: 3, minHeight: "75vh" }}>
-        <ProcessStatusHeader etlDate={currentEtlDate} />
-
-        {/* DATE PICKER */}
-        <Stack alignItems="center" mt={2}>
-          <LocalizationProvider dateAdapter={AdapterDayjs}>
-            <DatePicker
-              label="Select ETL Date"
-              value={selectedDate}
-              onChange={(d) => {
-                setSelectedDate(d);
-                loadByDate(d);
-              }}
-              renderInput={(p) => <TextField {...p} />}
-            />
-          </LocalizationProvider>
-        </Stack>
-
-        {/* EOD BUTTONS */}
-        {isCurrentDate && (
-          <Grid container justifyContent="center" spacing={2} my={3}>
-            <Grid>
-              <Button
-                variant="contained"
-                startIcon={<PlayArrowIcon />}
-                disabled={processes.length > 0}
-                onClick={() =>
-                  handleStartProcess({ dag: "orchestrator_v2_dag" })
-                }
-              >
-                Start EOD
-              </Button>
-            </Grid>
-
-            <Grid>
-              <Button
-                variant="contained"
-                color="success"
-                startIcon={<TaskAltIcon />}
-                disabled={!allCompleted}
-                onClick={handleFinishEod}
-              >
-                Finish EOD
-              </Button>
-            </Grid>
-          </Grid>
-        )}
-
-        {/* DIALOGS */}
-        <ProcessDetailsDialog
-          process={selectedProcess}
-          onClose={() => setSelectedProcessType(null)}
-          onStart={handleStartProcess}
-          onStop={handleStopProcess}
-        />
-
-        <ProcessSummaryDialog
-          open={!!summaryData}
-          data={summaryData}
-          onClose={() => setSummaryData(null)}
-        />
-
-        {/* TABLE */}
-        <Box mt={2}>
-          <ProcessStatusTable
-            loading={loading}
-            processes={processes}
-            actions={{
-              onStart: handleStartProcess,
-              onStop: handleStopProcess,
-              onView: setSelectedProcessType,
-              onSummary: handleOpenSummary,
+    <Paper elevation={1}>
+      <TableContainer sx={{ maxHeight: 380 }}>
+        <Table stickyHeader size="small">
+          {/* ================= HEADER ================= */}
+          <TableHead
+            sx={{
+              position: "sticky",
+              top: 0,
+              zIndex: 2,
+              backgroundColor: "#b4a7d6",
+              backdropFilter: "blur(8px)",
             }}
-          />
-        </Box>
-      </Paper>
+          >
+            <TableRow>
+              <TableCell>Process</TableCell>
+              <TableCell align="center">Status</TableCell>
+              <TableCell align="center">Stage</TableCell>
+              <TableCell align="center">Started</TableCell>
+              <TableCell align="center">Ended</TableCell>
+              <TableCell align="center">Actions</TableCell>
+            </TableRow>
+          </TableHead>
 
-      <LoadingOverlay loading={apiLoading} />
-    </>
+          {/* ================= BODY ================= */}
+          <TableBody>
+            {/* ---------- LOADING ---------- */}
+            {loading && (
+              <TableRow>
+                <TableCell colSpan={6} align="center">
+                  <Box py={2}>
+                    <CircularProgress size={20} />
+                    <Typography variant="caption" ml={1}>
+                      Loading processes…
+                    </Typography>
+                  </Box>
+                </TableCell>
+              </TableRow>
+            )}
+
+            {/* ---------- DATA ---------- */}
+            {!loading &&
+              paginatedData.map((p) => {
+                const lastStage = p.stageDetails.at(-1);
+
+                return (
+                  <TableRow
+                    key={p.type}
+                    hover
+                    sx={{
+                      bgcolor:
+                        lastStage.status === StageStatus.STARTED
+                          ? "action.hover"
+                          : "inherit",
+                    }}
+                  >
+                    <TableCell fontWeight={500}>{p.type}</TableCell>
+
+                    <TableCell align="center">
+                      <ProcessStatusChip status={lastStage.status} />
+                    </TableCell>
+
+                    <TableCell align="center">
+                      {lastStage.stage?.title}
+                    </TableCell>
+
+                    <TableCell align="center">
+                      {lastStage.startTime || "—"}
+                    </TableCell>
+
+                    <TableCell align="center">
+                      {lastStage.endTime || "—"}
+                    </TableCell>
+
+                    {/* ================= ACTIONS ================= */}
+                    <TableCell align="center">
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        justifyContent="center"
+                      >
+                        {/* START */}
+                        <Action
+                          title="Start"
+                          icon={<PlayArrowIcon fontSize="small" />}
+                          disabled={lastStage.status !== StageStatus.NOT_STARTED}
+                          onClick={() => actions.onStart(p)}
+                        />
+
+                        {/* STOP */}
+                        <Action
+                          title="Stop"
+                          icon={<StopIcon fontSize="small" />}
+                          disabled={lastStage.status !== StageStatus.STARTED}
+                          onClick={() => actions.onStop(p)}
+                        />
+
+                        {/* VIEW */}
+                        <Action
+                          title="View Details"
+                          icon={<VisibilityIcon fontSize="small" />}
+                          onClick={() => actions.onView(p.type)}
+                        />
+
+                        {/* SUMMARY */}
+                        {hasDifferenceSummary(p) && (
+                          <Action
+                            title="View Summary"
+                            icon={<SummarizeOutlinedIcon fontSize="small" />}
+                            onClick={() => actions.onSummary(p)}
+                          />
+                        )}
+                      </Stack>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+
+            {/* ---------- EMPTY ---------- */}
+            {!loading && validProcesses.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={6} align="center">
+                  <Typography color="error.light">
+                    Processes Not Available
+                  </Typography>
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      {/* ================= PAGINATION ================= */}
+      {!loading && validProcesses.length > MIN_PAGE_SIZE && (
+        <TablePagination
+          component="div"
+          count={validProcesses.length}
+          page={page}
+          onPageChange={(_, p) => setPage(p)}
+          rowsPerPage={rowsPerPage}
+          onRowsPerPageChange={(e) => {
+            setRowsPerPage(parseInt(e.target.value, 10));
+            setPage(0);
+          }}
+          rowsPerPageOptions={[5, 10, 25]}
+          labelRowsPerPage="Rows"
+        />
+      )}
+    </Paper>
   );
 };
 
-export default ProcessStatusPage;
+export default ProcessStatusTable;
