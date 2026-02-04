@@ -1,94 +1,9 @@
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  TextField,
-  Stack,
-  Typography,
-} from "@mui/material";
-import { useState, useEffect } from "react";
-
-const ActionConfirmDialog = ({
-  open,
-  actionType,        // start | stop | restart | finishEod
-  processName,
-  onConfirm,
-  onClose,
-}) => {
-  const [remarks, setRemarks] = useState("");
-
-  useEffect(() => {
-    if (open) setRemarks("");
-  }, [open]);
-
-  const titleMap = {
-    start: "Start Process",
-    stop: "Stop Process",
-    restart: "Restart Process",
-    finishEod: "Finish EOD",
-  };
-
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>{titleMap[actionType]}</DialogTitle>
-
-      <DialogContent dividers>
-        <Stack spacing={2}>
-          <Typography>
-            Are you sure you want to{" "}
-            <b>{titleMap[actionType]}</b>
-            {processName && (
-              <>
-                {" "}for <b>{processName}</b>
-              </>
-            )}
-            ?
-          </Typography>
-
-          <TextField
-            label="Remarks *"
-            placeholder="Enter remarks"
-            multiline
-            minRows={3}
-            value={remarks}
-            onChange={(e) => setRemarks(e.target.value)}
-            fullWidth
-            required
-          />
-        </Stack>
-      </DialogContent>
-
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-
-        <Button
-          variant="contained"
-          disabled={!remarks.trim()}
-          onClick={() => onConfirm(remarks)}
-        >
-          Confirm
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default ActionConfirmDialog;
-
 import { useEffect, useState, useRef, useMemo, useCallback } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { useSelector } from "react-redux";
 import dayjs from "dayjs";
 
-import {
-  Grid,
-  Button,
-  Paper,
-  Stack,
-  TextField,
-} from "@mui/material";
+import { Grid, Button, Paper, Stack, TextField } from "@mui/material";
 
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import TaskAltIcon from "@mui/icons-material/TaskAlt";
@@ -129,12 +44,8 @@ const normalizeStageDetails = (stages = []) => {
       ...s,
       _START_TIME_RAW: s.startTime,
       _END_TIME_RAW: s.endTime,
-      startTime: s.startTime
-        ? timeStampFormatter(s.startTime)
-        : null,
-      endTime: s.endTime
-        ? timeStampFormatter(s.endTime)
-        : null,
+      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
     }));
 };
 
@@ -162,6 +73,7 @@ const ProcessStatusPage = () => {
 
   const INITIAL_DATA_URL = "/PS/process/processes/data";
   const TRIGGER_DAG_URL = "/PS/airflow/trigger/";
+  const STOP_DAG_URL = "/PS/airflow/trigger/";
   const FINISH_EOD_URL = "/PS/process/finish-eod";
 
   const service = resolveConfig("/PS");
@@ -192,7 +104,7 @@ const ProcessStatusPage = () => {
         const res = await callApi(
           INITIAL_DATA_URL,
           { etlDate: date ? date.format("YYYY-MM-DD") : "" },
-          "GET"
+          "GET",
         );
 
         setCurrentEtlDate(res?.fincoreDate?.etlDate);
@@ -204,7 +116,7 @@ const ProcessStatusPage = () => {
         setLoading(false);
       }
     },
-    [callApi, snackbar]
+    [callApi, snackbar],
   );
 
   useEffect(() => {
@@ -239,9 +151,7 @@ const ProcessStatusPage = () => {
       onmessage(e) {
         if (e.event === "connected") return;
         const raw = JSON.parse(e.data);
-        setProcesses((prev) =>
-          mergeProcesses(prev, normalizeProcesses(raw))
-        );
+        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
       },
     });
 
@@ -265,26 +175,33 @@ const ProcessStatusPage = () => {
   const allCompleted = useMemo(
     () =>
       processes.length &&
-      processes.every((p) =>
-        p.stageDetails.every((s) => s.status === 2)
-      ),
-    [processes]
+      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
+    [processes],
   );
 
   /* =====================================================
      CONFIRMATION ACTION HANDLING
   ===================================================== */
 
-  const executeDag = async (dag, remarks) => {
+  const triggerDag = async (dag, remarks) => {
     setApiLoading(true);
+    const payload = { conf: {}, remarks };
     try {
-      const res = await callApi(
-        TRIGGER_DAG_URL + dag,
-        { remarks },
-        "POST"
-      );
-      if (res?.success)
-        snackbar("Action executed successfully", "success");
+      const res = await callApi(TRIGGER_DAG_URL + dag, payload, "POST");
+      if (res?.success) snackbar("Action executed successfully", "success");
+    } catch {
+      snackbar("Action failed", "error");
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  const stopDag = async (dag, remarks) => {
+    setApiLoading(true);
+    const payload = { conf: {}, remarks };
+    try {
+      const res = await callApi(STOP_DAG_URL + dag, payload, "POST");
+      if (res?.success) snackbar("Action executed successfully", "success");
     } catch {
       snackbar("Action failed", "error");
     } finally {
@@ -298,20 +215,17 @@ const ProcessStatusPage = () => {
     if (action === "finishEod") {
       try {
         setApiLoading(true);
-        const res = await callApi(
-          FINISH_EOD_URL,
-          { remarks },
-          "POST"
-        );
-        if (res?.success)
-          snackbar("Finished EOD successfully", "success");
+        const res = await callApi(FINISH_EOD_URL, { remarks }, "POST");
+        if (res?.success) snackbar("Finished EOD successfully", "success");
       } catch {
         snackbar("Finish EOD failed", "error");
       } finally {
         setApiLoading(false);
       }
+    } else if (action === "stop") {
+      await stopDag(process.dagId, remarks);
     } else {
-      await executeDag(process.dag, remarks);
+      await triggerDag(process.dagId, remarks);
     }
 
     setConfirmConfig(null);
@@ -401,12 +315,8 @@ const ProcessStatusPage = () => {
         <ProcessDetailsDialog
           process={selectedProcess}
           onClose={() => setSelectedProcessType(null)}
-          onStart={(p) =>
-            setConfirmConfig({ action: "restart", process: p })
-          }
-          onStop={(p) =>
-            setConfirmConfig({ action: "stop", process: p })
-          }
+          onStart={(p) => setConfirmConfig({ action: "restart", process: p })}
+          onStop={(p) => setConfirmConfig({ action: "stop", process: p })}
         />
 
         {/* SUMMARY */}
@@ -424,8 +334,7 @@ const ProcessStatusPage = () => {
             actions={{
               onStart: (p) =>
                 setConfirmConfig({ action: "restart", process: p }),
-              onStop: (p) =>
-                setConfirmConfig({ action: "stop", process: p }),
+              onStop: (p) => setConfirmConfig({ action: "stop", process: p }),
               onView: setSelectedProcessType,
               onSummary: handleOpenSummary,
             }}
