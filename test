@@ -1,168 +1,57 @@
-/*==========================================================
-  START NEW PROCESS RUN
-==========================================================*/
-INSERT INTO FINCORE.PROCESS_RUN
-VALUES (
-  FINCORE.PROCESS_RUN_SEQ.NEXTVAL,
-  :process_id,               -- e.g. CBS=1, GLIF=2
-  SYSTIMESTAMP,
-  NULL,
-  1,                         -- 1 = RUNNING
-  :triggered_by,             -- SYSTEM / AIRFLOW
-  :etl_date,
-  :airflow_run_id
+--------------------------------------------------------
+--  PROCESS MASTER
+--  One row per business process type.
+--  DAG details are stored directly here.
+--------------------------------------------------------
+
+CREATE TABLE FINCORE.PROCESS_MASTER (
+  PROCESS_ID    NUMBER PRIMARY KEY,
+  PROCESS_TYPE  VARCHAR2(30) NOT NULL,
+  DAG_NAME      VARCHAR2(100) NOT NULL,
+  PIPELINE_NAME VARCHAR2(50),
+  ACTIVE_FLAG   CHAR(1) DEFAULT 'Y' CHECK (ACTIVE_FLAG IN ('Y','N')),
+  CONSTRAINT UK_PROCESS_TYPE UNIQUE (PROCESS_TYPE)
 );
 
-/*==========================================================
-  CREATE ALL STAGES FOR THIS RUN
-==========================================================*/
-INSERT INTO FINCORE.PROCESS_RUN_STAGE
-SELECT
-  FINCORE.PROCESS_RUN_STAGE_SEQ.NEXTVAL,
-  :run_id,
-  STAGE_ID,
-  NULL,
-  NULL,
-  0,                          -- 0 = NOT STARTED
-  NULL,
-  NULL
-FROM FINCORE.PROCESS_STAGE_MASTER;
+--------------------------------------------------------
+--  COLUMN COMMENTS
+--------------------------------------------------------
 
-/*==========================================================
-  MARK STAGE STARTED
-==========================================================*/
-UPDATE FINCORE.PROCESS_RUN_STAGE
-SET STATUS = 1,
-    START_TIME = SYSTIMESTAMP
-WHERE RUN_ID = :run_id
-AND STAGE_ID = :stage_id;
+COMMENT ON TABLE FINCORE.PROCESS_MASTER
+IS 'Master of business processes with merged DAG configuration';
 
-/*==========================================================
-  MARK STAGE COMPLETED
-==========================================================*/
-UPDATE FINCORE.PROCESS_RUN_STAGE
-SET STATUS = 2,
-    END_TIME = SYSTIMESTAMP,
-    EXECUTION_REMARKS = :remarks
-WHERE RUN_ID = :run_id
-AND STAGE_ID = :stage_id;
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PROCESS_ID
+IS 'Unique identifier of business process';
 
-/*==========================================================
-  MARK STAGE FAILED
-==========================================================*/
-UPDATE FINCORE.PROCESS_RUN_STAGE
-SET STATUS = 3,
-    END_TIME = SYSTIMESTAMP,
-    EXECUTION_REMARKS = :error_message
-WHERE RUN_ID = :run_id
-AND STAGE_ID = :stage_id;
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PROCESS_TYPE
+IS 'Business name of process (CBS, GLIF, DIFFERENCE, ETL, BANCS etc)';
 
-/*==========================================================
-  UPDATE OVERALL PROCESS RUN STATUS
-==========================================================*/
-UPDATE FINCORE.PROCESS_RUN
-SET STATUS = :run_status,   -- 1 RUNNING, 2 SUCCESS, 3 FAILED
-    END_TIME = CASE
-                 WHEN :run_status IN (2,3)
-                 THEN SYSTIMESTAMP
-                 ELSE END_TIME
-               END
-WHERE RUN_ID = :run_id;
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.DAG_NAME
+IS 'Airflow DAG name used to execute this process';
 
-/*==========================================================
-  SAVE DIFFERENCE SUMMARY (CLOB)
-==========================================================*/
-UPDATE FINCORE.PROCESS_RUN_STAGE
-SET DIFFERENCE_SUMMARY = :difference_json
-WHERE RUN_ID = :run_id
-AND STAGE_ID = :stage_id;
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PIPELINE_NAME
+IS 'Logical pipeline or group name';
 
-/*==========================================================
-  UI TIMELINE (SINGLE RUN)
-==========================================================*/
-SELECT
- r.RUN_ID,
- pm.PROCESS_TYPE,
- d.DAG_NAME,
- sm.STAGE_ID,
- sm.TITLE AS STAGE_NAME,
- sm.ICON,
- s.STATUS,
- s.START_TIME,
- s.END_TIME,
- s.EXECUTION_REMARKS
-FROM FINCORE.PROCESS_RUN r
-JOIN FINCORE.PROCESS_MASTER pm
-  ON pm.PROCESS_ID = r.PROCESS_ID
-JOIN FINCORE.PROCESS_DAG_MASTER d
-  ON d.DAG_ID = pm.DAG_ID
-JOIN FINCORE.PROCESS_RUN_STAGE s
-  ON s.RUN_ID = r.RUN_ID
-JOIN FINCORE.PROCESS_STAGE_MASTER sm
-  ON sm.STAGE_ID = s.STAGE_ID
-WHERE r.RUN_ID = :run_id
-ORDER BY sm.STAGE_ID;
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.ACTIVE_FLAG
+IS 'Y if process is active, N if disabled';
 
-/*==========================================================
-  LATEST RUN PER PROCESS
-==========================================================*/
-SELECT *
-FROM (
-   SELECT r.*,
-          ROW_NUMBER() OVER
-           (PARTITION BY PROCESS_ID ORDER BY RUN_ID DESC) rn
-   FROM FINCORE.PROCESS_RUN r
-)
-WHERE rn = 1;
+--------------------------------------------------------
+--  SAMPLE INSERTS
+--------------------------------------------------------
 
-/*==========================================================
-  DASHBOARD SUMMARY
-==========================================================*/
-SELECT
- pm.PROCESS_TYPE,
- SUM(CASE WHEN r.STATUS = 1 THEN 1 ELSE 0 END) RUNNING,
- SUM(CASE WHEN r.STATUS = 2 THEN 1 ELSE 0 END) SUCCESS,
- SUM(CASE WHEN r.STATUS = 3 THEN 1 ELSE 0 END) FAILED
-FROM FINCORE.PROCESS_RUN r
-JOIN FINCORE.PROCESS_MASTER pm
- ON pm.PROCESS_ID = r.PROCESS_ID
-GROUP BY pm.PROCESS_TYPE;
+INSERT INTO FINCORE.PROCESS_MASTER
+VALUES (1,'CBS','cbs_dag','CBS','Y');
 
-/*==========================================================
-  FAILED STAGES ACROSS SYSTEM
-==========================================================*/
-SELECT
- r.RUN_ID,
- pm.PROCESS_TYPE,
- sm.TITLE,
- s.EXECUTION_REMARKS,
- s.START_TIME
-FROM FINCORE.PROCESS_RUN_STAGE s
-JOIN FINCORE.PROCESS_RUN r ON r.RUN_ID = s.RUN_ID
-JOIN FINCORE.PROCESS_MASTER pm ON pm.PROCESS_ID = r.PROCESS_ID
-JOIN FINCORE.PROCESS_STAGE_MASTER sm ON sm.STAGE_ID = s.STAGE_ID
-WHERE s.STATUS = 3
-ORDER BY s.START_TIME DESC;
+INSERT INTO FINCORE.PROCESS_MASTER
+VALUES (2,'GLIF','glif_dag','GLIF','Y');
 
-/*==========================================================
-  CURRENTLY RUNNING STAGES
-==========================================================*/
-SELECT
- r.RUN_ID,
- pm.PROCESS_TYPE,
- sm.TITLE,
- s.START_TIME
-FROM FINCORE.PROCESS_RUN_STAGE s
-JOIN FINCORE.PROCESS_RUN r ON r.RUN_ID = s.RUN_ID
-JOIN FINCORE.PROCESS_MASTER pm ON pm.PROCESS_ID = r.PROCESS_ID
-JOIN FINCORE.PROCESS_STAGE_MASTER sm ON sm.STAGE_ID = s.STAGE_ID
-WHERE s.STATUS = 1;
+INSERT INTO FINCORE.PROCESS_MASTER
+VALUES (3,'DIFFERENCE','diff_dag','DIFFERENCE','Y');
 
-/*==========================================================
-  RUNS FOR A PROCESS IN DATE RANGE
-==========================================================*/
-SELECT *
-FROM FINCORE.PROCESS_RUN
-WHERE PROCESS_ID = :process_id
-AND ETL_DATE BETWEEN :from_date AND :to_date
-ORDER BY RUN_ID DESC;
+INSERT INTO FINCORE.PROCESS_MASTER
+VALUES (4,'ETL','orchestrator_v2_dag','EOD','Y');
+
+INSERT INTO FINCORE.PROCESS_MASTER
+VALUES (5,'BANCS','orchestrator_v2_dag','EOD','Y');
+
+COMMIT;
