@@ -14,26 +14,50 @@ import {
   Stack,
   IconButton,
   Tooltip,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  LinearProgress,
 } from "@mui/material";
+
 import CloseIcon from "@mui/icons-material/Close";
-import TableChartIcon from "@mui/icons-material/TableChart";
 import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { toPng } from "html-to-image";
 import { useRef, useState } from "react";
 
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+
 /* ================= FORMAT ================= */
 const formatAmount = (num) =>
   typeof num === "number" ? num.toLocaleString("en-IN") : "—";
 
+/* ================= SUMMARY → REPORT MAP ================= */
+const SUMMARY_FILE_MAP = {
+  BALANCE: "BALANCE_COMPARE_SUMMARY",
+  SIBA: "SIBA_SUMMARY",
+  SUSPENSE: "SUSPENSE_SUMMARY",
+};
+
 const ProcessSummaryDialog = ({ open, data, onClose }) => {
-  /* hooks first */
+  /* hooks */
   const reportRef = useRef(null);
   const copyTimeoutRef = useRef(null);
+
   const [copied, setCopied] = useState(false);
+  const [summaryType, setSummaryType] = useState("BALANCE");
+
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
 
   if (!data) return null;
 
@@ -41,14 +65,14 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
 
   const totalEntries = summary.reduce(
     (sum, r) => sum + (r.Total_no_of_entries || 0),
-    0,
+    0
   );
   const totalNewEntries = summary.reduce(
     (sum, r) => sum + (r["new entry"] || 0),
-    0,
+    0
   );
 
-  /* ================= PDF ================= */
+  /* ================= EXPORT SUMMARY PDF ================= */
   const exportPDF = () => {
     const doc = new jsPDF("p", "pt");
 
@@ -71,9 +95,9 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
       styles: { halign: "right", fontSize: 9 },
       headStyles: { fillColor: [33, 150, 243] },
       columnStyles: { 0: { halign: "left" } },
-      didParseCell: (data) => {
-        if (data.row.index === summary.length) {
-          data.cell.styles.fontStyle = "bold";
+      didParseCell: (d) => {
+        if (d.row.index === summary.length) {
+          d.cell.styles.fontStyle = "bold";
         }
       },
     });
@@ -86,7 +110,6 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
     if (!reportRef.current) return;
 
     const node = reportRef.current;
-
     const originalOverflow = node.style.overflow;
     const originalHeight = node.style.height;
 
@@ -106,22 +129,75 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
         new ClipboardItem({ "image/png": blob }),
       ]);
 
-      /* UX feedback */
       setCopied(true);
       clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => {
-        setCopied(false);
-      }, 2000);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
     } catch (err) {
-      console.error("Copy PNG failed", err);
+      console.error(err);
+      snackbar("Copy failed", "error");
     } finally {
       node.style.overflow = originalOverflow;
       node.style.height = originalHeight;
     }
   };
 
+  /* ================= DOWNLOAD FULL REPORT ================= */
+  const handleDownloadReport = async () => {
+    const fileName = SUMMARY_FILE_MAP[summaryType];
+
+    setIsDownloading(true);
+    setDownloadedBytes(0);
+
+    try {
+      const payload = {
+        moduleType: "WHOLE_BANK",
+        fileName,
+        date: RECON_RUN_DATE,
+      };
+
+      const response = await callApi(
+        "/RS/reports/download",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          onDownloadProgress: (e) => {
+            if (e?.loaded) setDownloadedBytes(e.loaded);
+          },
+        },
+        false
+      );
+
+      if (response?.data?.size > 20) {
+        const url = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${fileName}_${RECON_RUN_DATE}.zip`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+        snackbar("Report downloaded", "success");
+      } else {
+        snackbar("No data found", "warning");
+      }
+    } catch {
+      snackbar("Download failed", "error");
+    } finally {
+      setIsDownloading(false);
+      setDownloadedBytes(0);
+    }
+  };
+
+  const downloadedMB =
+    downloadedBytes > 0
+      ? (downloadedBytes / (1024 * 1024)).toFixed(2)
+      : null;
+
+  /* ================================================= */
+
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+
       {/* ================= HEADER ================= */}
       <Box
         sx={{
@@ -131,7 +207,6 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
           borderColor: "divider",
           display: "flex",
           justifyContent: "space-between",
-          alignItems: "center",
         }}
       >
         <Box>
@@ -144,19 +219,19 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
         </Box>
 
         <Stack direction="row" spacing={1} alignItems="center">
-          <Tooltip title="Export PDF">
+
+          {/* PDF */}
+          <Tooltip title="Export Summary PDF">
             <IconButton onClick={exportPDF}>
               <PictureAsPdfOutlinedIcon />
             </IconButton>
           </Tooltip>
 
+          {/* COPY */}
           <Tooltip title={copied ? "Copied!" : "Copy Image"}>
             <IconButton
               onClick={copyPNGToClipboard}
-              sx={{
-                color: copied ? "success.main" : "inherit",
-                transition: "all 0.3s ease",
-              }}
+              sx={{ color: copied ? "success.main" : "inherit" }}
             >
               {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
             </IconButton>
@@ -169,12 +244,43 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
       </Box>
 
       {/* ================= BODY ================= */}
-      <DialogContent sx={{ p: 1, height: "70vh" }}>
-        <TableContainer
-          component={Paper}
-          sx={{ height: "100%" }}
-          ref={reportRef}
-        >
+      <DialogContent sx={{ p: 2, height: "70vh" }}>
+
+        {/* SUMMARY TYPE + DOWNLOAD */}
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <RadioGroup
+            row
+            value={summaryType}
+            onChange={(e) => setSummaryType(e.target.value)}
+          >
+            <FormControlLabel value="BALANCE" control={<Radio />} label="Balance" />
+            <FormControlLabel value="SIBA" control={<Radio />} label="SIBA" />
+            <FormControlLabel value="SUSPENSE" control={<Radio />} label="Suspense" />
+          </RadioGroup>
+
+          <Button
+            startIcon={<CloudDownloadTwoToneIcon />}
+            variant="contained"
+            onClick={handleDownloadReport}
+            disabled={isDownloading}
+          >
+            Download Full Report
+          </Button>
+
+          {isDownloading && (
+            <Box mt={1}>
+              <LinearProgress />
+              {downloadedMB && (
+                <Typography variant="caption">
+                  {downloadedMB} MB downloaded
+                </Typography>
+              )}
+            </Box>
+          )}
+        </Paper>
+
+        {/* SUMMARY TABLE */}
+        <TableContainer component={Paper} sx={{ height: "100%" }} ref={reportRef}>
           <Table stickyHeader size="small">
             <TableHead
               sx={{
@@ -182,43 +288,33 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
                 top: 0,
                 zIndex: 2,
                 backgroundColor: "primary.light",
-                boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
               }}
             >
               <TableRow>
-                <TableCell sx={{ fontWeight: 600, bgcolor: "primary.light" }}>
-                  HEAD
-                </TableCell>
-                <TableCell
-                  align="right"
-                  sx={{ fontWeight: 600, bgcolor: "primary.light" }}
-                >
+                <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 600 }}>
                   TOTAL ENTRIES
                 </TableCell>
-                <TableCell
-                  align="right"
-                  sx={{ fontWeight: 600, bgcolor: "primary.light" }}
-                >
+                <TableCell align="right" sx={{ fontWeight: 600 }}>
                   NEW ENTRIES
                 </TableCell>
               </TableRow>
             </TableHead>
 
             <TableBody>
-              {summary.map((row, idx) => (
-                <TableRow key={idx} hover>
-                  <TableCell sx={{ fontWeight: 500 }}>{row.HEAD}</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 500 }}>
+              {summary.map((row, i) => (
+                <TableRow key={i}>
+                  <TableCell>{row.HEAD}</TableCell>
+                  <TableCell align="right">
                     {formatAmount(row.Total_no_of_entries)}
                   </TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 500 }}>
+                  <TableCell align="right">
                     {formatAmount(row["new entry"])}
                   </TableCell>
                 </TableRow>
               ))}
 
-              {/* TOTAL ROW */}
-              <TableRow sx={{ fontWeight: 700, bgcolor: "#D3D3D3" }}>
+              <TableRow sx={{ bgcolor: "#eee" }}>
                 <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 700 }}>
                   {formatAmount(totalEntries)}
@@ -230,6 +326,7 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
             </TableBody>
           </Table>
         </TableContainer>
+
       </DialogContent>
 
       {/* ================= FOOTER ================= */}
@@ -247,6 +344,7 @@ const ProcessSummaryDialog = ({ open, data, onClose }) => {
           Close
         </Button>
       </Box>
+
     </Dialog>
   );
 };
