@@ -1,8 +1,6 @@
 import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  DialogActions,
   Button,
   Table,
   TableHead,
@@ -13,58 +11,196 @@ import {
   Paper,
   Typography,
   Box,
+  Stack,
+  IconButton,
+  Tooltip,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
-import IconButton from "@mui/material/IconButton";
+import TableChartIcon from "@mui/icons-material/TableChart";
+import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { toPng } from "html-to-image";
+import { useRef, useState } from "react";
 
-/* ================= NUMBER FORMAT ================= */
+/* ================= FORMAT ================= */
 const formatAmount = (num) =>
   typeof num === "number" ? num.toLocaleString("en-IN") : "—";
 
-/* ================= MAIN COMPONENT ================= */
-const ProcessSummary = ({ open, data, onClose }) => {
+const ProcessSummaryDialog = ({ open, data, onClose }) => {
+  /* hooks first */
+  const reportRef = useRef(null);
+  const copyTimeoutRef = useRef(null);
+  const [copied, setCopied] = useState(false);
+
   if (!data) return null;
 
   const { RECON_RUN_DATE, summary = [] } = data;
 
   const totalEntries = summary.reduce(
-    (sum, row) => sum + (row.Total_no_of_entries || 0),
+    (sum, r) => sum + (r.Total_no_of_entries || 0),
     0,
   );
   const totalNewEntries = summary.reduce(
-    (sum, row) => sum + (row["new entry"] || 0),
+    (sum, r) => sum + (r["new entry"] || 0),
     0,
   );
 
+  /* ================= PDF ================= */
+  const exportPDF = () => {
+    const doc = new jsPDF("p", "pt");
+
+    doc.setFontSize(14);
+    doc.text("Difference Summary Report", 40, 40);
+    doc.setFontSize(10);
+    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
+
+    autoTable(doc, {
+      startY: 80,
+      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
+      body: [
+        ...summary.map((r) => [
+          r.HEAD,
+          formatAmount(r.Total_no_of_entries),
+          formatAmount(r["new entry"]),
+        ]),
+        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
+      ],
+      styles: { halign: "right", fontSize: 9 },
+      headStyles: { fillColor: [33, 150, 243] },
+      columnStyles: { 0: { halign: "left" } },
+      didParseCell: (data) => {
+        if (data.row.index === summary.length) {
+          data.cell.styles.fontStyle = "bold";
+        }
+      },
+    });
+
+    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
+  };
+
+  /* ================= COPY PNG ================= */
+  const copyPNGToClipboard = async () => {
+    if (!reportRef.current) return;
+
+    const node = reportRef.current;
+
+    const originalOverflow = node.style.overflow;
+    const originalHeight = node.style.height;
+
+    node.style.overflow = "visible";
+    node.style.height = `${node.scrollHeight}px`;
+
+    try {
+      const dataUrl = await toPng(node, {
+        cacheBust: true,
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+      });
+
+      const blob = await (await fetch(dataUrl)).blob();
+
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": blob }),
+      ]);
+
+      /* UX feedback */
+      setCopied(true);
+      clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => {
+        setCopied(false);
+      }, 2000);
+    } catch (err) {
+      console.error("Copy PNG failed", err);
+    } finally {
+      node.style.overflow = originalOverflow;
+      node.style.height = originalHeight;
+    }
+  };
+
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle>
-        Difference Summary
-        <IconButton
-          onClick={onClose}
-          sx={{ position: "absolute", right: 12, top: 8 }}
-        >
-          <CloseIcon />
-        </IconButton>
-      </DialogTitle>
-
-      <DialogContent dividers>
-        {/* ================= META ================= */}
-        <Box mb={2}>
-          <Typography variant="caption" color="text.secondary">
-            Reconciliation of ETL date
+      {/* ================= HEADER ================= */}
+      <Box
+        sx={{
+          px: 3,
+          py: 2,
+          borderBottom: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <Box>
+          <Typography variant="h6" fontWeight={700}>
+            Difference Summary Report
           </Typography>
-          <Typography fontWeight={600}>{RECON_RUN_DATE}</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Reconciliation Date: {RECON_RUN_DATE}
+          </Typography>
         </Box>
 
-        {/* ================= TABLE ================= */}
-        <TableContainer component={Paper} sx={{ maxHeight: 420 }}>
-          <Table stickyHeader>
-            <TableHead>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Tooltip title="Export PDF">
+            <IconButton onClick={exportPDF}>
+              <PictureAsPdfOutlinedIcon />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title={copied ? "Copied!" : "Copy Image"}>
+            <IconButton
+              onClick={copyPNGToClipboard}
+              sx={{
+                color: copied ? "success.main" : "inherit",
+                transition: "all 0.3s ease",
+              }}
+            >
+              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
+            </IconButton>
+          </Tooltip>
+
+          <IconButton onClick={onClose}>
+            <CloseIcon />
+          </IconButton>
+        </Stack>
+      </Box>
+
+      {/* ================= BODY ================= */}
+      <DialogContent sx={{ p: 1, height: "70vh" }}>
+        <TableContainer
+          component={Paper}
+          sx={{ height: "100%" }}
+          ref={reportRef}
+        >
+          <Table stickyHeader size="small">
+            <TableHead
+              sx={{
+                position: "sticky",
+                top: 0,
+                zIndex: 2,
+                backgroundColor: "primary.light",
+                boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
+              }}
+            >
               <TableRow>
-                <TableCell>Head</TableCell>
-                <TableCell align="right">Total Entries</TableCell>
-                <TableCell align="right">New Entries</TableCell>
+                <TableCell sx={{ fontWeight: 600, bgcolor: "primary.light" }}>
+                  HEAD
+                </TableCell>
+                <TableCell
+                  align="right"
+                  sx={{ fontWeight: 600, bgcolor: "primary.light" }}
+                >
+                  TOTAL ENTRIES
+                </TableCell>
+                <TableCell
+                  align="right"
+                  sx={{ fontWeight: 600, bgcolor: "primary.light" }}
+                >
+                  NEW ENTRIES
+                </TableCell>
               </TableRow>
             </TableHead>
 
@@ -72,17 +208,17 @@ const ProcessSummary = ({ open, data, onClose }) => {
               {summary.map((row, idx) => (
                 <TableRow key={idx} hover>
                   <TableCell sx={{ fontWeight: 500 }}>{row.HEAD}</TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" sx={{ fontWeight: 500 }}>
                     {formatAmount(row.Total_no_of_entries)}
                   </TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" sx={{ fontWeight: 500 }}>
                     {formatAmount(row["new entry"])}
                   </TableCell>
                 </TableRow>
               ))}
 
-              {/* ================= TOTAL ================= */}
-              <TableRow>
+              {/* TOTAL ROW */}
+              <TableRow sx={{ fontWeight: 700, bgcolor: "#D3D3D3" }}>
                 <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 700 }}>
                   {formatAmount(totalEntries)}
@@ -96,423 +232,23 @@ const ProcessSummary = ({ open, data, onClose }) => {
         </TableContainer>
       </DialogContent>
 
-      <DialogActions>
+      {/* ================= FOOTER ================= */}
+      <Box
+        sx={{
+          px: 3,
+          py: 2,
+          borderTop: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "flex-end",
+        }}
+      >
         <Button onClick={onClose} variant="outlined">
           Close
         </Button>
-      </DialogActions>
+      </Box>
     </Dialog>
   );
 };
 
-export default ProcessSummary;
-
-
-import { useEffect, useState } from "react";
-import {
-  Box,
-  Typography,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
-  Stack,
-  Button,
-  Card,
-  LinearProgress,
-  Grow,
-  Fade,
-} from "@mui/material";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import {
-  Summarize,
-  CloudDownloadTwoTone,
-  LooksOne,
-  LooksTwo,
-  Looks3,
-} from "@mui/icons-material";
-import useApi from "../../hooks/useApi";
-import dayjs from "dayjs";
-import { useSelector } from "react-redux";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import { useTheme } from "@mui/material/styles";
-import CustomChip from "../../utils/CustomChip";
-import GlifReportsStyles from "./GlifReportsStyles";
-
-// 1. Ensure strictly 'en-gb' locale logic if specific DD/MM formats are fighting with browser locale
-import "dayjs/locale/en-gb";
-const moduleType="WHOLE_BANK";
-
-export default function GlifReports() {
-  const { callApi } = useApi();
-  const showSnackBar = useCustomSnackbar();
-  const user = useSelector((state) => state.auth.user);
-
-  const [dateError, setDateError] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [repTypes, setRepTypes] = useState([]);
-  const [selectedReport, setReport] = useState(null);
-  const [selectedDate, setDate] = useState(null);
-
-  // Defaulting to a safe past date initially
-  const [minDate, setMinDate] = useState(dayjs("2020-01-01"));
-
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadedBytes, setDownloadedBytes] = useState(0);
-
-  const theme = useTheme();
-  const styles = GlifReportsStyles(theme);
-
-  const disableInputs = isLoading || isDownloading;
-
-  const downloadedMB =
-    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
-
-  // --- API Fetch ---
-  useEffect(() => {
-    async function fetchData() {
-      setIsLoading(true);
-      try {
-        const data = await callApi(
-          "/RS/reports/types",
-          { roleId: user.role ,
-            moduleType:moduleType,
-          },
-          "POST"
-        );
-        const types = data.data || [];
-        setRepTypes(types);
-
-        if (types.length > 0 && types[0].selectedDate) {
-          // IMPORTANT: Use .startOf('day') to ensure time is 00:00:00
-          // This fixes the "sometimes enabled/disabled arrow" issue by ensuring strict day comparison
-          setMinDate(dayjs(types[0].selectedDate).startOf("day"));
-        } else {
-          // Fallback
-          setMinDate(dayjs("2025-10-01").startOf("day"));
-        }
-      } catch (error) {
-        console.error("Failed to fetch report types:", error);
-        showSnackBar("Failed to load report types", "error");
-      }
-      setIsLoading(false);
-    }
-    fetchData();
-  }, [callApi, user.role, showSnackBar]);
-
-  const handleSelect = (report) => {
-    setReport(report);
-  };
-
-  // --- Download Logic ---
-  const handleFetchReportData = async () => {
-    if (!selectedReport?.fileName || !selectedDate) return;
-
-    if (dateError) {
-      showSnackBar(getErrorMessage(dateError), "error");
-      return;
-    }
-
-    setIsLoading(true);
-    setIsDownloading(true);
-    setDownloadedBytes(0);
-
-    const payload = {
-      moduleType:moduleType,
-      fileName: selectedReport.fileName,
-      date: selectedDate.format("YYYY-MM-DD"),
-      roleId: user.role,
-    };
-
-    try {
-      const response = await callApi(
-        "/RS/reports/download",
-        payload,
-        "POST",
-        "blob",
-        "application/json",
-        {
-          onDownloadProgress: (event) => {
-            setIsDownloading(true);
-            if (event && typeof event.loaded === "number") {
-              setDownloadedBytes(event.loaded);
-            }
-          },
-        },
-        false
-      );
-
-      if (response.data && response.data.size > 22) {
-        const contentDisposition =
-          response.headers["content-disposition"] ||
-          response.headers["Content-Disposition"];
-          
-        let filename = "report.zip";
-        if (
-          contentDisposition &&
-          contentDisposition.indexOf("attachment") !== -1
-        ) {
-          const filenameMatch = contentDisposition.match(/filename="(.+?)"/);
-          if (filenameMatch && filenameMatch.length > 1) {
-            filename = filenameMatch[1];
-          }
-        }
-
-        const downloadUrl = window.URL.createObjectURL(response.data);
-        const a = document.createElement("a");
-        a.href = downloadUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(downloadUrl);
-        showSnackBar(
-          `Reports "${filename}" downloaded successfully`,
-          "success"
-        );
-      } else {
-        showSnackBar(
-          "No reports found matching your current filter criteria",
-          "warning"
-        );
-      }
-    } catch (error) {
-      console.log("error", error);
-
-      if (error && error instanceof Blob) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          try {
-            const errorJson = JSON.parse(reader.result);
-            console.error(errorJson.message);
-            showSnackBar(
-              errorJson.message || "No reports found matching your criteria",
-              "error"
-            );
-          } catch (e) {
-            console.error(e);
-            showSnackBar("Something went wrong, kindly try again.", "error");
-          }
-        };
-        reader.readAsText(error);
-      } else {
-        showSnackBar("Network Error: Could not connect to server", "error");
-      }
-    } finally {
-      setIsLoading(false);
-      setIsDownloading(false);
-      setDownloadedBytes(0);
-    }
-  };
-
-  // --- Validation Message Logic ---
-  const getErrorMessage = (error) => {
-    const minDateStr = minDate?.isValid()
-      ? minDate.format("DD/MM/YYYY")
-      : "Allowed Min Date";
-
-    switch (error) {
-      case "maxDate":
-        return "Date cannot be in the future (Today is max)";
-      case "minDate":
-        return `Date cannot be prior to ${minDateStr}`;
-      case "invalidDate":
-        // This covers cases like 31st Feb or 31st April
-        return "Invalid date (Check day for this month)";
-      default:
-        // When no error, return instructions
-        return `Allowed Range: ${minDateStr} - Today`;
-    }
-  };
-
-  return (
-    <Grow in timeout={500}>
-      <Stack spacing={4}>
-        <Box sx={styles.rootBox} elevation={10}>
-          <Stack
-            spacing={3}
-            direction={"column"}
-            alignItems="center"
-            justifyContent="center"
-          >
-            <Card sx={styles.card}>
-              <Box sx={styles.headerContainer}>
-                <Box sx={styles.headerIconWrapper}>
-                  <Summarize sx={styles.summaryIcon} />
-                </Box>
-                <Box sx={styles.headerTextBox}>
-                  <Typography
-                    variant="h5"
-                    fontWeight="bold"
-                    sx={styles.headerTitle}
-                  >
-                    Reports Generation
-                  </Typography>
-                  <Typography variant="body2" sx={styles.headerSubtitle}>
-                    Choose a specific required Report type and Date using the
-                    criteria below to download reports
-                  </Typography>
-                </Box>
-              </Box>
-
-              <Box sx={styles.noteContainer}>
-                <Typography variant="body2" sx={styles.noteText}>
-                  Note: The generated reports cannot be viewed on-screen it can
-                  only be downloaded.
-                </Typography>
-                <Stack direction="row" spacing={2} sx={styles.stepsStack}>
-                  <CustomChip
-                    label="Select a report"
-                    variant="outlined"
-                    icon={<LooksOne />}
-                    color="info"
-                    sx={{ px: 1 }}
-                  />
-                  <CustomChip
-                    label="Select the report date"
-                    variant="outlined"
-                    icon={<LooksTwo />}
-                    color="info"
-                    sx={{ px: 1 }}
-                  />
-                  <CustomChip
-                    label="Click Fetch & Download button"
-                    variant="outlined"
-                    icon={<Looks3 />}
-                    color="info"
-                    sx={{ px: 1 }}
-                  />
-                </Stack>
-              </Box>
-
-              <Box sx={styles.inputOuterBox}>
-                <Box sx={styles.inputInnerBox}>
-                  {/* Dropdown Menu */}
-                  <FormControl sx={styles.formControl}>
-                    <InputLabel id="menu-select-label">
-                      Select a report
-                    </InputLabel>
-                    <Select
-                      labelId="menu-select-label"
-                      id="menu-select"
-                      value={selectedReport || ""}
-                      label="Select a report"
-                      onChange={(e) => handleSelect(e.target.value)}
-                      disabled={repTypes.length === 0 || disableInputs}
-                    >
-                      {repTypes.map((item) => (
-                        <MenuItem key={item.fileName} value={item}>
-                          {item.reportName}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-
-                  {/* Date Picker */}
-                  <FormControl sx={styles.formControl}>
-                    {/* Ensure adapterLocale is set to handle DD/MM logic naturally */}
-                    <LocalizationProvider
-                      dateAdapter={AdapterDayjs}
-                      adapterLocale="en-gb"
-                    >
-                      <DatePicker
-                        label="Select report date"
-                        format="DD/MM/YYYY"
-                        views={["year", "month", "day"]}
-                        value={selectedDate}
-                        onChange={(newDate) => setDate(newDate)}
-                        // Explicitly set maxDate to Today
-                        maxDate={dayjs().endOf("day")}
-                        // Explicitly set minDate
-                        minDate={minDate}
-                        onError={(newError) => setDateError(newError)}
-                        disabled={repTypes.length === 0 || disableInputs}
-                        slotProps={{
-                          textField: {
-                            // Logic: If there is an error, show specific error msg.
-                            // If no error, show the range helper text to guide user.
-                            helperText: dateError
-                              ? getErrorMessage(dateError)
-                              : "",
-                            error: !!dateError,
-                            placeholder: "DD/MM/YYYY",
-                          },
-                          // Enhancement: Show days outside current month but verify they are disabled correctly
-                          day: {
-                            showDaysOutsideCurrentMonth: true,
-                          },
-                        }}
-                      />
-                    </LocalizationProvider>
-                  </FormControl>
-                </Box>
-              </Box>
-
-              <Box sx={styles.buttonContainer}>
-                <Button
-                  sx={styles.downloadButton}
-                  endIcon={<CloudDownloadTwoTone />}
-                  variant="contained"
-                  onClick={handleFetchReportData}
-                  disabled={
-                    disableInputs ||
-                    !selectedReport ||
-                    !selectedDate ||
-                    !!dateError
-                  }
-                >
-                  {isDownloading ? "Downloading..." : "Fetch & Download"}
-                </Button>
-
-                <Fade in={isDownloading} unmountOnExit>
-                  <Box sx={styles.progressContainer}>
-                    <Box sx={styles.progressHeader}>
-                      <Box sx={styles.progressIconWrapper}>
-                        <CloudDownloadTwoTone sx={styles.innerDownloadIcon} />
-                      </Box>
-                      <Box sx={styles.progressHeaderTextBox}>
-                        <Typography variant="body2" fontWeight={600}>
-                          Searching{" "}
-                          {selectedReport?.reportName ?? "the selected report"}{" "}
-                          for the period{" "}
-                          {selectedDate?.isValid()
-                            ? selectedDate.format("YYYY-MM-DD")
-                            : "an unknown period"}{" "}
-                          is in progress.
-                        </Typography>
-
-                        <Typography
-                          variant="caption"
-                          color="text.secondary"
-                          sx={styles.progressCaption}
-                        >
-                          {downloadedMB
-                            ? `Streaming report data… ${downloadedMB} MB received`
-                            : "Preparing your report stream…"}
-                        </Typography>
-                      </Box>
-
-                      {downloadedMB && (
-                        <CustomChip
-                          color="error"
-                          label={`${downloadedMB} MB downloaded`}
-                          variant="filled"
-                        />
-                      )}
-                    </Box>
-                    <LinearProgress
-                      variant="indeterminate"
-                      sx={styles.progressBar}
-                    />
-                  </Box>
-                </Fade>
-              </Box>
-            </Card>
-          </Stack>
-        </Box>
-      </Stack>
-    </Grow>
-  );
-}
+export default ProcessSummaryDialog;
