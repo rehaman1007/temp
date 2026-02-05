@@ -1,5 +1,430 @@
-ALTER TABLE FINCORE.PROCESS_RUN
-ADD PROCESS_REMARKS VARCHAR2(500 BYTE);
+import {
+  Dialog,
+  DialogContent,
+  Button,
+  Table,
+  TableHead,
+  TableRow,
+  TableCell,
+  TableBody,
+  TableContainer,
+  Paper,
+  Typography,
+  Box,
+  Stack,
+  IconButton,
+  Tooltip,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  LinearProgress,
+  Fade,
+  useTheme,
+} from "@mui/material";
+import GppBadIcon from "@mui/icons-material/GppBad";
+import GppGoodIcon from "@mui/icons-material/GppGood";
+import CloseIcon from "@mui/icons-material/Close";
+import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { toPng } from "html-to-image";
+import { useRef, useState } from "react";
 
-COMMENT ON COLUMN FINCORE.PROCESS_RUN.PROCESS_REMARKS
-IS 'Overall remarks or error message for the process execution';
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import GlifReportsStyles from "../../glifReports/GlifReportsStyles";
+import CustomChip from "../../../utils/CustomChip";
+
+/* ================= FORMAT ================= */
+
+const formatAmount = (num) =>
+  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
+
+/* ================= SUMMARY → FILE MAP ================= */
+
+const SUMMARY_FILE_MAP = {
+  BALANCE: "balance_compare_report",
+  SIBA: "intr_report",
+  SUSPENSE: "cntr_report",
+};
+
+/* ====================================================== */
+
+const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
+  const reportRef = useRef(null);
+  const copyTimeoutRef = useRef(null);
+
+  const [copied, setCopied] = useState(false);
+  const [summaryType, setSummaryType] = useState("BALANCE");
+
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
+
+  const theme = useTheme();
+  const styles = GlifReportsStyles(theme);
+
+  if (!data) return null;
+
+  const { RECON_RUN_DATE, summary = [] } = data;
+
+  const totalEntries = summary.reduce(
+    (sum, r) => sum + (r.Total_no_of_entries || 0),
+    0,
+  );
+  const totalNewEntries = summary.reduce(
+    (sum, r) => sum + (r["new entry"] || 0),
+    0,
+  );
+
+  /* ================= EXPORT SUMMARY PDF ================= */
+
+  const exportPDF = () => {
+    const doc = new jsPDF("p", "pt");
+
+    doc.setFontSize(14);
+    doc.text("Difference Summary Report", 40, 40);
+    doc.setFontSize(10);
+    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
+
+    autoTable(doc, {
+      startY: 80,
+      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
+      body: [
+        ...summary.map((r) => [
+          r.HEAD,
+          formatAmount(r.Total_no_of_entries),
+          formatAmount(r["new entry"]),
+        ]),
+        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
+      ],
+      styles: { halign: "right", fontSize: 9 },
+      headStyles: { fillColor: [33, 150, 243] },
+      columnStyles: { 0: { halign: "left" } },
+      didParseCell: (d) => {
+        if (d.row.index === summary.length) {
+          d.cell.styles.fontStyle = "bold";
+        }
+      },
+    });
+
+    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
+  };
+
+  /* ================= COPY PNG (FIXED) ================= */
+
+  const copyPNGToClipboard = async () => {
+    if (!reportRef.current) return;
+
+    try {
+      const dataUrl = await toPng(reportRef.current, {
+        cacheBust: true,
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+        skipFonts: true, // fixes cssRules SecurityError
+      });
+
+      const blob = await (await fetch(dataUrl)).blob();
+
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": blob }),
+      ]);
+
+      setCopied(true);
+      clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error(err);
+      snackbar("Copy failed", "error");
+    }
+  };
+
+  /* ================= DOWNLOAD FULL REPORT ================= */
+
+  const handleDownloadReport = async () => {
+    const fileName = SUMMARY_FILE_MAP[summaryType];
+
+    setIsDownloading(true);
+    setDownloadedBytes(0);
+
+    try {
+      const payload = {
+        runId: "1",
+        // fileName,
+        fileName: "intr_report",
+        // date: RECON_RUN_DATE,
+        date: "2026-01-07",
+      };
+
+      const response = await callApi(
+        "/RS/reports/download-temp-reports",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          onDownloadProgress: (e) => {
+            if (e?.loaded) setDownloadedBytes(e.loaded);
+          },
+        },
+        false,
+      );
+
+      if (response?.data?.size > 22) {
+        const url = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${fileName}_${RECON_RUN_DATE}.zip`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+        snackbar("Report downloaded", "success");
+      } else {
+        snackbar("No reports found, Kindly try again", "warning");
+      }
+    } catch (error) {
+      console.log("error", error);
+
+      if (error && error instanceof Blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const errorJson = JSON.parse(reader.result);
+            console.error(errorJson.message);
+            snackbar(
+              errorJson.message || "No reports found matching your criteria",
+              "error",
+            );
+          } catch (e) {
+            console.error(e);
+            snackbar(
+              "Download failed, Something went wrong, kindly try again.",
+              "error",
+            );
+          }
+        };
+        reader.readAsText(error);
+      } else {
+        snackbar("Network Error: Could not connect to server", "error");
+      }
+    } finally {
+      setIsDownloading(false);
+      setDownloadedBytes(0);
+    }
+  };
+
+  const downloadedMB =
+    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
+
+  /* ====================================================== */
+
+  return (
+    <Dialog open={open} fullWidth maxWidth="md">
+      {/* ================= HEADER ================= */}
+
+      <Box
+        sx={{
+          px: 3,
+          py: 2,
+          borderBottom: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "space-between",
+        }}
+      >
+        <Box>
+          <Typography variant="h6" fontWeight={700}>
+            Difference Summary Report
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Reconciliation Date: {RECON_RUN_DATE}
+          </Typography>
+        </Box>
+
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Tooltip title="Export summary to PDF">
+            <IconButton onClick={exportPDF}>
+              <PictureAsPdfOutlinedIcon />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
+            <IconButton
+              onClick={copyPNGToClipboard}
+              sx={{ color: copied ? "success.main" : "inherit" }}
+            >
+              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
+            </IconButton>
+          </Tooltip>
+
+          <IconButton onClick={onClose}>
+            <CloseIcon />
+          </IconButton>
+        </Stack>
+      </Box>
+
+      {/* ================= BODY ================= */}
+
+      <DialogContent>
+        {/* SUMMARY TYPE + DOWNLOAD */}
+
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            alignItems="center"
+            flexWrap="wrap"
+            gap={2}
+          >
+            <RadioGroup
+              row
+              value={summaryType}
+              onChange={(e) => setSummaryType(e.target.value)}
+            >
+              <FormControlLabel
+                value="BALANCE"
+                control={<Radio />}
+                label="Balance Compare"
+              />
+              <FormControlLabel value="SIBA" control={<Radio />} label="SIBA" />
+              <FormControlLabel
+                value="SUSPENSE"
+                control={<Radio />}
+                label="Suspense"
+              />
+            </RadioGroup>
+
+            <Button
+              startIcon={<CloudDownloadTwoToneIcon />}
+              variant="contained"
+              onClick={handleDownloadReport}
+              disabled={isDownloading}
+            >
+              Download Full Report
+            </Button>
+          </Stack>
+
+          <Fade in={isDownloading} unmountOnExit>
+            <Box
+              sx={{
+                mt: 2,
+                textAlign: "left",
+              }}
+            >
+              <Box sx={styles.progressHeader}>
+                <Box sx={styles.progressIconWrapper}>
+                  <CloudDownloadTwoToneIcon sx={styles.innerDownloadIcon} />
+                </Box>
+                <Box sx={styles.progressHeaderTextBox}>
+                  <Typography variant="body2" fontWeight={600}>
+                    Downloading{" "}
+                    {SUMMARY_FILE_MAP[summaryType] ??
+                      "the selected report is in progress."}
+                  </Typography>
+
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={styles.progressCaption}
+                  >
+                    {downloadedMB
+                      ? `Streaming report data… ${downloadedMB} MB received`
+                      : "Preparing your report stream…"}
+                  </Typography>
+                </Box>
+
+                {downloadedMB && (
+                  <CustomChip
+                    color="error"
+                    label={`${downloadedMB} MB downloaded`}
+                    variant="filled"
+                  />
+                )}
+              </Box>
+              <LinearProgress variant="indeterminate" sx={styles.progressBar} />
+            </Box>
+          </Fade>
+        </Paper>
+
+        {/* SUMMARY TABLE */}
+
+        <TableContainer component={Paper} ref={reportRef}>
+          <Table stickyHeader size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                  TOTAL ENTRIES
+                </TableCell>
+                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                  NEW ENTRIES
+                </TableCell>
+              </TableRow>
+            </TableHead>
+
+            <TableBody>
+              {summary.map((row, i) => (
+                <TableRow key={i}>
+                  <TableCell>{row.HEAD}</TableCell>
+                  <TableCell align="right">
+                    {formatAmount(row.Total_no_of_entries)}
+                  </TableCell>
+                  <TableCell align="right">
+                    {formatAmount(row["new entry"])}
+                  </TableCell>
+                </TableRow>
+              ))}
+
+              <TableRow sx={{ bgcolor: "#f1f1f1" }}>
+                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 700 }}>
+                  {formatAmount(totalEntries)}
+                </TableCell>
+                <TableCell align="right" sx={{ fontWeight: 700 }}>
+                  {formatAmount(totalNewEntries)}
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </DialogContent>
+
+      {/* ================= FOOTER ================= */}
+
+      <Box
+        sx={{
+          px: 3,
+          py: 2,
+          borderTop: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "center",
+          gap: 2,
+        }}
+      >
+        <Button
+          color="error"
+          variant="outlined"
+          startIcon={<GppBadIcon />}
+          onClick={() => onReject(data)}
+        >
+          Reject
+        </Button>
+        <Button
+          color="success"
+          variant="contained"
+          startIcon={<GppGoodIcon />}
+          onClick={() => onAccept(data)}
+        >
+          Accept
+        </Button>
+      </Box>
+    </Dialog>
+  );
+};
+
+export default ProcessSummaryDialog;
