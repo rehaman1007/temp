@@ -1,766 +1,116 @@
-import { useEffect, useState, useRef, useMemo, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import dayjs from "dayjs";
-
-import { Grid, Button, Paper, Stack, TextField } from "@mui/material";
-
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import TaskAltIcon from "@mui/icons-material/TaskAlt";
-
-import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import useApi from "../../hooks/useApi";
-import { resolveConfig } from "../../config/EnvironmentConfig";
-import { timeStampFormatter } from "../../utils/CommonUtilities";
-
-import ProcessStatusHeader from "./components/ProcessStatusHeader";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
-import ActionConfirmDialog from "./components/ActionConfirmDialog";
-import LoadingOverlay from "../../utils/LoadingOverlay";
-
-/* =====================================================
-   NORMALIZATION
-===================================================== */
-
-const normalizeStageDetails = (stages = []) => {
-  const map = new Map();
-
-  stages.forEach((s) => {
-    const prev = map.get(s.processStage);
-    if (!prev || s.startTime > prev.startTime) {
-      map.set(s.processStage, s);
-    }
-  });
-
-  return Array.from(map.values())
-    .sort((a, b) => a.processStage - b.processStage)
-    .map((s) => ({
-      ...s,
-      _START_TIME_RAW: s.startTime,
-      _END_TIME_RAW: s.endTime,
-      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
-      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
-    }));
-};
-
-const normalizeProcesses = (data = []) =>
-  data.map((p) => ({
-    ...p,
-    type: p.type ?? p.processType,
-    stageDetails: normalizeStageDetails(p.stageDetails || []),
-  }));
-
-const mergeProcesses = (prev = [], incoming = []) => {
-  const map = new Map(prev.map((p) => [p.type, p]));
-  incoming.forEach((p) => map.set(p.type, p));
-  return Array.from(map.values());
-};
-
-/* =====================================================
-   MAIN PAGE
-===================================================== */
-
-const ProcessStatusPage = () => {
-  const snackbar = useCustomSnackbar();
-  const token = useSelector((s) => s.auth.token);
-  const { callApi } = useApi();
-
-  const INITIAL_DATA_URL = "/PS/process/processes/data";
-  const TRIGGER_DAG_URL = "/PS/airflow/trigger";
-  const STOP_DAG_URL = "/PS/airflow/trigger/";
-  const FINISH_EOD_URL = "/PS/process/finish-eod";
-
-  const service = resolveConfig("/PS");
-  const STREAM_URL = `${service}/process/processes`;
-
-  const [currentEtlDate, setCurrentEtlDate] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(null);
-
-  const [processes, setProcesses] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [apiLoading, setApiLoading] = useState(false);
-
-  const [selectedProcessType, setSelectedProcessType] = useState(null);
-  const [summaryData, setSummaryData] = useState(null);
-
-  const [confirmConfig, setConfirmConfig] = useState(null);
-
-  const initialFetchDone = useRef(false);
-
-  /* =====================================================
-     LOAD BY DATE
-  ===================================================== */
-
-  const loadByDate = useCallback(
-    async (date) => {
-      setLoading(true);
-      try {
-        const res = await callApi(
-          INITIAL_DATA_URL,
-          { etlDate: date ? date.format("YYYY-MM-DD") : "" },
-          "GET",
-        );
-
-        setCurrentEtlDate(res?.fincoreDate?.etlDate);
-        setSelectedDate(date || dayjs(res?.fincoreDate?.etlDate));
-        setProcesses(normalizeProcesses(res?.initialData || []));
-      } catch {
-        snackbar("Failed to load processes", "error");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [callApi, snackbar],
-  );
-
-  useEffect(() => {
-    if (initialFetchDone.current) return;
-    initialFetchDone.current = true;
-    loadByDate(null);
-  }, [loadByDate]);
-
-  /* =====================================================
-     SSE (ONLY CURRENT DATE)
-  ===================================================== */
-
-  useEffect(() => {
-    if (loading) return;
-
-    if (
-      selectedDate &&
-      currentEtlDate &&
-      selectedDate.format("YYYY-MM-DD") !== currentEtlDate
-    ) {
-      return;
-    }
-
-    const controller = new AbortController();
-
-    fetchEventSource(STREAM_URL, {
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
-      onmessage(e) {
-        if (e.event === "connected") return;
-        const raw = JSON.parse(e.data);
-        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
-      },
-    });
-
-    return () => controller.abort();
-  }, [STREAM_URL, token, loading, selectedDate, currentEtlDate]);
-
-  /* =====================================================
-     DERIVED
-  ===================================================== */
-
-  const selectedProcess = useMemo(() => {
-    if (!selectedProcessType) return null;
-    return processes.find((p) => p.type === selectedProcessType) || null;
-  }, [processes, selectedProcessType]);
-
-  const isCurrentDate =
-    selectedDate &&
-    currentEtlDate &&
-    selectedDate.format("YYYY-MM-DD") === currentEtlDate;
-
-  const allCompleted = useMemo(
-    () =>
-      processes.length &&
-      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
-    [processes],
-  );
-
-  /* =====================================================
-     CONFIRMATION ACTION HANDLING
-  ===================================================== */
-
-  const triggerDag = async (dag_id, remarks) => {
-    setApiLoading(true);
-    console.log(dag_id);
-    const payload = { dag_id, conf: {}, remarks };
-    try {
-      const res = await callApi(TRIGGER_DAG_URL, payload, "POST");
-      if (res?.success)
-        snackbar("Start EOD action executed successfully", "success");
-    } catch (e) {
-      console.error(e);
-      snackbar(
-        e.message || "Something went wrong, Kindly try again after some time",
-        "error",
-      );
-    } finally {
-      setApiLoading(false);
-    }
-  };
-
-  const stopDag = async (dag, remarks) => {
-    setApiLoading(true);
-    const payload = { conf: {}, remarks };
-    try {
-      const res = await callApi(STOP_DAG_URL + dag, payload, "POST");
-      if (res?.success)
-        snackbar("Stop Process action executed successfully", "success");
-    } catch (e) {
-      console.error(e);
-      snackbar(
-        e.message || "Something went wrong, Kindly try again after some time",
-        "error",
-      );
-    } finally {
-      setApiLoading(false);
-    }
-  };
-
-  const handleConfirmAction = async (remarks) => {
-    const { action, process } = confirmConfig;
-
-    console.log(process);
-
-    if (action === "finishEod") {
-      try {
-        setApiLoading(true);
-        const res = await callApi(FINISH_EOD_URL, { remarks }, "POST");
-        if (res?.success) snackbar("Finished EOD successfully", "success");
-      } catch {
-        snackbar("Finish EOD failed", "error");
-      } finally {
-        setApiLoading(false);
-      }
-    } else if (action === "stop") {
-      await stopDag(process.dagId, remarks);
-    } else {
-      await triggerDag(process.dagId, remarks);
-    }
-
-    setConfirmConfig(null);
-  };
-
-  /* =====================================================
-     SUMMARY
-  ===================================================== */
-
-  const handleOpenSummary = (row) => {
-    const stage6 = [...row.stageDetails]
-      .sort((a, b) => b.id - a.id)
-      .find((s) => s.processStage === 6);
-
-    if (stage6?.differenceSummary) {
-      setSummaryData(stage6.differenceSummary);
-    } else {
-      snackbar("Summary data not available or empty", "warning");
-    }
-  };
-
-  /* =====================================================
-     RENDER
-  ===================================================== */
-
-  return (
-    <>
-      <Paper sx={{ p: 3 }}>
-        <ProcessStatusHeader etlDate={currentEtlDate} />
-
-        {/* DATE PICKER */}
-        {selectedDate && (
-          <Stack alignItems="center" mt={3} mb={2}>
-            <LocalizationProvider dateAdapter={AdapterDayjs}>
-              <DatePicker
-                label="Select ETL Date"
-                value={selectedDate}
-                onChange={(d) => {
-                  setSelectedDate(d);
-                  loadByDate(d);
-                }}
-                renderInput={(p) => <TextField {...p} />}
-              />
-            </LocalizationProvider>
-          </Stack>
-        )}
-
-        {/* EOD BUTTONS */}
-        {isCurrentDate && (
-          <Grid container justifyContent="center" spacing={2} my={3}>
-            <Grid>
-              <Button
-                variant="contained"
-                startIcon={<PlayArrowIcon />}
-                disabled={processes.length > 0}
-                onClick={() =>
-                  setConfirmConfig({
-                    action: "start",
-                    process: { dagId: "orchestrator_v2_dag" },
-                  })
-                }
-              >
-                Start EOD
-              </Button>
-            </Grid>
-
-            <Grid>
-              <Button
-                variant="contained"
-                color="success"
-                startIcon={<TaskAltIcon />}
-                disabled={!allCompleted}
-                onClick={() =>
-                  setConfirmConfig({
-                    action: "finishEod",
-                    process: null,
-                  })
-                }
-              >
-                Finish EOD
-              </Button>
-            </Grid>
-          </Grid>
-        )}
-
-        {/* DETAILS */}
-        <ProcessDetailsDialog
-          process={selectedProcess}
-          onClose={() => setSelectedProcessType(null)}
-          onStart={(p) =>
-            setConfirmConfig({
-              action: "restart",
-              severity: "warning",
-              process: p,
-            })
-          }
-          onStop={(p) =>
-            setConfirmConfig({
-              action: "stop",
-              severity: "error",
-              process: p,
-            })
-          }
-        />
-
-        {/* SUMMARY */}
-        <ProcessSummaryDialog
-          open={!!summaryData}
-          data={summaryData}
-          onClose={() => setSummaryData(null)}
-        />
-
-        {/* TABLE */}
-        <Paper>
-          <ProcessStatusTable
-            loading={loading}
-            processes={processes}
-            actions={{
-              onStart: (p) =>
-                setConfirmConfig({
-                  action: "restart",
-                  severity: "warning",
-                  process: p,
-                }),
-
-              onStop: (p) =>
-                setConfirmConfig({
-                  action: "stop",
-                  severity: "error",
-                  process: p,
-                }),
-
-              onView: setSelectedProcessType,
-              onSummary: handleOpenSummary,
-            }}
-          />
-        </Paper>
-      </Paper>
-
-      {/* CONFIRM DIALOG */}
-      <ActionConfirmDialog
-        open={!!confirmConfig}
-        actionType={confirmConfig?.action}
-        severity={confirmConfig?.severity}
-        processName={confirmConfig?.process?.type}
-        onConfirm={handleConfirmAction}
-        onClose={() => setConfirmConfig(null)}
-      />
-
-      <LoadingOverlay loading={apiLoading} />
-    </>
-  );
-};
-
-export default ProcessStatusPage;
-
-import {
-  Dialog,
-  DialogContent,
-  Button,
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  Stack,
-  IconButton,
-  Tooltip,
-  RadioGroup,
-  FormControlLabel,
-  Radio,
-  LinearProgress,
-} from "@mui/material";
-import GppBadIcon from "@mui/icons-material/GppBad";
-import GppGoodIcon from "@mui/icons-material/GppGood";
-import CloseIcon from "@mui/icons-material/Close";
-import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
-
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { toPng } from "html-to-image";
-import { useRef, useState } from "react";
-
-import useApi from "../../../hooks/useApi";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
-
-/* ================= FORMAT ================= */
-
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
-
-/* ================= SUMMARY → FILE MAP ================= */
-
-const SUMMARY_FILE_MAP = {
-  BALANCE: "balance_compare_report",
-  SIBA: "intr_report",
-  SUSPENSE: "cntr_report",
-};
-
-/* ====================================================== */
-
-const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
-  const reportRef = useRef(null);
-  const copyTimeoutRef = useRef(null);
-
-  const [copied, setCopied] = useState(false);
-  const [summaryType, setSummaryType] = useState("BALANCE");
-
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadedBytes, setDownloadedBytes] = useState(0);
-
-  const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-
-  if (!data) return null;
-
-  const { RECON_RUN_DATE, summary = [] } = data;
-
-  const totalEntries = summary.reduce(
-    (sum, r) => sum + (r.Total_no_of_entries || 0),
-    0,
-  );
-  const totalNewEntries = summary.reduce(
-    (sum, r) => sum + (r["new entry"] || 0),
-    0,
-  );
-
-  /* ================= EXPORT SUMMARY PDF ================= */
-
-  const exportPDF = () => {
-    const doc = new jsPDF("p", "pt");
-
-    doc.setFontSize(14);
-    doc.text("Difference Summary Report", 40, 40);
-    doc.setFontSize(10);
-    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
-
-    autoTable(doc, {
-      startY: 80,
-      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
-      body: [
-        ...summary.map((r) => [
-          r.HEAD,
-          formatAmount(r.Total_no_of_entries),
-          formatAmount(r["new entry"]),
-        ]),
-        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
-      ],
-      styles: { halign: "right", fontSize: 9 },
-      headStyles: { fillColor: [33, 150, 243] },
-      columnStyles: { 0: { halign: "left" } },
-      didParseCell: (d) => {
-        if (d.row.index === summary.length) {
-          d.cell.styles.fontStyle = "bold";
-        }
-      },
-    });
-
-    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
-  };
-
-  /* ================= COPY PNG (FIXED) ================= */
-
-  const copyPNGToClipboard = async () => {
-    if (!reportRef.current) return;
-
-    try {
-      const dataUrl = await toPng(reportRef.current, {
-        cacheBust: true,
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-        skipFonts: true, // fixes cssRules SecurityError
-      });
-
-      const blob = await (await fetch(dataUrl)).blob();
-
-      await navigator.clipboard.write([
-        new ClipboardItem({ "image/png": blob }),
-      ]);
-
-      setCopied(true);
-      clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error(err);
-      snackbar("Copy failed", "error");
-    }
-  };
-
-  /* ================= DOWNLOAD FULL REPORT ================= */
-
-  const handleDownloadReport = async () => {
-    const fileName = SUMMARY_FILE_MAP[summaryType];
-
-    setIsDownloading(true);
-    setDownloadedBytes(0);
-
-    try {
-      const payload = {
-        moduleType: "WHOLE_BANK",
-        fileName,
-        date: RECON_RUN_DATE,
-      };
-
-      const response = await callApi(
-        "/RS/reports/download",
-        payload,
-        "POST",
-        "blob",
-        "application/json",
-        {
-          onDownloadProgress: (e) => {
-            if (e?.loaded) setDownloadedBytes(e.loaded);
-          },
-        },
-        false,
-      );
-
-      if (response?.data?.size > 20) {
-        const url = window.URL.createObjectURL(response.data);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${fileName}_${RECON_RUN_DATE}.zip`;
-        a.click();
-        window.URL.revokeObjectURL(url);
-        snackbar("Report downloaded", "success");
-      } else {
-        snackbar("No data found", "warning");
-      }
-    } catch {
-      snackbar("Download failed", "error");
-    } finally {
-      setIsDownloading(false);
-      setDownloadedBytes(0);
-    }
-  };
-
-  const downloadedMB =
-    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
-
-  /* ====================================================== */
-
-  return (
-    <Dialog open={open} fullWidth maxWidth="md">
-      {/* ================= HEADER ================= */}
-
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderBottom: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "space-between",
-        }}
-      >
-        <Box>
-          <Typography variant="h6" fontWeight={700}>
-            Difference Summary Report
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Reconciliation Date: {RECON_RUN_DATE}
-          </Typography>
-        </Box>
-
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Tooltip title="Export summary to PDF">
-            <IconButton onClick={exportPDF}>
-              <PictureAsPdfOutlinedIcon />
-            </IconButton>
-          </Tooltip>
-
-          <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
-            <IconButton
-              onClick={copyPNGToClipboard}
-              sx={{ color: copied ? "success.main" : "inherit" }}
-            >
-              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
-            </IconButton>
-          </Tooltip>
-
-          <IconButton onClick={onClose}>
-            <CloseIcon />
-          </IconButton>
-        </Stack>
-      </Box>
-
-      {/* ================= BODY ================= */}
-
-      <DialogContent>
-        {/* SUMMARY TYPE + DOWNLOAD */}
-
-        <Paper sx={{ p: 2, mb: 2 }}>
-          <Stack
-            direction="row"
-            justifyContent="space-between"
-            alignItems="center"
-            flexWrap="wrap"
-            gap={2}
-          >
-            <RadioGroup
-              row
-              value={summaryType}
-              onChange={(e) => setSummaryType(e.target.value)}
-            >
-              <FormControlLabel
-                value="BALANCE"
-                control={<Radio />}
-                label="Balance Compare"
-              />
-              <FormControlLabel value="SIBA" control={<Radio />} label="SIBA" />
-              <FormControlLabel
-                value="SUSPENSE"
-                control={<Radio />}
-                label="Suspense"
-              />
-            </RadioGroup>
-
-            <Button
-              startIcon={<CloudDownloadTwoToneIcon />}
-              variant="contained"
-              onClick={handleDownloadReport}
-              disabled={isDownloading}
-            >
-              Download Full Report
-            </Button>
-          </Stack>
-
-          {isDownloading && (
-            <Box mt={1}>
-              <LinearProgress />
-              {downloadedMB && (
-                <Typography variant="caption">
-                  {downloadedMB} MB downloaded
-                </Typography>
-              )}
-            </Box>
-          )}
-        </Paper>
-
-        {/* SUMMARY TABLE */}
-
-        <TableContainer component={Paper} ref={reportRef}>
-          <Table stickyHeader size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  TOTAL ENTRIES
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  NEW ENTRIES
-                </TableCell>
-              </TableRow>
-            </TableHead>
-
-            <TableBody>
-              {summary.map((row, i) => (
-                <TableRow key={i}>
-                  <TableCell>{row.HEAD}</TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row.Total_no_of_entries)}
-                  </TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row["new entry"])}
-                  </TableCell>
-                </TableRow>
-              ))}
-
-              <TableRow sx={{ bgcolor: "#f1f1f1" }}>
-                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalEntries)}
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalNewEntries)}
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </DialogContent>
-
-      {/* ================= FOOTER ================= */}
-
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderTop: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "center",
-          gap: 2,
-        }}
-      >
-        <Button
-          color="error"
-          variant="outlined"
-          startIcon={<GppBadIcon />}
-          onClick={() => onReject(data)}
-        >
-          Reject
-        </Button>
-        <Button
-          color="success"
-          variant="contained"
-          startIcon={<GppGoodIcon />}
-          onClick={() => onAccept(data)}
-        >
-          Accept
-        </Button>
-      </Box>
-    </Dialog>
-  );
-};
-
-export default ProcessSummaryDialog;
+--------------------------------------------------------
+--  DDL for Table PROCESS_RUN
+--------------------------------------------------------
+
+  CREATE TABLE "FINCORE"."PROCESS_RUN" 
+   (	"PROCESS_RUN_ID" NUMBER, 
+	"PROCESS_ID" NUMBER, 
+	"ETL_DATE" DATE, 
+	"RUN_ID" NUMBER, 
+	"STATUS" NUMBER, 
+	"START_TIME" TIMESTAMP (6), 
+	"END_TIME" TIMESTAMP (6), 
+	"TRIGGERED_BY" VARCHAR2(100 BYTE), 
+	"AIRFLOW_RUN_ID" VARCHAR2(100 BYTE)
+   ) SEGMENT CREATION IMMEDIATE 
+  PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255 
+ NOCOMPRESS LOGGING
+  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+  BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+  TABLESPACE "TBS_FINCORE" ;
+--------------------------------------------------------
+--  DDL for Index UQ_PROCESS_RUN
+--------------------------------------------------------
+
+  CREATE UNIQUE INDEX "FINCORE"."UQ_PROCESS_RUN" ON "FINCORE"."PROCESS_RUN" ("PROCESS_ID", "ETL_DATE", "RUN_ID") 
+  PCTFREE 10 INITRANS 2 MAXTRANS 255 
+  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+  BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+  TABLESPACE "TBS_FINCORE" ;
+--------------------------------------------------------
+--  DDL for Index PROCESS_RUN_PK
+--------------------------------------------------------
+
+  CREATE UNIQUE INDEX "FINCORE"."PROCESS_RUN_PK" ON "FINCORE"."PROCESS_RUN" ("PROCESS_RUN_ID") 
+  PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS 
+  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+  BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+  TABLESPACE "TBS_FINCORE" ;
+--------------------------------------------------------
+--  Constraints for Table PROCESS_RUN
+--------------------------------------------------------
+
+  ALTER TABLE "FINCORE"."PROCESS_RUN" MODIFY ("PROCESS_ID" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN" MODIFY ("ETL_DATE" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN" MODIFY ("RUN_ID" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN" MODIFY ("STATUS" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN" ADD CONSTRAINT "UQ_PROCESS_RUN" UNIQUE ("PROCESS_ID", "ETL_DATE", "RUN_ID")
+  USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 
+  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+  BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+  TABLESPACE "TBS_FINCORE"  ENABLE;
+  ALTER TABLE "FINCORE"."PROCESS_RUN" ADD CONSTRAINT "PROCESS_RUN_PK" PRIMARY KEY ("PROCESS_RUN_ID")
+  USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS 
+  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1
+  BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+  TABLESPACE "TBS_FINCORE"  ENABLE;
+--------------------------------------------------------
+--  Ref Constraints for Table PROCESS_RUN
+--------------------------------------------------------
+
+  ALTER TABLE "FINCORE"."PROCESS_RUN" ADD CONSTRAINT "FK_PR_PROCESS" FOREIGN KEY ("PROCESS_ID")
+	  REFERENCES "FINCORE"."PROCESS_MASTER" ("PROCESS_ID") ENABLE;
+
+
+
+
+--------------------------------------------------------
+--  DDL for Table PROCESS_RUN_STAGE
+--------------------------------------------------------
+
+  CREATE TABLE "FINCORE"."PROCESS_RUN_STAGE" 
+   (	"PROCESS_RUN_STAGE_ID" NUMBER, 
+	"PROCESS_RUN_ID" NUMBER, 
+	"STAGE_ID" VARCHAR2(50 BYTE), 
+	"PARENT_STAGE_ID" VARCHAR2(50 BYTE), 
+	"STATUS" NUMBER, 
+	"EVENT_TIME" TIMESTAMP (6), 
+	"SOURCE" VARCHAR2(20 BYTE), 
+	"REMARKS" VARCHAR2(500 BYTE), 
+	"SUMMARY" CLOB
+   ) SEGMENT CREATION DEFERRED 
+  PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255 
+ NOCOMPRESS LOGGING
+  TABLESPACE "TBS_FINCORE" 
+ LOB ("SUMMARY") STORE AS SECUREFILE (
+  TABLESPACE "TBS_FINCORE" ENABLE STORAGE IN ROW CHUNK 8192
+  NOCACHE LOGGING  NOCOMPRESS  KEEP_DUPLICATES ) ;
+--------------------------------------------------------
+--  DDL for Index SYS_C0010339
+--------------------------------------------------------
+
+  CREATE UNIQUE INDEX "FINCORE"."SYS_C0010339" ON "FINCORE"."PROCESS_RUN_STAGE" ("PROCESS_RUN_STAGE_ID") 
+  PCTFREE 10 INITRANS 2 MAXTRANS 255 
+  TABLESPACE "TBS_FINCORE" ;
+--------------------------------------------------------
+--  Constraints for Table PROCESS_RUN_STAGE
+--------------------------------------------------------
+
+  ALTER TABLE "FINCORE"."PROCESS_RUN_STAGE" MODIFY ("PROCESS_RUN_ID" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN_STAGE" MODIFY ("STAGE_ID" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN_STAGE" MODIFY ("STATUS" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN_STAGE" MODIFY ("SOURCE" NOT NULL ENABLE);
+  ALTER TABLE "FINCORE"."PROCESS_RUN_STAGE" ADD PRIMARY KEY ("PROCESS_RUN_STAGE_ID")
+  USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 
+  TABLESPACE "TBS_FINCORE"  ENABLE;
+--------------------------------------------------------
+--  Ref Constraints for Table PROCESS_RUN_STAGE
+--------------------------------------------------------
+
+  ALTER TABLE "FINCORE"."PROCESS_RUN_STAGE" ADD CONSTRAINT "FK_PRS_RUN" FOREIGN KEY ("PROCESS_RUN_ID")
+	  REFERENCES "FINCORE"."PROCESS_RUN" ("PROCESS_RUN_ID") ENABLE;
