@@ -1,391 +1,227 @@
-import {
-  Dialog,
-  DialogContent,
-  Button,
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  Stack,
-  IconButton,
-  Tooltip,
-  RadioGroup,
-  FormControlLabel,
-  Radio,
-  LinearProgress,
-} from "@mui/material";
-
-import CloseIcon from "@mui/icons-material/Close";
-import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
-
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { toPng } from "html-to-image";
-import { useRef, useState } from "react";
-
-import useApi from "../../../hooks/useApi";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
-
-/* ================= FORMAT ================= */
-
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
-
-/* ================= SUMMARY → FILE MAP ================= */
-
-const SUMMARY_FILE_MAP = {
-  BALANCE: "balance_compare_report",
-  SIBA: "intr_report",
-  SUSPENSE: "cntr_report",
-};
-
-/* ====================================================== */
-
-const ProcessSummaryDialog = ({
-  open,
-  data,
-  onClose,
-  onAccept,
-  onReject,
-}) => {
-
-  const reportRef = useRef(null);
-  const copyTimeoutRef = useRef(null);
-
-  const [copied, setCopied] = useState(false);
-  const [summaryType, setSummaryType] = useState("BALANCE");
-
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadedBytes, setDownloadedBytes] = useState(0);
-
-  const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-
-  if (!data) return null;
-
-  const { RECON_RUN_DATE, summary = [] } = data;
-
-  const totalEntries = summary.reduce(
-    (sum, r) => sum + (r.Total_no_of_entries || 0),
-    0
-  );
-  const totalNewEntries = summary.reduce(
-    (sum, r) => sum + (r["new entry"] || 0),
-    0
-  );
-
-  /* ================= EXPORT SUMMARY PDF ================= */
-
-  const exportPDF = () => {
-    const doc = new jsPDF("p", "pt");
-
-    doc.setFontSize(14);
-    doc.text("Difference Summary Report", 40, 40);
-    doc.setFontSize(10);
-    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
-
-    autoTable(doc, {
-      startY: 80,
-      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
-      body: [
-        ...summary.map((r) => [
-          r.HEAD,
-          formatAmount(r.Total_no_of_entries),
-          formatAmount(r["new entry"]),
-        ]),
-        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
-      ],
-      styles: { halign: "right", fontSize: 9 },
-      headStyles: { fillColor: [33, 150, 243] },
-      columnStyles: { 0: { halign: "left" } },
-      didParseCell: (d) => {
-        if (d.row.index === summary.length) {
-          d.cell.styles.fontStyle = "bold";
-        }
-      },
-    });
-
-    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
-  };
-
-  /* ================= COPY PNG (FIXED) ================= */
-
-  const copyPNGToClipboard = async () => {
-    if (!reportRef.current) return;
-
-    try {
-      const dataUrl = await toPng(reportRef.current, {
-        cacheBust: true,
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-        skipFonts: true,      // ✅ fixes cssRules SecurityError
-      });
-
-      const blob = await (await fetch(dataUrl)).blob();
-
-      await navigator.clipboard.write([
-        new ClipboardItem({ "image/png": blob }),
-      ]);
-
-      setCopied(true);
-      clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error(err);
-      snackbar("Copy failed", "error");
-    }
-  };
-
-  /* ================= DOWNLOAD FULL REPORT ================= */
-
-  const handleDownloadReport = async () => {
-    const fileName = SUMMARY_FILE_MAP[summaryType];
-
-    setIsDownloading(true);
-    setDownloadedBytes(0);
-
-    try {
-      const payload = {
-        moduleType: "WHOLE_BANK",
-        fileName,
-        date: RECON_RUN_DATE,
-      };
-
-      const response = await callApi(
-        "/RS/reports/download",
-        payload,
-        "POST",
-        "blob",
-        "application/json",
-        {
-          onDownloadProgress: (e) => {
-            if (e?.loaded) setDownloadedBytes(e.loaded);
-          },
-        },
-        false
-      );
-
-      if (response?.data?.size > 20) {
-        const url = window.URL.createObjectURL(response.data);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${fileName}_${RECON_RUN_DATE}.zip`;
-        a.click();
-        window.URL.revokeObjectURL(url);
-        snackbar("Report downloaded", "success");
-      } else {
-        snackbar("No data found", "warning");
-      }
-    } catch {
-      snackbar("Download failed", "error");
-    } finally {
-      setIsDownloading(false);
-      setDownloadedBytes(0);
-    }
-  };
-
-  const downloadedMB =
-    downloadedBytes > 0
-      ? (downloadedBytes / (1024 * 1024)).toFixed(2)
-      : null;
-
-  /* ====================================================== */
-
-  return (
-    <Dialog open={open} fullWidth maxWidth="md">
-
-      {/* ================= HEADER ================= */}
-
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderBottom: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "space-between",
-        }}
-      >
-        <Box>
-          <Typography variant="h6" fontWeight={700}>
-            Difference Summary Report
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Reconciliation Date: {RECON_RUN_DATE}
-          </Typography>
-        </Box>
-
-        <Stack direction="row" spacing={1} alignItems="center">
-
-          <Tooltip title="Export summary to PDF">
-            <IconButton onClick={exportPDF}>
-              <PictureAsPdfOutlinedIcon />
-            </IconButton>
-          </Tooltip>
-
-          <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
-            <IconButton
-              onClick={copyPNGToClipboard}
-              sx={{ color: copied ? "success.main" : "inherit" }}
-            >
-              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
-            </IconButton>
-          </Tooltip>
-
-          <IconButton onClick={onClose}>
-            <CloseIcon />
-          </IconButton>
-
-        </Stack>
-      </Box>
-
-      {/* ================= BODY ================= */}
-
-      <DialogContent>
-
-        {/* SUMMARY TYPE + DOWNLOAD */}
-
-        <Paper sx={{ p: 2, mb: 2 }}>
-          <Stack
-            direction="row"
-            justifyContent="space-between"
-            alignItems="center"
-            flexWrap="wrap"
-            gap={2}
-          >
-
-            <RadioGroup
-              row
-              value={summaryType}
-              onChange={(e) => setSummaryType(e.target.value)}
-            >
-              <FormControlLabel
-                value="BALANCE"
-                control={<Radio />}
-                label="Balance Compare"
-              />
-              <FormControlLabel
-                value="SIBA"
-                control={<Radio />}
-                label="SIBA"
-              />
-              <FormControlLabel
-                value="SUSPENSE"
-                control={<Radio />}
-                label="Suspense"
-              />
-            </RadioGroup>
-
-            <Button
-              startIcon={<CloudDownloadTwoToneIcon />}
-              variant="contained"
-              onClick={handleDownloadReport}
-              disabled={isDownloading}
-            >
-              Download Full Report
-            </Button>
-
-          </Stack>
-
-          {isDownloading && (
-            <Box mt={1}>
-              <LinearProgress />
-              {downloadedMB && (
-                <Typography variant="caption">
-                  {downloadedMB} MB downloaded
-                </Typography>
-              )}
-            </Box>
-          )}
-        </Paper>
-
-        {/* SUMMARY TABLE */}
-
-        <TableContainer component={Paper} ref={reportRef}>
-          <Table stickyHeader size="small">
-
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  TOTAL ENTRIES
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  NEW ENTRIES
-                </TableCell>
-              </TableRow>
-            </TableHead>
-
-            <TableBody>
-
-              {summary.map((row, i) => (
-                <TableRow key={i}>
-                  <TableCell>{row.HEAD}</TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row.Total_no_of_entries)}
-                  </TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row["new entry"])}
-                  </TableCell>
-                </TableRow>
-              ))}
-
-              <TableRow sx={{ bgcolor: "#f1f1f1" }}>
-                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalEntries)}
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalNewEntries)}
-                </TableCell>
-              </TableRow>
-
-            </TableBody>
-          </Table>
-        </TableContainer>
-
-      </DialogContent>
-
-      {/* ================= FOOTER ================= */}
-
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderTop: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "flex-end",
-          gap: 2,
-        }}
-      >
-        <Button
-          color="error"
-          variant="outlined"
-          onClick={() => onReject(data)}
-        >
-          Reject
-        </Button>
-
-        <Button
-          color="success"
-          variant="contained"
-          onClick={() => onAccept(data)}
-        >
-          Accept
-        </Button>
-      </Box>
-
-    </Dialog>
-  );
-};
-
-export default ProcessSummaryDialog;
+/*==========================================================
+  OPTIONAL CLEANUP
+==========================================================*/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE FINCORE.PROCESS_RUN_STAGE CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE FINCORE.PROCESS_RUN CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE FINCORE.PROCESS_MASTER CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE FINCORE.PROCESS_STAGE_MASTER CASCADE CONSTRAINTS'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP SEQUENCE FINCORE.PROCESS_RUN_SEQ'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP SEQUENCE FINCORE.PROCESS_RUN_STAGE_SEQ'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+
+/*==========================================================
+  PROCESS_STAGE_MASTER
+==========================================================*/
+CREATE TABLE FINCORE.PROCESS_STAGE_MASTER (
+  STAGE_ID NUMBER PRIMARY KEY,
+  TITLE VARCHAR2(100) NOT NULL,
+  ICON VARCHAR2(50) NOT NULL
+);
+
+COMMENT ON TABLE FINCORE.PROCESS_STAGE_MASTER
+IS 'Master list of all possible stages in a process pipeline';
+
+COMMENT ON COLUMN FINCORE.PROCESS_STAGE_MASTER.STAGE_ID
+IS 'Unique identifier of a stage';
+
+COMMENT ON COLUMN FINCORE.PROCESS_STAGE_MASTER.TITLE
+IS 'Display name of the stage shown in UI';
+
+COMMENT ON COLUMN FINCORE.PROCESS_STAGE_MASTER.ICON
+IS 'UI icon name representing the stage';
+
+/*==========================================================
+  PROCESS_MASTER
+==========================================================*/
+CREATE TABLE FINCORE.PROCESS_MASTER (
+  PROCESS_ID NUMBER PRIMARY KEY,
+  PROCESS_NAME VARCHAR2(30) NOT NULL,
+  PROCESS_DAG_ID VARCHAR2(100) NOT NULL,
+  PROCESS_FLAG CHAR(1) DEFAULT 'Y' CHECK (PROCESS_FLAG IN ('Y','N')),
+  PROCESS_DESCRIPTION VARCHAR2(250),
+  CONSTRAINT UK_PROCESS_NAME UNIQUE (PROCESS_NAME)
+);
+
+COMMENT ON TABLE FINCORE.PROCESS_MASTER
+IS 'Master of business processes with merged DAG configuration';
+
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PROCESS_ID
+IS 'Unique identifier of business process';
+
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PROCESS_NAME
+IS 'Business name of process (CBS, GLIF, DIFFERENCE, ETL, BANCS etc)';
+
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PROCESS_DAG_ID
+IS 'Airflow DAG name used to execute this process';
+
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PROCESS_FLAG
+IS 'Y if process is active, N if disabled';
+
+COMMENT ON COLUMN FINCORE.PROCESS_MASTER.PROCESS_DESCRIPTION
+IS 'Logical description of what this process does';
+
+/*==========================================================
+  PROCESS_RUN
+==========================================================*/
+CREATE TABLE FINCORE.PROCESS_RUN (
+  RUN_ID NUMBER PRIMARY KEY,
+  PROCESS_ID NUMBER NOT NULL,
+  START_TIME TIMESTAMP,
+  END_TIME TIMESTAMP,
+  STATUS NUMBER(1) CHECK (STATUS IN (0,1,2,3)),
+  TRIGGERED_BY VARCHAR2(30),
+  ETL_DATE DATE,
+  AIRFLOW_RUN_ID VARCHAR2(50),
+  CONSTRAINT FK_RUN_PROCESS
+    FOREIGN KEY (PROCESS_ID)
+    REFERENCES FINCORE.PROCESS_MASTER(PROCESS_ID)
+);
+
+COMMENT ON TABLE FINCORE.PROCESS_RUN
+IS 'One execution (run) of a process';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.RUN_ID
+IS 'Unique identifier of process run';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.PROCESS_ID
+IS 'Foreign key referencing PROCESS_MASTER.PROCESS_ID';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.START_TIME
+IS 'Timestamp when execution started';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.END_TIME
+IS 'Timestamp when execution ended';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.STATUS
+IS '0 Not Started, 1 Running, 2 Success, 3 Failed';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.TRIGGERED_BY
+IS 'User or system who triggered the run';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.ETL_DATE
+IS 'Business date of execution';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN.AIRFLOW_RUN_ID
+IS 'Run id generated by Airflow';
+
+/*==========================================================
+  PROCESS_RUN_STAGE
+==========================================================*/
+CREATE TABLE FINCORE.PROCESS_RUN_STAGE (
+  RUN_STAGE_ID NUMBER PRIMARY KEY,
+  RUN_ID NUMBER NOT NULL,
+  PROCESS_ID NUMBER NOT NULL,
+  STAGE_ID NUMBER NOT NULL,
+  START_TIME TIMESTAMP,
+  END_TIME TIMESTAMP,
+  STATUS NUMBER(1) CHECK (STATUS IN (0,1,2,3)),
+  EXECUTION_REMARKS VARCHAR2(400),
+  DIFFERENCE_SUMMARY CLOB,
+  CONSTRAINT FK_RS_RUN
+    FOREIGN KEY (RUN_ID)
+    REFERENCES FINCORE.PROCESS_RUN(RUN_ID),
+  CONSTRAINT FK_RS_PROCESS
+    FOREIGN KEY (PROCESS_ID)
+    REFERENCES FINCORE.PROCESS_MASTER(PROCESS_ID),
+  CONSTRAINT FK_RS_STAGE
+    FOREIGN KEY (STAGE_ID)
+    REFERENCES FINCORE.PROCESS_STAGE_MASTER(STAGE_ID),
+  CONSTRAINT UK_RUN_STAGE UNIQUE (RUN_ID, STAGE_ID)
+);
+
+COMMENT ON TABLE FINCORE.PROCESS_RUN_STAGE
+IS 'Execution status of each stage for a process run';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.RUN_STAGE_ID
+IS 'Unique identifier of stage execution row';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.RUN_ID
+IS 'Foreign key referencing PROCESS_RUN.RUN_ID';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.PROCESS_ID
+IS 'Foreign key referencing PROCESS_MASTER.PROCESS_ID';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.STAGE_ID
+IS 'Foreign key referencing PROCESS_STAGE_MASTER.STAGE_ID';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.START_TIME
+IS 'Stage start timestamp';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.END_TIME
+IS 'Stage end timestamp';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.STATUS
+IS '0 Not Started, 1 Running, 2 Success, 3 Failed';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.EXECUTION_REMARKS
+IS 'Remarks or error message for stage execution';
+
+COMMENT ON COLUMN FINCORE.PROCESS_RUN_STAGE.DIFFERENCE_SUMMARY
+IS 'Large JSON or text summary for reconciliation or difference stage';
+
+/*==========================================================
+  SEQUENCES
+==========================================================*/
+CREATE SEQUENCE FINCORE.PROCESS_RUN_SEQ START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+CREATE SEQUENCE FINCORE.PROCESS_RUN_STAGE_SEQ START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+
+/*==========================================================
+  INDEXES
+==========================================================*/
+CREATE INDEX IDX_RUN_PROCESS ON FINCORE.PROCESS_RUN(PROCESS_ID);
+CREATE INDEX IDX_RUN_STATUS ON FINCORE.PROCESS_RUN(STATUS);
+CREATE INDEX IDX_RS_RUN ON FINCORE.PROCESS_RUN_STAGE(RUN_ID);
+CREATE INDEX IDX_RS_PROCESS ON FINCORE.PROCESS_RUN_STAGE(PROCESS_ID);
+CREATE INDEX IDX_RS_STAGE ON FINCORE.PROCESS_RUN_STAGE(STAGE_ID);
+CREATE INDEX IDX_RS_STATUS ON FINCORE.PROCESS_RUN_STAGE(STATUS);
+
+/*==========================================================
+  SAMPLE MASTER DATA
+==========================================================*/
+INSERT INTO FINCORE.PROCESS_STAGE_MASTER VALUES (1,'File Reception','InsertDriveFile');
+INSERT INTO FINCORE.PROCESS_STAGE_MASTER VALUES (4,'Triggered','WorkHistory');
+INSERT INTO FINCORE.PROCESS_STAGE_MASTER VALUES (8,'File Reading Started','InsertDriveFile');
+INSERT INTO FINCORE.PROCESS_STAGE_MASTER VALUES (9,'File Reading Ended','InsertDriveFile');
+INSERT INTO FINCORE.PROCESS_STAGE_MASTER VALUES (11,'Transaction calculated','Calculate');
+INSERT INTO FINCORE.PROCESS_STAGE_MASTER VALUES (18,'ETL Process Ended','Completed');
+
+INSERT INTO FINCORE.PROCESS_MASTER VALUES (1,'CBS','cbs_dag','Y','Core Banking System');
+INSERT INTO FINCORE.PROCESS_MASTER VALUES (2,'GLIF','glif_dag','Y','GL Interface');
+INSERT INTO FINCORE.PROCESS_MASTER VALUES (3,'DIFFERENCE','diff_dag','Y','Difference Engine');
+INSERT INTO FINCORE.PROCESS_MASTER VALUES (4,'ETL','orchestrator_v2_dag','Y','Enterprise ETL');
+
+COMMIT;
+
+/*==========================================================
+  SAMPLE RUN DATA
+==========================================================*/
+INSERT INTO FINCORE.PROCESS_RUN
+VALUES (1001,1,SYSTIMESTAMP-5,SYSTIMESTAMP-4,2,'AIRFLOW',DATE '2026-01-12','manual__2026_01_23');
+
+INSERT INTO FINCORE.PROCESS_RUN
+VALUES (2001,2,SYSTIMESTAMP-2,NULL,1,'AIRFLOW',DATE '2026-03-31','manual__2026_02_04');
+
+/*==========================================================
+  SAMPLE RUN STAGE DATA
+==========================================================*/
+INSERT INTO FINCORE.PROCESS_RUN_STAGE
+VALUES (1,1001,1,8,SYSTIMESTAMP-5,SYSTIMESTAMP-4,1,'File Reading Started',NULL);
+
+INSERT INTO FINCORE.PROCESS_RUN_STAGE
+VALUES (2,1001,1,9,SYSTIMESTAMP-4,SYSTIMESTAMP-3,2,'File Reading Completed',NULL);
+
+INSERT INTO FINCORE.PROCESS_RUN_STAGE
+VALUES (3,1001,1,11,SYSTIMESTAMP-3,SYSTIMESTAMP-2,2,'Transactions Calculated',NULL);
+
+INSERT INTO FINCORE.PROCESS_RUN_STAGE
+VALUES (4,1001,1,18,SYSTIMESTAMP-2,SYSTIMESTAMP-1,2,'ETL Process Ended',NULL);
+
+INSERT INTO FINCORE.PROCESS_RUN_STAGE
+VALUES (5,2001,2,8,SYSTIMESTAMP-2,NULL,1,'File Reading Started',NULL);
+
+COMMIT;
