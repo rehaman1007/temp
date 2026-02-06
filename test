@@ -21,6 +21,7 @@ import {
   Fade,
   useTheme,
 } from "@mui/material";
+
 import GppBadIcon from "@mui/icons-material/GppBad";
 import GppGoodIcon from "@mui/icons-material/GppGood";
 import CloseIcon from "@mui/icons-material/Close";
@@ -28,13 +29,12 @@ import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
 import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { toPng } from "html-to-image";
 import { useRef, useState } from "react";
 
-import useApi from "../../../hooks/useApi";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 import GlifReportsStyles from "../../glifReports/GlifReportsStyles";
 import CustomChip from "../../../utils/CustomChip";
 
@@ -53,33 +53,57 @@ const SUMMARY_FILE_MAP = {
 
 /* ====================================================== */
 
-const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
+const ProcessSummaryDialog = ({
+  open,
+  data,
+  onClose,
+  onAccept,
+  onReject,
+  onDownload,
+  downloadProgress, // { inProgress, loadedBytes }
+}) => {
   const reportRef = useRef(null);
   const copyTimeoutRef = useRef(null);
 
   const [copied, setCopied] = useState(false);
   const [summaryType, setSummaryType] = useState("BALANCE");
 
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadedBytes, setDownloadedBytes] = useState(0);
-
-  const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-
   const theme = useTheme();
   const styles = GlifReportsStyles(theme);
 
   if (!data) return null;
 
-  const { RECON_RUN_DATE, summary = [] } = data;
+  const { RECON_RUN_DATE, summary = [], stages = [] } = data;
+
+  /* ================= STAGE BASED SUMMARY AVAILABILITY ================= */
+
+  const stage6Done = stages.some(
+    (s) => s.processStage === 6 && s.status === 2
+  );
+  const stage7Done = stages.some(
+    (s) => s.processStage === 7 && s.status === 2
+  );
+  const stage8Done = stages.some(
+    (s) => s.processStage === 8 && s.status === 2
+  );
+  const stage9Waiting = stages.some(
+    (s) => s.processStage === 9 && s.status === 1
+  );
+
+  const availableSummaryTypes = [];
+  if (stage6Done) availableSummaryTypes.push("BALANCE");
+  if (stage7Done) availableSummaryTypes.push("SIBA");
+  if (stage8Done) availableSummaryTypes.push("SUSPENSE");
+
+  /* ================= TOTALS ================= */
 
   const totalEntries = summary.reduce(
     (sum, r) => sum + (r.Total_no_of_entries || 0),
-    0,
+    0
   );
   const totalNewEntries = summary.reduce(
     (sum, r) => sum + (r["new entry"] || 0),
-    0,
+    0
   );
 
   /* ================= EXPORT SUMMARY PDF ================= */
@@ -116,7 +140,7 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
     doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
   };
 
-  /* ================= COPY PNG (FIXED) ================= */
+  /* ================= COPY PNG ================= */
 
   const copyPNGToClipboard = async () => {
     if (!reportRef.current) return;
@@ -126,7 +150,7 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
         cacheBust: true,
         backgroundColor: "#ffffff",
         pixelRatio: 2,
-        skipFonts: true, // fixes cssRules SecurityError
+        skipFonts: true, // avoids cssRules error
       });
 
       const blob = await (await fetch(dataUrl)).blob();
@@ -140,90 +164,19 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
       copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error(err);
-      snackbar("Copy failed", "error");
-    }
-  };
-
-  /* ================= DOWNLOAD FULL REPORT ================= */
-
-  const handleDownloadReport = async () => {
-    const fileName = SUMMARY_FILE_MAP[summaryType];
-
-    setIsDownloading(true);
-    setDownloadedBytes(0);
-
-    try {
-      const payload = {
-        runId: "1",
-        // fileName,
-        fileName: "intr_report",
-        // date: RECON_RUN_DATE,
-        date: "2026-01-07",
-      };
-
-      const response = await callApi(
-        "/RS/reports/download-temp-reports",
-        payload,
-        "POST",
-        "blob",
-        "application/json",
-        {
-          onDownloadProgress: (e) => {
-            if (e?.loaded) setDownloadedBytes(e.loaded);
-          },
-        },
-        false,
-      );
-
-      if (response?.data?.size > 22) {
-        const url = window.URL.createObjectURL(response.data);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${fileName}_${RECON_RUN_DATE}.zip`;
-        a.click();
-        window.URL.revokeObjectURL(url);
-        snackbar("Report downloaded", "success");
-      } else {
-        snackbar("No reports found, Kindly try again", "warning");
-      }
-    } catch (error) {
-      console.log("error", error);
-
-      if (error && error instanceof Blob) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          try {
-            const errorJson = JSON.parse(reader.result);
-            console.error(errorJson.message);
-            snackbar(
-              errorJson.message || "No reports found matching your criteria",
-              "error",
-            );
-          } catch (e) {
-            console.error(e);
-            snackbar(
-              "Download failed, Something went wrong, kindly try again.",
-              "error",
-            );
-          }
-        };
-        reader.readAsText(error);
-      } else {
-        snackbar("Network Error: Could not connect to server", "error");
-      }
-    } finally {
-      setIsDownloading(false);
-      setDownloadedBytes(0);
     }
   };
 
   const downloadedMB =
-    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
+    downloadProgress?.loadedBytes > 0
+      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
+      : null;
 
   /* ====================================================== */
 
   return (
     <Dialog open={open} fullWidth maxWidth="md">
+
       {/* ================= HEADER ================= */}
 
       <Box
@@ -245,7 +198,7 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
           </Typography>
         </Box>
 
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1}>
           <Tooltip title="Export summary to PDF">
             <IconButton onClick={exportPDF}>
               <PictureAsPdfOutlinedIcon />
@@ -270,6 +223,7 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
       {/* ================= BODY ================= */}
 
       <DialogContent>
+
         {/* SUMMARY TYPE + DOWNLOAD */}
 
         <Paper sx={{ p: 2, mb: 2 }}>
@@ -280,59 +234,70 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
             flexWrap="wrap"
             gap={2}
           >
+
             <RadioGroup
               row
               value={summaryType}
               onChange={(e) => setSummaryType(e.target.value)}
             >
-              <FormControlLabel
-                value="BALANCE"
-                control={<Radio />}
-                label="Balance Compare"
-              />
-              <FormControlLabel value="SIBA" control={<Radio />} label="SIBA" />
-              <FormControlLabel
-                value="SUSPENSE"
-                control={<Radio />}
-                label="Suspense"
-              />
+              {availableSummaryTypes.includes("BALANCE") && (
+                <FormControlLabel
+                  value="BALANCE"
+                  control={<Radio />}
+                  label="Balance Compare"
+                />
+              )}
+
+              {availableSummaryTypes.includes("SIBA") && (
+                <FormControlLabel
+                  value="SIBA"
+                  control={<Radio />}
+                  label="SIBA"
+                />
+              )}
+
+              {availableSummaryTypes.includes("SUSPENSE") && (
+                <FormControlLabel
+                  value="SUSPENSE"
+                  control={<Radio />}
+                  label="Suspense"
+                />
+              )}
             </RadioGroup>
 
             <Button
               startIcon={<CloudDownloadTwoToneIcon />}
               variant="contained"
-              onClick={handleDownloadReport}
-              disabled={isDownloading}
+              onClick={() =>
+                onDownload(
+                  SUMMARY_FILE_MAP[summaryType],
+                  RECON_RUN_DATE
+                )
+              }
+              disabled={downloadProgress?.inProgress}
             >
               Download Full Report
             </Button>
+
           </Stack>
 
-          <Fade in={isDownloading} unmountOnExit>
-            <Box
-              sx={{
-                mt: 2,
-                textAlign: "left",
-              }}
-            >
+          {/* DOWNLOAD PROGRESS */}
+
+          <Fade in={downloadProgress?.inProgress} unmountOnExit>
+            <Box sx={{ mt: 2 }}>
               <Box sx={styles.progressHeader}>
                 <Box sx={styles.progressIconWrapper}>
                   <CloudDownloadTwoToneIcon sx={styles.innerDownloadIcon} />
                 </Box>
+
                 <Box sx={styles.progressHeaderTextBox}>
                   <Typography variant="body2" fontWeight={600}>
-                    Downloading{" "}
-                    {SUMMARY_FILE_MAP[summaryType] ??
-                      "the selected report is in progress."}
+                    Downloading {SUMMARY_FILE_MAP[summaryType]}
                   </Typography>
 
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={styles.progressCaption}
-                  >
+                  <Typography variant="caption" color="text.secondary">
                     {downloadedMB
-                      ? `Streaming report data… ${downloadedMB} MB received`
+                      ? `Streaming… ${downloadedMB} MB received`
                       : "Preparing your report stream…"}
                   </Typography>
                 </Box>
@@ -340,14 +305,16 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
                 {downloadedMB && (
                   <CustomChip
                     color="error"
-                    label={`${downloadedMB} MB downloaded`}
+                    label={`${downloadedMB} MB`}
                     variant="filled"
                   />
                 )}
               </Box>
+
               <LinearProgress variant="indeterminate" sx={styles.progressBar} />
             </Box>
           </Fade>
+
         </Paper>
 
         {/* SUMMARY TABLE */}
@@ -391,6 +358,7 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
             </TableBody>
           </Table>
         </TableContainer>
+
       </DialogContent>
 
       {/* ================= FOOTER ================= */}
@@ -410,19 +378,23 @@ const ProcessSummaryDialog = ({ open, data, onClose, onAccept, onReject }) => {
           color="error"
           variant="outlined"
           startIcon={<GppBadIcon />}
-          onClick={() => onReject(data)}
+          disabled={!stage9Waiting}
+          onClick={() => onReject(summaryType)}
         >
           Reject
         </Button>
+
         <Button
           color="success"
           variant="contained"
           startIcon={<GppGoodIcon />}
-          onClick={() => onAccept(data)}
+          disabled={!stage9Waiting}
+          onClick={() => onAccept(summaryType)}
         >
           Accept
         </Button>
       </Box>
+
     </Dialog>
   );
 };
