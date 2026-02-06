@@ -1,402 +1,415 @@
-import {
-  Dialog,
-  DialogContent,
-  Button,
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  Stack,
-  IconButton,
-  Tooltip,
-  RadioGroup,
-  FormControlLabel,
-  Radio,
-  LinearProgress,
-  Fade,
-  useTheme,
-} from "@mui/material";
+import { useEffect, useState, useRef, useMemo, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import dayjs from "dayjs";
 
-import GppBadIcon from "@mui/icons-material/GppBad";
-import GppGoodIcon from "@mui/icons-material/GppGood";
-import CloseIcon from "@mui/icons-material/Close";
-import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+import { Grid, Button, Paper, Stack, TextField } from "@mui/material";
 
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { toPng } from "html-to-image";
-import { useRef, useState } from "react";
+import StopCircleIcon from "@mui/icons-material/StopCircle";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import TaskAltIcon from "@mui/icons-material/TaskAlt";
 
-import GlifReportsStyles from "../../glifReports/GlifReportsStyles";
-import CustomChip from "../../../utils/CustomChip";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 
-/* ================= FORMAT ================= */
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import useApi from "../../hooks/useApi";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
 
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
+import ProcessStatusHeader from "./components/ProcessStatusHeader";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
+import ActionConfirmDialog from "./components/ActionConfirmDialog";
+import LoadingOverlay from "../../utils/LoadingOverlay";
 
-/* ================= SUMMARY → FILE MAP ================= */
+/* =====================================================
+   NORMALIZATION
+===================================================== */
 
-const SUMMARY_FILE_MAP = {
-  BALANCE: "balance_compare_report",
-  SIBA: "intr_report",
-  SUSPENSE: "cntr_report",
+const normalizeStageDetails = (stages = []) => {
+  const map = new Map();
+
+  stages.forEach((s) => {
+    const prev = map.get(s.processStage);
+    if (!prev || s.startTime > prev.startTime) {
+      map.set(s.processStage, s);
+    }
+  });
+
+  return Array.from(map.values())
+    .sort((a, b) => a.processStage - b.processStage)
+    .map((s) => ({
+      ...s,
+      _START_TIME_RAW: s.startTime,
+      _END_TIME_RAW: s.endTime,
+      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
+    }));
 };
 
-/* ====================================================== */
+const normalizeProcesses = (data = []) =>
+  data.map((p) => ({
+    ...p,
+    type: p.type ?? p.processType,
+    stageDetails: normalizeStageDetails(p.stageDetails || []),
+  }));
 
-const ProcessSummaryDialog = ({
-  open,
-  data,
-  onClose,
-  onAccept,
-  onReject,
-  onDownload,
-  downloadProgress, // { inProgress, loadedBytes }
-}) => {
-  const reportRef = useRef(null);
-  const copyTimeoutRef = useRef(null);
+const mergeProcesses = (prev = [], incoming = []) => {
+  const map = new Map(prev.map((p) => [p.type, p]));
+  incoming.forEach((p) => map.set(p.type, p));
+  return Array.from(map.values());
+};
 
-  const [copied, setCopied] = useState(false);
-  const [summaryType, setSummaryType] = useState("BALANCE");
+/* =====================================================
+   MAIN PAGE
+===================================================== */
 
-  const theme = useTheme();
-  const styles = GlifReportsStyles(theme);
+const ProcessStatusPage = () => {
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((s) => s.auth.token);
+  const { callApi } = useApi();
 
-  if (!data) return null;
+  const INITIAL_DATA_URL = "/PS/process/processes/data";
+  const TRIGGER_DAG_URL = "/PS/airflow/trigger";
+  const STOP_DAG_URL = "/PS/airflow/stop";
+  const FINISH_EOD_URL = "/PS/process/finish-eod";
 
-  const { RECON_RUN_DATE, summary = [], stages = [] } = data;
+  const service = resolveConfig("/PS");
+  const STREAM_URL = `${service}/process/processes`;
 
-  /* ================= STAGE BASED SUMMARY AVAILABILITY ================= */
+  const [currentEtlDate, setCurrentEtlDate] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [temp, setTemp] = useState(null);
+  const [processes, setProcesses] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [apiLoading, setApiLoading] = useState(false);
 
-  const stage6Done = stages.some(
-    (s) => s.processStage === 6 && s.status === 2
+  const [selectedProcessType, setSelectedProcessType] = useState(null);
+  const [summaryData, setSummaryData] = useState(null);
+
+  const [confirmConfig, setConfirmConfig] = useState(null);
+
+  const initialFetchDone = useRef(false);
+
+  /* =====================================================
+     LOAD BY DATE
+  ===================================================== */
+
+  const loadByDate = useCallback(
+    async (date) => {
+      setLoading(true);
+      try {
+        const res = await callApi(
+          INITIAL_DATA_URL,
+          { etlDate: date ? date.format("YYYY-MM-DD") : "" },
+          "GET",
+        );
+
+        setCurrentEtlDate(res?.fincoreDate?.etlDate);
+        setSelectedDate(date || dayjs(res?.fincoreDate?.etlDate));
+        setProcesses(normalizeProcesses(res?.initialData || []));
+      } catch {
+        snackbar("Failed to load processes", "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [callApi, snackbar],
   );
-  const stage7Done = stages.some(
-    (s) => s.processStage === 7 && s.status === 2
-  );
-  const stage8Done = stages.some(
-    (s) => s.processStage === 8 && s.status === 2
-  );
-  const stage9Waiting = stages.some(
-    (s) => s.processStage === 9 && s.status === 1
-  );
 
-  const availableSummaryTypes = [];
-  if (stage6Done) availableSummaryTypes.push("BALANCE");
-  if (stage7Done) availableSummaryTypes.push("SIBA");
-  if (stage8Done) availableSummaryTypes.push("SUSPENSE");
+  useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+    loadByDate(null);
+  }, [loadByDate]);
 
-  /* ================= TOTALS ================= */
+  /* =====================================================
+     SSE (ONLY CURRENT DATE)
+  ===================================================== */
 
-  const totalEntries = summary.reduce(
-    (sum, r) => sum + (r.Total_no_of_entries || 0),
-    0
-  );
-  const totalNewEntries = summary.reduce(
-    (sum, r) => sum + (r["new entry"] || 0),
-    0
-  );
+  useEffect(() => {
+    if (loading) return;
 
-  /* ================= EXPORT SUMMARY PDF ================= */
+    if (
+      selectedDate &&
+      currentEtlDate &&
+      selectedDate.format("YYYY-MM-DD") !== currentEtlDate
+    ) {
+      return;
+    }
 
-  const exportPDF = () => {
-    const doc = new jsPDF("p", "pt");
+    const controller = new AbortController();
 
-    doc.setFontSize(14);
-    doc.text("Difference Summary Report", 40, 40);
-    doc.setFontSize(10);
-    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
-
-    autoTable(doc, {
-      startY: 80,
-      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
-      body: [
-        ...summary.map((r) => [
-          r.HEAD,
-          formatAmount(r.Total_no_of_entries),
-          formatAmount(r["new entry"]),
-        ]),
-        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
-      ],
-      styles: { halign: "right", fontSize: 9 },
-      headStyles: { fillColor: [33, 150, 243] },
-      columnStyles: { 0: { halign: "left" } },
-      didParseCell: (d) => {
-        if (d.row.index === summary.length) {
-          d.cell.styles.fontStyle = "bold";
-        }
+    fetchEventSource(STREAM_URL, {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
+      },
+      onmessage(e) {
+        if (e.event === "connected") return;
+        const raw = JSON.parse(e.data);
+        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
       },
     });
 
-    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
-  };
+    return () => controller.abort();
+  }, [STREAM_URL, token, loading, selectedDate, currentEtlDate]);
 
-  /* ================= COPY PNG ================= */
+  /* =====================================================
+     DERIVED
+  ===================================================== */
 
-  const copyPNGToClipboard = async () => {
-    if (!reportRef.current) return;
+  const selectedProcess = useMemo(() => {
+    if (!selectedProcessType) return null;
+    return processes.find((p) => p.type === selectedProcessType) || null;
+  }, [processes, selectedProcessType]);
 
+  const isCurrentDate =
+    selectedDate &&
+    currentEtlDate &&
+    selectedDate.format("YYYY-MM-DD") === currentEtlDate;
+
+  const allCompleted = useMemo(
+    () =>
+      processes.length &&
+      processes.every((p) => p.stageDetails.every((s) => s.status === 2)),
+    [processes],
+  );
+
+  /* =====================================================
+     CONFIRMATION ACTION HANDLING
+  ===================================================== */
+
+  const triggerDag = async (dagId, remarks) => {
+    setApiLoading(true);
+    console.log(dagId);
+    const payload = { dagId, processId: 4, conf: {}, remarks };
     try {
-      const dataUrl = await toPng(reportRef.current, {
-        cacheBust: true,
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-        skipFonts: true, // avoids cssRules error
-      });
-
-      const blob = await (await fetch(dataUrl)).blob();
-
-      await navigator.clipboard.write([
-        new ClipboardItem({ "image/png": blob }),
-      ]);
-
-      setCopied(true);
-      clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error(err);
+      const res = await callApi(TRIGGER_DAG_URL, payload, "POST");
+      if (res?.success) {
+        snackbar("Start EOD action executed successfully", "success");
+        setTemp(res?.data?.airflowResponse?.dag_run_id);
+      }
+    } catch (e) {
+      console.error(e);
+      snackbar(
+        e.message || "Something went wrong, Kindly try again after some time",
+        "error",
+      );
+    } finally {
+      setApiLoading(false);
     }
   };
 
-  const downloadedMB =
-    downloadProgress?.loadedBytes > 0
-      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
-      : null;
+  const stopDag = async (dagId, remarks) => {
+    setApiLoading(true);
+    const payload = { dagId, dagRunId: temp, processId: 4, conf: {}, remarks };
+    try {
+      const res = await callApi(STOP_DAG_URL, payload, "POST");
+      if (res?.success)
+        snackbar("Stop Process action executed successfully", "success");
+    } catch (e) {
+      console.error(e);
+      snackbar(
+        e.message || "Something went wrong, Kindly try again after some time",
+        "error",
+      );
+    } finally {
+      setApiLoading(false);
+    }
+  };
 
-  /* ====================================================== */
+  const handleConfirmAction = async (remarks) => {
+    const { action, process } = confirmConfig;
+
+    console.log(process);
+
+    if (action === "finishEod") {
+      try {
+        setApiLoading(true);
+        const res = await callApi(FINISH_EOD_URL, { remarks }, "POST");
+        if (res?.success) snackbar("Finished EOD successfully", "success");
+      } catch {
+        snackbar("Finish EOD failed", "error");
+      } finally {
+        setApiLoading(false);
+      }
+    } else if (action === "stop") {
+      await stopDag(process.dagId, remarks);
+    } else {
+      await triggerDag(process.dagId, remarks);
+    }
+
+    setConfirmConfig(null);
+  };
+
+  /* =====================================================
+     SUMMARY
+  ===================================================== */
+
+  const handleOpenSummary = (row) => {
+    const stage6 = [...row.stageDetails]
+      .sort((a, b) => b.id - a.id)
+      .find((s) => s.processStage === 6);
+
+    if (stage6?.differenceSummary) {
+      setSummaryData(stage6.differenceSummary);
+    } else {
+      snackbar("Summary data not available or empty", "warning");
+    }
+  };
+
+  /* =====================================================
+     RENDER
+  ===================================================== */
 
   return (
-    <Dialog open={open} fullWidth maxWidth="md">
+    <>
+      <Paper sx={{ p: 3 }}>
+        <ProcessStatusHeader etlDate={currentEtlDate} />
 
-      {/* ================= HEADER ================= */}
-
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderBottom: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "space-between",
-        }}
-      >
-        <Box>
-          <Typography variant="h6" fontWeight={700}>
-            Difference Summary Report
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Reconciliation Date: {RECON_RUN_DATE}
-          </Typography>
-        </Box>
-
-        <Stack direction="row" spacing={1}>
-          <Tooltip title="Export summary to PDF">
-            <IconButton onClick={exportPDF}>
-              <PictureAsPdfOutlinedIcon />
-            </IconButton>
-          </Tooltip>
-
-          <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
-            <IconButton
-              onClick={copyPNGToClipboard}
-              sx={{ color: copied ? "success.main" : "inherit" }}
-            >
-              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
-            </IconButton>
-          </Tooltip>
-
-          <IconButton onClick={onClose}>
-            <CloseIcon />
-          </IconButton>
-        </Stack>
-      </Box>
-
-      {/* ================= BODY ================= */}
-
-      <DialogContent>
-
-        {/* SUMMARY TYPE + DOWNLOAD */}
-
-        <Paper sx={{ p: 2, mb: 2 }}>
-          <Stack
-            direction="row"
-            justifyContent="space-between"
-            alignItems="center"
-            flexWrap="wrap"
-            gap={2}
-          >
-
-            <RadioGroup
-              row
-              value={summaryType}
-              onChange={(e) => setSummaryType(e.target.value)}
-            >
-              {availableSummaryTypes.includes("BALANCE") && (
-                <FormControlLabel
-                  value="BALANCE"
-                  control={<Radio />}
-                  label="Balance Compare"
-                />
-              )}
-
-              {availableSummaryTypes.includes("SIBA") && (
-                <FormControlLabel
-                  value="SIBA"
-                  control={<Radio />}
-                  label="SIBA"
-                />
-              )}
-
-              {availableSummaryTypes.includes("SUSPENSE") && (
-                <FormControlLabel
-                  value="SUSPENSE"
-                  control={<Radio />}
-                  label="Suspense"
-                />
-              )}
-            </RadioGroup>
-
-            <Button
-              startIcon={<CloudDownloadTwoToneIcon />}
-              variant="contained"
-              onClick={() =>
-                onDownload(
-                  SUMMARY_FILE_MAP[summaryType],
-                  RECON_RUN_DATE
-                )
-              }
-              disabled={downloadProgress?.inProgress}
-            >
-              Download Full Report
-            </Button>
-
+        {/* DATE PICKER */}
+        {selectedDate && (
+          <Stack alignItems="center" mt={3} mb={2}>
+            <LocalizationProvider dateAdapter={AdapterDayjs}>
+              <DatePicker
+                label="Select ETL Date"
+                value={selectedDate}
+                onChange={(d) => {
+                  setSelectedDate(d);
+                  loadByDate(d);
+                }}
+                renderInput={(p) => <TextField {...p} />}
+              />
+            </LocalizationProvider>
           </Stack>
+        )}
 
-          {/* DOWNLOAD PROGRESS */}
+        {/* EOD BUTTONS */}
+        {isCurrentDate && (
+          <Grid container justifyContent="center" spacing={2} my={3}>
+            <Grid>
+              <Button
+                variant="contained"
+                startIcon={<PlayArrowIcon />}
+                // disabled={processes.length > 0}
+                onClick={() =>
+                  setConfirmConfig({
+                    action: "start",
+                    process: { dagId: "orchestrator_v2_dag" },
+                  })
+                }
+              >
+                Start EOD
+              </Button>
+            </Grid>
 
-          <Fade in={downloadProgress?.inProgress} unmountOnExit>
-            <Box sx={{ mt: 2 }}>
-              <Box sx={styles.progressHeader}>
-                <Box sx={styles.progressIconWrapper}>
-                  <CloudDownloadTwoToneIcon sx={styles.innerDownloadIcon} />
-                </Box>
+            <Grid>
+              <Button
+                variant="contained"
+                startIcon={<StopCircleIcon />}
+                disabled={!temp}
+                onClick={() =>
+                  setConfirmConfig({
+                    action: "stop",
+                    process: { dagId: "orchestrator_v2_dag" },
+                  })
+                }
+              >
+                Stop EOD
+              </Button>
+            </Grid>
 
-                <Box sx={styles.progressHeaderTextBox}>
-                  <Typography variant="body2" fontWeight={600}>
-                    Downloading {SUMMARY_FILE_MAP[summaryType]}
-                  </Typography>
+            <Grid>
+              <Button
+                variant="contained"
+                color="success"
+                startIcon={<TaskAltIcon />}
+                disabled={!allCompleted}
+                onClick={() =>
+                  setConfirmConfig({
+                    action: "finishEod",
+                    process: null,
+                  })
+                }
+              >
+                Finish EOD
+              </Button>
+            </Grid>
+          </Grid>
+        )}
 
-                  <Typography variant="caption" color="text.secondary">
-                    {downloadedMB
-                      ? `Streaming… ${downloadedMB} MB received`
-                      : "Preparing your report stream…"}
-                  </Typography>
-                </Box>
+        {/* DETAILS */}
+        <ProcessDetailsDialog
+          process={selectedProcess}
+          onClose={() => setSelectedProcessType(null)}
+          onStart={(p) =>
+            setConfirmConfig({
+              action: "restart",
+              severity: "warning",
+              process: p,
+            })
+          }
+          onStop={(p) =>
+            setConfirmConfig({
+              action: "stop",
+              severity: "error",
+              process: p,
+            })
+          }
+        />
 
-                {downloadedMB && (
-                  <CustomChip
-                    color="error"
-                    label={`${downloadedMB} MB`}
-                    variant="filled"
-                  />
-                )}
-              </Box>
+        {/* SUMMARY */}
+        <ProcessSummaryDialog
+          open={!!summaryData}
+          data={summaryData}
+          onClose={() => setSummaryData(null)}
+        />
 
-              <LinearProgress variant="indeterminate" sx={styles.progressBar} />
-            </Box>
-          </Fade>
+        {/* TABLE */}
+        <Paper>
+          <ProcessStatusTable
+            loading={loading}
+            processes={processes}
+            actions={{
+              onStart: (p) =>
+                setConfirmConfig({
+                  action: "restart",
+                  severity: "warning",
+                  process: p,
+                }),
 
+              onStop: (p) =>
+                setConfirmConfig({
+                  action: "stop",
+                  severity: "error",
+                  process: p,
+                }),
+
+              onView: setSelectedProcessType,
+              onSummary: handleOpenSummary,
+            }}
+          />
         </Paper>
+      </Paper>
 
-        {/* SUMMARY TABLE */}
+      {/* CONFIRM DIALOG */}
+      <ActionConfirmDialog
+        open={!!confirmConfig}
+        actionType={confirmConfig?.action}
+        severity={confirmConfig?.severity}
+        processName={confirmConfig?.process?.type}
+        onConfirm={handleConfirmAction}
+        onClose={() => setConfirmConfig(null)}
+      />
 
-        <TableContainer component={Paper} ref={reportRef}>
-          <Table stickyHeader size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  TOTAL ENTRIES
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  NEW ENTRIES
-                </TableCell>
-              </TableRow>
-            </TableHead>
-
-            <TableBody>
-              {summary.map((row, i) => (
-                <TableRow key={i}>
-                  <TableCell>{row.HEAD}</TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row.Total_no_of_entries)}
-                  </TableCell>
-                  <TableCell align="right">
-                    {formatAmount(row["new entry"])}
-                  </TableCell>
-                </TableRow>
-              ))}
-
-              <TableRow sx={{ bgcolor: "#f1f1f1" }}>
-                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalEntries)}
-                </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalNewEntries)}
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </TableContainer>
-
-      </DialogContent>
-
-      {/* ================= FOOTER ================= */}
-
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderTop: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "center",
-          gap: 2,
-        }}
-      >
-        <Button
-          color="error"
-          variant="outlined"
-          startIcon={<GppBadIcon />}
-          disabled={!stage9Waiting}
-          onClick={() => onReject(summaryType)}
-        >
-          Reject
-        </Button>
-
-        <Button
-          color="success"
-          variant="contained"
-          startIcon={<GppGoodIcon />}
-          disabled={!stage9Waiting}
-          onClick={() => onAccept(summaryType)}
-        >
-          Accept
-        </Button>
-      </Box>
-
-    </Dialog>
+      <LoadingOverlay loading={apiLoading} />
+    </>
   );
 };
 
-export default ProcessSummaryDialog;
+export default ProcessStatusPage;
