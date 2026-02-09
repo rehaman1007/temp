@@ -1,369 +1,224 @@
-import { configureStore, combineReducers } from "@reduxjs/toolkit";
-import {
-  persistStore,
-  persistReducer,
-  FLUSH,
-  REHYDRATE,
-  PAUSE,
-  PERSIST,
-  PURGE,
-  REGISTER,
-} from "redux-persist";
-import storageSession from "redux-persist/lib/storage/session";
-import undoable from "redux-undo";
+import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
+import axios from "axios";
 
-import menuReducer from "./slices/menuSlice";
-import authReducer from "./slices/authSlice";
-import tabReducer from "./slices/tabSlice";
-import uiReducer from "./slices/uiSlice";
-import templateReducer from "../features/reportTemplateBuilder/store/templateSlice";
-import configReducer from "../features/reportTemplateBuilder/store/configSlice";
+export const startDownload = createAsyncThunk(
+  "download/start",
+  async (
+    { url, payload, headers = {}, fileName },
+    { dispatch }
+  ) => {
+    const downloadId = `${fileName}_${Date.now()}`;
 
-/* Persist Configs */
+    dispatch(downloadStarted({ downloadId, fileName }));
 
-const authPersistConfig = {
-  key: "auth",
-  storage: storageSession,
-  whitelist: ["token", "user"],
-};
+    const response = await axios({
+      method: "POST",
+      url,
+      data: payload,
+      responseType: "blob",
+      headers,
+      onDownloadProgress: (event) => {
+        dispatch(
+          downloadProgress({
+            downloadId,
+            loaded: event.loaded || 0,
+          })
+        );
+      },
+    });
 
-const sessionPersistConfig = {
-  key: "session",
-  storage: storageSession,
-  whitelist: ["menus", "tabId"],
-};
+    dispatch(downloadCompleted({ downloadId }));
 
-/* Undoable Template Reducer */
+    // trigger browser download
+    const blobUrl = window.URL.createObjectURL(response.data);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(blobUrl);
 
-const undoableTemplateReducer = undoable(templateReducer, {
-  limit: 50,
-  filter: (action) => {
-    const undoableActions = [
-      "template/updateCell",
-      "template/updateCellRender",
-      "template/updateCellFormat",
-      "template/updateCellSource",
-      "template/addColumn",
-      "template/removeColumn",
-      "template/updateColumn",
-      "template/updateColumnFormat",
-      "template/addRow",
-      "template/removeRow",
-      "template/updateRow",
-      "template/reorderRows",
-      "template/updateDynamicConfig",
-      "template/setRowHeight",
-    ];
-    return undoableActions.includes(action.type);
+    return downloadId;
+  }
+);
+
+const downloadSlice = createSlice({
+  name: "download",
+  initialState: {
+    active: {}, // { [downloadId]: { fileName, loaded, status } }
+  },
+  reducers: {
+    downloadStarted: (state, action) => {
+      const { downloadId, fileName } = action.payload;
+      state.active[downloadId] = {
+        fileName,
+        loaded: 0,
+        status: "DOWNLOADING",
+      };
+    },
+    downloadProgress: (state, action) => {
+      const { downloadId, loaded } = action.payload;
+      if (state.active[downloadId]) {
+        state.active[downloadId].loaded = loaded;
+      }
+    },
+    downloadCompleted: (state, action) => {
+      if (state.active[action.payload]) {
+        state.active[action.payload].status = "COMPLETED";
+      }
+    },
+    clearDownload: (state, action) => {
+      delete state.active[action.payload];
+    },
   },
 });
 
-/*  Root Reducer */
+export const {
+  downloadStarted,
+  downloadProgress,
+  downloadCompleted,
+  clearDownload,
+} = downloadSlice.actions;
 
-const rootReducer = combineReducers({
-  auth: persistReducer(authPersistConfig, authReducer),
-  menus: persistReducer(sessionPersistConfig, menuReducer),
-  tab: persistReducer(sessionPersistConfig, tabReducer),
-  ui: uiReducer,
+export default downloadSlice.reducer;
 
-  template: undoableTemplateReducer,
-  config: configReducer,
-});
+downloadStarted: (state, action) => {
+  const { downloadId, fileName } = action.payload;
+  state.active[downloadId] = {
+    fileName,
+    loaded: 0,
+    lastLoaded: 0,
+    lastTs: Date.now(),
+    speed: 0,
+    status: "DOWNLOADING",
+    completedAt: null,
+  };
+},
 
-/* Store */
+downloadProgress: (state, action) => {
+  const { downloadId, loaded } = action.payload;
+  const d = state.active[downloadId];
+  if (!d) return;
 
-export const store = configureStore({
-  reducer: rootReducer,
-  middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware({
-      serializableCheck: {
-        ignoredActions: [FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER],
-      },
-      immutableCheck: false,
-    }),
-});
+  const now = Date.now();
+  const deltaBytes = loaded - d.lastLoaded;
+  const deltaTime = (now - d.lastTs) / 1000; // sec
 
-export const persistor = persistStore(store);
+  d.speed =
+    deltaTime > 0 ? deltaBytes / (1024 * 1024) / deltaTime : d.speed;
 
-import React, { useMemo, useState, useCallback } from "react";
-import { Box, Paper, Typography } from "@mui/material";
-import { Outlet } from "react-router-dom";
-import { useSelector } from "react-redux";
+  d.lastLoaded = loaded;
+  d.lastTs = now;
+  d.loaded = loaded;
+},
 
-import LayoutHeader from "../components/LayoutHeader";
-import SideBar from "../components/SideBar/SideBar";
-import { getParentMenu } from "../utils/CommonUtilities";
-import { getIconComponent } from "../utils/IconUtils";
-import useNavigateToPage from "../hooks/useNavigateToPage";
-import AppBreadcrumbs from "./AppBreadcrumbs";
+downloadCompleted: (state, action) => {
+  const d = state.active[action.payload];
+  if (d) {
+    d.status = "COMPLETED";
+    d.completedAt = Date.now();
+  }
+},
 
-const drawerWidth = 270;
-
-const CommonLayout = () => {
-  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
-  const menus = useSelector((state) => state.menus.menus);
-
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [showComponentTitle, setShowComponentTitle] = useState(true);
-  const { navigateToPage } = useNavigateToPage();
-
-  const handleDrawerToggle = useCallback(() => {
-    setMobileOpen((prev) => !prev);
-  }, []);
-
-  const title = useMemo(() => {
-    if (!selectedMenuItem) return "";
-
-    if (Object.hasOwn(selectedMenuItem, "hasChildren")) {
-      // Top-level menu
-      return selectedMenuItem.title;
-    }
-
-    const parentMenu = getParentMenu(selectedMenuItem, menus);
-
-    if (!parentMenu) return selectedMenuItem.title;
-
-    return `${parentMenu.title} > ${selectedMenuItem.title}`;
-  }, [menus, selectedMenuItem]);
-
-  const outletContextValue = useMemo(() => ({ setShowComponentTitle }), []);
-
-  return (
-    <Box
-      sx={{
-        display: "flex",
-        minHeight: "100vh",
-      }}
-    >
-      {/* Header */}
-      <LayoutHeader
-        drawerWidth={drawerWidth}
-        title={title}
-        navigateToPage={navigateToPage}
-        handleDrawerToggle={handleDrawerToggle}
-      />
-
-      {/* Sidebar */}
-      <SideBar
-        drawerWidth={drawerWidth}
-        getIconComponent={getIconComponent}
-        mobileOpen={mobileOpen}
-        handleDrawerToggle={handleDrawerToggle}
-      />
-
-      {/* Main Content */}
-      <Box
-        component="main"
-        sx={{
-          flexGrow: 1,
-          width: { xs: "100%", md: `calc(100% - ${drawerWidth}px)` },
-          p: 3,
-          pt: 11,
-          minHeight: "calc(100vh - 88px)",
-        }}
-      >
-        <Box>
-          {showComponentTitle && (
-            <Paper
-              elevation={2}
-              sx={{
-                p: 2,
-                mb: 4,
-                borderRadius: 1,
-              }}
-            >
-              {/* Breadcrumbs */}
-              <AppBreadcrumbs />
-            </Paper>
-          )}
-
-          <Box>
-            <Outlet context={outletContextValue} />
-          </Box>
-        </Box>
-      </Box>
-    </Box>
-  );
-};
-
-export default CommonLayout;
-
-
-
-import React, { useState } from "react";
+import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import {
-  Avatar,
-  Badge,
-  Box,
-  IconButton,
-  Toolbar,
-  Typography,
-  useTheme,
-  useMediaQuery,
-  CircularProgress,
+  Popover,
+  LinearProgress,
+  Tooltip,
+  Fade,
 } from "@mui/material";
-import { Notifications, Menu as MenuIcon } from "@mui/icons-material";
-import { useSelector } from "react-redux";
-import { userAvatarCreator } from "../utils/userUtilities";
-import NotificationDrawer from "./NotificationDrawer";
-import ProfileDrawer from "./ProfileDrawer";
-import SearchBar from "./search/SearchBar";
-import fLogo from "../assets/Logos/Fincore_transperent.svg";
-import useNotifications from "../hooks/useNotifications";
-import NotificationPopup from "./NotificationPopup";
-import AutorenewIcon from "@mui/icons-material/Autorenew";
-import TaskProgressDrawer from "./TaskProgressDrawer";
 
-const LayoutHeader = ({ drawerWidth, navigateToPage, handleDrawerToggle }) => {
-  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
-  const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
-  const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
+const downloads = useSelector((state) => state.download.active);
 
-  const {
-    notifications,
-    markAsRead,
-    markAllAsRead,
-    loadMore,
-    hasMore,
-    unreadCount,
-    popNotification,
-    setPopNotification,
-    tasks,
-    activeCount,
-  } = useNotifications();
+const activeDownloads = Object.values(downloads).filter(
+  (d) => d.status === "DOWNLOADING"
+);
 
-  const user = useSelector((state) => state.auth.user);
-  const theme = useTheme();
-  const isSmallScreen = useMediaQuery(theme.breakpoints.down("lg"));
+const completedDownloads = Object.values(downloads).filter(
+  (d) =>
+    d.status === "COMPLETED" &&
+    Date.now() - d.completedAt < 3000 // auto-hide after 3s
+);
 
-  return (
-    <Box
-      position="fixed"
-      sx={{
-        width: { xs: "100%", lg: `calc(100% - ${drawerWidth}px)` },
-        right: 0,
-        top: 0,
-        zIndex: 1200,
-        background:
-          "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
-      }}
-    >
-      <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
-        {/* Left side section */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          {isSmallScreen && (
-            <IconButton
-              onClick={handleDrawerToggle}
-              sx={{ color: "text.primary" }}
-            >
-              <MenuIcon />
-            </IconButton>
-          )}
+const [anchorEl, setAnchorEl] = useState(null);
+const open = Boolean(anchorEl);
 
-          {isSmallScreen && (
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-              <img src={fLogo} alt="Logo" style={{ width: 40, height: 40 }} />
-              <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                FinCore
-              </Typography>
-            </Box>
-          )}
-        </Box>
-
-        {/* Right side section */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <SearchBar navigateToPage={navigateToPage} />
-
-          {activeCount > 0 && (
-            <IconButton onClick={() => setTaskDrawerOpen(true)}>
-              <Badge badgeContent={activeCount} color="warning">
-                <Box sx={{ position: "relative" }}>
-                  <AutorenewIcon
-                    sx={{ animation: "spin 1.2s linear infinite" }}
-                  />
-                  <CircularProgress
-                    size={36}
-                    sx={{
-                      position: "absolute",
-                      top: -6,
-                      left: -6,
-                      zIndex: -1,
-                    }}
-                  />
-                </Box>
-              </Badge>
-
-              <style>
-                {`@keyframes spin { 100% { transform: rotate(360deg); } }`}
-              </style>
-            </IconButton>
-          )}
-          <IconButton
-            color="inherit"
-            onClick={() => setNotificationDrawerOpen(true)}
-          >
-            {unreadCount > 0 ? (
-              <Badge badgeContent={unreadCount || ""} color="error">
-                <Notifications />
-              </Badge>
-            ) : (
-              <Notifications />
-            )}
-          </IconButton>
-
-          <Avatar
-            onClick={() => setProfileDrawerOpen(true)}
-            sx={{
-              width: 32,
-              height: 32,
-              color: "primary.contrastText",
-              backgroundColor: "primary.main",
-              cursor: "pointer",
-              ml: 1,
-            }}
-          >
-            {userAvatarCreator(user)}
-          </Avatar>
-        </Box>
-      </Toolbar>
-
-      {taskDrawerOpen && (
-        <TaskProgressDrawer
-          open={taskDrawerOpen}
-          onClose={() => setTaskDrawerOpen(false)}
-          tasks={tasks}
+{(activeDownloads.length > 0 || completedDownloads.length > 0) && (
+  <Tooltip
+    title={
+      activeDownloads.length > 0
+        ? `${activeDownloads[0].fileName} • ${activeDownloads[0].speed.toFixed(
+            2
+          )} MB/s`
+        : "Download completed"
+    }
+    arrow
+  >
+    <IconButton onClick={(e) => setAnchorEl(e.currentTarget)}>
+      {activeDownloads.length > 0 ? (
+        <CloudDownloadTwoToneIcon
+          sx={{ color: "warning.main", animation: "pulse 1.4s infinite" }}
         />
+      ) : (
+        <CheckCircleIcon sx={{ color: "success.main" }} />
       )}
+    </IconButton>
+  </Tooltip>
+)}
 
-      <NotificationDrawer
-        notificationDrawerOpen={notificationDrawerOpen}
-        setNotificationDrawerOpen={setNotificationDrawerOpen}
-        notifications={notifications}
-        markAsRead={markAsRead}
-        markAllAsRead={markAllAsRead}
-        loadMore={loadMore}
-        hasMore={hasMore}
-      />
+<style>
+  {`
+    @keyframes pulse {
+      0% { opacity: 1 }
+      50% { opacity: 0.6 }
+      100% { opacity: 1 }
+    }
+  `}
+</style>
 
-      <ProfileDrawer
-        profileDrawerOpen={profileDrawerOpen}
-        setProfileDrawerOpen={setProfileDrawerOpen}
-      />
+<Popover
+  open={open}
+  anchorEl={anchorEl}
+  onClose={() => setAnchorEl(null)}
+  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+  transformOrigin={{ vertical: "top", horizontal: "right" }}
+>
+  <Box sx={{ p: 2, width: 320 }}>
+    <Typography variant="subtitle2" sx={{ mb: 1 }}>
+      Downloads
+    </Typography>
 
-      {popNotification && (
-        <NotificationPopup
-          popup={popNotification}
-          handleNotificationClick={() => {
-            setNotificationDrawerOpen(true);
-            setPopNotification(null);
-          }}
-          onClose={() => {
-            setPopNotification(null);
-          }}
-        />
-      )}
-    </Box>
-  );
-};
+    {activeDownloads.map((d) => {
+      const mb = (d.loaded / (1024 * 1024)).toFixed(2);
 
-export default React.memo(LayoutHeader);
+      return (
+        <Box key={d.fileName} sx={{ mb: 2 }}>
+          <Typography variant="body2" fontWeight={600}>
+            {d.fileName}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {mb} MB • {d.speed.toFixed(2)} MB/s
+          </Typography>
+          <LinearProgress
+            variant="indeterminate"
+            sx={{ mt: 1, height: 6, borderRadius: 999 }}
+          />
+        </Box>
+      );
+    })}
+
+    {completedDownloads.length > 0 && (
+      <Fade in>
+        <Typography
+          variant="caption"
+          color="success.main"
+          sx={{ mt: 1, display: "block" }}
+        >
+          ✓ Download completed
+        </Typography>
+      </Fade>
+    )}
+  </Box>
+</Popover>
