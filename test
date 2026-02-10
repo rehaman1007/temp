@@ -1,26 +1,131 @@
 import {
   Dialog,
+  DialogTitle,
   DialogContent,
-  Grid,
-  Box,
+  DialogActions,
+  Button,
+  Stack,
+  IconButton,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import { useEffect, useState, useMemo } from "react";
+import ProgressStepper from "./ProgressStepper";
+import StageDetails from "./StageDetails";
+import { StageStatus } from "../util/StageStatus";
+
+const resolveInitialActiveStep = (stages = []) => {
+  if (!stages.length) return 0;
+
+  const started = stages.findIndex((s) => s.status === StageStatus.STARTED);
+  if (started !== -1) return started;
+
+  const error = stages.findIndex((s) => s.status === StageStatus.ERROR);
+  if (error !== -1) return error;
+
+  const completedIndexes = stages
+    .map((s, i) => (s.status === StageStatus.COMPLETED ? i : -1))
+    .filter((i) => i !== -1);
+
+  if (completedIndexes.length > 0) {
+    return completedIndexes[completedIndexes.length - 1];
+  }
+
+  return 0;
+};
+
+const ProcessDetailsDialog = ({
+  process,
+  onClose,
+  onStart,
+  onStop,
+  permissions = {},
+}) => {
+  const stages = useMemo(() => process?.stageDetails || [], [process]);
+  const [activeStep, setActiveStep] = useState(0);
+
+  useEffect(() => {
+    if (stages.length) {
+      setActiveStep(resolveInitialActiveStep(stages));
+    }
+  }, [stages, process]);
+
+  if (!process) return null;
+
+  const lastStatus = stages[stages.length - 1]?.status;
+
+  return (
+    <Dialog open={!!process} fullWidth maxWidth="md" onClose={onClose}>
+      <DialogTitle>
+        {process.type} – Process Details
+        <IconButton
+          onClick={onClose}
+          sx={{ position: "absolute", right: 12, top: 8 }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+
+      <DialogContent dividers>
+        <Stack direction="row" gap={1}>
+          <ProgressStepper
+            stageDetails={stages}
+            activeStep={activeStep}
+            onStageClick={setActiveStep}
+          />
+
+          <StageDetails stages={stages} activeStep={activeStep} />
+        </Stack>
+      </DialogContent>
+
+      {(permissions.start || permissions.stop) && (
+        <DialogActions>
+          {permissions.start && lastStatus != StageStatus.STARTED && (
+            <Button
+              startIcon={<RestartAltIcon />}
+              disabled={lastStatus === StageStatus.STARTED}
+              onClick={() => onStart(process)}
+            >
+              Restart
+            </Button>
+          )}
+
+          {permissions.stop && lastStatus == StageStatus.STARTED && (
+            <Button
+              startIcon={<StopIcon />}
+              disabled={lastStatus !== StageStatus.STARTED}
+              onClick={() => onStop(process)}
+            >
+              Stop
+            </Button>
+          )}
+        </DialogActions>
+      )}
+    </Dialog>
+  );
+};
+
+export default ProcessDetailsDialog;
+
+
+
+import {
   Stepper,
   Step,
   StepLabel,
   StepContent,
   Typography,
+  Box,
   Button,
 } from "@mui/material";
-import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { getIconComponent } from "../../../utils/IconUtils";
 import { StageStatus } from "../util/StageStatus";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 
-/* -------------------------------------------------------
-   STEP LABEL + CONTENT (LEFT)
-------------------------------------------------------- */
-
-const ProcessStepItem = ({ stage, active, onClick }) => {
-  const notStarted =
-    !stage.status || stage.status === StageStatus.NOT_STARTED;
+/* ------------------ Step Label Content ------------------ */
+const ProcessStepContent = ({ stage, active, onClick }) => {
+  const notStarted = !stage.status || stage.status === StageStatus.NOT_STARTED;
   const started = stage.status === StageStatus.STARTED;
   const error = stage.status === StageStatus.ERROR;
   const completed = stage.status === StageStatus.COMPLETED;
@@ -28,10 +133,10 @@ const ProcessStepItem = ({ stage, active, onClick }) => {
   const statusText = notStarted
     ? "Not Started"
     : started
-    ? "Started"
-    : error
-    ? "Failed"
-    : "Completed";
+      ? "Started"
+      : error
+        ? "Failed"
+        : "Completed";
 
   return (
     <>
@@ -52,24 +157,18 @@ const ProcessStepItem = ({ stage, active, onClick }) => {
               color: error
                 ? theme.palette.error.main
                 : completed
-                ? theme.palette.success.main
-                : theme.palette.text.secondary,
+                  ? theme.palette.success.main
+                  : theme.palette.text.secondary,
             })}
           />
         }
       >
-        <Typography variant="subtitle2">
-          {stage.stage.title}
-        </Typography>
+        <Typography variant="subtitle2">{stage.stage.title}</Typography>
       </StepLabel>
 
       <StepContent>
         {!notStarted && !active && (
-          <Button
-            size="small"
-            variant="contained"
-            onClick={onClick}
-          >
+          <Button size="small" o variant="contained" onClick={onClick}>
             <VisibilityOutlinedIcon fontSize="small" sx={{ mr: 1 }} />
             View Details
           </Button>
@@ -79,84 +178,68 @@ const ProcessStepItem = ({ stage, active, onClick }) => {
   );
 };
 
-/* -------------------------------------------------------
-   MAIN DIALOG
-------------------------------------------------------- */
-
-const ProgressStepperDialog = ({
-  open,
-  stageDetails = [],
-  activeStep = 0,
-  onStageClick,
-  onClose,
-  children, // RIGHT SIDE CONTENT
-}) => {
+/* ------------------ Progress Stepper ------------------ */
+const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
   return (
-    <Dialog
-      open={open}
-      fullWidth
-      maxWidth="lg"
-      onClose={onClose}
-      PaperProps={{
-        sx: {
-          height: "100vh",
-          maxHeight: "100vh",
-        },
-      }}
-    >
-      <DialogContent
-        sx={{
-          height: "100%",
-          p: 0,
-          overflow: "hidden", // ❌ dialog itself never scrolls
-        }}
-      >
-        <Grid container height="100%">
-          {/* ==================================================
-              LEFT COLUMN — SCROLLABLE STEPPER
-          ================================================== */}
-          <Grid
-            item
-            xs={4}
-            sx={{
-              height: "100%",
-              borderRight: 1,
-              borderColor: "divider",
-              overflowY: "auto", // ✅ ONLY THIS SCROLLS
-              p: 2,
-            }}
-          >
-            <Stepper orientation="vertical" nonLinear>
-              {stageDetails.map((stage, index) => (
-                <Step key={index} active>
-                  <ProcessStepItem
-                    stage={stage}
-                    active={index === activeStep}
-                    onClick={() => onStageClick(index)}
-                  />
-                </Step>
-              ))}
-            </Stepper>
-          </Grid>
+    <Box>
+      <Stepper orientation="vertical" sx={{ minWidth: 180 }} nonLinear>
+        {stageDetails.map((stage, index) => {
+          const active = index === activeStep;
 
-          {/* ==================================================
-              RIGHT COLUMN — FIXED CONTENT
-          ================================================== */}
-          <Grid
-            item
-            xs={8}
-            sx={{
-              height: "100%",
-              p: 3,
-              overflow: "hidden", // ❌ NEVER scroll
-            }}
-          >
-            {children}
-          </Grid>
-        </Grid>
-      </DialogContent>
-    </Dialog>
+          return (
+            <Step
+              key={index}
+              active
+              data-step={index}
+              sx={(theme) =>
+                active
+                  ? {
+                      backgroundImage: `linear-gradient(to right, transparent, ${theme.palette.divider})`,
+                      position: "relative",
+                      "&::after": {
+                        content: '""',
+                        position: "absolute",
+                        right: -8,
+                        top: 0,
+                        width: 8,
+                        height: "100%",
+                        backgroundColor: theme.palette.divider,
+                      },
+                    }
+                  : {}
+              }
+            >
+              <Box
+                sx={(theme) =>
+                  active
+                    ? {
+                        backgroundImage: `linear-gradient(to right, transparent, ${theme.palette.divider})`,
+                        position: "relative",
+                        "&::after": {
+                          content: '""',
+                          position: "absolute",
+                          right: -8,
+                          top: 0,
+                          width: 8,
+                          height: "100%",
+                          backgroundColor: theme.palette.divider,
+                        },
+                      }
+                    : {}
+                }
+              >
+                <ProcessStepContent
+                  stage={stage}
+                  active={active}
+                  onClick={() => onStageClick(index)}
+                />
+              </Box>
+            </Step>
+          );
+        })}
+      </Stepper>
+    </Box>
   );
 };
 
-export default ProgressStepperDialog;
+export default ProgressStepper;
