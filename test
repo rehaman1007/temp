@@ -1,96 +1,24 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector, useStore } from "react-redux";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { refreshAccessToken } from "../auth/refreshHelper";
-import { logoutSuccess } from "../store/slices/authSlice";
+import api from "../config/axiosConfig";
+import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
+import { parseJwt } from "../utils/EncryptionUtilities";
 
-const useStreamApi = () => {
-  const token = useSelector((state) => state.auth.token);
-  const store = useStore();
+export const refreshAccessToken = async (store) => {
+  try {
+    const response = await api.post("/auth/refresh-token");
+    const { accessToken } = response?.data?.data || {};
 
-  const controllerRef = useRef(null);
-  const streamRef = useRef(null);
+    if (!accessToken) throw new Error("No token");
 
-  const [connected, setConnected] = useState(false);
-
-  const stopStream = useCallback(() => {
-    controllerRef.current?.abort();
-    controllerRef.current = null;
-    setConnected(false);
-  }, []);
-
-  const startStream = useCallback(
-    async (url, handlers = {}) => {
-      if (!token) return;
-
-      stopStream();
-
-      const controller = new AbortController();
-      controllerRef.current = controller;
-
-      const parts = url.split("/");
-      parts[1] = resolveConfig(`/${parts[1]}`);
-      const finalUrl = parts.slice(1).join("/");
-
-      fetchEventSource(finalUrl, {
-        method: "GET",
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${store.getState().auth.token}`,
-        },
-
-        async onopen(response) {
-          if (response.status === 200) {
-            setConnected(true);
-            handlers.onOpen?.();
-            return;
-          }
-
-          if (response.status === 401) {
-            const error = await response.json();
-            const code = error?.error || error?.code;
-
-            if (code === "TOKEN_EXPIRED") {
-              try {
-                await refreshAccessToken(store);
-                startStream(url, handlers); // 🔁 restart stream
-              } catch {
-                stopStream();
-              }
-            } else {
-              store.dispatch(logoutSuccess());
-              stopStream();
-            }
-          }
-        },
-
-        onmessage(event) {
-          if (event.event === "task_progress") {
-            handlers.onTaskProgress?.(JSON.parse(event.data));
-          }
-
-          if (event.event === "new_notification") {
-            handlers.onMessage?.(JSON.parse(event.data));
-          }
-        },
-
-        onerror(err) {
-          setConnected(false);
-
-          // Network errors → retry silently
-          if (!controller.signal.aborted) {
-            setTimeout(() => startStream(url, handlers), 3000);
-          }
-        },
-      });
-    },
-    [stopStream, store, token]
-  );
-
-  useEffect(() => stopStream, [stopStream]);
-
-  return { startStream, stopStream, connected };
+    const user = parseJwt(accessToken);
+    store.dispatch(tokenRefreshed({ token: accessToken, user }));
+    return accessToken;
+  } catch (err) {
+    store.dispatch(logoutSuccess());
+    window.dispatchEvent(
+      new CustomEvent("auth:session-expired", {
+        detail: { reason: "SESSION_EXPIRED" },
+      })
+    );
+    throw err;
+  }
 };
-
-export default useStreamApi;
