@@ -1,28 +1,375 @@
-SELECT
-    prs.PROCESS_RUN_STAGE_ID            AS ID,
-    pr.PROCESS_ID,
-    pm.PROCESS_NAME                     AS PROCESS_TYPE,
-    prs.STAGE_ID                        AS PROCESS_STAGE,
-    prs.EVENT_TIME                      AS START_TIME,
-    pr.END_TIME,
-    prs.STATUS,
-    prs.REMARKS                         AS EXECUTION_REMARKS,
-    pr.TRIGGERED_BY,
-    pr.ETL_DATE,
-    prs.SUMMARY                         AS DIFFERENCE_SUMMARY,
-    pr.AIRFLOW_RUN_ID,
-    pm.PROCESS_DAG_ID                   AS DAG_ID,
-    psm.TITLE                           AS STAGE_TITLE,
-    psm.ICON                            AS STAGE_ICON
-FROM FINCORE.PROCESS_RUN_STAGE prs
-JOIN FINCORE.PROCESS_RUN pr
-      ON pr.PROCESS_RUN_ID = prs.PROCESS_RUN_ID
-JOIN FINCORE.PROCESS_MASTER pm
-      ON pm.PROCESS_ID = pr.PROCESS_ID
-LEFT JOIN FINCORE.PROCESS_STAGE_MASTER psm
-      ON psm.STAGE_ID = prs.STAGE_ID
-WHERE pr.ETL_DATE = :P_ETL_DATE
-ORDER BY
-    pr.ETL_DATE DESC,
-    pr.PROCESS_ID,
-    prs.EVENT_TIME;
+import { useEffect, useRef, useState, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import { resolveConfig } from "../config/EnvironmentConfig";
+
+const useStreamApi = () => {
+  const token = useSelector((state) => state.auth.token);
+
+  const controllerRef = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [lastMessage, setLastMessage] = useState(null);
+
+  const startStream = useCallback(
+    (url, { onMessage, onOpen, onError, onTaskProgress } = {}) => {
+      if (!token) return console.warn("No token, cannot start SSE stream");
+      const parts = url.split("/");
+      const service = parts[1];
+      const resolved = resolveConfig(`/${service}`);
+      parts[1] = resolved;
+      const Final_Url = parts.slice(1).join("/");
+
+      // Cancel any existing connection
+      if (controllerRef.current) controllerRef.current.abort();
+
+      const controller = new AbortController();
+      controllerRef.current = controller;
+
+      fetchEventSource(Final_Url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+
+        onopen(response) {
+          if (response.ok && response.status === 200) {
+            console.log("SSE Connection established");
+            setConnected(true);
+            onOpen?.(response);
+          } else {
+            console.error("SSE Connection failed:", response.status);
+          }
+        },
+
+        onmessage(event) {
+          if (event.event === "connected") {
+            // console.log("Server connected:", event.data);
+            return;
+          }
+
+          // NOTIFICATIONS
+          if (event.event === "new_notification") {
+            try {
+              const data = JSON.parse(event.data);
+              setLastMessage(data);
+              onMessage?.(data);
+            } catch (err) {
+              console.error("SSE notification parse error:", err);
+            }
+          }
+
+          // TASK PROGRESS
+          if (event.event === "task_progress") {
+            try {
+              const data = JSON.parse(event.data);
+              onTaskProgress?.(data);
+            } catch (err) {
+              console.error("SSE task progress parse error:", err);
+            }
+          }
+        },
+
+        onerror(err) {
+          console.error("SSE Error:", err);
+          setConnected(false);
+          onError?.(err);
+        },
+      });
+    },
+    [token]
+  );
+
+  const stopStream = useCallback(() => {
+    if (controllerRef.current) {
+      controllerRef.current.abort();
+      controllerRef.current = null;
+      setConnected(false);
+      console.log("SSE connection stopped.");
+    }
+  }, []);
+
+  useEffect(() => stopStream, [stopStream]);
+
+  return { connected, lastMessage, startStream, stopStream };
+};
+
+export default useStreamApi;
+
+
+
+import { useState, useCallback, useRef, useEffect } from "react";
+import { useSelector } from "react-redux";
+import { useLocation } from "react-router-dom";
+import api from "../config/axiosConfig";
+import { resolveConfig } from "../config/EnvironmentConfig";
+import { convertToKebabCase } from "../utils/CommonUtilities";
+
+const useApi = () => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const activeRequests = useRef(new Set());
+  const location = useLocation();
+
+  const menus = useSelector((state) => state.menus.menus);
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
+
+  const findMenuItem = useCallback((items, route) => {
+    if (!items?.length) return null;
+    for (const item of items) {
+      if (item.route === route) return item;
+      if (item.children?.length) {
+        if (route.includes("/choose-option/")) {
+          const param = route.split("/choose-option/")[1];
+          if (param === convertToKebabCase(item.title)) return item;
+        }
+        const found = findMenuItem(item.children, route);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
+
+  const xRequestType = (() => {
+    const currentMenu = findMenuItem(menus, location.pathname);
+    return currentMenu?.requestType || selectedMenuItem?.requestType || "*";
+  })();
+
+  const cancelAllRequests = useCallback(() => {
+    activeRequests.current.forEach((controller) => controller.abort());
+    activeRequests.current.clear();
+  }, []);
+
+  useEffect(() => () => cancelAllRequests(), [cancelAllRequests]);
+
+  const callApi = useCallback(
+    async (
+      url,
+      payload = null,
+      method = "GET",
+      responseType = "json",
+      contentType = "application/json",
+      extraConfig = {},
+      returnDataOnly = true
+    ) => {
+      setLoading(true);
+      setError(null);
+
+      // Build final URL using service resolution
+      const parts = url.split("/");
+      const service = parts[1];
+      const resolved = resolveConfig(`/${service}`);
+      parts[1] = resolved;
+      const finalUrl = parts.slice(1).join("/");
+
+      const controller = new AbortController();
+      activeRequests.current.add(controller);
+
+      try {
+        const config = {
+          method,
+          url: finalUrl,
+          data: method !== "GET" ? payload : undefined,
+          params: method === "GET" ? payload : undefined,
+          responseType,
+          signal: controller.signal,
+          headers: {
+            "Content-Type": contentType,
+            "X-Request-Type": xRequestType,
+            ...(extraConfig.headers || {}),
+          },
+          ...extraConfig,
+        };
+
+        const response = await api(config);
+        setData(response.data);
+        return returnDataOnly ? response.data : response;
+      } catch (err) {
+        setError(err);
+        if (err.response?.status !== 401) {
+          console.error(
+            err.response?.data?.message ||
+              err.response?.data?.error ||
+              "An error occurred"
+          );
+        }
+        throw err?.response?.data;
+      } finally {
+        activeRequests.current.delete(controller);
+        setLoading(false);
+      }
+    },
+    [xRequestType]
+  );
+
+  return { data, error, loading, callApi, cancelAllRequests };
+};
+
+export default useApi;
+
+
+import axios from "axios";
+import { resolveConfig } from "../config/EnvironmentConfig"; // Ensure this path is correct
+import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
+import { parseJwt } from "../utils/EncryptionUtilities";
+
+let store; // Will hold the Redux store reference
+
+// Inject store from App.js or index.js to avoid circular dependency
+export const injectStore = (_store) => {
+  store = _store;
+};
+
+// Create a Singleton Axios Instance
+const api = axios.create({
+  baseURL: "", // Base URL
+  withCredentials: true, // IMPORTANT: Allows sending/receiving HttpOnly Cookies
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
+
+// --- Request Interceptor ---
+api.interceptors.request.use(
+  (config) => {
+    // 1. Get Token from Redux Store
+    const state = store?.getState();
+    const token = state?.auth?.token;
+
+    // 2. Attach Authorization Header
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    // 3. Attach Context Header (X-Request-Type) if passed in config
+    // The hook will pass this in, or defaults to '*'
+    if (!config.headers["X-Request-Type"]) {
+      config.headers["X-Request-Type"] = "*";
+    }
+
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// --- Response Interceptor ---
+let isRefreshing = false;
+let failedQueue = [];
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+};
+
+api.interceptors.response.use(
+  (response) => {
+    return response;
+  },
+  async (error) => {
+    const originalRequest = error.config;
+
+    // Safety check to prevent infinite loops
+    if (!originalRequest || originalRequest._retryCount > 2) {
+      return Promise.reject(error);
+    }
+
+    // Extract Error Details
+    const status = error.response?.status;
+    const errorCode = error.response?.data?.error || error.response?.data?.code;
+
+    // ---------------------------------------------------------
+    // SCENARIO 1: Concurrent Login / Session Invalidated
+    // ---------------------------------------------------------
+    if (
+      status === 401 &&
+      (errorCode === "CONCURRENT_LOGIN" ||
+        errorCode === "SESSION_EXPIRED" ||
+        errorCode === "INVALID_TOKEN")
+    ) {
+      // Do NOT attempt refresh. The session is dead.
+      // We dispatch a custom event that AuthContext listens to for the Dialog
+      window.dispatchEvent(
+        new CustomEvent("auth:session-expired", {
+          detail: { reason: errorCode },
+        })
+      );
+
+      // Clear local state immediately
+      store.dispatch(logoutSuccess());
+      return Promise.reject(error);
+    }
+
+    // ---------------------------------------------------------
+    // SCENARIO 2: Access Token Expired (Try Refresh)
+    // ---------------------------------------------------------
+    if (
+      status === 401 &&
+      errorCode === "TOKEN_EXPIRED" &&
+      !originalRequest._retry
+    ) {
+      if (isRefreshing) {
+        // If already refreshing, queue this request
+        return new Promise(function (resolve, reject) {
+          failedQueue.push({
+            resolve: (token) => {
+              originalRequest.headers["Authorization"] = "Bearer " + token;
+              resolve(api(originalRequest));
+            },
+            reject: (err) => {
+              reject(err);
+            },
+          });
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        // Call Backend Refresh Endpoint
+        // Note: We don't send the refresh token in body; backend reads the Cookie
+        const response = await api.post(
+          `${resolveConfig("/LS") || ""}/auth/refresh-token`
+        );
+
+        const { accessToken } = response?.data?.data || "";
+
+        if (accessToken) {
+          // 1. Update Redux
+          const user = parseJwt(accessToken);
+          store.dispatch(tokenRefreshed({ token: accessToken, user }));
+
+          // 2. Process Queue
+          processQueue(null, accessToken);
+
+          // 3. Retry Original Request
+          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
+          return api(originalRequest);
+        } else {
+          throw new Error("No access token returned");
+        }
+      } catch (refreshError) {
+        processQueue(refreshError, null);
+        store.dispatch(logoutSuccess());
+        window.dispatchEvent(
+          new CustomEvent("auth:session-expired", {
+            detail: { reason: "SESSION_EXPIRED" },
+          })
+        );
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
+
+export default api;
