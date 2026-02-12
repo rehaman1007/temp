@@ -1,20 +1,583 @@
-const StageIcon = resolveStageIcon(stage.stage?.icon);
+import { useEffect, useState, useRef, useMemo, useCallback } from "react";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
+import { useSelector } from "react-redux";
+import dayjs from "dayjs";
 
-<Box
-  sx={{
-    borderRadius: "50%",
-    bgcolor: "rgba(255,255,255,0.12)",
-    display: "flex",
-  }}
->
-  <StageIcon
-    sx={{
-      height: 60,
-      width: 60,
-      transition: "transform 0.3s ease-in-out",
-      "&:hover": {
-        transform: "translateY(-5px)",
+import {
+  Grid,
+  Button,
+  Paper,
+  Stack,
+  Typography,
+  LinearProgress,
+  ButtonGroup,
+} from "@mui/material";
+
+import StopCircleIcon from "@mui/icons-material/StopCircle";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import TaskAltIcon from "@mui/icons-material/TaskAlt";
+
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import useApi from "../../hooks/useApi";
+import { resolveConfig } from "../../config/EnvironmentConfig";
+import {
+  getPermissions,
+  timeStampFormatter,
+} from "../../utils/CommonUtilities";
+
+import ProcessStatusHeader from "./components/ProcessStatusHeader";
+import ProcessStatusTable from "./components/ProcessStatusTable";
+import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
+import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
+import ActionConfirmDialog from "./components/ActionConfirmDialog";
+import LoadingOverlay from "../../utils/LoadingOverlay";
+
+/* =====================================================
+   Date Validation Messages
+===================================================== */
+
+const getDateErrorMessage = (error, maxDate) => {
+  switch (error) {
+    case "invalidDate":
+      return "Invalid date format";
+    case "minDate":
+      return "Date is before allowed range";
+    case "maxDate":
+      return `Date cannot be after ${dayjs(maxDate).format("DD-MM-YYYY")}`;
+    default:
+      return "Enter a valid date";
+  }
+};
+
+/* =====================================================
+   NORMALIZATION
+===================================================== */
+
+const normalizeStageDetails = (stages = []) => {
+  const map = new Map();
+
+  stages.forEach((s) => {
+    const prev = map.get(s.processStage);
+    if (!prev || s.startTime > prev.startTime) {
+      map.set(s.processStage, s);
+    }
+  });
+
+  return Array.from(map.values())
+    .sort((a, b) => a.processStage - b.processStage)
+    .map((s) => ({
+      ...s,
+      _START_TIME_RAW: s.startTime,
+      _END_TIME_RAW: s.endTime,
+      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
+      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
+    }));
+};
+
+const normalizeProcesses = (data = []) =>
+  data.map((p) => ({
+    ...p,
+    type: p.type ?? p.processType,
+    stages: normalizeStageDetails(p.stages || []),
+  }));
+
+const mergeProcesses = (prev = [], incoming = []) => {
+  const map = new Map(prev.map((p) => [p.type, p]));
+  incoming.forEach((p) => map.set(p.type, p));
+  return Array.from(map.values());
+};
+
+/* Main DAG for whole ETL */
+const EOD_DAG = "wrapper_test";
+
+/* =====================================================
+   MAIN PAGE
+===================================================== */
+
+const ProcessStatusPage = () => {
+  const snackbar = useCustomSnackbar();
+  const token = useSelector((s) => s.auth.token);
+  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+  const permissions = getPermissions(selectedMenuItem);
+  const { callApi } = useApi();
+
+  /* URLs */
+  const INITIAL_DATA_URL = "/PS/process/processes/data";
+  const TRIGGER_DAG_URL = "/PS/airflow/trigger";
+  const STOP_DAG_URL = "/PS/airflow/stop";
+  const FINISH_EOD_URL = "/PS/process/finish-eod";
+
+  const APPROVE_SUMMARY_URL = "/PS/process/approve-summary";
+  const REJECT_SUMMARY_URL = "/PS/process/reject-summary";
+
+  const service = resolveConfig("/PS");
+  const STREAM_URL = `${service}/process/processes`;
+
+  /* STATE */
+  const [currentEtlDate, setCurrentEtlDate] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [processes, setProcesses] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [apiLoading, setApiLoading] = useState(false);
+  const [dateError, setDateError] = useState(null);
+  const [isTypingDate, setIsTypingDate] = useState(false);
+  const isValidDayjsDate = (d) => dayjs.isDayjs(d) && d.isValid();
+
+  const [selectedProcessType, setSelectedProcessType] = useState(null);
+
+  const [summaryData, setSummaryData] = useState(null);
+  const [summaryMeta, setSummaryMeta] = useState(null);
+
+  const [confirmConfig, setConfirmConfig] = useState(null);
+
+  const [downloadProgress, setDownloadProgress] = useState({
+    inProgress: false,
+    loadedBytes: 0,
+  });
+
+  const initialFetchDone = useRef(false);
+  const dagRunRef = useRef(null);
+
+  /* =====================================================
+     LOAD BY DATE
+  ===================================================== */
+
+  const loadByDate = useCallback(
+    async (date) => {
+      if (date && !isValidDayjsDate(date)) return;
+
+      const payload = {
+        etlDate: date ? date.format("YYYY-MM-DD") : "",
+      };
+
+      setLoading(true);
+      try {
+        const res = await callApi(INITIAL_DATA_URL, payload, "GET");
+
+        setCurrentEtlDate(res?.fincoreDate?.etlDate);
+        setSelectedDate(date || dayjs(res?.fincoreDate?.etlDate));
+        // setProcesses(normalizeProcesses(res?.initialData || []));
+        setProcesses(normalizeProcesses(res?.temp || []));
+      } catch {
+        snackbar("Failed to load processes", "error");
+      } finally {
+        setLoading(false);
+        setIsTypingDate(false);
+      }
+    },
+    [callApi, snackbar],
+  );
+
+  useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+    loadByDate(null);
+  }, [loadByDate]);
+
+  /* =====================================================
+     SSE
+  ===================================================== */
+
+  useEffect(() => {
+    if (loading) return;
+
+    if (
+      selectedDate &&
+      currentEtlDate &&
+      selectedDate.format("YYYY-MM-DD") !== currentEtlDate
+    )
+      return;
+
+    const controller = new AbortController();
+
+    fetchEventSource(STREAM_URL, {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
       },
-    }}
-  />
-</Box>
+      onmessage(e) {
+        if (e.event === "connected") return;
+        const raw = JSON.parse(e.data);
+        setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
+      },
+    });
+
+    return () => controller.abort();
+  }, [STREAM_URL, token, loading, selectedDate, currentEtlDate]);
+
+  /* =====================================================
+     DERIVED
+  ===================================================== */
+
+  const selectedProcess = useMemo(
+    () =>
+      selectedProcessType
+        ? processes.find((p) => p.type === selectedProcessType)
+        : null,
+    [processes, selectedProcessType],
+  );
+
+  const isCurrentDate =
+    selectedDate &&
+    currentEtlDate &&
+    selectedDate.format("YYYY-MM-DD") === currentEtlDate;
+
+  const allCompleted =
+    processes.length && processes.every((p) => p.sstatus === 2);
+
+  const isInProgress = processes.some((p) => p.status === 1);
+
+  /* =====================================================
+     DAG ACTIONS
+  ===================================================== */
+
+  const triggerDag = async (dagId, remarks, processId) => {
+    setApiLoading(true);
+    try {
+      const res = await callApi(
+        TRIGGER_DAG_URL,
+        { dagId, conf: {}, remarks, processId },
+        "POST",
+      );
+      dagRunRef.current = res?.data?.airflowResponse?.dag_run_id;
+      snackbar("Process started", "success");
+    } catch (e) {
+      snackbar("Start failed, " + e.message, "error");
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  const stopDag = async (
+    dagId,
+    remarks,
+    processId = 4,
+    dagRunId = dagRunRef.current,
+  ) => {
+    setApiLoading(true);
+    try {
+      await callApi(
+        STOP_DAG_URL,
+        { dagId, dagRunId, conf: {}, remarks, processId },
+        "POST",
+      );
+      snackbar("Process stopped", "success");
+    } catch (e) {
+      snackbar("Stop failed, " + e.message, "error");
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  const handleConfirmAction = async (remarks) => {
+    const { action, process } = confirmConfig;
+    console.log(process);
+    if (action === "finishEod") {
+      await callApi(FINISH_EOD_URL, { remarks }, "POST");
+      snackbar("Finished EOD", "success");
+    } else if (action === "stop") {
+      await stopDag(
+        process.dagId,
+        remarks,
+        process.processId,
+        process.airflowRunId,
+      );
+    } else {
+      await triggerDag(process.dagId, remarks, process.processId);
+    }
+
+    setConfirmConfig(null);
+  };
+
+  /* =====================================================
+     SUMMARY OPEN
+  ===================================================== */
+
+  const handleOpenSummary = (row) => {
+    const stage6 = row.stageDetails.find((s) => s.processStage === 6);
+
+    if (!stage6?.differenceSummary) {
+      snackbar("Summary not available", "warning");
+      return;
+    }
+
+    setSummaryMeta({
+      processType: row.type,
+      stages: row.stageDetails,
+    });
+
+    setSummaryData({
+      ...stage6.differenceSummary,
+      stages: row.stageDetails,
+    });
+  };
+
+  /* =====================================================
+     SUMMARY APPROVE / REJECT
+  ===================================================== */
+
+  const approveSummary = async (summaryType) => {
+    try {
+      setApiLoading(true);
+      await callApi(APPROVE_SUMMARY_URL, {
+        processType: summaryMeta?.processType,
+        summaryType,
+      });
+      snackbar("Summary approved", "success");
+      setSummaryData(null);
+    } catch {
+      snackbar("Approval failed", "error");
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  const rejectSummary = async (summaryType) => {
+    try {
+      setApiLoading(true);
+      await callApi(REJECT_SUMMARY_URL, {
+        processType: summaryMeta?.processType,
+        summaryType,
+      });
+      snackbar("Summary rejected", "success");
+      setSummaryData(null);
+    } catch {
+      snackbar("Rejection failed", "error");
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  /* =====================================================
+     DOWNLOAD SUMMARY REPORT
+  ===================================================== */
+
+  const handleDownloadSummaryReport = async (fileName, runDate) => {
+    setDownloadProgress({ inProgress: true, loadedBytes: 0 });
+    // const payload = { runId: "1", fileName, date: runDate };
+    const payload = {
+      runId: "1",
+      fileName: "intr_report",
+      date: "2026-01-07",
+    };
+
+    try {
+      const res = await callApi(
+        "/RS/reports/download-temp-reports",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          onDownloadProgress: (e) => {
+            if (e?.loaded) {
+              setDownloadProgress({
+                inProgress: true,
+                loadedBytes: e.loaded,
+              });
+            }
+          },
+        },
+        false,
+      );
+
+      const url = window.URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileName}_${runDate}.zip`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      snackbar("Download failed", "error");
+    } finally {
+      setDownloadProgress({ inProgress: false, loadedBytes: 0 });
+    }
+  };
+
+  /* =====================================================
+     RENDER
+  ===================================================== */
+
+  return (
+    <>
+      <Paper sx={{ p: 3 }}>
+        <ProcessStatusHeader etlDate={currentEtlDate} />
+
+        {/* GLOBAL DOWNLOAD PROGRESS */}
+        {downloadProgress.inProgress && !summaryData && (
+          <Paper sx={{ p: 2, my: 2 }}>
+            <Stack direction="row" spacing={2} alignItems="center">
+              <Typography>Downloading report…</Typography>
+              <LinearProgress sx={{ flex: 1 }} />
+              {downloadProgress.loadedBytes > 0 && (
+                <Typography variant="caption">
+                  {(downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)} MB
+                </Typography>
+              )}
+            </Stack>
+          </Paper>
+        )}
+
+        {/* DATE PICKER */}
+        <Stack alignItems="center" mt={3} mb={2}>
+          <LocalizationProvider dateAdapter={AdapterDayjs}>
+            <DatePicker
+              label="ETL Date (DD-MM-YYYY)"
+              format="DD-MM-YYYY"
+              inputFormat="DD-MM-YYYY"
+              views={["year", "month", "day"]}
+              minDate={dayjs("2025-11-01")}
+              maxDate={dayjs(currentEtlDate)}
+              value={selectedDate}
+              disabled={loading || apiLoading}
+              onChange={(newDate) => {
+                setIsTypingDate(true);
+                setSelectedDate(newDate);
+
+                // Trigger API ONLY when valid
+                if (isValidDayjsDate(newDate) && !dateError) {
+                  loadByDate(newDate);
+                }
+              }}
+              onError={(error) => {
+                setDateError(error);
+              }}
+              slotProps={{
+                textField: {
+                  placeholder: "DD-MM-YYYY",
+                  error: Boolean(dateError),
+                  helperText: dateError
+                    ? getDateErrorMessage(dateError, currentEtlDate)
+                    : "Select or type a valid ETL date",
+                  onBlur: () => {
+                    // Prevent half-typed garbage from staying
+                    if (!isValidDayjsDate(selectedDate)) {
+                      setSelectedDate(dayjs(currentEtlDate));
+                      setDateError(null);
+                    }
+                  },
+                },
+                day: {
+                  showDaysOutsideCurrentMonth: true,
+                },
+              }}
+            />
+          </LocalizationProvider>
+        </Stack>
+        {/* view|approve|reject|download|start|stop|restart|finish */}
+        {/* EOD BUTTONS */}
+        {(permissions.start || permissions.stop || permissions.finish) &&
+          isCurrentDate && (
+            <Grid container justifyContent="center" m={3}>
+              <ButtonGroup
+                variant="contained"
+                aria-label="EOD Action Button Group"
+                // disabled={/* Optional: Disable all if a global loading state exists */}
+              >
+                {/* START EOD */}
+                {permissions.start && processes.length === 0 && (
+                  <Button
+                    startIcon={<PlayArrowIcon />}
+                    onClick={() =>
+                      setConfirmConfig({
+                        action: "start",
+                        process: { dagId: EOD_DAG, processId: 4 },
+                      })
+                    }
+                    // Added loading check if you have a loading state, e.g., loadingStart
+                    // loading={loadingStart}
+                  >
+                    Start EOD
+                  </Button>
+                )}
+
+                {/* STOP EOD */}
+                {permissions.stop && isInProgress && (
+                  <Button
+                    startIcon={<StopCircleIcon />}
+                    color="warning" // Added color to distinguish action
+                    onClick={() =>
+                      setConfirmConfig({
+                        action: "stop",
+                        process: { dagId: EOD_DAG, processId: 4 },
+                      })
+                    }
+                  >
+                    Stop EOD
+                  </Button>
+                )}
+
+                {/* FINISH EOD */}
+                {permissions.finish && allCompleted && (
+                  <Button
+                    startIcon={<TaskAltIcon />}
+                    color="success"
+                    onClick={() =>
+                      setConfirmConfig({ action: "finishEod", process: null })
+                    }
+                  >
+                    Finish EOD
+                  </Button>
+                )}
+              </ButtonGroup>
+            </Grid>
+          )}
+
+        {/* DETAILS */}
+        <ProcessDetailsDialog
+          process={selectedProcess}
+          onClose={() => setSelectedProcessType(null)}
+          onStart={(p) => setConfirmConfig({ action: "restart", process: p })}
+          onStop={(p) => setConfirmConfig({ action: "stop", process: p })}
+          permissions={permissions}
+        />
+
+        {/* SUMMARY */}
+        <ProcessSummaryDialog
+          open={!!summaryData}
+          data={summaryData}
+          onClose={() => setSummaryData(null)}
+          onAccept={approveSummary}
+          onReject={rejectSummary}
+          onDownload={handleDownloadSummaryReport}
+          downloadProgress={downloadProgress}
+          permissions={permissions}
+        />
+
+        {/* TABLE */}
+        <Paper>
+          <ProcessStatusTable
+            loading={loading}
+            processes={processes}
+            actions={{
+              onStart: (p) =>
+                setConfirmConfig({ action: "restart", process: p }),
+              onStop: (p) => setConfirmConfig({ action: "stop", process: p }),
+              onView: setSelectedProcessType,
+              onSummary: handleOpenSummary,
+            }}
+            permissions={permissions}
+          />
+        </Paper>
+      </Paper>
+
+      {/* CONFIRM */}
+      <ActionConfirmDialog
+        open={!!confirmConfig}
+        actionType={confirmConfig?.action}
+        processName={confirmConfig?.process?.type}
+        onConfirm={handleConfirmAction}
+        onClose={() => setConfirmConfig(null)}
+      />
+
+      <LoadingOverlay loading={apiLoading} />
+    </>
+  );
+};
+
+export default ProcessStatusPage;
