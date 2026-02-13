@@ -33,7 +33,7 @@ import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { toPng } from "html-to-image";
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect, useMemo } from "react";
 
 import GlifReportsStyles from "../../glifReports/GlifReportsStyles";
 import CustomChip from "../../../utils/CustomChip";
@@ -60,7 +60,7 @@ const ProcessSummaryDialog = ({
   onAccept,
   onReject,
   onDownload,
-  downloadProgress, // { inProgress, loadedBytes }
+  downloadProgress,
   permissions = {},
 }) => {
   const reportRef = useRef(null);
@@ -74,7 +74,8 @@ const ProcessSummaryDialog = ({
 
   if (!data) return null;
 
-  console.log("data>>>", data);
+  /* ================= DATA ================= */
+
   const {
     RECON_RUN_DATE,
     summary = [],
@@ -84,45 +85,90 @@ const ProcessSummaryDialog = ({
     stages = [],
   } = data;
 
-  /* ================= STAGE BASED SUMMARY AVAILABILITY ================= */
+  /* ================= STAGE CHECK ================= */
 
   const balanceDone = stages.some(
-    (s) => s.stageId === "CNTR_Report_generated" && s.stageStatus === 2,
+    (s) => s.stageId === "balance_Compare_generated" && s.stageStatus === 2,
   );
+
   const sibaDone = stages.some(
     (s) => s.stageId === "INTR_Report_generated" && s.stageStatus === 2,
   );
+
   const suspenseDone = stages.some(
-    (s) => s.stageId === "balance_Compare_generated" && s.stageStatus === 2,
+    (s) => s.stageId === "CNTR_Report_generated" && s.stageStatus === 2,
   );
+
   const stageWaiting = stages.some(
     (s) => s.stageId === "waiting_for_approval" && s.stageStatus === 1,
   );
 
-  console.log("stageWaiting >", stageWaiting);
-  const availableSummaryTypes = [];
-  if (balanceDone) availableSummaryTypes.push("BALANCE");
-  if (sibaDone) availableSummaryTypes.push("SIBA");
-  if (suspenseDone) availableSummaryTypes.push("SUSPENSE");
+  /* ================= AVAILABLE TYPES ================= */
+
+  const availableSummaryTypes = useMemo(() => {
+    const arr = [];
+
+    if (balanceDone) arr.push("BALANCE");
+    if (sibaDone) arr.push("SIBA");
+    if (suspenseDone) arr.push("SUSPENSE");
+
+    return arr;
+  }, [balanceDone, sibaDone, suspenseDone]);
+
+  /* ================= AUTO FIX SELECTED TYPE ================= */
+
+  useEffect(() => {
+    if (!availableSummaryTypes.includes(summaryType)) {
+      setSummaryType(availableSummaryTypes[0] || "BALANCE");
+    }
+  }, [availableSummaryTypes]);
+
+  /* ================= ACTIVE SUMMARY ================= */
+
+  const activeSummary = useMemo(() => {
+    switch (summaryType) {
+      case "BALANCE":
+        return differenceSummary?.length ? differenceSummary : summary;
+
+      case "SIBA":
+        return sibaSummary || [];
+
+      case "SUSPENSE":
+        return suspenseSummary || [];
+
+      default:
+        return [];
+    }
+  }, [summaryType, differenceSummary, summary, sibaSummary, suspenseSummary]);
 
   /* ================= TOTALS ================= */
 
-  const totalEntries = summary.reduce(
-    (sum, r) => sum + (r.Total_no_of_entries || 0),
-    0,
-  );
-  const totalNewEntries = summary.reduce(
-    (sum, r) => sum + (r["new entry"] || 0),
-    0,
+  const totalEntries = useMemo(
+    () =>
+      activeSummary.reduce(
+        (sum, r) => sum + (r.Total_no_of_entries || 0),
+        0,
+      ),
+    [activeSummary],
   );
 
-  /* ================= EXPORT SUMMARY PDF ================= */
+  const totalNewEntries = useMemo(
+    () =>
+      activeSummary.reduce(
+        (sum, r) => sum + (r["new entry"] || 0),
+        0,
+      ),
+    [activeSummary],
+  );
+
+  /* ================= EXPORT PDF ================= */
 
   const exportPDF = () => {
     const doc = new jsPDF("p", "pt");
 
     doc.setFontSize(14);
-    doc.text("Difference Summary Report", 40, 40);
+    doc.text(`${summaryType} Summary Report`, 40, 40);
+
     doc.setFontSize(10);
     doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
 
@@ -130,7 +176,7 @@ const ProcessSummaryDialog = ({
       startY: 80,
       head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
       body: [
-        ...summary.map((r) => [
+        ...activeSummary.map((r) => [
           r.HEAD,
           formatAmount(r.Total_no_of_entries),
           formatAmount(r["new entry"]),
@@ -141,13 +187,13 @@ const ProcessSummaryDialog = ({
       headStyles: { fillColor: [33, 150, 243] },
       columnStyles: { 0: { halign: "left" } },
       didParseCell: (d) => {
-        if (d.row.index === summary.length) {
+        if (d.row.index === activeSummary.length) {
           d.cell.styles.fontStyle = "bold";
         }
       },
     });
 
-    doc.save(`Difference_Summary_${RECON_RUN_DATE}.pdf`);
+    doc.save(`${summaryType}_Summary_${RECON_RUN_DATE}.pdf`);
   };
 
   /* ================= COPY PNG ================= */
@@ -160,7 +206,6 @@ const ProcessSummaryDialog = ({
         cacheBust: true,
         backgroundColor: "#ffffff",
         pixelRatio: 2,
-        skipFonts: true, // avoids cssRules error
       });
 
       const blob = await (await fetch(dataUrl)).blob();
@@ -170,8 +215,13 @@ const ProcessSummaryDialog = ({
       ]);
 
       setCopied(true);
+
       clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+
+      copyTimeoutRef.current = setTimeout(
+        () => setCopied(false),
+        2000,
+      );
     } catch (err) {
       console.error(err);
     }
@@ -186,40 +236,33 @@ const ProcessSummaryDialog = ({
 
   return (
     <Dialog open={open} fullWidth maxWidth="md">
-      {/* ================= HEADER ================= */}
+      {/* HEADER */}
 
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderBottom: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "space-between",
-        }}
-      >
+      <Box sx={styles.header}>
         <Box>
           <Typography variant="h6" fontWeight={700}>
-            Difference Summary Report
+            {summaryType} Summary Report
           </Typography>
+
           <Typography variant="body2" color="text.secondary">
             Reconciliation Date: {RECON_RUN_DATE}
           </Typography>
         </Box>
 
-        <Stack direction="row" spacing={1}>
-          <Tooltip title="Export summary to PDF">
+        <Stack direction="row">
+          <Tooltip title="Export PDF">
             <IconButton onClick={exportPDF}>
               <PictureAsPdfOutlinedIcon />
             </IconButton>
           </Tooltip>
 
-          <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
-            <IconButton
-              onClick={copyPNGToClipboard}
-              sx={{ color: copied ? "success.main" : "inherit" }}
-            >
-              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
+          <Tooltip title="Copy as Image">
+            <IconButton onClick={copyPNGToClipboard}>
+              {copied ? (
+                <CheckCircleOutlineIcon color="success" />
+              ) : (
+                <ImageOutlinedIcon />
+              )}
             </IconButton>
           </Tooltip>
 
@@ -229,20 +272,14 @@ const ProcessSummaryDialog = ({
         </Stack>
       </Box>
 
-      {/* ================= BODY ================= */}
+      {/* BODY */}
 
       <DialogContent>
-        {/* SUMMARY TYPE + DOWNLOAD */}
+        {/* RADIO */}
 
         {permissions.download && availableSummaryTypes.length > 0 && (
           <Paper sx={{ p: 2, mb: 2 }}>
-            <Stack
-              direction="row"
-              justifyContent="space-between"
-              alignItems="center"
-              flexWrap="wrap"
-              gap={2}
-            >
+            <Stack direction="row" justifyContent="space-between">
               <RadioGroup
                 row
                 value={summaryType}
@@ -277,7 +314,10 @@ const ProcessSummaryDialog = ({
                 startIcon={<CloudDownloadTwoToneIcon />}
                 variant="contained"
                 onClick={() =>
-                  onDownload(SUMMARY_FILE_MAP[summaryType], RECON_RUN_DATE)
+                  onDownload(
+                    SUMMARY_FILE_MAP[summaryType],
+                    RECON_RUN_DATE,
+                  )
                 }
                 disabled={downloadProgress?.inProgress}
               >
@@ -285,55 +325,31 @@ const ProcessSummaryDialog = ({
               </Button>
             </Stack>
 
-            {/* DOWNLOAD PROGRESS */}
-
-            <Fade in={downloadProgress?.inProgress} unmountOnExit>
+            <Fade in={downloadProgress?.inProgress}>
               <Box sx={{ mt: 2 }}>
-                <Box sx={styles.progressHeader}>
-                  <Box sx={styles.progressIconWrapper}>
-                    <CloudDownloadTwoToneIcon sx={styles.innerDownloadIcon} />
-                  </Box>
+                <Typography variant="body2">
+                  Downloading {SUMMARY_FILE_MAP[summaryType]}{" "}
+                  {downloadedMB && `(${downloadedMB} MB)`}
+                </Typography>
 
-                  <Box sx={styles.progressHeaderTextBox}>
-                    <Typography variant="body2" fontWeight={600}>
-                      Downloading {SUMMARY_FILE_MAP[summaryType]}
-                    </Typography>
-
-                    <Typography variant="caption" color="text.secondary">
-                      {downloadedMB
-                        ? `Streaming… ${downloadedMB} MB received`
-                        : "Preparing your report stream…"}
-                    </Typography>
-                  </Box>
-
-                  {downloadedMB && (
-                    <CustomChip
-                      color="error"
-                      label={`${downloadedMB} MB`}
-                      variant="filled"
-                    />
-                  )}
-                </Box>
-
-                <LinearProgress
-                  variant="indeterminate"
-                  sx={styles.progressBar}
-                />
+                <LinearProgress />
               </Box>
             </Fade>
           </Paper>
         )}
 
-        {/* SUMMARY TABLE */}
+        {/* TABLE */}
 
         <TableContainer component={Paper} ref={reportRef}>
           <Table stickyHeader size="small">
             <TableHead>
               <TableRow>
                 <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
+
                 <TableCell align="right" sx={{ fontWeight: 600 }}>
                   TOTAL ENTRIES
                 </TableCell>
+
                 <TableCell align="right" sx={{ fontWeight: 600 }}>
                   NEW ENTRIES
                 </TableCell>
@@ -341,23 +357,27 @@ const ProcessSummaryDialog = ({
             </TableHead>
 
             <TableBody>
-              {summary.map((row, i) => (
+              {activeSummary.map((row, i) => (
                 <TableRow key={i}>
                   <TableCell>{row.HEAD}</TableCell>
+
                   <TableCell align="right">
                     {formatAmount(row.Total_no_of_entries)}
                   </TableCell>
+
                   <TableCell align="right">
                     {formatAmount(row["new entry"])}
                   </TableCell>
                 </TableRow>
               ))}
 
-              <TableRow sx={{ bgcolor: "#f1f1f1" }}>
+              <TableRow sx={{ bgcolor: "#f5f5f5" }}>
                 <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
+
                 <TableCell align="right" sx={{ fontWeight: 700 }}>
                   {formatAmount(totalEntries)}
                 </TableCell>
+
                 <TableCell align="right" sx={{ fontWeight: 700 }}>
                   {formatAmount(totalNewEntries)}
                 </TableCell>
@@ -367,25 +387,14 @@ const ProcessSummaryDialog = ({
         </TableContainer>
       </DialogContent>
 
-      {/* ================= FOOTER ================= */}
+      {/* FOOTER */}
 
       {stageWaiting && (
-        <Box
-          sx={{
-            px: 3,
-            py: 2,
-            borderTop: 1,
-            borderColor: "divider",
-            display: "flex",
-            justifyContent: "center",
-            gap: 2,
-          }}
-        >
+        <Box sx={styles.footer}>
           <Button
             color="error"
             variant="outlined"
             startIcon={<GppBadIcon />}
-            disabled={!stageWaiting}
             onClick={() => onReject(summaryType)}
           >
             Reject
@@ -395,7 +404,6 @@ const ProcessSummaryDialog = ({
             color="success"
             variant="contained"
             startIcon={<GppGoodIcon />}
-            disabled={!stageWaiting}
             onClick={() => onAccept(summaryType)}
           >
             Accept
