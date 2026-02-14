@@ -1,643 +1,488 @@
-import { useEffect, useState, useRef, useMemo, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useSelector } from "react-redux";
-import dayjs from "dayjs";
-
 import {
-  Grid,
+  Dialog,
+  DialogContent,
   Button,
+  Table,
+  TableHead,
+  TableRow,
+  TableCell,
+  TableBody,
+  TableContainer,
   Paper,
-  Stack,
   Typography,
+  Box,
+  Stack,
+  IconButton,
+  Tooltip,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
   LinearProgress,
-  ButtonGroup,
+  Fade,
+  useTheme,
 } from "@mui/material";
 
-import StopCircleIcon from "@mui/icons-material/StopCircle";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import TaskAltIcon from "@mui/icons-material/TaskAlt";
+import GppBadIcon from "@mui/icons-material/GppBad";
+import GppGoodIcon from "@mui/icons-material/GppGood";
+import CloseIcon from "@mui/icons-material/Close";
+import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
 
-import { DatePicker } from "@mui/x-date-pickers/DatePicker";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { toPng } from "html-to-image";
+import { useRef, useState, useEffect, useMemo } from "react";
+import CustomChip from "../../../utils/CustomChip";
 
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import useApi from "../../hooks/useApi";
-import { resolveConfig } from "../../config/EnvironmentConfig";
-import {
-  getPermissions,
-  timeStampFormatter,
-} from "../../utils/CommonUtilities";
+/* ================= FORMAT ================= */
 
-import ProcessStatusHeader from "./components/ProcessStatusHeader";
-import ProcessStatusTable from "./components/ProcessStatusTable";
-import ProcessDetailsDialog from "./components/ProcessDetailsDialog";
-import ProcessSummaryDialog from "./components/ProcessSummaryDialog";
-import ActionConfirmDialog from "./components/ActionConfirmDialog";
-import LoadingOverlay from "../../utils/LoadingOverlay";
+const formatAmount = (num) =>
+  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
 
-/* =====================================================
-CONFIG
-===================================================== */
+/* ================= SUMMARY → FILE MAP ================= */
 
-const EOD_DAG = "wrapper_test";
-const ETL_PROCESS_TYPE = "EOD";
-const ETL_PROCESS_ID = 0;
-
-const INITIAL_DATA_URL = "/PS/process/processes/data";
-const TRIGGER_DAG_URL = "/PS/airflow/trigger";
-const STOP_DAG_URL = "/PS/airflow/stop";
-const FINISH_EOD_URL = "/PS/process/finish-eod";
-
-const service = resolveConfig("/PS");
-const STREAM_URL = `${service}/process/processes`;
-
-const APPROVE_SUMMARY_URL = "/PS/process/approve-reject";
-const REJECT_SUMMARY_URL = "/PS/process/approve-reject";
-
-/* =====================================================
-   Date Validation Messages
-===================================================== */
-
-const getDateErrorMessage = (error, maxDate) => {
-  switch (error) {
-    case "invalidDate":
-      return "Invalid date format";
-    case "minDate":
-      return "Date is before allowed range";
-    case "maxDate":
-      return `Date cannot be after ${dayjs(maxDate).format("DD-MM-YYYY")}`;
-    default:
-      return "Enter a valid date";
-  }
+const SUMMARY_FILE_MAP = {
+  BALANCE: "balance_compare_report",
+  SIBA: "intr_report",
+  SUSPENSE: "cntr_report",
 };
 
-/* =====================================================
-   NORMALIZATION
-===================================================== */
+/* ====================================================== */
 
-const normalizeStageDetails = (stages = []) => {
-  // const map = new Map();
+const ProcessSummaryDialog = ({
+  open,
+  data,
+  onClose,
+  onAccept,
+  onReject,
+  onDownload,
+  downloadProgress,
+  permissions = {},
+}) => {
+  const reportRef = useRef(null);
+  const copyTimeoutRef = useRef(null);
 
-  // stages.forEach((s) => {
-  //   const prev = map.get(s.processStage);
-  //   // if (!prev || s.startTime > prev.startTime) {
-  //   //   map.set(s.processStage, s);
-  //   // }
-  // });
+  const [copied, setCopied] = useState(false);
+  const [summaryType, setSummaryType] = useState("BALANCE");
 
-  return Array.from(stages.values())
-    .sort((a, b) => a._END_TIME_RAW - b._START_TIME_RAW)
-    .map((s) => ({
-      ...s,
-      _START_TIME_RAW: s.startTime,
-      _END_TIME_RAW: s.endTime,
-      startTime: s.startTime ? timeStampFormatter(s.startTime) : null,
-      endTime: s.endTime ? timeStampFormatter(s.endTime) : null,
-    }));
-};
+  const theme = useTheme();
 
-const normalizeProcesses = (data = []) =>
-  data.map((p) => ({
-    ...p,
-    type: p.type ?? p.processType,
-    stages: normalizeStageDetails(p.stages || []),
-  }));
+  const safeData = data || {};
+  /* ================= DATA ================= */
 
-const mergeProcesses = (prev = [], incoming = []) => {
-  const map = new Map(prev.map((p) => [p.processId, p]));
+  const {
+    RECON_RUN_DATE = "2026",
+    summary = [],
+    differenceSummary = [],
+    sibaSummary = [],
+    suspenseSummary = [],
+    stages = [],
+  } = safeData;
 
-  incoming.forEach((p) => {
-    map.set(p.processId, {
-      ...map.get(p.processId),
-      ...p,
-    });
-  });
+  /* ================= STAGE CHECK ================= */
 
-  return Array.from(map.values());
-};
+  const balanceDone = stages.some(
+    (s) => s.stageId === "balance_Compare_generated" && s.stageStatus === 2,
+  );
 
-/* =====================================================
-   MAIN PAGE
-===================================================== */
+  const sibaDone = stages.some(
+    (s) => s.stageId === "INTR_Report_generated" && s.stageStatus === 2,
+  );
 
-const ProcessStatusPage = () => {
-  const snackbar = useCustomSnackbar();
-  const token = useSelector((s) => s.auth.token);
-  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
-  const permissions = getPermissions(selectedMenuItem);
-  const { callApi } = useApi();
+  const suspenseDone = stages.some(
+    (s) => s.stageId === "CNTR_Report_generated" && s.stageStatus === 2,
+  );
 
-  /* STATE */
-  const [currentEtlDate, setCurrentEtlDate] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(null);
-  const [processes, setProcesses] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [apiLoading, setApiLoading] = useState(false);
-  const [dateError, setDateError] = useState(null);
-  const isValidDayjsDate = (d) => dayjs.isDayjs(d) && d.isValid();
+  const stageWaiting = stages.some(
+    (s) => s.stageId === "waiting_for_approval" && s.stageStatus === 1,
+  );
 
-  const [selectedProcessType, setSelectedProcessType] = useState(null);
-  const [selectedProcess, setSelectedProcess] = useState(null);
+  /* ================= AVAILABLE TYPES ================= */
 
-  const [summaryData, setSummaryData] = useState(null);
-  const [summaryMeta, setSummaryMeta] = useState(null);
-  const [summaryProcess, setSummaryProcess] = useState(null);
+  const availableSummaryTypes = useMemo(() => {
+    const arr = [];
 
-  const [confirmConfig, setConfirmConfig] = useState(null);
+    if (balanceDone) arr.push("BALANCE");
+    if (sibaDone) arr.push("SIBA");
+    if (suspenseDone) arr.push("SUSPENSE");
 
-  const [downloadProgress, setDownloadProgress] = useState({
-    inProgress: false,
-    loadedBytes: 0,
-  });
+    return arr;
+  }, [balanceDone, sibaDone, suspenseDone]);
 
-  const initialFetchDone = useRef(false);
-  const dagRunRef = useRef(null);
+  /* ================= AUTO FIX SELECTED TYPE ================= */
 
-  /* =====================================================
-      DERIVED STATE
-  ===================================================== */
+  useEffect(() => {
+    if (!availableSummaryTypes.includes(summaryType)) {
+      setSummaryType(availableSummaryTypes[0] || "BALANCE");
+    }
+  }, [availableSummaryTypes, summaryType]);
 
-  /* Visible processes (exclude ETL from table) */
-  const visibleProcesses = useMemo(
+  /* ================= ACTIVE SUMMARY ================= */
+
+  const activeSummary = useMemo(() => {
+    switch (summaryType) {
+      case "BALANCE":
+        return differenceSummary?.length ? differenceSummary : summary;
+
+      case "SIBA":
+        return sibaSummary || [];
+
+      case "SUSPENSE":
+        return suspenseSummary || [];
+
+      default:
+        return [];
+    }
+  }, [summaryType, differenceSummary, summary, sibaSummary, suspenseSummary]);
+
+  /* ================= TOTALS ================= */
+
+  const totalEntries = useMemo(
     () =>
-      processes.filter(
-        (p) => p.type !== ETL_PROCESS_TYPE && p.processId !== ETL_PROCESS_ID,
-      ),
-    [processes],
+      activeSummary.reduce((sum, r) => sum + (r.Total_no_of_entries || 0), 0),
+    [activeSummary],
   );
 
-  /* ETL process only */
-  const etlProcess = useMemo(
-    () => processes.find((p) => p.type === ETL_PROCESS_TYPE),
-    [processes],
+  const totalNewEntries = useMemo(
+    () => activeSummary.reduce((sum, r) => sum + (r["new entry"] || 0), 0),
+    [activeSummary],
   );
 
-  const isInProgress =
-    etlProcess?.status === 1 || processes.some((p) => p.status === 1);
+  /* ================= EXPORT PDF ================= */
 
-  const allCompleted =
-    etlProcess?.status === 2 && processes.every((p) => p.status === 2);
+  const exportPDF = () => {
+    const doc = new jsPDF("p", "pt");
 
-  const hasEtl = Boolean(etlProcess);
+    doc.setFontSize(14);
+    doc.text(`${summaryType} Summary Report`, 40, 40);
 
-  const isCurrentDate =
-    selectedDate &&
-    currentEtlDate &&
-    selectedDate.format("YYYY-MM-DD") === currentEtlDate;
+    doc.setFontSize(10);
+    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
 
-  /* =====================================================
-     INITIAL LOAD
-  ===================================================== */
-
-  const loadByDate = useCallback(
-    async (date) => {
-      if (date && !isValidDayjsDate(date)) return;
-
-      const payload = {
-        etlDate: date ? date.format("YYYY-MM-DD") : "",
-      };
-
-      setLoading(true);
-      try {
-        const res = await callApi(INITIAL_DATA_URL, payload, "GET");
-
-        setCurrentEtlDate(res?.fincoreDate?.etlDate);
-        setSelectedDate(date || dayjs(res?.fincoreDate?.etlDate));
-        setProcesses(normalizeProcesses(res?.initialData || []));
-      } catch {
-        snackbar("Failed to load processes", "error");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [callApi, snackbar],
-  );
-
-  useEffect(() => {
-    if (initialFetchDone.current) return;
-    initialFetchDone.current = true;
-    loadByDate(null);
-  }, [loadByDate]);
-
-  /* =====================================================
-     SSE STREAM
-  ===================================================== */
-
-  useEffect(() => {
-    if (loading) return;
-
-    if (
-      selectedDate &&
-      currentEtlDate &&
-      selectedDate.format("YYYY-MM-DD") !== currentEtlDate
-    )
-      return;
-
-    const controller = new AbortController();
-
-    fetchEventSource(STREAM_URL, {
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
-      onmessage(e) {
-        if (e.event === "connected") return;
-        const raw = JSON.parse(e.data.temp);
-        setProcesses(normalizeProcesses(raw || []));
-        // setProcesses((prev) => mergeProcesses(prev, normalizeProcesses(raw)));
+    autoTable(doc, {
+      startY: 80,
+      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
+      body: [
+        ...activeSummary.map((r) => [
+          r.HEAD,
+          formatAmount(r.Total_no_of_entries),
+          formatAmount(r["new entry"]),
+        ]),
+        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
+      ],
+      styles: { halign: "right", fontSize: 9 },
+      headStyles: { fillColor: [33, 150, 243] },
+      columnStyles: { 0: { halign: "left" } },
+      didParseCell: (d) => {
+        if (d.row.index === activeSummary.length) {
+          d.cell.styles.fontStyle = "bold";
+        }
       },
     });
 
-    return () => controller.abort();
-  }, [token, loading, selectedDate, currentEtlDate]);
-
-  /* =====================================================
-     DAG ACTIONS
-  ===================================================== */
-
-  const triggerDag = async (dagId, remarks, processId) => {
-    setApiLoading(true);
-    try {
-      const res = await callApi(
-        TRIGGER_DAG_URL,
-        { dagId, conf: {}, remarks, processId },
-        "POST",
-      );
-      dagRunRef.current = res?.data?.airflowResponse?.dag_run_id;
-      snackbar("Process started", "success");
-    } catch (e) {
-      snackbar("Start failed, " + e.message, "error");
-    } finally {
-      setApiLoading(false);
-    }
+    doc.save(`${summaryType}_Summary_${RECON_RUN_DATE}.pdf`);
   };
 
-  const stopDag = async (
-    dagId,
-    remarks,
-    processId = 4,
-    dagRunId = etlProcess.processRunId,
-  ) => {
-    console.log(etlProcess);
-    setApiLoading(true);
-    try {
-      await callApi(
-        STOP_DAG_URL,
-        { dagId, dagRunId, conf: {}, remarks, processId },
-        "POST",
-      );
-      snackbar("Process stopped", "success");
-    } catch (e) {
-      snackbar("Stop failed, " + e.message, "error");
-    } finally {
-      setApiLoading(false);
-    }
-  };
+  /* ================= COPY PNG ================= */
 
-  const finishEod = async (remarks) => {
-    try {
-      setApiLoading(true);
-
-      await callApi(FINISH_EOD_URL, { remarks });
-
-      snackbar("EOD Finished", "success");
-    } catch {
-      snackbar("Finish failed", "error");
-    } finally {
-      setApiLoading(false);
-    }
-  };
-
-  const handleConfirmAction = async (remarks) => {
-    const { action, process } = confirmConfig;
-    console.log(process);
-    if (action === "finishEod") {
-      await finishEod(remarks);
-      snackbar("Finished EOD", "success");
-    } else if (action === "stop") {
-      await stopDag(
-        process.dagId,
-        remarks,
-        process.processId,
-        process.airflowRunId,
-      );
-    } else {
-      await triggerDag(process.dagId, remarks, process.processId);
-    }
-
-    setConfirmConfig(null);
-  };
-
-  /* =====================================================
-     SUMMARY OPEN
-  ===================================================== */
-
-  const handleOpenSummary = (row) => {
-    console.log(row);
-    const stageBalComp = row.stages.find(
-      (s) => s.stageId === "balance_Compare_generated",
-    );
-    const stageSiba = row.stages.find(
-      (s) => s.stageId === "INTR_Report_generated",
-    );
-    const stageSuspense = row.stages.find(
-      (s) => s.stageId === "CNTR_Report_generated",
-    );
-
-    if (
-      !(stageBalComp?.summary || stageSiba?.summary || stageSuspense?.summary)
-    ) {
-      snackbar("Summary not available", "warning");
-      return;
-    }
-
-    setSummaryProcess(row);
-
-    setSummaryMeta({
-      processType: row.type,
-      stages: row.stageDetails,
-    });
-    const modSummary = JSON.parse(stageBalComp?.summary);
-    const differenceSummary = JSON.parse(stageBalComp?.summary);
-    const sibaSummary = JSON.parse(stageBalComp?.summary);
-    const suspenseSummary = JSON.parse(stageBalComp?.summary);
-    console.log(modSummary);
-
-    setSummaryData({
-      RECON_RUN_DATE: modSummary.RECON_RUN_DATE,
-      summary: modSummary.summary,
-      differenceSummary: differenceSummary.summary,
-      sibaSummary: sibaSummary.summary,
-      suspenseSummary: suspenseSummary.summary,
-      ...stageSiba?.summary,
-      ...stageSuspense?.summary,
-      stages: row.stages,
-    });
-  };
-
-  /* =====================================================
-     SUMMARY APPROVE / REJECT
-  ===================================================== */
-
-  const handleApproveRejectAction = async (action) => {
-    try {
-      setApiLoading(true);
-      const response = await callApi(
-        APPROVE_SUMMARY_URL,
-        {
-          actionFlag: action,
-          processRunId: summaryProcess.processRunId,
-          remarks: "NA",
-        },
-        "PATCH",
-      );
-      if (response.success) {
-        const message = `${action == "ACCEPT" ? "Accepted" : "Rejected"} data Successfully for ETL date ${currentEtlDate.split("-").reverse().join("-")}`;
-        snackbar(message, "success");
-        setSummaryData(null);
-      } else {
-        snackbar(
-          "Action failed. Something went wrong, please try again later.",
-          "success",
-        );
-      }
-    } catch {
-      snackbar(
-        "Action failed. Something went wrong, please try again later.",
-        "error",
-      );
-    } finally {
-      setApiLoading(false);
-    }
-  };
-
-  /* =====================================================
-     DOWNLOAD SUMMARY REPORT
-  ===================================================== */
-
-  const handleDownloadSummaryReport = async (fileName, runDate) => {
-    setDownloadProgress({ inProgress: true, loadedBytes: 0 });
-    // const payload = { runId: "1", fileName, date: runDate };
-    const payload = {
-      runId: "1",
-      fileName: "intr_report",
-      date: "2026-01-07",
-    };
+  const copyPNGToClipboard = async () => {
+    if (!reportRef.current) return;
 
     try {
-      const res = await callApi(
-        "/RS/reports/download-temp-reports",
-        payload,
-        "POST",
-        "blob",
-        "application/json",
-        {
-          onDownloadProgress: (e) => {
-            if (e?.loaded) {
-              setDownloadProgress({
-                inProgress: true,
-                loadedBytes: e.loaded,
-              });
-            }
-          },
-        },
-        false,
-      );
+      const dataUrl = await toPng(reportRef.current, {
+        cacheBust: true,
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+      });
 
-      const url = window.URL.createObjectURL(res.data);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${fileName}_${runDate}.zip`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-    } catch {
-      snackbar("Download failed", "error");
-    } finally {
-      setDownloadProgress({ inProgress: false, loadedBytes: 0 });
+      const blob = await (await fetch(dataUrl)).blob();
+
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": blob }),
+      ]);
+
+      setCopied(true);
+
+      clearTimeout(copyTimeoutRef.current);
+
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error(err);
     }
   };
 
-  /* =====================================================
-     RENDER
-  ===================================================== */
+  const downloadedMB =
+    downloadProgress?.loadedBytes > 0
+      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
+      : null;
+
+  /* ====================================================== */
 
   return (
-    <>
-      <Paper sx={{ p: 3 }}>
-        <ProcessStatusHeader etlDate={currentEtlDate} />
+    <Dialog open={open} fullWidth maxWidth="md">
+      {/* HEADER */}
 
-        {/* GLOBAL DOWNLOAD PROGRESS */}
-        {downloadProgress.inProgress && !summaryData && (
-          <Paper sx={{ p: 2, my: 2 }}>
-            <Stack direction="row" spacing={2} alignItems="center">
-              <Typography>Downloading report…</Typography>
-              <LinearProgress sx={{ flex: 1 }} />
-              {downloadProgress.loadedBytes > 0 && (
-                <Typography variant="caption">
-                  {(downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)} MB
-                </Typography>
-              )}
+      <Box
+        sx={{
+          px: 3,
+          py: 2,
+          borderBottom: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "space-between",
+        }}
+      >
+        <Box>
+          <Typography variant="h6" fontWeight={700}>
+            {summaryType} Summary Report
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Reconciliation Date: {RECON_RUN_DATE}
+          </Typography>
+        </Box>
+
+        <Stack direction="row" spacing={1}>
+          <Tooltip title="Export summary to PDF">
+            <IconButton onClick={exportPDF}>
+              <PictureAsPdfOutlinedIcon />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
+            <IconButton
+              onClick={copyPNGToClipboard}
+              sx={{ color: copied ? "success.main" : "inherit" }}
+            >
+              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
+            </IconButton>
+          </Tooltip>
+
+          <IconButton onClick={onClose}>
+            <CloseIcon />
+          </IconButton>
+        </Stack>
+      </Box>
+
+      {/* BODY */}
+
+      <DialogContent>
+        {/* RADIO */}
+        {permissions.download && availableSummaryTypes.length > 0 && (
+          <Paper sx={{ p: 2, mb: 2 }}>
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
+              flexWrap="wrap"
+              gap={2}
+            >
+              <RadioGroup
+                row
+                value={summaryType}
+                onChange={(e) => setSummaryType(e.target.value)}
+              >
+                {availableSummaryTypes.includes("BALANCE") && (
+                  <FormControlLabel
+                    value="BALANCE"
+                    control={<Radio />}
+                    label="Balance Compare"
+                    disabled={downloadProgress?.inProgress}
+                  />
+                )}
+
+                {availableSummaryTypes.includes("SIBA") && (
+                  <FormControlLabel
+                    value="SIBA"
+                    control={<Radio />}
+                    label="SIBA"
+                    disabled={downloadProgress?.inProgress}
+                  />
+                )}
+
+                {availableSummaryTypes.includes("SUSPENSE") && (
+                  <FormControlLabel
+                    value="SUSPENSE"
+                    control={<Radio />}
+                    label="Suspense"
+                    disabled={downloadProgress?.inProgress}
+                  />
+                )}
+              </RadioGroup>
+
+              <Button
+                startIcon={<CloudDownloadTwoToneIcon />}
+                variant="contained"
+                onClick={() =>
+                  onDownload(SUMMARY_FILE_MAP[summaryType], RECON_RUN_DATE)
+                }
+                disabled={downloadProgress?.inProgress}
+              >
+                Download Full Report
+              </Button>
             </Stack>
+
+            {/* DOWNLOAD PROGRESS */}
+
+            <Fade in={downloadProgress?.inProgress} unmountOnExit>
+              <Box sx={{ mt: 2 }}>
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 2,
+                    p: 1.5,
+                    mb: 1.5,
+                    borderRadius: 2,
+                    bgcolor: "grey.100",
+                    boxShadow: 1,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      p: 1,
+                      borderRadius: "50%",
+                      bgcolor: "primary.main",
+                      color: "common.white",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <CloudDownloadTwoToneIcon
+                      sx={{
+                        fontSize: 22,
+                        transform: "translateY(1px)",
+                      }}
+                    />
+                  </Box>
+
+                  <Box flex={1}>
+                    <Typography variant="body2" fontWeight={600}>
+                      Downloading {SUMMARY_FILE_MAP[summaryType]}
+                    </Typography>
+
+                    <Typography variant="caption" color="text.secondary">
+                      {downloadedMB
+                        ? `Streaming… ${downloadedMB} MB received`
+                        : "Preparing your report stream…"}
+                    </Typography>
+                  </Box>
+
+                  {downloadedMB && (
+                    <CustomChip
+                      color="error"
+                      label={`${downloadedMB} MB`}
+                      variant="filled"
+                    />
+                  )}
+                </Box>
+
+                <LinearProgress
+                  variant="indeterminate"
+                  sx={{
+                    height: 8,
+                    borderRadius: 999,
+                    overflow: "hidden",
+                    bgcolor:
+                      theme.palette.mode === "light" ? "grey.200" : "grey.800",
+                    "& .MuiLinearProgress-bar": {
+                      borderRadius: 999,
+                      backgroundImage:
+                        "linear-gradient(90deg, #42a5f5 0%, #7e57c2 50%, #ffb300 100%)",
+                    },
+                  }}
+                />
+              </Box>
+            </Fade>
           </Paper>
         )}
 
-        {/* DATE PICKER */}
-        <Stack alignItems="center" mt={3} mb={2}>
-          <LocalizationProvider dateAdapter={AdapterDayjs}>
-            <DatePicker
-              label="ETL Date (DD-MM-YYYY)"
-              format="DD-MM-YYYY"
-              inputFormat="DD-MM-YYYY"
-              views={["year", "month", "day"]}
-              minDate={dayjs("2025-11-01")}
-              maxDate={dayjs(currentEtlDate)}
-              value={selectedDate}
-              disabled={loading || apiLoading}
-              onChange={(newDate) => {
-                setSelectedDate(newDate);
-
-                // Trigger API ONLY when valid
-                if (isValidDayjsDate(newDate) && !dateError) {
-                  loadByDate(newDate);
-                }
-              }}
-              onError={(error) => {
-                setDateError(error);
-              }}
-              slotProps={{
-                textField: {
-                  placeholder: "DD-MM-YYYY",
-                  error: Boolean(dateError),
-                  helperText: dateError
-                    ? getDateErrorMessage(dateError, currentEtlDate)
-                    : "Select or type a valid ETL date",
-                  onBlur: () => {
-                    // Prevent half-typed garbage from staying
-                    if (!isValidDayjsDate(selectedDate)) {
-                      setSelectedDate(dayjs(currentEtlDate));
-                      setDateError(null);
-                    }
-                  },
-                },
-                day: {
-                  showDaysOutsideCurrentMonth: true,
-                },
-              }}
-            />
-          </LocalizationProvider>
-        </Stack>
-
-        {/* EOD BUTTONS */}
-        {(permissions.start || permissions.terminate || permissions.finish) &&
-          (!hasEtl || isInProgress || allCompleted) &&
-          isCurrentDate && (
-            <Grid container justifyContent="center" m={3}>
-              <ButtonGroup
-                variant="contained"
-                aria-label="EOD Action Button Group"
-                // disabled={/* Optional: Disable all if a global loading state exists */}
-              >
-                {/* START EOD */}
-                {permissions.start && !hasEtl && (
-                  <Button
-                    startIcon={<PlayArrowIcon />}
-                    onClick={() =>
-                      setConfirmConfig({
-                        action: "start",
-                        process: { dagId: EOD_DAG, processId: ETL_PROCESS_ID },
-                      })
-                    }
-                    // Added loading check if you have a loading state, e.g., loadingStart
-                    // loading={loadingStart}
-                  >
-                    Start EOD
-                  </Button>
-                )}
-
-                {/* STOP EOD */}
-                {permissions.terminate && isInProgress && (
-                  <Button
-                    startIcon={<StopCircleIcon />}
-                    // color="warning" // Added color to distinguish action
-                    onClick={() =>
-                      setConfirmConfig({
-                        action: "stop",
-                        process: { dagId: EOD_DAG, processId: ETL_PROCESS_ID },
-                      })
-                    }
-                  >
-                    Stop EOD
-                  </Button>
-                )}
-
-                {/* FINISH EOD */}
-                {permissions.finish && allCompleted && (
-                  <Button
-                    startIcon={<TaskAltIcon />}
-                    color="success"
-                    onClick={() =>
-                      setConfirmConfig({ action: "finishEod", process: null })
-                    }
-                  >
-                    Finish EOD
-                  </Button>
-                )}
-              </ButtonGroup>
-            </Grid>
-          )}
-
-        {/* DETAILS */}
-        <ProcessDetailsDialog
-          process={selectedProcess}
-          onClose={() => setSelectedProcess(null)}
-          onStart={(p) => setConfirmConfig({ action: "restart", process: p })}
-          onStop={(p) => setConfirmConfig({ action: "stop", process: p })}
-          permissions={permissions}
-        />
-
-        {/* SUMMARY */}
-        <ProcessSummaryDialog
-          open={!!summaryData}
-          data={summaryData}
-          onClose={() => setSummaryData(null)}
-          onAccept={handleApproveRejectAction("ACCEPT")}
-          onReject={handleApproveRejectAction("REJECT")}
-          onDownload={handleDownloadSummaryReport}
-          downloadProgress={downloadProgress}
-          permissions={permissions}
-        />
-
         {/* TABLE */}
-        <Paper>
-          <ProcessStatusTable
-            loading={loading}
-            processes={visibleProcesses}
-            actions={{
-              onStart: (p) =>
-                setConfirmConfig({ action: "restart", process: p }),
-              onStop: (p) => setConfirmConfig({ action: "stop", process: p }),
-              onView: (p) => setSelectedProcess(p),
-              onSummary: handleOpenSummary,
-            }}
-            permissions={permissions}
-          />
-        </Paper>
-      </Paper>
 
-      {/* CONFIRM */}
-      <ActionConfirmDialog
-        open={!!confirmConfig}
-        actionType={confirmConfig?.action}
-        processName={confirmConfig?.process?.type}
-        onConfirm={handleConfirmAction}
-        onClose={() => setConfirmConfig(null)}
-      />
+        <TableContainer component={Paper} ref={reportRef}>
+          <Table stickyHeader size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
 
-      <LoadingOverlay loading={apiLoading} />
-    </>
+                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                  TOTAL ENTRIES
+                </TableCell>
+
+                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                  NEW ENTRIES
+                </TableCell>
+              </TableRow>
+            </TableHead>
+
+            <TableBody>
+              {activeSummary.map((row, i) => (
+                <TableRow key={i}>
+                  <TableCell>{row.HEAD}</TableCell>
+
+                  <TableCell align="right">
+                    {formatAmount(row.Total_no_of_entries)}
+                  </TableCell>
+
+                  <TableCell align="right">
+                    {formatAmount(row["new entry"])}
+                  </TableCell>
+                </TableRow>
+              ))}
+
+              <TableRow sx={{ bgcolor: "#f5f5f5" }}>
+                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
+
+                <TableCell align="right" sx={{ fontWeight: 700 }}>
+                  {formatAmount(totalEntries)}
+                </TableCell>
+
+                <TableCell align="right" sx={{ fontWeight: 700 }}>
+                  {formatAmount(totalNewEntries)}
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </DialogContent>
+
+      {/* FOOTER */}
+
+      {!stageWaiting && (
+        <Box
+          sx={{
+            px: 3,
+            py: 2,
+            borderTop: 1,
+            borderColor: "divider",
+            display: "flex",
+            justifyContent: "center",
+            gap: 2,
+          }}
+        >
+          <Button
+            color="error"
+            variant="outlined"
+            startIcon={<GppBadIcon />}
+            onClick={() => onReject(summaryType)}
+          >
+            Reject
+          </Button>
+
+          <Button
+            color="success"
+            variant="contained"
+            startIcon={<GppGoodIcon />}
+            onClick={() => onAccept(summaryType)}
+          >
+            Accept
+          </Button>
+        </Box>
+      )}
+    </Dialog>
   );
 };
 
-export default ProcessStatusPage;
+export default ProcessSummaryDialog;
