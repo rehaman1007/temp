@@ -1,1 +1,403 @@
-I demonstrated consistent ownership, adaptability, and commitment while contributing across multiple applications and modules. I handled development, defect resolution, and new scopes with a strong focus on quality and timely delivery. I collaborated effectively with stakeholders, remained receptive to feedback, and continuously worked towards improving system stability, code quality, and overall outcomes.
+import {
+  Dialog,
+  DialogContent,
+  Button,
+  Table,
+  TableHead,
+  TableRow,
+  TableCell,
+  TableBody,
+  TableContainer,
+  Paper,
+  Typography,
+  Box,
+  Stack,
+  IconButton,
+  Tooltip,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  LinearProgress,
+  Fade,
+  useTheme,
+} from "@mui/material";
+
+import GppBadIcon from "@mui/icons-material/GppBad";
+import GppGoodIcon from "@mui/icons-material/GppGood";
+import CloseIcon from "@mui/icons-material/Close";
+import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { toPng } from "html-to-image";
+import { useRef, useState, useEffect, useMemo } from "react";
+
+import GlifReportsStyles from "../../glifReports/GlifReportsStyles";
+import CustomChip from "../../../utils/CustomChip";
+
+/* ================= FORMAT ================= */
+
+const formatAmount = (num) =>
+  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
+
+const SUMMARY_FILE_MAP = {
+  BALANCE: "balance_compare_report",
+  SIBA: "intr_report",
+  SUSPENSE: "cntr_report",
+};
+
+const ProcessSummaryDialog = ({
+  open,
+  data,
+  onClose,
+  onAccept,
+  onReject,
+  onDownload,
+  downloadProgress,
+  permissions = {},
+}) => {
+  const theme = useTheme();
+  const styles = GlifReportsStyles(theme);
+
+  const reportRef = useRef(null);
+  const copyTimeoutRef = useRef(null);
+
+  const [copied, setCopied] = useState(false);
+  const [summaryType, setSummaryType] = useState("BALANCE");
+
+  /* ================= SAFE DATA ================= */
+
+  const safeData = data || {};
+
+  const {
+    RECON_RUN_DATE = "",
+    summary = [],
+    differenceSummary = [],
+    sibaSummary = [],
+    suspenseSummary = [],
+    stages = [],
+  } = safeData;
+
+  /* ================= STAGE CHECK ================= */
+
+  const balanceDone = useMemo(
+    () =>
+      stages.some(
+        (s) =>
+          s.stageId === "balance_Compare_generated" &&
+          s.stageStatus === 2,
+      ),
+    [stages],
+  );
+
+  const sibaDone = useMemo(
+    () =>
+      stages.some(
+        (s) =>
+          s.stageId === "INTR_Report_generated" &&
+          s.stageStatus === 2,
+      ),
+    [stages],
+  );
+
+  const suspenseDone = useMemo(
+    () =>
+      stages.some(
+        (s) =>
+          s.stageId === "CNTR_Report_generated" &&
+          s.stageStatus === 2,
+      ),
+    [stages],
+  );
+
+  const stageWaiting = useMemo(
+    () =>
+      stages.some(
+        (s) =>
+          s.stageId === "waiting_for_approval" &&
+          s.stageStatus === 1,
+      ),
+    [stages],
+  );
+
+  /* ================= AVAILABLE TYPES ================= */
+
+  const availableSummaryTypes = useMemo(() => {
+    const arr = [];
+    if (balanceDone) arr.push("BALANCE");
+    if (sibaDone) arr.push("SIBA");
+    if (suspenseDone) arr.push("SUSPENSE");
+    return arr;
+  }, [balanceDone, sibaDone, suspenseDone]);
+
+  /* ================= FIX INVALID SELECTED TYPE ================= */
+
+  useEffect(() => {
+    if (
+      availableSummaryTypes.length &&
+      !availableSummaryTypes.includes(summaryType)
+    ) {
+      setSummaryType(availableSummaryTypes[0]);
+    }
+  }, [availableSummaryTypes]);
+
+  /* ================= ACTIVE SUMMARY ================= */
+
+  const activeSummary = useMemo(() => {
+    switch (summaryType) {
+      case "BALANCE":
+        return differenceSummary.length
+          ? differenceSummary
+          : summary;
+
+      case "SIBA":
+        return sibaSummary;
+
+      case "SUSPENSE":
+        return suspenseSummary;
+
+      default:
+        return [];
+    }
+  }, [
+    summaryType,
+    differenceSummary,
+    summary,
+    sibaSummary,
+    suspenseSummary,
+  ]);
+
+  /* ================= TOTALS ================= */
+
+  const totalEntries = useMemo(
+    () =>
+      activeSummary.reduce(
+        (sum, r) => sum + (r.Total_no_of_entries || 0),
+        0,
+      ),
+    [activeSummary],
+  );
+
+  const totalNewEntries = useMemo(
+    () =>
+      activeSummary.reduce(
+        (sum, r) => sum + (r["new entry"] || 0),
+        0,
+      ),
+    [activeSummary],
+  );
+
+  /* ================= PDF ================= */
+
+  const exportPDF = () => {
+    const doc = new jsPDF("p", "pt");
+
+    doc.text(`${summaryType} Summary`, 40, 40);
+
+    autoTable(doc, {
+      startY: 60,
+      head: [["HEAD", "TOTAL", "NEW"]],
+      body: [
+        ...activeSummary.map((r) => [
+          r.HEAD,
+          formatAmount(r.Total_no_of_entries),
+          formatAmount(r["new entry"]),
+        ]),
+        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
+      ],
+    });
+
+    doc.save(`${summaryType}_${RECON_RUN_DATE}.pdf`);
+  };
+
+  /* ================= COPY ================= */
+
+  const copyPNGToClipboard = async () => {
+    if (!reportRef.current) return;
+
+    const dataUrl = await toPng(reportRef.current);
+
+    const blob = await (await fetch(dataUrl)).blob();
+
+    await navigator.clipboard.write([
+      new ClipboardItem({ "image/png": blob }),
+    ]);
+
+    setCopied(true);
+
+    clearTimeout(copyTimeoutRef.current);
+
+    copyTimeoutRef.current = setTimeout(
+      () => setCopied(false),
+      2000,
+    );
+  };
+
+  const downloadedMB =
+    downloadProgress?.loadedBytes > 0
+      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
+      : null;
+
+  /* ================= RENDER ================= */
+
+  return (
+    <Dialog open={open} fullWidth maxWidth="md">
+      <Box sx={styles.header}>
+        <Typography variant="h6">
+          {summaryType} Summary Report
+        </Typography>
+
+        <Stack direction="row">
+          <IconButton onClick={exportPDF}>
+            <PictureAsPdfOutlinedIcon />
+          </IconButton>
+
+          <IconButton onClick={copyPNGToClipboard}>
+            {copied ? (
+              <CheckCircleOutlineIcon color="success" />
+            ) : (
+              <ImageOutlinedIcon />
+            )}
+          </IconButton>
+
+          <IconButton onClick={onClose}>
+            <CloseIcon />
+          </IconButton>
+        </Stack>
+      </Box>
+
+      <DialogContent>
+        {permissions.download &&
+          availableSummaryTypes.length > 0 && (
+            <Paper sx={{ p: 2, mb: 2 }}>
+              <RadioGroup
+                row
+                value={summaryType}
+                onChange={(e) =>
+                  setSummaryType(e.target.value)
+                }
+              >
+                {availableSummaryTypes.includes(
+                  "BALANCE",
+                ) && (
+                  <FormControlLabel
+                    value="BALANCE"
+                    control={<Radio />}
+                    label="Balance"
+                  />
+                )}
+
+                {availableSummaryTypes.includes(
+                  "SIBA",
+                ) && (
+                  <FormControlLabel
+                    value="SIBA"
+                    control={<Radio />}
+                    label="SIBA"
+                  />
+                )}
+
+                {availableSummaryTypes.includes(
+                  "SUSPENSE",
+                ) && (
+                  <FormControlLabel
+                    value="SUSPENSE"
+                    control={<Radio />}
+                    label="Suspense"
+                  />
+                )}
+              </RadioGroup>
+
+              <Button
+                startIcon={<CloudDownloadTwoToneIcon />}
+                variant="contained"
+                onClick={() =>
+                  onDownload(
+                    SUMMARY_FILE_MAP[summaryType],
+                    RECON_RUN_DATE,
+                  )
+                }
+              >
+                Download
+              </Button>
+
+              {downloadProgress?.inProgress && (
+                <LinearProgress />
+              )}
+            </Paper>
+          )}
+
+        <TableContainer component={Paper} ref={reportRef}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>HEAD</TableCell>
+                <TableCell align="right">
+                  TOTAL
+                </TableCell>
+                <TableCell align="right">
+                  NEW
+                </TableCell>
+              </TableRow>
+            </TableHead>
+
+            <TableBody>
+              {activeSummary.map((row, i) => (
+                <TableRow key={i}>
+                  <TableCell>{row.HEAD}</TableCell>
+
+                  <TableCell align="right">
+                    {formatAmount(
+                      row.Total_no_of_entries,
+                    )}
+                  </TableCell>
+
+                  <TableCell align="right">
+                    {formatAmount(row["new entry"])}
+                  </TableCell>
+                </TableRow>
+              ))}
+
+              <TableRow>
+                <TableCell>
+                  <b>TOTAL</b>
+                </TableCell>
+
+                <TableCell align="right">
+                  <b>{formatAmount(totalEntries)}</b>
+                </TableCell>
+
+                <TableCell align="right">
+                  <b>{formatAmount(totalNewEntries)}</b>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </DialogContent>
+
+      {stageWaiting && (
+        <Box sx={styles.footer}>
+          <Button
+            color="error"
+            onClick={() => onReject(summaryType)}
+          >
+            Reject
+          </Button>
+
+          <Button
+            color="success"
+            onClick={() => onAccept(summaryType)}
+          >
+            Accept
+          </Button>
+        </Box>
+      )}
+    </Dialog>
+  );
+};
+
+export default ProcessSummaryDialog;
