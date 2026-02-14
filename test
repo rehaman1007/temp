@@ -1,488 +1,335 @@
-import {
-  Dialog,
-  DialogContent,
-  Button,
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  Stack,
-  IconButton,
-  Tooltip,
-  RadioGroup,
-  FormControlLabel,
-  Radio,
-  LinearProgress,
-  Fade,
-  useTheme,
-} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import { Box, IconButton, Stack, Tooltip, Typography } from "@mui/material";
+import InfoIcon from "@mui/icons-material/Info";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
+import TableRowsIcon from "@mui/icons-material/TableRows";
+import MemoryIcon from "@mui/icons-material/Memory";
+import AnalyticsIcon from "@mui/icons-material/Analytics";
+import ApprovalIcon from "@mui/icons-material/Approval";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+import AdsClickIcon from "@mui/icons-material/AdsClick";
 
-import GppBadIcon from "@mui/icons-material/GppBad";
-import GppGoodIcon from "@mui/icons-material/GppGood";
-import CloseIcon from "@mui/icons-material/Close";
-import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
-
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { toPng } from "html-to-image";
-import { useRef, useState, useEffect, useMemo } from "react";
+import { StageStatus } from "../util/StageStatus";
+import ProcessStatusChip from "./ProcessStatusChip";
+import { useMemo } from "react";
+import { timeStampFormatter } from "../../../utils/CommonUtilities";
 import CustomChip from "../../../utils/CustomChip";
+import { getIconComponent } from "../../../utils/IconUtils";
 
-/* ================= FORMAT ================= */
+/* ================= MAIN COMPONENT ================= */
 
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
-
-/* ================= SUMMARY → FILE MAP ================= */
-
-const SUMMARY_FILE_MAP = {
-  BALANCE: "balance_compare_report",
-  SIBA: "intr_report",
-  SUSPENSE: "cntr_report",
-};
-
-/* ====================================================== */
-
-const ProcessSummaryDialog = ({
-  open,
-  data,
-  onClose,
-  onAccept,
-  onReject,
-  onDownload,
-  downloadProgress,
+const ProcessStatusTable = ({
+  processes = [],
+  actions,
+  loading,
   permissions = {},
 }) => {
-  const reportRef = useRef(null);
-  const copyTimeoutRef = useRef(null);
+  const SUMMARY_STAGES = new Set([
+    "CNTR_Report_generated",
+    "INTR_Report_generated",
+    "balance_Compare_generated",
+  ]);
 
-  const [copied, setCopied] = useState(false);
-  const [summaryType, setSummaryType] = useState("BALANCE");
+  const rows = processes.map((p) => {
+    const lastStage = p.stages.at(-1);
 
-  const theme = useTheme();
+    // Use .some() with the Set for a cleaner, more scalable check
+    const hasSummary =
+      p.processType?.toUpperCase() === "DIFFERENCE" &&
+      p.stages.some(
+        (s) =>
+          s.stageStatus === StageStatus.COMPLETED &&
+          SUMMARY_STAGES.has(s.stageId),
+      );
 
-  const safeData = data || {};
-  /* ================= DATA ================= */
+    return {
+      processId: p.processId,
+      processRunId: p.processRunId,
+      processType: p.processType,
+      runId: p.runId,
+      status: p.status,
+      stageTitle: lastStage?.stageTitle ?? "N/A", // Nullish coalescing
+      stageIcon: lastStage?.stageIcon,
+      startTime: p.processStartTime,
+      endTime: p.processEndTime,
+      raw: p,
+      hasSummary,
+    };
+  });
 
-  const {
-    RECON_RUN_DATE = "2026",
-    summary = [],
-    differenceSummary = [],
-    sibaSummary = [],
-    suspenseSummary = [],
-    stages = [],
-  } = safeData;
+  const columns = useMemo(
+    () => [
+      // {
+      //   field: "processRunId",
+      //   headerName: "ID",
+      //   flex: 0.4,
+      // },
+      // {
+      //   field: "processId",
+      //   headerName: "ID",
+      //   flex: 0.4,
+      // },
 
-  /* ================= STAGE CHECK ================= */
-
-  const balanceDone = stages.some(
-    (s) => s.stageId === "balance_Compare_generated" && s.stageStatus === 2,
-  );
-
-  const sibaDone = stages.some(
-    (s) => s.stageId === "INTR_Report_generated" && s.stageStatus === 2,
-  );
-
-  const suspenseDone = stages.some(
-    (s) => s.stageId === "CNTR_Report_generated" && s.stageStatus === 2,
-  );
-
-  const stageWaiting = stages.some(
-    (s) => s.stageId === "waiting_for_approval" && s.stageStatus === 1,
-  );
-
-  /* ================= AVAILABLE TYPES ================= */
-
-  const availableSummaryTypes = useMemo(() => {
-    const arr = [];
-
-    if (balanceDone) arr.push("BALANCE");
-    if (sibaDone) arr.push("SIBA");
-    if (suspenseDone) arr.push("SUSPENSE");
-
-    return arr;
-  }, [balanceDone, sibaDone, suspenseDone]);
-
-  /* ================= AUTO FIX SELECTED TYPE ================= */
-
-  useEffect(() => {
-    if (!availableSummaryTypes.includes(summaryType)) {
-      setSummaryType(availableSummaryTypes[0] || "BALANCE");
-    }
-  }, [availableSummaryTypes, summaryType]);
-
-  /* ================= ACTIVE SUMMARY ================= */
-
-  const activeSummary = useMemo(() => {
-    switch (summaryType) {
-      case "BALANCE":
-        return differenceSummary?.length ? differenceSummary : summary;
-
-      case "SIBA":
-        return sibaSummary || [];
-
-      case "SUSPENSE":
-        return suspenseSummary || [];
-
-      default:
-        return [];
-    }
-  }, [summaryType, differenceSummary, summary, sibaSummary, suspenseSummary]);
-
-  /* ================= TOTALS ================= */
-
-  const totalEntries = useMemo(
-    () =>
-      activeSummary.reduce((sum, r) => sum + (r.Total_no_of_entries || 0), 0),
-    [activeSummary],
-  );
-
-  const totalNewEntries = useMemo(
-    () => activeSummary.reduce((sum, r) => sum + (r["new entry"] || 0), 0),
-    [activeSummary],
-  );
-
-  /* ================= EXPORT PDF ================= */
-
-  const exportPDF = () => {
-    const doc = new jsPDF("p", "pt");
-
-    doc.setFontSize(14);
-    doc.text(`${summaryType} Summary Report`, 40, 40);
-
-    doc.setFontSize(10);
-    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
-
-    autoTable(doc, {
-      startY: 80,
-      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
-      body: [
-        ...activeSummary.map((r) => [
-          r.HEAD,
-          formatAmount(r.Total_no_of_entries),
-          formatAmount(r["new entry"]),
-        ]),
-        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
-      ],
-      styles: { halign: "right", fontSize: 9 },
-      headStyles: { fillColor: [33, 150, 243] },
-      columnStyles: { 0: { halign: "left" } },
-      didParseCell: (d) => {
-        if (d.row.index === activeSummary.length) {
-          d.cell.styles.fontStyle = "bold";
-        }
+      {
+        field: "processId",
+        flex: 0.4,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <TableRowsIcon sx={{}} />
+            <Typography variant="subtitle1">ID</Typography>
+          </Box>
+        ),
       },
-    });
-
-    doc.save(`${summaryType}_Summary_${RECON_RUN_DATE}.pdf`);
-  };
-
-  /* ================= COPY PNG ================= */
-
-  const copyPNGToClipboard = async () => {
-    if (!reportRef.current) return;
-
-    try {
-      const dataUrl = await toPng(reportRef.current, {
-        cacheBust: true,
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-      });
-
-      const blob = await (await fetch(dataUrl)).blob();
-
-      await navigator.clipboard.write([
-        new ClipboardItem({ "image/png": blob }),
-      ]);
-
-      setCopied(true);
-
-      clearTimeout(copyTimeoutRef.current);
-
-      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const downloadedMB =
-    downloadProgress?.loadedBytes > 0
-      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
-      : null;
-
-  /* ====================================================== */
-
-  return (
-    <Dialog open={open} fullWidth maxWidth="md">
-      {/* HEADER */}
-
-      <Box
-        sx={{
-          px: 3,
-          py: 2,
-          borderBottom: 1,
-          borderColor: "divider",
-          display: "flex",
-          justifyContent: "space-between",
-        }}
-      >
-        <Box>
-          <Typography variant="h6" fontWeight={700}>
-            {summaryType} Summary Report
+      {
+        field: "processType",
+        headerName: "Process Name",
+        flex: 1,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <MemoryIcon sx={{ mr: 1 }} />
+            <Typography variant="subtitle1">Process Name</Typography>
+          </Box>
+        ),
+      },
+      {
+        field: "status",
+        headerName: "Status",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AnalyticsIcon sx={{ mr: 1 }} />
+            <Typography variant="subtitle1">Status</Typography>
+          </Box>
+        ),
+        renderCell: (p) => <ProcessStatusChip status={p.value} />,
+      },
+      {
+        field: "stageTitle",
+        headerName: "Stage",
+        flex: 1.2,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <ApprovalIcon sx={{ mr: 1 }} />
+            <Typography variant="subtitle1">Stage</Typography>
+          </Box>
+        ),
+        renderCell: (params) => {
+          const x = params.row?.stageIcon;
+          const Icon = getIconComponent(x);
+          return (
+            <CustomChip
+              label={params.row?.stageTitle}
+              icon={<Icon />}
+              variant="outlined"
+            />
+          );
+        },
+      },
+      {
+        field: "startTime",
+        headerName: "Started",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 1 }} />
+            <Typography variant="subtitle1">Started</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value)}
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Reconciliation Date: {RECON_RUN_DATE}
+        ),
+      },
+      {
+        field: "endTime",
+        headerName: "Ended",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 1 }} />
+            <Typography variant="subtitle1">Ended</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value)}
           </Typography>
-        </Box>
+        ),
+      },
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.8,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AdsClickIcon sx={{ mr: 1 }} />
+            <Typography variant="subtitle1">Actions</Typography>
+          </Box>
+        ),
+        renderCell: (params) => {
+          const row = params.row.raw;
+          const showRestart = row?.status !== StageStatus.STARTED;
+          const showStop = row?.status === StageStatus.STARTED;
 
-        <Stack direction="row" spacing={1}>
-          <Tooltip title="Export summary to PDF">
-            <IconButton onClick={exportPDF}>
-              <PictureAsPdfOutlinedIcon />
-            </IconButton>
-          </Tooltip>
-
-          <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
-            <IconButton
-              onClick={copyPNGToClipboard}
-              sx={{ color: copied ? "success.main" : "inherit" }}
-            >
-              {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
-            </IconButton>
-          </Tooltip>
-
-          <IconButton onClick={onClose}>
-            <CloseIcon />
-          </IconButton>
-        </Stack>
-      </Box>
-
-      {/* BODY */}
-
-      <DialogContent>
-        {/* RADIO */}
-        {permissions.download && availableSummaryTypes.length > 0 && (
-          <Paper sx={{ p: 2, mb: 2 }}>
+          return (
             <Stack
               direction="row"
-              justifyContent="space-between"
+              spacing={1}
               alignItems="center"
-              flexWrap="wrap"
-              gap={2}
+              justifyContent="center"
+              sx={{ height: "100%" }}
             >
-              <RadioGroup
-                row
-                value={summaryType}
-                onChange={(e) => setSummaryType(e.target.value)}
-              >
-                {availableSummaryTypes.includes("BALANCE") && (
-                  <FormControlLabel
-                    value="BALANCE"
-                    control={<Radio />}
-                    label="Balance Compare"
-                    disabled={downloadProgress?.inProgress}
-                  />
-                )}
+              {(permissions.restart || permissions.start) && showRestart && (
+                <Tooltip title="Restart">
+                  <IconButton size="small" onClick={() => actions.onStart(row)}>
+                    <RestartAltIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
 
-                {availableSummaryTypes.includes("SIBA") && (
-                  <FormControlLabel
-                    value="SIBA"
-                    control={<Radio />}
-                    label="SIBA"
-                    disabled={downloadProgress?.inProgress}
-                  />
-                )}
+              {permissions.stop && showStop && (
+                <Tooltip title="Stop">
+                  <IconButton size="small" onClick={() => actions.onStop(row)}>
+                    <StopIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
 
-                {availableSummaryTypes.includes("SUSPENSE") && (
-                  <FormControlLabel
-                    value="SUSPENSE"
-                    control={<Radio />}
-                    label="Suspense"
-                    disabled={downloadProgress?.inProgress}
-                  />
-                )}
-              </RadioGroup>
+              {permissions.view && (
+                <Tooltip title="View">
+                  <IconButton size="small" onClick={() => actions.onView(row)}>
+                    <VisibilityIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
 
-              <Button
-                startIcon={<CloudDownloadTwoToneIcon />}
-                variant="contained"
-                onClick={() =>
-                  onDownload(SUMMARY_FILE_MAP[summaryType], RECON_RUN_DATE)
-                }
-                disabled={downloadProgress?.inProgress}
-              >
-                Download Full Report
-              </Button>
-            </Stack>
-
-            {/* DOWNLOAD PROGRESS */}
-
-            <Fade in={downloadProgress?.inProgress} unmountOnExit>
-              <Box sx={{ mt: 2 }}>
-                <Box
-                  sx={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 2,
-                    p: 1.5,
-                    mb: 1.5,
-                    borderRadius: 2,
-                    bgcolor: "grey.100",
-                    boxShadow: 1,
-                  }}
-                >
-                  <Box
-                    sx={{
-                      p: 1,
-                      borderRadius: "50%",
-                      bgcolor: "primary.main",
-                      color: "common.white",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
+              {permissions.view && params.row.hasSummary && (
+                <Tooltip title="Summary">
+                  <IconButton
+                    size="small"
+                    onClick={() => actions.onSummary(row)}
                   >
-                    <CloudDownloadTwoToneIcon
-                      sx={{
-                        fontSize: 22,
-                        transform: "translateY(1px)",
-                      }}
-                    />
-                  </Box>
+                    <SummarizeOutlinedIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </Stack>
+          );
+        },
+      },
+    ],
+    [
+      actions,
+      permissions.restart,
+      permissions.start,
+      permissions.stop,
+      permissions.view,
+    ],
+  );
 
-                  <Box flex={1}>
-                    <Typography variant="body2" fontWeight={600}>
-                      Downloading {SUMMARY_FILE_MAP[summaryType]}
-                    </Typography>
+  const filteredColumns = useMemo(() => {
+    if (
+      permissions.start ||
+      permissions.stop ||
+      permissions.restart ||
+      permissions.view
+    ) {
+      return columns;
+    }
+    return columns.filter((c) => c.field !== "actions");
+  }, [columns, permissions]);
 
-                    <Typography variant="caption" color="text.secondary">
-                      {downloadedMB
-                        ? `Streaming… ${downloadedMB} MB received`
-                        : "Preparing your report stream…"}
-                    </Typography>
-                  </Box>
-
-                  {downloadedMB && (
-                    <CustomChip
-                      color="error"
-                      label={`${downloadedMB} MB`}
-                      variant="filled"
-                    />
-                  )}
-                </Box>
-
-                <LinearProgress
-                  variant="indeterminate"
-                  sx={{
-                    height: 8,
-                    borderRadius: 999,
-                    overflow: "hidden",
-                    bgcolor:
-                      theme.palette.mode === "light" ? "grey.200" : "grey.800",
-                    "& .MuiLinearProgress-bar": {
-                      borderRadius: 999,
-                      backgroundImage:
-                        "linear-gradient(90deg, #42a5f5 0%, #7e57c2 50%, #ffb300 100%)",
-                    },
-                  }}
-                />
-              </Box>
-            </Fade>
-          </Paper>
-        )}
-
-        {/* TABLE */}
-
-        <TableContainer component={Paper} ref={reportRef}>
-          <Table stickyHeader size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 600 }}>HEAD</TableCell>
-
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  TOTAL ENTRIES
-                </TableCell>
-
-                <TableCell align="right" sx={{ fontWeight: 600 }}>
-                  NEW ENTRIES
-                </TableCell>
-              </TableRow>
-            </TableHead>
-
-            <TableBody>
-              {activeSummary.map((row, i) => (
-                <TableRow key={i}>
-                  <TableCell>{row.HEAD}</TableCell>
-
-                  <TableCell align="right">
-                    {formatAmount(row.Total_no_of_entries)}
-                  </TableCell>
-
-                  <TableCell align="right">
-                    {formatAmount(row["new entry"])}
-                  </TableCell>
-                </TableRow>
-              ))}
-
-              <TableRow sx={{ bgcolor: "#f5f5f5" }}>
-                <TableCell sx={{ fontWeight: 700 }}>TOTAL</TableCell>
-
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalEntries)}
-                </TableCell>
-
-                <TableCell align="right" sx={{ fontWeight: 700 }}>
-                  {formatAmount(totalNewEntries)}
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </DialogContent>
-
-      {/* FOOTER */}
-
-      {!stageWaiting && (
-        <Box
-          sx={{
-            px: 3,
-            py: 2,
-            borderTop: 1,
-            borderColor: "divider",
-            display: "flex",
-            justifyContent: "center",
-            gap: 2,
-          }}
-        >
-          <Button
-            color="error"
-            variant="outlined"
-            startIcon={<GppBadIcon />}
-            onClick={() => onReject(summaryType)}
-          >
-            Reject
-          </Button>
-
-          <Button
-            color="success"
-            variant="contained"
-            startIcon={<GppGoodIcon />}
-            onClick={() => onAccept(summaryType)}
-          >
-            Accept
-          </Button>
-        </Box>
-      )}
-    </Dialog>
+  return (
+    <Box
+      sx={{
+        height: 372,
+        "& .MuiDataGrid-columnHeaders": {
+          backgroundColor: "#b4a7d6",
+          fontWeight: 600,
+        },
+        "& .MuiDataGrid-row:hover": {
+          backgroundColor: "action.hover",
+        },
+      }}
+    >
+      <DataGrid
+        rows={rows}
+        columns={filteredColumns}
+        pageSizeOptions={[5, 10, 25, 50]}
+        initialState={{
+          pagination: {
+            paginationModel: {
+              pageSize: 5,
+              page: 0,
+            },
+          },
+        }}
+        loading={loading}
+        getRowId={(p) =>
+          `${p.processType}_${p.processRunId || ""}_${p.processId || ""}_${p.dagId || ""}`
+        }
+        disableRowSelectionOnClick
+        slots={{
+          noRowsOverlay: () => (
+            <Stack height="100%" alignItems="center" justifyContent="center">
+              <InfoIcon
+                sx={{
+                  fontSize: 48,
+                  color: "text.secondary",
+                  mb: 1,
+                }}
+              />
+              <Typography variant="h6">No processes available</Typography>
+              <Typography variant="body2">
+                Processes not found for the ETL date.
+              </Typography>
+            </Stack>
+          ),
+        }}
+      />
+    </Box>
   );
 };
 
-export default ProcessSummaryDialog;
+export default ProcessStatusTable;
