@@ -1,3 +1,457 @@
+import {
+  Dialog,
+  DialogContent,
+  Button,
+  Paper,
+  Typography,
+  Box,
+  Stack,
+  IconButton,
+  Tooltip,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  LinearProgress,
+  Fade,
+  useTheme,
+} from "@mui/material";
+
+import GppBadIcon from "@mui/icons-material/GppBad";
+import GppGoodIcon from "@mui/icons-material/GppGood";
+import CloseIcon from "@mui/icons-material/Close";
+import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { toPng } from "html-to-image";
+import { useRef, useState, useEffect, useMemo } from "react";
+import CustomChip from "../../../utils/CustomChip";
+import DynamicSummaryTable from "./ProcessDynamicSummaryTable";
+import ActionConfirmDialog from "./ActionConfirmDialog";
+
+/* ================= FORMAT ================= */
+
+const formatAmount = (num) =>
+  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
+
+/* ================= SUMMARY → FILE MAP ================= */
+
+const SUMMARY_FILE_MAP = {
+  BALANCE: "balance_compare_report",
+  SIBA: "intr_report",
+  SUSPENSE: "cntr_report",
+};
+
+/* ====================================================== */
+
+const ProcessSummaryDialog = ({
+  open,
+  data,
+  onClose,
+  onAccept,
+  onReject,
+  onDownload,
+  downloadProgress,
+  permissions = {},
+}) => {
+  const reportRef = useRef(null);
+  const copyTimeoutRef = useRef(null);
+
+  const [copied, setCopied] = useState(false);
+  const [summaryType, setSummaryType] = useState("BALANCE");
+
+  const theme = useTheme();
+
+  const safeData = data || {};
+  /* ================= DATA ================= */
+
+  const {
+    RECON_RUN_DATE,
+    differenceSummary = [],
+    sibaSummary = [],
+    suspenseSummary = [],
+    stages = [],
+  } = safeData;
+
+  /* ================= STAGE CHECK ================= */
+
+  const balanceDone = stages.some(
+    (s) => s.stageId === "balance_Compare_generated" && s.stageStatus === 2,
+  );
+
+  const sibaDone = stages.some(
+    (s) => s.stageId === "INTR_Report_generated" && s.stageStatus === 2,
+  );
+
+  const suspenseDone = stages.some(
+    (s) => s.stageId === "CNTR_Report_generated" && s.stageStatus === 2,
+  );
+
+  const stageWaiting = stages.some(
+    (s) => s.stageId === "waiting_for_approval" && s.stageStatus === 1,
+  );
+
+  /* ================= AVAILABLE TYPES ================= */
+
+  const availableSummaryTypes = useMemo(() => {
+    const arr = [];
+
+    if (balanceDone) arr.push("BALANCE");
+    if (sibaDone) arr.push("SIBA");
+    if (suspenseDone) arr.push("SUSPENSE");
+
+    return arr;
+  }, [balanceDone, sibaDone, suspenseDone]);
+
+  /* ================= AUTO FIX SELECTED TYPE ================= */
+
+  useEffect(() => {
+    if (!availableSummaryTypes.includes(summaryType)) {
+      setSummaryType(availableSummaryTypes[0] || "BALANCE");
+    }
+  }, [availableSummaryTypes, summaryType]);
+
+  /* ================= ACTIVE SUMMARY ================= */
+
+  const activeSummary = useMemo(() => {
+    switch (summaryType) {
+      case "BALANCE":
+        return differenceSummary || [];
+
+      case "SIBA":
+        return sibaSummary || [];
+
+      case "SUSPENSE":
+        return suspenseSummary || [];
+
+      default:
+        return [];
+    }
+  }, [summaryType, differenceSummary, sibaSummary, suspenseSummary]);
+
+  /* ================= TOTALS ================= */
+
+  const totalEntries = useMemo(
+    () =>
+      activeSummary.reduce((sum, r) => sum + (r.Total_no_of_entries || 0), 0),
+    [activeSummary],
+  );
+
+  const totalNewEntries = useMemo(
+    () => activeSummary.reduce((sum, r) => sum + (r["new entry"] || 0), 0),
+    [activeSummary],
+  );
+
+  /* ================= EXPORT PDF ================= */
+
+  const exportPDF = () => {
+    const doc = new jsPDF("p", "pt");
+
+    doc.setFontSize(14);
+    doc.text(`${summaryType} Summary Report`, 40, 40);
+
+    doc.setFontSize(10);
+    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
+
+    autoTable(doc, {
+      startY: 80,
+      head: [["HEAD", "TOTAL ENTRIES", "NEW ENTRIES"]],
+      body: [
+        ...activeSummary.map((r) => [
+          r.HEAD,
+          formatAmount(r.Total_no_of_entries),
+          formatAmount(r["new entry"]),
+        ]),
+        ["TOTAL", formatAmount(totalEntries), formatAmount(totalNewEntries)],
+      ],
+      styles: { halign: "right", fontSize: 9 },
+      headStyles: { fillColor: [33, 150, 243] },
+      columnStyles: { 0: { halign: "left" } },
+      didParseCell: (d) => {
+        if (d.row.index === activeSummary.length) {
+          d.cell.styles.fontStyle = "bold";
+        }
+      },
+    });
+
+    doc.save(`${summaryType}_Summary_${RECON_RUN_DATE}.pdf`);
+  };
+
+  /* ================= COPY PNG ================= */
+
+  const copyPNGToClipboard = async () => {
+    if (!reportRef.current) return;
+
+    try {
+      const dataUrl = await toPng(reportRef.current, {
+        cacheBust: true,
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+      });
+
+      const blob = await (await fetch(dataUrl)).blob();
+
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": blob }),
+      ]);
+
+      setCopied(true);
+
+      clearTimeout(copyTimeoutRef.current);
+
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const downloadedMB =
+    downloadProgress?.loadedBytes > 0
+      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
+      : null;
+
+  /* ====================================================== */
+
+  return (
+    <>
+      <Dialog open={open} fullWidth maxWidth="md">
+        {/* HEADER */}
+
+        <Box
+          sx={{
+            px: 3,
+            py: 2,
+            borderBottom: 1,
+            borderColor: "divider",
+            display: "flex",
+            justifyContent: "space-between",
+          }}
+        >
+          <Box>
+            <Typography variant="h6" fontWeight={700}>
+              {summaryType} Summary Report
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Reconciliation Date: {RECON_RUN_DATE}
+            </Typography>
+          </Box>
+
+          <Stack direction="row" spacing={1}>
+            <Tooltip title="Export summary to PDF">
+              <IconButton onClick={exportPDF}>
+                <PictureAsPdfOutlinedIcon />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
+              <IconButton
+                onClick={copyPNGToClipboard}
+                sx={{ color: copied ? "success.main" : "inherit" }}
+              >
+                {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
+              </IconButton>
+            </Tooltip>
+
+            <IconButton onClick={onClose}>
+              <CloseIcon />
+            </IconButton>
+          </Stack>
+        </Box>
+
+        {/* BODY */}
+
+        <DialogContent>
+          {/* RADIO */}
+          {permissions.download && availableSummaryTypes.length > 0 && (
+            <Paper sx={{ p: 2, mb: 2 }}>
+              <Stack
+                direction="row"
+                justifyContent="space-between"
+                alignItems="center"
+                flexWrap="wrap"
+                gap={2}
+              >
+                <RadioGroup
+                  row
+                  value={summaryType}
+                  onChange={(e) => {
+                    setSummaryType(e.target.value);
+                    console.log(
+                      "activeSummary " + summaryType + ">>>",
+                      activeSummary,
+                    );
+                  }}
+                >
+                  {availableSummaryTypes.includes("BALANCE") && (
+                    <FormControlLabel
+                      value="BALANCE"
+                      control={<Radio />}
+                      label="Balance Compare"
+                      disabled={downloadProgress?.inProgress}
+                    />
+                  )}
+
+                  {availableSummaryTypes.includes("SIBA") && (
+                    <FormControlLabel
+                      value="SIBA"
+                      control={<Radio />}
+                      label="SIBA"
+                      disabled={downloadProgress?.inProgress}
+                    />
+                  )}
+
+                  {availableSummaryTypes.includes("SUSPENSE") && (
+                    <FormControlLabel
+                      value="SUSPENSE"
+                      control={<Radio />}
+                      label="Suspense"
+                      disabled={downloadProgress?.inProgress}
+                    />
+                  )}
+                </RadioGroup>
+
+                <Button
+                  startIcon={<CloudDownloadTwoToneIcon />}
+                  variant="contained"
+                  onClick={() =>
+                    onDownload(SUMMARY_FILE_MAP[summaryType], RECON_RUN_DATE)
+                  }
+                  disabled={downloadProgress?.inProgress}
+                >
+                  Download Full Report
+                </Button>
+              </Stack>
+
+              {/* DOWNLOAD PROGRESS */}
+
+              <Fade in={downloadProgress?.inProgress} unmountOnExit>
+                <Box sx={{ mt: 2 }}>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 2,
+                      p: 1.5,
+                      mb: 1.5,
+                      borderRadius: 2,
+                      bgcolor: "grey.100",
+                      boxShadow: 1,
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        p: 1,
+                        borderRadius: "50%",
+                        bgcolor: "primary.main",
+                        color: "common.white",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <CloudDownloadTwoToneIcon
+                        sx={{
+                          fontSize: 22,
+                          transform: "translateY(1px)",
+                        }}
+                      />
+                    </Box>
+
+                    <Box flex={1}>
+                      <Typography variant="body2" fontWeight={600}>
+                        Downloading {SUMMARY_FILE_MAP[summaryType]}
+                      </Typography>
+
+                      <Typography variant="caption" color="text.secondary">
+                        {downloadedMB
+                          ? `Streaming… ${downloadedMB} MB received`
+                          : "Preparing your report stream…"}
+                      </Typography>
+                    </Box>
+
+                    {downloadedMB && (
+                      <CustomChip
+                        color="error"
+                        label={`${downloadedMB} MB`}
+                        variant="filled"
+                      />
+                    )}
+                  </Box>
+
+                  <LinearProgress
+                    variant="indeterminate"
+                    sx={{
+                      height: 8,
+                      borderRadius: 999,
+                      overflow: "hidden",
+                      bgcolor:
+                        theme.palette.mode === "light"
+                          ? "grey.200"
+                          : "grey.800",
+                      "& .MuiLinearProgress-bar": {
+                        borderRadius: 999,
+                        backgroundImage:
+                          "linear-gradient(90deg, #42a5f5 0%, #7e57c2 50%, #ffb300 100%)",
+                      },
+                    }}
+                  />
+                </Box>
+              </Fade>
+            </Paper>
+          )}
+
+          {/* TABLE */}
+
+          <DynamicSummaryTable summaryType={summaryType} data={activeSummary} />
+        </DialogContent>
+
+        {/* FOOTER */}
+
+        {!stageWaiting && (
+          <Box
+            sx={{
+              px: 3,
+              py: 2,
+              borderTop: 1,
+              borderColor: "divider",
+              display: "flex",
+              justifyContent: "center",
+              gap: 2,
+            }}
+          >
+            <Button
+              color="error"
+              variant="outlined"
+              startIcon={<GppBadIcon />}
+              onClick={() => onReject(summaryType)}
+            >
+              Reject
+            </Button>
+
+            <Button
+              color="success"
+              variant="contained"
+              startIcon={<GppGoodIcon />}
+              onClick={() => onAccept(summaryType)}
+            >
+              Accept
+            </Button>
+          </Box>
+        )}
+      </Dialog>
+      <ActionConfirmDialog />
+    </>
+  );
+};
+
+export default ProcessSummaryDialog;
+
+
+
+
 import React, { useMemo, forwardRef } from "react";
 import {
   Table,
@@ -14,9 +468,7 @@ import {
 /* ================= FORMAT ================= */
 
 const formatAmount = (num) =>
-  typeof num === "number"
-    ? num.toLocaleString("en-IN")
-    : num || "—";
+  typeof num === "number" ? num.toLocaleString("en-IN") : num || "—";
 
 /* ================= SAMPLE DEFAULT DATA ================= */
 
@@ -88,12 +540,12 @@ const TABLE_CONFIG = {
         align: "right",
       },
       {
-        field: "new entry",
+        field: "new_entries",
         label: "NEW ENTRIES",
         align: "right",
       },
     ],
-    totalFields: ["Total_no_of_entries", "new entry"],
+    totalFields: ["Total_no_of_entries", "new_entries"],
   },
 
   SIBA: {
@@ -130,21 +582,23 @@ const DynamicSummaryTable = forwardRef(
 
     /* ================= GET CONFIG ================= */
 
-    const config =
-      TABLE_CONFIG[summaryType] || {
-        columns: [],
-        totalFields: [],
-      };
+    const config = useMemo(() => {
+      return (
+        TABLE_CONFIG[summaryType] || {
+          columns: [],
+          totalFields: [],
+        }
+      );
+    }, [summaryType]); // Only re-calculates if summaryType changes
 
     /* ================= TOTAL CALCULATION ================= */
 
     const totals = useMemo(() => {
       const result = {};
 
-      config.totalFields.forEach((field) => {
+      config?.totalFields.forEach((field) => {
         result[field] = safeData.reduce(
-          (sum, row) =>
-            sum + (Number(row[field]) || 0),
+          (sum, row) => sum + (Number(row[field]) || 0),
           0,
         );
       });
@@ -154,7 +608,7 @@ const DynamicSummaryTable = forwardRef(
 
     /* ================= EMPTY CHECK ================= */
 
-    if (!config.columns.length) {
+    if (!config?.columns) {
       return (
         <Box p={2}>
           <Typography color="text.secondary">
@@ -173,7 +627,7 @@ const DynamicSummaryTable = forwardRef(
 
           <TableHead>
             <TableRow>
-              {config.columns.map((col) => (
+              {config?.columns.map((col) => (
                 <TableCell
                   key={col.field}
                   align={col.align}
@@ -190,15 +644,10 @@ const DynamicSummaryTable = forwardRef(
           <TableBody>
             {safeData.map((row, index) => (
               <TableRow key={index}>
-                {config.columns.map((col) => (
-                  <TableCell
-                    key={col.field}
-                    align={col.align}
-                  >
+                {config?.columns.map((col) => (
+                  <TableCell key={col.field} align={col.align}>
                     {col.align === "right"
-                      ? formatAmount(
-                          row[col.field],
-                        )
+                      ? formatAmount(row[col.field])
                       : row[col.field] || "—"}
                   </TableCell>
                 ))}
@@ -207,41 +656,25 @@ const DynamicSummaryTable = forwardRef(
 
             {/* TOTAL ROW */}
 
-            {config.totalFields.length > 0 && (
+            {config?.totalFields.length > 0 && (
               <TableRow sx={{ bgcolor: "#f5f5f5" }}>
-                {config.columns.map(
-                  (col, index) => {
-                    if (index === 0)
-                      return (
-                        <TableCell key={col.field}>
-                          <b>TOTAL</b>
-                        </TableCell>
-                      );
-
-                    if (
-                      totals[col.field] !==
-                      undefined
-                    )
-                      return (
-                        <TableCell
-                          key={col.field}
-                          align="right"
-                        >
-                          <b>
-                            {formatAmount(
-                              totals[col.field],
-                            )}
-                          </b>
-                        </TableCell>
-                      );
-
+                {config?.columns.map((col, index) => {
+                  if (index === 0)
                     return (
-                      <TableCell
-                        key={col.field}
-                      />
+                      <TableCell key={col.field}>
+                        <b>TOTAL</b>
+                      </TableCell>
                     );
-                  },
-                )}
+
+                  if (totals[col.field] !== undefined)
+                    return (
+                      <TableCell key={col.field} align="right">
+                        <b>{formatAmount(totals[col.field])}</b>
+                      </TableCell>
+                    );
+
+                  return <TableCell key={col.field} />;
+                })}
               </TableRow>
             )}
           </TableBody>
@@ -252,8 +685,3 @@ const DynamicSummaryTable = forwardRef(
 );
 
 export default DynamicSummaryTable;
-
-<DynamicSummaryTable
-  summaryType={summaryType}
-  data={activeSummary}
-/>
