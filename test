@@ -1,47 +1,435 @@
-WITH filteredbranches AS (
-    SELECT branch_code
-    FROM bs_branch
-    WHERE branch_circle = '002'
-)
+import { useState, useEffect } from "react";
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  Box,
+  Typography,
+  IconButton,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  FormControl,
+  FormLabel,
+  MenuItem,
+  Autocomplete,
+  Divider,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import { useTableConfig } from "../../hooks/useTableConfig";
+import { FilterBuilder } from "../editor/FilterBuilder";
+import WarningIcon from "@mui/icons-material/Warning";
+import { toPascalKebabCase } from "../../../../utils/CommonUtilities";
+import ExpressionEditorWithVariables from "./ExpressionEditorWithVariables";
+import useCustomSnackbar from "../../../../utils/useCustomSnackbar";
 
-SELECT
-    TO_CHAR(cd_identifier) AS id,
-    SUM(cd_amount)         AS amt
-FROM bs_dicgc_bid_con
-WHERE cd_date = DATE '2025-12-31'
-  AND cd_branch IN (SELECT branch_code FROM filteredbranches)
-  AND cd_identifier < 1000
-  AND cd_identifier NOT IN (
-        220,230,250,260,280,
-        290,310,320,340,350,
-        360,370,380,390,400,
-        410,420,430
-  )
-GROUP BY cd_identifier
+/* ---------------- CONSTANTS ---------------- */
 
-UNION ALL
+const dataTypes = ["DATE", "STRING", "NUMBER", "BOOLEAN"];
+const modes = ["INPUT", "EXPRESSION", "QUERY"];
+const queryTypes = [
+  "DB_VALUE",
+  "DB_COUNT",
+  "DB_SUM",
+  "DB_AVG",
+  "DB_MIN",
+  "DB_MAX",
+];
 
-SELECT
-    TO_CHAR(gd_identifier) AS id,
-    SUM(
-        CASE 
-            WHEN gd_identifier = 340
-                 AND TRIM(UPPER(gd_modified_flag)) = 'Y'
-            THEN NVL(gd_final_amount,0)
-            WHEN gd_identifier = 340
-            THEN 0
-            ELSE NVL(gd_final_amount,0)
-        END
-    ) AS amt
-FROM bs_dicgc_bid_granular
-WHERE gd_quarter_end_date = DATE '2025-12-31'
-  AND gd_branch_no IN (SELECT branch_code FROM filteredbranches)
-  AND gd_identifier IN (
-        220,230,250,260,280,
-        290,310,320,340,350,
-        360,370,380,390,400,
-        410,420,430
-  )
-GROUP BY gd_identifier
+const NAME_REGEX = /^[A-Z0-9_]+$/;
+const LABEL_REGEX = /^[A-Za-z0-9 _-]+$/;
+const DESCRIPTION_REGEX = /^[a-zA-Z0-9\s/&().,-]*$/;
 
-ORDER BY 1;
+const emptyState = {
+  name: "",
+  label: "",
+  description: "",
+  dataType: "DATE",
+  mode: "INPUT",
+  expression: "",
+  source: {
+    type: "",
+    table: "",
+    column: "",
+    filters: {},
+  },
+};
+
+/* ---------------- COMPONENT ---------------- */
+
+export const GlobalVariableDialog = ({
+  open,
+  globalVariable,
+  globals = [],
+  onClose,
+  onSave,
+}) => {
+  const { tableConfigs, getSelectableColumns } = useTableConfig();
+  const snackBar = useCustomSnackbar();
+  const [form, setForm] = useState(emptyState);
+  const [errors, setErrors] = useState({});
+
+  const isEdit = Boolean(globalVariable);
+
+  useEffect(() => {
+    setForm(globalVariable || emptyState);
+    setErrors({});
+  }, [globalVariable, open]);
+
+  /* ---------------- UPDATE ---------------- */
+
+  const update = (key, val) => {
+    if (key.startsWith("source.")) {
+      const k = key.split(".")[1];
+      setForm((p) => ({ ...p, source: { ...p.source, [k]: val } }));
+    } else {
+      setForm((p) => ({ ...p, [key]: val }));
+    }
+  };
+
+  /* ---------------- FIELD VALIDATION ---------------- */
+
+  const validateName = (value) => {
+    if (!value) return "Variable name required";
+    if (value.length < 3) return "Minimum 3 characters";
+    if (value.length > 40) return "Maximum 40 characters";
+    if (!NAME_REGEX.test(value)) return "Only A-Z, 0-9 and _ allowed";
+
+    const duplicate = globals.some(
+      (g) => g.name === value && g.name !== globalVariable?.name,
+    );
+
+    if (duplicate) return "Variable already exists";
+
+    return "";
+  };
+
+  const validateLabel = (value) => {
+    if (!value) return "Label required";
+    if (value.length < 3) return "Minimum 3 characters";
+    if (value.length > 60) return "Maximum 60 characters";
+    if (!LABEL_REGEX.test(value))
+      return "Only letters, numbers, space, - and _ allowed";
+
+    return "";
+  };
+
+  const validateDescription = (value) => {
+    console.log("Description >", value);
+    if (!value) return "Description required";
+    if (value.length < 5) return "Minimum 5 characters";
+    if (value.length > 200) return "Maximum 100 characters";
+    if (!DESCRIPTION_REGEX.test(value))
+      return "Allowed 5-200 characters (alphabets, numbers, spaces(single spaces only between words) and ,()&/- are allowed!)";
+
+    return "";
+  };
+
+  const validateForm = () => {
+    const e = {};
+
+    e.name = validateName(form.name);
+    e.label = validateLabel(form.label);
+    e.description = validateDescription(form.description);
+
+    if (!form.description) e.description = "Description required";
+    if (form.description.length > 200) e.description = "Max 200 characters";
+
+    if (!form.dataType) e.dataType = "Select data type";
+
+    if (form.mode === "EXPRESSION" && !form.expression)
+      e.expression = "Expression required";
+
+    if (form.mode === "QUERY") {
+      if (!form.source.type) e.type = "Select query type";
+      if (!form.source.table) e.table = "Select table";
+      if (!form.source.column) e.column = "Select column";
+    }
+
+    Object.keys(e).forEach((k) => !e[k] && delete e[k]);
+    setErrors(e);
+
+    return Object.keys(e).length === 0;
+  };
+
+  const handleSave = () => {
+    if (!validateForm()) {
+      snackBar("Kindly fill the required fields before saving", "error");
+      return;
+    }
+    onSave(form);
+    onClose();
+  };
+
+  /* ---------------- DERIVED ---------------- */
+
+  const selectedTable = tableConfigs?.find(
+    (t) => t.tableName === form?.source?.table,
+  );
+
+  const columns = selectedTable ? getSelectableColumns(form.source?.table) : [];
+
+  /* ---------------- UI ---------------- */
+
+  return (
+    <Dialog open={open} maxWidth="md" fullWidth>
+      <DialogTitle>
+        {isEdit ? "Edit Variable" : "Add Global Variable"}
+        <IconButton
+          onClick={onClose}
+          sx={{ position: "absolute", right: 16, top: 12 }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+
+      <DialogContent dividers>
+        {/* NAME + LABEL */}
+        <Box display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
+          <TextField
+            label="Variable Name *"
+            value={form.name}
+            // disabled={isEdit}
+            error={!!errors.name}
+            helperText={
+              errors.name ||
+              "3–40 chars, A-Z, 0-9, _. Used as $G{VAR} and G.VAR"
+            }
+            onChange={(e) => {
+              const newValue = e.target.value
+                .toUpperCase()
+                .replace(/[^A-Z0-9_]/g, "");
+
+              update("name", newValue);
+              setErrors((p) => ({
+                ...p,
+                name: validateName(newValue),
+              }));
+            }}
+          />
+
+          <TextField
+            label="Label *"
+            value={form.label}
+            // disabled={isEdit}
+            error={!!errors.label}
+            helperText={
+              errors.label || "3–60 chars, letters, numbers, space, - and _"
+            }
+            onChange={(e) => {
+              let newValue = e.target.value.replace(/[^A-Za-z0-9 _-]/g, "");
+              newValue = newValue.replace(/\s\s+/g, " ");
+              setErrors((p) => ({
+                ...p,
+                label: validateLabel(e.target.value),
+              }));
+              update("label", newValue);
+            }}
+          />
+        </Box>
+
+        {/* Default Value */}
+        {form.mode === "INPUT" && (
+          <TextField
+            sx={{ mt: 2 }}
+            label="Default Value *"
+            value={form.defaultValue}
+            fullWidth
+            error={!!errors.defaultValue}
+            helperText={
+              errors.defaultValue ||
+              "1–60 chars, letters, numbers, space, - and _"
+            }
+            onChange={(e) => {
+              let newValue = e.target.value.replace(/[^A-Za-z0-9 _-]/g, "");
+              newValue = newValue.replace(/\s\s+/g, " ");
+              setErrors((p) => ({
+                ...p,
+                label: validateLabel(e.target.value),
+              }));
+              update("label", newValue);
+            }}
+          />
+        )}
+
+        {/* DESCRIPTION */}
+        <TextField
+          sx={{ mt: 2 }}
+          label="Description *"
+          fullWidth
+          multiline
+          rows={2}
+          value={form.description}
+          error={!!errors.description}
+          helperText={
+            errors.description || "Allowed 5–200 characters, A-Z, 0-9 ,()&/-"
+          }
+          onChange={(e) => {
+            let value = e.target.value;
+            const cleanedValue = value
+              .replace(/\s{2,}/g, " ") // Restricts 2+ spaces
+              .replace(/[^a-zA-Z0-9\s/&().,-]/g, ""); // Your original character filtering
+
+            update("description", cleanedValue);
+          }}
+        />
+
+        {/* DATA TYPE */}
+        <Box /* width="100%" */ sx={{ mt: 2 }}>
+          <FormControl>
+            <FormLabel>Choose Variable Data Type</FormLabel>
+            <RadioGroup
+              row
+              value={form.dataType}
+              onChange={(e) => update("dataType", e.target.value)}
+            >
+              {dataTypes.map((m) => (
+                <FormControlLabel
+                  key={m}
+                  value={m}
+                  control={<Radio />}
+                  label={toPascalKebabCase(m)}
+                />
+              ))}
+            </RadioGroup>
+          </FormControl>
+        </Box>
+
+        {/* MODE */}
+        <Box /* width="100%" */ sx={{ mt: 2 }}>
+          <FormControl>
+            <FormLabel>Choose Variable Mode</FormLabel>
+            <RadioGroup
+              row
+              value={form.mode}
+              onChange={(e) => update("mode", e.target.value)}
+            >
+              {modes.map((m) => (
+                <FormControlLabel
+                  key={m}
+                  value={m}
+                  control={<Radio />}
+                  label={toPascalKebabCase(m)}
+                />
+              ))}
+            </RadioGroup>
+          </FormControl>
+        </Box>
+
+        <Divider sx={{ my: 2 }} />
+
+        {/* INPUT MODE */}
+        {form.mode === "INPUT" && (
+          <Box display="flex">
+            <WarningIcon
+              color="warning"
+              sx={{ mr: 1, mt: 1, fontSize: "2.5rem" }}
+            />
+            <Typography color="text.secondary">
+              When the variable mode is set to <b>"Input"</b>, values are
+              prompted at runtime. Additionally, a new parameter has been
+              included in the variant configuration.
+            </Typography>
+          </Box>
+        )}
+
+        {/* EXPRESSION MODE */}
+        {form.mode === "EXPRESSION" && (
+          <>
+            <ExpressionEditorWithVariables
+              globals={globals}
+              value={form.expression}
+              placeholder="e.g. #{ 1000 * G.USD_RATE }"
+              onChange={(v) => update("expression", v)}
+            />
+
+            {errors.expression && (
+              <Typography color="error" variant="caption">
+                {errors.expression}
+              </Typography>
+            )}
+          </>
+        )}
+
+        {/* QUERY MODE */}
+        {form.mode === "QUERY" && (
+          <>
+            <TextField
+              select
+              fullWidth
+              label="Query Type"
+              value={form.source.type}
+              error={!!errors.type}
+              helperText={errors.type}
+              onChange={(e) => update("source.type", e.target.value)}
+            >
+              {queryTypes.map((q) => (
+                <MenuItem key={q} value={q}>
+                  {q}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            <Box mt={2} display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
+              <Autocomplete
+                options={tableConfigs || []}
+                getOptionLabel={(o) => o?.label || o?.tableName || o || ""}
+                onChange={(_, v) => {
+                  console.log(v, tableConfigs);
+                  update("source.table", v.tableName);
+                }}
+                value={form.source.table || ""}
+                renderInput={(p) => (
+                  <TextField
+                    {...p}
+                    label="Table"
+                    error={!!errors.table}
+                    helperText={errors.table}
+                  />
+                )}
+              />
+
+              <Autocomplete
+                options={columns || []}
+                getOptionLabel={(o) => o?.label || o?.columnName || o || ""}
+                onChange={(_, v) => {
+                  console.log(v, columns);
+                  update("source.column", v);
+                }}
+                value={form?.source?.column || ""}
+                renderInput={(p) => (
+                  <TextField
+                    {...p}
+                    label="Column"
+                    error={!!errors.column}
+                    helperText={errors.column}
+                  />
+                )}
+              />
+            </Box>
+
+            {form.source.column && (
+              <Box mt={2}>
+                <FilterBuilder
+                  tableName={form.source.table}
+                  filters={form.source.filters}
+                  onFiltersChange={(f) => update("source.filters", f)}
+                />
+              </Box>
+            )}
+          </>
+        )}
+      </DialogContent>
+
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={handleSave}>
+          Save
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
