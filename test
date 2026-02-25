@@ -1,418 +1,975 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  TextField,
   Box,
-  Typography,
-  IconButton,
-  FormControl,
-  FormLabel,
-  MenuItem,
-  Autocomplete,
-  Divider,
   Paper,
-  ToggleButton,
-  ToggleButtonGroup,
-  Alert,
-  AlertTitle,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
-import DataObjectIcon from "@mui/icons-material/DataObject";
-import SettingsEthernetIcon from "@mui/icons-material/SettingsEthernet";
-import WarningIcon from "@mui/icons-material/Warning";
+  Typography,
+  Grid,
+  Card,
+  CardContent,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Chip,
+  Stack,
+  InputAdornment,
+  Tooltip,
+  Skeleton,
+  Avatar,
+  LinearProgress,
+} from '@mui/material';
+import { PieChart } from '@mui/x-charts/PieChart';
 
-import { useTableConfig } from "../../hooks/useTableConfig";
-import { FilterBuilder } from "../editor/FilterBuilder";
-import { toPascalKebabCase } from "../../../../utils/CommonUtilities";
-import ExpressionEditorWithVariables from "./ExpressionEditorWithVariables";
-import useCustomSnackbar from "../../../../utils/useCustomSnackbar";
+// Icons
+import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
+import HowToRegIcon from '@mui/icons-material/HowToReg';
+import PersonIcon from '@mui/icons-material/Person';
+import SearchIcon from '@mui/icons-material/Search';
+import AssessmentIcon from '@mui/icons-material/Assessment';
+import LockIcon from '@mui/icons-material/Lock';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import PendingActionsIcon from '@mui/icons-material/PendingActions';
+import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
+import useApi from '../../../../common/hooks/useApi';
+import LoadingOverlay from '../../../../common/components/ui/loadingOverlay';
+import FormInput from '../../../../common/components/ui/FormInput';
+import InboxIcon from '@mui/icons-material/Inbox';
 
-/* ---------------- CONSTANTS ---------------- */
+const formatDate = (timestamp) => {
+  if (!timestamp) return 'N/A';
+  try {
+    const d = new Date(Number(timestamp));
+    // Check if the timestamp resulted in a valid date
+    if (isNaN(d.getTime())) return 'Invalid Date';
 
-const dataTypes = ["DATE", "STRING", "NUMBER", "BOOLEAN"];
-const modes = ["INPUT", "EXPRESSION", "QUERY"];
-const queryTypes = [
-  "DB_VALUE",
-  "DB_COUNT",
-  "DB_SUM",
-  "DB_AVG",
-  "DB_MIN",
-  "DB_MAX",
-];
-
-const NAME_REGEX = /^[A-Z0-9_]+$/;
-const LABEL_REGEX = /^[A-Za-z0-9 _-]+$/;
-const DESCRIPTION_REGEX = /^[a-zA-Z0-9\s/&().,-]*$/;
-
-const emptyState = {
-  name: "",
-  label: "",
-  description: "",
-  dataType: "DATE",
-  mode: "INPUT",
-  expression: "",
-  defaultValue: "",
-  source: {
-    type: "",
-    table: "",
-    column: "",
-    filters: {},
-  },
+    return new Intl.DateTimeFormat('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    }).format(d);
+  } catch (e) {
+    return 'N/A';
+  }
 };
 
-/* ---------------- COMPONENT ---------------- */
+// --- Status Config Function ---
+const getStatusConfig = (status) => {
+  const configs = {
+    null: {
+      label: 'Not Initiated',
+      color: '#9e9e9e',
+      muiColor: 'default',
+      icon: <ErrorOutlineIcon fontSize="small" />,
+    },
+    10: { label: 'Initiated', color: '#0288d1', muiColor: 'info', icon: <PlayCircleOutlineIcon fontSize="small" /> },
+    11: { label: 'In Progress', color: '#1976d2', muiColor: 'primary', icon: <HourglassEmptyIcon fontSize="small" /> },
+    20: {
+      label: 'Pending Approval',
+      color: '#ed6c02',
+      muiColor: 'warning',
+      icon: <PendingActionsIcon fontSize="small" />,
+    },
+    12: { label: 'Rejected', color: '#d32f2f', muiColor: 'error', icon: <ErrorOutlineIcon fontSize="small" /> },
+    53: { label: 'Freezed', color: '#2e7d32', muiColor: 'success', icon: <LockIcon fontSize="small" /> },
+  };
+  return configs[String(status)] || configs['null'];
+};
 
-export const GlobalVariableDialog = ({
-  open,
-  globalVariable,
-  globals = [],
-  onClose,
-  onSave,
-}) => {
-  const { tableConfigs, getSelectableColumns } = useTableConfig();
-  const snackBar = useCustomSnackbar();
-  const [form, setForm] = useState(emptyState);
-  const [errors, setErrors] = useState({});
+const DICGCDashboard = () => {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const { callApi } = useApi();
+  const user = JSON.parse(localStorage.getItem('user'));
+  const qed = user?.quarterEndDate;
 
-  const isEdit = Boolean(globalVariable);
-
+  // --- API CALL ---
   useEffect(() => {
-    setForm(globalVariable || emptyState);
-    setErrors({});
-  }, [globalVariable, open]);
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        const response = await callApi('/bidData/get-dicgc-dashboard', { qed: '30/09/2025' });
+        console.log(response);
+        setData(response);
+      } catch (error) {
+        console.error('Failed to fetch dashboard data:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+  }, [callApi, qed]);
 
-  /* ---------------- UPDATE ---------------- */
-
-  const update = (key, val) => {
-    if (key.startsWith("source.")) {
-      const k = key.split(".")[1];
-      setForm((p) => ({ ...p, source: { ...p.source, [k]: val } }));
-    } else {
-      setForm((p) => ({ ...p, [key]: val }));
-    }
-  };
-
-  /* ---------------- FIELD VALIDATION ---------------- */
-
-  const validateName = (value) => {
-    if (!value) return "Variable name required";
-    if (value.length < 3) return "Minimum 3 characters";
-    if (value.length > 40) return "Maximum 40 characters";
-    if (!NAME_REGEX.test(value)) return "Only A-Z, 0-9 and _ allowed";
-
-    const duplicate = globals.some(
-      (g) => g.name === value && g.name !== globalVariable?.name
-    );
-
-    if (duplicate) return "Variable already exists";
-    return "";
-  };
-
-  const validateLabel = (value) => {
-    if (!value) return "Label required";
-    if (value.length < 3) return "Minimum 3 characters";
-    if (value.length > 60) return "Maximum 60 characters";
-    if (!LABEL_REGEX.test(value))
-      return "Only letters, numbers, space, - and _ allowed";
-    return "";
-  };
-
-  const validateDescription = (value) => {
-    if (!value) return "Description required";
-    if (value.length < 5) return "Minimum 5 characters";
-    if (value.length > 200) return "Maximum 200 characters";
-    if (!DESCRIPTION_REGEX.test(value))
-      return "Allowed 5-200 characters (alphabets, numbers, spaces, ,()&/- allowed!)";
-    return "";
-  };
-
-  const validateForm = () => {
-    const e = {};
-
-    e.name = validateName(form.name);
-    e.label = validateLabel(form.label);
-    e.description = validateDescription(form.description);
-
-    if (!form.dataType) e.dataType = "Select data type";
-
-    if (form.mode === "EXPRESSION" && !form.expression)
-      e.expression = "Expression required";
-
-    if (form.mode === "QUERY") {
-      if (!form.source.type) e.type = "Select query type";
-      if (!form.source.table) e.table = "Select table";
-      if (!form.source.column) e.column = "Select column";
-    }
-
-    Object.keys(e).forEach((k) => !e[k] && delete e[k]);
-    setErrors(e);
-
-    return Object.keys(e).length === 0;
-  };
-
-  const handleSave = () => {
-    if (!validateForm()) {
-      snackBar("Kindly fill the required fields before saving", "error");
-      return;
-    }
-    onSave(form);
-    onClose();
-  };
-
-  /* ---------------- DERIVED ---------------- */
-
-  const selectedTable = tableConfigs?.find(
-    (t) => t.tableName === form?.source?.table
+  const filteredData = data.filter(
+    (item) =>
+      item.CIRCLE_NAME?.toLowerCase().includes(searchTerm.toLowerCase()) || item.CIRCLE_CODE?.includes(searchTerm)
   );
 
-  const columns = selectedTable ? getSelectableColumns(form.source?.table) : [];
+  // --- ANALYTICS LOGIC ---
+  const chartData = useMemo(() => {
+    const counts = data.reduce((acc, item) => {
+      const status = String(item.MISC_STATUS);
+      acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {});
 
-  /* ---------------- UI ---------------- */
+    return [
+      { id: 0, value: counts['null'] || 0, label: 'Not Initiated', color: '#9e9e9e' },
+      { id: 1, value: counts['11'] || 0, label: 'In Progress', color: '#1976d2' },
+      { id: 2, value: counts['20'] || 0, label: 'Pending Approval', color: '#ed6c02' },
+      { id: 3, value: counts['53'] || 0, label: 'Freezed', color: '#2e7d32' },
+      { id: 4, value: counts['12'] || 0, label: 'Rejected', color: '#d32f2f' },
+    ].filter((item) => item.value > 0); // Only show statuses that have data
+  }, [data]);
+
+  // ---------- KPI CALC ----------
+  const stats = useMemo(() => {
+    const total = data.length;
+    const freezed = data.filter((d) => d.MISC_STATUS === '53').length;
+    const pending = data.filter((d) => d.MISC_STATUS !== '53').length;
+    const notInitiated = data.filter((d) => !d.MISC_STATUS).length;
+    const checkerPending = data.filter((d) => d.MISC_STATUS === '20').length;
+    const makerPending = pending - checkerPending || 0;
+    const freezedPct = total ? Math.round((freezed / total) * 100) : 0;
+    const pendingPct = total ? Math.round((pending / total) * 100) : 0;
+    const notInitiatedPct = total ? Math.round((notInitiated / total) * 100) : 0;
+    const checkerPendingPct = pending ? Math.round((checkerPending / pending) * 100) : 0;
+    const makerPendingPct = pending && checkerPending ? Math.round(((pending - checkerPending) / pending) * 100) : 0;
+
+    return {
+      total,
+      freezed,
+      pending,
+      notInitiated,
+      checkerPending,
+      makerPending,
+      freezedPct,
+      pendingPct,
+      notInitiatedPct,
+      checkerPendingPct,
+      makerPendingPct,
+    };
+  }, [data]);
+
+  const KPI = [
+    {
+      key: 'ALL',
+      label: 'Total',
+      value: stats.total,
+      pct: 100,
+      icon: <AssessmentIcon />,
+      color: '#1565c0',
+    },
+
+    {
+      key: 'FREEZED',
+      label: 'Freezed',
+      value: stats.freezed,
+      pct: stats.freezedPct,
+      icon: <LockIcon />,
+      color: '#2e7d32',
+    },
+    {
+      key: 'NOT_INITIATED',
+      label: 'Not Initiated',
+      value: stats.notInitiated,
+      pct: stats.notInitiatedPct,
+      icon: <ErrorOutlineIcon />,
+      color: '#9e9e9e',
+    },
+
+    {
+      key: 'PENDING',
+      label: 'Pending',
+      value: stats.pending,
+      pct: stats.pendingPct,
+      icon: <PendingActionsIcon />,
+      color: '#ed6c02',
+    },
+
+    {
+      key: 'MAKER_PENDING',
+      label: 'Pending With Maker',
+      value: stats.makerPending,
+      pct: stats.makerPendingPct,
+      color: '#ed6c02',
+      icon: <PendingActionsIcon />,
+    },
+    {
+      key: 'CHECKER_PENDING',
+      label: 'Pending With Checker',
+      value: stats.checkerPending,
+      pct: stats.checkerPendingPct,
+      color: '#ed6c02',
+      icon: <PendingActionsIcon />,
+    },
+  ];
 
   return (
-    <Dialog 
-      open={open} 
-      maxWidth="md" 
-      fullWidth 
-      PaperProps={{ 
-        sx: { borderRadius: 3, bgcolor: "background.default" } 
-      }}
-    >
-      <DialogTitle sx={{ pb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-        <DataObjectIcon color="primary" />
-        <Typography variant="h6" fontWeight="bold">
-          {isEdit ? "Edit Global Variable" : "New Global Variable"}
+    <>
+      <Box sx={{ p: { xs: 2, md: 4 }, minHeight: '100vh' }}>
+        <Typography variant="h4" align="center" fontWeight={800} gutterBottom>
+          DICGC Compliance Hub
         </Typography>
-        <IconButton
-          onClick={onClose}
-          sx={{ position: "absolute", right: 16, top: 12 }}
-        >
-          <CloseIcon />
-        </IconButton>
-      </DialogTitle>
 
-      <DialogContent dividers sx={{ p: 3, display: "flex", flexDirection: "column", gap: 3 }}>
-        
-        {/* ZONE 1: Core Information */}
-        <Paper elevation={0} sx={{ p: 2.5, borderRadius: 2, border: "1px solid", borderColor: "divider" }}>
-          <Typography variant="subtitle2" color="text.secondary" mb={2} textTransform="uppercase" letterSpacing={1}>
-            Core Details
-          </Typography>
-          
-          <Box display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
-            <TextField
-              label="Variable Name *"
-              variant="filled"
-              value={form.name}
-              error={!!errors.name}
-              helperText={errors.name || "A-Z, 0-9, _. Used as $G{VAR}"}
-              onChange={(e) => {
-                const newValue = e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "");
-                update("name", newValue);
-                setErrors((p) => ({ ...p, name: validateName(newValue) }));
+        <Grid container spacing={3}>
+          {/* --- LEFT: CHART --- */}
+          <Grid size={{ xs: 12, md: 5 }}>
+            <Paper
+              sx={{
+                p: 3,
+                borderRadius: 4,
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
               }}
-            />
-
-            <TextField
-              label="Display Label *"
-              variant="filled"
-              value={form.label}
-              error={!!errors.label}
-              helperText={errors.label || "User-friendly name"}
-              onChange={(e) => {
-                let newValue = e.target.value.replace(/[^A-Za-z0-9 _-]/g, "").replace(/\s\s+/g, " ");
-                setErrors((p) => ({ ...p, label: validateLabel(e.target.value) }));
-                update("label", newValue);
-              }}
-            />
-          </Box>
-
-          <TextField
-            sx={{ mt: 2 }}
-            label="Description *"
-            variant="filled"
-            fullWidth
-            multiline
-            rows={2}
-            value={form.description}
-            error={!!errors.description}
-            helperText={errors.description || "Brief explanation of what this variable does."}
-            onChange={(e) => {
-              const cleanedValue = e.target.value
-                .replace(/\s{2,}/g, " ")
-                .replace(/[^a-zA-Z0-9\s/&().,-]/g, "");
-              update("description", cleanedValue);
-              setErrors((p) => ({ ...p, description: validateDescription(cleanedValue) }));
-            }}
-          />
-        </Paper>
-
-        {/* ZONE 2: Variable Configuration */}
-        <Paper elevation={0} sx={{ p: 2.5, borderRadius: 2, border: "1px solid", borderColor: "divider" }}>
-          <Typography variant="subtitle2" color="text.secondary" mb={2} textTransform="uppercase" letterSpacing={1}>
-            Configuration
-          </Typography>
-
-          <Box display="grid" gridTemplateColumns={{ xs: "1fr", sm: "1fr 1fr" }} gap={4}>
-            {/* DATA TYPE - Segmented Control */}
-            <FormControl fullWidth>
-              <FormLabel sx={{ mb: 1, fontWeight: 500, color: "text.primary" }}>
-                Data Type
-              </FormLabel>
-              <ToggleButtonGroup
-                color="primary"
-                value={form.dataType}
-                exclusive
-                fullWidth
-                onChange={(e, newVal) => newVal && update("dataType", newVal)}
-              >
-                {dataTypes.map((m) => (
-                  <ToggleButton key={m} value={m} sx={{ py: 1 }}>
-                    {toPascalKebabCase(m)}
-                  </ToggleButton>
-                ))}
-              </ToggleButtonGroup>
-            </FormControl>
-
-            {/* MODE - Segmented Control */}
-            <FormControl fullWidth>
-              <FormLabel sx={{ mb: 1, fontWeight: 500, color: "text.primary" }}>
-                Resolution Mode
-              </FormLabel>
-              <ToggleButtonGroup
-                color="secondary"
-                value={form.mode}
-                exclusive
-                fullWidth
-                onChange={(e, newVal) => newVal && update("mode", newVal)}
-              >
-                {modes.map((m) => (
-                  <ToggleButton key={m} value={m} sx={{ py: 1 }}>
-                    {toPascalKebabCase(m)}
-                  </ToggleButton>
-                ))}
-              </ToggleButtonGroup>
-            </FormControl>
-          </Box>
-        </Paper>
-
-        {/* ZONE 3: Contextual Mode Settings */}
-        <Box sx={{ minHeight: "100px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
-          
-          {/* INPUT MODE */}
-          {form.mode === "INPUT" && (
-            <Box sx={{ animation: "fadeIn 0.3s ease-in-out" }}>
-              <Alert severity="info" icon={<WarningIcon />} sx={{ mb: 2, borderRadius: 2 }}>
-                <AlertTitle>Interactive Input</AlertTitle>
-                When mode is set to <strong>Input</strong>, values are prompted at runtime. A new parameter has been included in the variant configuration.
-              </Alert>
-              
-              <TextField
-                label="Default Value"
-                variant="outlined"
-                value={form.defaultValue || ""}
-                fullWidth
-                error={!!errors.defaultValue}
-                helperText={errors.defaultValue || "Optional fallback value"}
-                onChange={(e) => {
-                  let newValue = e.target.value.replace(/[^A-Za-z0-9 _-]/g, "").replace(/\s\s+/g, " ");
-                  // BUG FIX: changed update("label", newValue) to update("defaultValue", newValue)
-                  update("defaultValue", newValue);
-                }}
-              />
-            </Box>
-          )}
-
-          {/* EXPRESSION MODE */}
-          {form.mode === "EXPRESSION" && (
-            <Box sx={{ animation: "fadeIn 0.3s ease-in-out" }}>
-              <Typography variant="subtitle2" sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-                <SettingsEthernetIcon fontSize="small" color="action" /> Define Expression
+            >
+              <Typography variant="h6" fontWeight={700} sx={{ mb: 2, alignSelf: 'flex-start' }}>
+                Completion Overview
               </Typography>
-              <ExpressionEditorWithVariables
-                globals={globals}
-                value={form.expression}
-                placeholder="e.g. #{ 1000 * G.USD_RATE }"
-                onChange={(v) => update("expression", v)}
+              <PieChart
+                series={[
+                  {
+                    data: chartData,
+                    innerRadius: 60,
+                    outerRadius: 100,
+                    paddingAngle: 5,
+                    cornerRadius: 5,
+                  },
+                ]}
+                width={400}
+                height={250}
+                slotProps={{ legend: { direction: 'column', position: { vertical: 'middle', horizontal: 'right' } } }}
               />
-              {errors.expression && (
-                <Typography color="error" variant="caption" sx={{ mt: 1, display: "block" }}>
-                  {errors.expression}
-                </Typography>
-              )}
-            </Box>
-          )}
+            </Paper>
+          </Grid>
 
-          {/* QUERY MODE */}
-          {form.mode === "QUERY" && (
-            <Box sx={{ animation: "fadeIn 0.3s ease-in-out" }}>
-              <Typography variant="subtitle2" sx={{ mb: 2 }}>Database Query Builder</Typography>
-              
-              <Box display="grid" gridTemplateColumns="1fr 1fr 1fr" gap={2}>
-                <TextField
-                  select
-                  fullWidth
-                  label="Query Type"
-                  value={form.source.type}
-                  error={!!errors.type}
-                  helperText={errors.type}
-                  onChange={(e) => update("source.type", e.target.value)}
-                >
-                  {queryTypes.map((q) => (
-                    <MenuItem key={q} value={q}>{q}</MenuItem>
-                  ))}
-                </TextField>
+          {/* --- RIGHT: KPI CARDS --- */}
+          <Grid size={{ xs: 12, md: 7 }}>
+            <Grid container spacing={2}>
+              {KPI.map((k) => (
+                <Grid size={{ xs: 12, sm: 4 }} key={k.key}>
+                  <Card
+                    sx={{
+                      cursor: 'pointer',
+                      //   border: '1px solid',
+                      borderRadius: 3,
+                      boxShadow: '0 4px 10px rgba(0,0,0,0.05)',
+                    }}
+                  >
+                    <CardContent>
+                      <Stack direction="row" justifyContent="space-between">
+                        <Box>
+                          <Typography variant="h4">{loading ? <Skeleton width={40} /> : k.value} Circles</Typography>
 
-                <Autocomplete
-                  options={tableConfigs || []}
-                  getOptionLabel={(o) => o?.label || o?.tableName || o || ""}
-                  onChange={(_, v) => update("source.table", v?.tableName || "")}
-                  value={form.source.table || ""}
-                  renderInput={(p) => (
-                    <TextField {...p} label="Table" error={!!errors.table} helperText={errors.table} />
+                          <Typography>{k.label}</Typography>
+
+                          <Typography variant="caption">{k.pct}%</Typography>
+                        </Box>
+
+                        <Avatar
+                          sx={{
+                            bgcolor: k.color,
+                          }}
+                        >
+                          {k.icon}
+                        </Avatar>
+                      </Stack>
+
+                      <LinearProgress variant="determinate" value={k.pct} sx={{ mt: 2 }} />
+                    </CardContent>
+                  </Card>
+                </Grid>
+              ))}
+            </Grid>
+
+            {/* --- SEARCH BAR --- */}
+            <Paper sx={{ mt: 3, p: 1.5, borderRadius: 3, display: 'flex', alignItems: 'center' }}>
+              <FormInput
+                fullWidth
+                variant="standard"
+                inputType="alphaNumeric"
+                placeholder="Search by Circle Name or Code..."
+                onChange={(e) => setSearchTerm(e.target.value)}
+                InputProps={{
+                  disableUnderline: true,
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <SearchIcon color="action" />
+                    </InputAdornment>
+                  ),
+                }}
+                sx={{ ml: 1 }}
+              />
+            </Paper>
+          </Grid>
+
+          {/* --- TABLE: CIRCLE LIST --- */}
+          <Grid size={{ xs: 12 }}>
+            <TableContainer component={Paper} sx={{ borderRadius: 4, boxShadow: '0 10px 30px rgba(0,0,0,0.05)' }}>
+              <Table stickyHeader>
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 800 }}>Circle Details</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }}>Maker Info</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }}>Maker Action Date</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }}>Checker Info</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }}>Checker Action Date</TableCell>
+                    <TableCell sx={{ fontWeight: 800 }}>Current Status</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {filteredData.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={2} align="center">
+                        <InboxIcon />
+                        No Data Found
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredData.map((row) => {
+                      const status = getStatusConfig(row.MISC_STATUS);
+                      return (
+                        <TableRow key={row.CIRCLE_CODE} hover>
+                          <TableCell>
+                            <Typography variant="body2" fontWeight={700}>
+                              {row.CIRCLE_NAME}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              Code: {row.CIRCLE_CODE}
+                            </Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Stack direction="row" alignItems="center" spacing={1}>
+                              <PersonIcon
+                                sx={{
+                                  fontSize: 18,
+                                  color: row.MISC_MAKERID ? 'primary.main' : 'action.disabled',
+                                }}
+                              />
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  fontWeight: row.MISC_MAKERID ? 600 : 400,
+                                  color: row.MISC_MAKERID ? 'text.primary' : 'text.secondary',
+                                }}
+                              >
+                                {row.MISC_MAKERID || 'Not Assigned'}
+                              </Typography>
+                            </Stack>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2" color="text.secondary">
+                              {formatDate(row.MISC_MAKER_UP_DT) || '-'}
+                            </Typography>
+                          </TableCell>
+
+                          <TableCell>
+                            <Stack direction="row" alignItems="center" spacing={1}>
+                              <Tooltip
+                                title={row.MISC_CHECKERID ? `Verified by ${row.MISC_CHECKERID}` : 'Pending Check'}
+                              >
+                                <HowToRegIcon
+                                  sx={{
+                                    fontSize: 18,
+                                    color: row.MISC_CHECKERID ? 'success.main' : 'action.disabled',
+                                  }}
+                                />
+                              </Tooltip>
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  fontWeight: row.MISC_CHECKERID ? 600 : 400,
+                                  color: row.MISC_CHECKERID ? 'success.dark' : 'text.secondary',
+                                }}
+                              >
+                                {row.MISC_CHECKERID || 'Pending'}
+                              </Typography>
+                            </Stack>
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="body2" color="text.secondary">
+                              {formatDate(row.MISC_CHECKER_DT) || '-'}
+                            </Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Chip icon={status.icon} label={status.label} color={status.muiColor} />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
                   )}
-                />
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Grid>
+        </Grid>
+      </Box>
 
-                <Autocomplete
-                  options={columns || []}
-                  getOptionLabel={(o) => o?.label || o?.columnName || o || ""}
-                  onChange={(_, v) => update("source.column", v || "")}
-                  value={form?.source?.column || ""}
-                  renderInput={(p) => (
-                    <TextField {...p} label="Column" error={!!errors.column} helperText={errors.column} />
-                  )}
-                />
-              </Box>
-
-              {form.source.column && (
-                <Paper elevation={0} sx={{ mt: 2, p: 2, bgcolor: "action.hover", borderRadius: 2 }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={600} mb={1} display="block">
-                    FILTERS
-                  </Typography>
-                  <FilterBuilder
-                    tableName={form.source.table}
-                    filters={form.source.filters}
-                    onFiltersChange={(f) => update("source.filters", f)}
-                  />
-                </Paper>
-              )}
-            </Box>
-          )}
-        </Box>
-      </DialogContent>
-
-      <DialogActions sx={{ px: 3, py: 2 }}>
-        <Button onClick={onClose} color="inherit" sx={{ fontWeight: 600 }}>
-          Cancel
-        </Button>
-        <Button variant="contained" onClick={handleSave} disableElevation sx={{ borderRadius: 2, px: 3, fontWeight: 600 }}>
-          {isEdit ? "Save Changes" : "Create Variable"}
-        </Button>
-      </DialogActions>
-    </Dialog>
+      <LoadingOverlay loading={loading} />
+    </>
   );
 };
+
+export default DICGCDashboard;
+
+
+[
+  {
+    "CIRCLE_NAME": "AHMEDABAD",
+    "CIRCLE_CODE": "006",
+    "MISC_PKID": 100930,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "6413560",
+    "MISC_MAKER_UP_DT": 1760697589000,
+    "MISC_CHECKERID": "3536351",
+    "MISC_CHECKER_DT": 1760796954000,
+    "MISC_CHECKER_REMARKS": "REJECTED",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "AMARAVATI",
+    "CIRCLE_CODE": "024",
+    "MISC_PKID": 100916,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "6082777",
+    "MISC_MAKER_UP_DT": 1760687340000,
+    "MISC_CHECKERID": "4237420",
+    "MISC_CHECKER_DT": 1761049046000,
+    "MISC_CHECKER_REMARKS": "rejected,,,\n",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "BENGALURU",
+    "CIRCLE_CODE": "013",
+    "MISC_PKID": 100926,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5777682",
+    "MISC_MAKER_UP_DT": 1760695258000,
+    "MISC_CHECKERID": "6187641",
+    "MISC_CHECKER_DT": 1760955690000,
+    "MISC_CHECKER_REMARKS": "needs rectification",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "BHOPAL",
+    "CIRCLE_CODE": "008",
+    "MISC_PKID": 100933,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "7664680",
+    "MISC_MAKER_UP_DT": 1760699633000,
+    "MISC_CHECKERID": "6776388",
+    "MISC_CHECKER_DT": 1760778998000,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "BHUBANESHWAR",
+    "CIRCLE_CODE": "011",
+    "MISC_PKID": 100923,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "11",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5805406",
+    "MISC_MAKER_UP_DT": 1760693307000,
+    "MISC_CHECKERID": "3624889",
+    "MISC_CHECKER_DT": 1761038738000,
+    "MISC_CHECKER_REMARKS": "Rejected ",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": "a",
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "CCG COMMERCIAL CLIENTS GROUP",
+    "CIRCLE_CODE": "016",
+    "MISC_PKID": 100919,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5062764",
+    "MISC_MAKER_UP_DT": 1760688102000,
+    "MISC_CHECKERID": "5291879",
+    "MISC_CHECKER_DT": 1760712126000,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "CHANDIGARH",
+    "CIRCLE_CODE": "010",
+    "MISC_PKID": 100917,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "7125909",
+    "MISC_MAKER_UP_DT": 1760687402000,
+    "MISC_CHECKERID": "5114012",
+    "MISC_CHECKER_DT": 1760773344000,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": "REVISED DATA REQUIRED",
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "CHENNAI",
+    "CIRCLE_CODE": "003",
+    "MISC_PKID": 100932,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "1034290",
+    "MISC_MAKER_UP_DT": 1760699126000,
+    "MISC_CHECKERID": "6188451",
+    "MISC_CHECKER_DT": 1762407472000,
+    "MISC_CHECKER_REMARKS": "DSFDF",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": "MIsmatch",
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "CO-AU II, MUMBAI",
+    "CIRCLE_CODE": "020",
+    "MISC_PKID": 100935,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "11",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "3698629",
+    "MISC_MAKER_UP_DT": 1760702130000,
+    "MISC_CHECKERID": "6400094",
+    "MISC_CHECKER_DT": 1761648719000,
+    "MISC_CHECKER_REMARKS": "f",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": "HHHHHHHHHHHHHHH",
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "CORPORATE ACCOUNTS GROUP",
+    "CIRCLE_CODE": "015",
+    "MISC_PKID": 100943,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "11",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "6381502",
+    "MISC_MAKER_UP_DT": 1760788356000,
+    "MISC_CHECKERID": "4184718",
+    "MISC_CHECKER_DT": 1761196708000,
+    "MISC_CHECKER_REMARKS": "Margin Money",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "CnSD CORPORATE CENTRE MUMBAI",
+    "CIRCLE_CODE": "025",
+    "MISC_PKID": 100914,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5965063",
+    "MISC_MAKER_UP_DT": 1760683672000,
+    "MISC_CHECKERID": "3796000",
+    "MISC_CHECKER_DT": 1761555949000,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "N",
+    "REQUEST_FLAG": null,
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": null,
+    "DR_ACTIVE_FLG": null
+  },
+  {
+    "CIRCLE_NAME": "GLOBAL MARKET",
+    "CIRCLE_CODE": "026",
+    "MISC_PKID": 100942,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "11",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5930278",
+    "MISC_MAKER_UP_DT": 1760767674000,
+    "MISC_CHECKERID": null,
+    "MISC_CHECKER_DT": null,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "N",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "GUWAHATI",
+    "CIRCLE_CODE": "012",
+    "MISC_PKID": 100920,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "7583303",
+    "MISC_MAKER_UP_DT": 1760690550000,
+    "MISC_CHECKERID": "3199479",
+    "MISC_CHECKER_DT": 1764147934000,
+    "MISC_CHECKER_REMARKS": "k",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "HYDERABAD",
+    "CIRCLE_CODE": "007",
+    "MISC_PKID": 100925,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "11",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "6261671",
+    "MISC_MAKER_UP_DT": 1760695079000,
+    "MISC_CHECKERID": "6379265",
+    "MISC_CHECKER_DT": 1761030456000,
+    "MISC_CHECKER_REMARKS": "FOR VERIFICATION",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": "a",
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "INTERNATIONAL BANKING GROUP",
+    "CIRCLE_CODE": "021",
+    "MISC_PKID": null,
+    "MISC_REPORTID_FK": null,
+    "MISC_QDATE": null,
+    "MISC_STATUS": null,
+    "MISC_TABLE_STATUS": null,
+    "MISC_DATAFLAG": null,
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": null,
+    "MISC_MAKER_UP_DT": null,
+    "MISC_CHECKERID": null,
+    "MISC_CHECKER_DT": null,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": null,
+    "REQUEST_FLAG": null,
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": null,
+    "DR_ACTIVE_FLG": null
+  },
+  {
+    "CIRCLE_NAME": "JAIPUR",
+    "CIRCLE_CODE": "023",
+    "MISC_PKID": 100934,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5545129",
+    "MISC_MAKER_UP_DT": 1760700166000,
+    "MISC_CHECKERID": "6938086",
+    "MISC_CHECKER_DT": 1760706774000,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": "PLEASE",
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "KOLKATA",
+    "CIRCLE_CODE": "001",
+    "MISC_PKID": 100927,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "4363965",
+    "MISC_MAKER_UP_DT": 1760696012000,
+    "MISC_CHECKERID": "3532402",
+    "MISC_CHECKER_DT": 1760790579000,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "LUCKNOW",
+    "CIRCLE_CODE": "005",
+    "MISC_PKID": 100928,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5919010",
+    "MISC_MAKER_UP_DT": 1760696213000,
+    "MISC_CHECKERID": "6224709",
+    "MISC_CHECKER_DT": 1761033363000,
+    "MISC_CHECKER_REMARKS": "REJECT",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "MAHARASHTRA",
+    "CIRCLE_CODE": "002",
+    "MISC_PKID": 100924,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "20",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5934257",
+    "MISC_MAKER_UP_DT": 1760693681000,
+    "MISC_CHECKERID": "4409280",
+    "MISC_CHECKER_DT": 1760950908000,
+    "MISC_CHECKER_REMARKS": "error",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": "error ",
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "MUMBAI METRO",
+    "CIRCLE_CODE": "027",
+    "MISC_PKID": 100929,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5940702",
+    "MISC_MAKER_UP_DT": 1760697104000,
+    "MISC_CHECKERID": "4170210",
+    "MISC_CHECKER_DT": 1761206846000,
+    "MISC_CHECKER_REMARKS": "CHANGE",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "NEW DELHI",
+    "CIRCLE_CODE": "004",
+    "MISC_PKID": 100921,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "8470405",
+    "MISC_MAKER_UP_DT": 1760692164000,
+    "MISC_CHECKERID": "5428769",
+    "MISC_CHECKER_DT": 1761198063000,
+    "MISC_CHECKER_REMARKS": "check",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "PATNA",
+    "CIRCLE_CODE": "009",
+    "MISC_PKID": 100922,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "6004288",
+    "MISC_MAKER_UP_DT": 1760692740000,
+    "MISC_CHECKERID": "4080084",
+    "MISC_CHECKER_DT": 1760947914000,
+    "MISC_CHECKER_REMARKS": "aa",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "PPG ACCOUNTING AND MAINTENANCE CELL",
+    "CIRCLE_CODE": "018",
+    "MISC_PKID": 100940,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "5060737",
+    "MISC_MAKER_UP_DT": 1760766366000,
+    "MISC_CHECKERID": "3527344",
+    "MISC_CHECKER_DT": 1760768075000,
+    "MISC_CHECKER_REMARKS": null,
+    "BID_FLAG": "N",
+    "REQUEST_FLAG": null,
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": null,
+    "DR_ACTIVE_FLG": null
+  },
+  {
+    "CIRCLE_NAME": "SARG STRS ASSET RESOLUTION GRP",
+    "CIRCLE_CODE": "017",
+    "MISC_PKID": 100945,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "4212436",
+    "MISC_MAKER_UP_DT": 1760875043000,
+    "MISC_CHECKERID": "5002095",
+    "MISC_CHECKER_DT": 1761301687000,
+    "MISC_CHECKER_REMARKS": "Resubmit",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  },
+  {
+    "CIRCLE_NAME": "THIRUVANANTHAPURAM",
+    "CIRCLE_CODE": "014",
+    "MISC_PKID": 100918,
+    "MISC_REPORTID_FK": "5001",
+    "MISC_QDATE": 1759170600000,
+    "MISC_STATUS": "53",
+    "MISC_TABLE_STATUS": "UUIU",
+    "MISC_DATAFLAG": "I",
+    "MISC_FILENAME": null,
+    "MISC_MAKERID": "7289960",
+    "MISC_MAKER_UP_DT": 1760687924000,
+    "MISC_CHECKERID": "7243936",
+    "MISC_CHECKER_DT": 1761025721000,
+    "MISC_CHECKER_REMARKS": "error",
+    "BID_FLAG": "Y",
+    "REQUEST_FLAG": "N",
+    "REQUEST_REMARKS": null,
+    "DR_REJECT_REMARKS": null,
+    "DR_BATCH_ID_FK": "10029",
+    "DR_ACTIVE_FLG": "Y"
+  }
+]
+
