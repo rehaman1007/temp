@@ -1,331 +1,317 @@
-import React, { useState, useEffect, useMemo, useDeferredValue } from 'react';
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Box,
-  Paper,
-  Typography,
   Grid,
   Card,
   CardContent,
+  Typography,
+  Chip,
   Table,
   TableBody,
   TableCell,
   TableContainer,
   TableHead,
   TableRow,
-  Chip,
-  Stack,
-  InputAdornment,
-  Tooltip,
-  Skeleton,
-  Avatar,
+  Paper,
   LinearProgress,
   IconButton,
-  Collapse,
-} from '@mui/material';
+  Container,
+  Stack,
+  Avatar,
+  useTheme,
+} from "@mui/material";
+import {
+  Storage,
+  Speed,
+  SettingsInputComponent,
+  Psychology,
+  Refresh,
+  PlayArrow,
+  CheckCircle,
+  ErrorOutline,
+  Info,
+} from "@mui/icons-material";
+import { PieChart } from "@mui/x-charts/PieChart";
+import useApi from "../../hooks/useApi";
 
-import { PieChart } from '@mui/x-charts/PieChart';
+const HEALTH_URL = "/PS/airflow/health";
+const PIPELINE_URL = "/PS/process/all-pipelines";
+const DAGS_URL = "/PS/airflow/running-dags";
 
-// Icons
-import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
-import HowToRegIcon from '@mui/icons-material/HowToReg';
-import PersonIcon from '@mui/icons-material/Person';
-import SearchIcon from '@mui/icons-material/Search';
-import AssessmentIcon from '@mui/icons-material/Assessment';
-import LockIcon from '@mui/icons-material/Lock';
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
-import PendingActionsIcon from '@mui/icons-material/PendingActions';
-import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
-import InboxIcon from '@mui/icons-material/Inbox';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-
-import useApi from '../../../../common/hooks/useApi';
-import LoadingOverlay from '../../../../common/components/ui/loadingOverlay';
-import FormInput from '../../../../common/components/ui/FormInput';
-
-const formatDate = (timestamp) => {
-  if (!timestamp) return '-';
-  const d = new Date(Number(timestamp));
-  if (isNaN(d.getTime())) return '-';
-  return new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true,
-  }).format(d);
-};
-
-const getStatusConfig = (status) => {
-  const configs = {
-    null: { label: 'Not Initiated', muiColor: 'default', icon: <ErrorOutlineIcon fontSize="small" /> },
-    10: { label: 'Initiated', muiColor: 'info', icon: <PlayCircleOutlineIcon fontSize="small" /> },
-    11: { label: 'In Progress', muiColor: 'primary', icon: <HourglassEmptyIcon fontSize="small" /> },
-    20: { label: 'Pending Approval', muiColor: 'warning', icon: <PendingActionsIcon fontSize="small" /> },
-    12: { label: 'Rejected', muiColor: 'error', icon: <ErrorOutlineIcon fontSize="small" /> },
-    53: { label: 'Freezed', muiColor: 'success', icon: <LockIcon fontSize="small" /> },
-  };
-  return configs[String(status)] || configs['null'];
-};
-
-const DICGCDashboard = () => {
-  const [data, setData] = useState([]);
+const AirflowDashboard = () => {
+  const theme = useTheme();
+  const [health, setHealth] = useState(null);
+  const [pipelines, setPipelines] = useState([]);
+  const [runningDags, setRunningDags] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const deferredSearch = useDeferredValue(searchTerm);
-  const [expandedRow, setExpandedRow] = useState(null);
-
   const { callApi } = useApi();
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setLoading(true);
-        const response = await callApi('/bidData/get-dicgc-dashboard', { qed: '30/09/2025' });
-        setData(response || []);
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchData();
+  const fetchData = useCallback(async () => {
+    try {
+      const [healthRes, pipeRes, runsRes] = await Promise.all([
+        callApi(HEALTH_URL, null, "GET"),
+        callApi(PIPELINE_URL, null, "GET"),
+        callApi(DAGS_URL, null, "GET"),
+      ]);
+      console.log(healthRes, pipeRes, runsRes);
+      setHealth(healthRes.data);
+      setPipelines(pipeRes.data);
+      setRunningDags(runsRes.data.dag_runs || []);
+    } catch (error) {
+      console.error("Dashboard Sync Error:", error);
+    } finally {
+      setLoading(false);
+    }
   }, [callApi]);
 
-  // 🔥 Indexed Search Optimization
-  const indexedData = useMemo(() => {
-    return data.map((item) => ({
-      ...item,
-      __search: `${item.CIRCLE_NAME || ''} ${item.CIRCLE_CODE || ''}`.toLowerCase(),
-    }));
-  }, [data]);
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 30000); // 30s polling
+    return () => clearInterval(interval);
+  }, [fetchData]);
 
-  const filteredData = useMemo(() => {
-    if (!deferredSearch) return indexedData;
-    return indexedData.filter((item) =>
-      item.__search.includes(deferredSearch.toLowerCase())
-    );
-  }, [indexedData, deferredSearch]);
+  if (loading) return <LinearProgress />;
 
-  // 📊 Chart Data
-  const chartData = useMemo(() => {
-    const counts = data.reduce((acc, item) => {
-      const status = String(item.MISC_STATUS);
-      acc[status] = (acc[status] || 0) + 1;
-      return acc;
-    }, {});
-    return [
-      { id: 0, value: counts['null'] || 0, label: 'Not Initiated', color: '#9e9e9e' },
-      { id: 1, value: counts['11'] || 0, label: 'In Progress', color: '#1976d2' },
-      { id: 2, value: counts['20'] || 0, label: 'Pending Approval', color: '#ed6c02' },
-      { id: 3, value: counts['53'] || 0, label: 'Freezed', color: '#2e7d32' },
-      { id: 4, value: counts['12'] || 0, label: 'Rejected', color: '#d32f2f' },
-    ].filter((i) => i.value > 0);
-  }, [data]);
+  // Helper to map components to MUI Icons
+  const getComponentIcon = (name) => {
+    switch (name) {
+      case "metadatabase":
+        return <Storage />;
+      case "scheduler":
+        return <Speed />;
+      case "triggerer":
+        return <SettingsInputComponent />;
+      case "dag_processor":
+        return <Psychology />;
+      default:
+        return <Info />;
+    }
+  };
+
+  // Prepare Data for MUI X PieChart
+  const pieData = health
+    ? Object.entries(health).map(([key, val], index) => ({
+        id: index,
+        value: 1,
+        label: key.replace("_", " ").toUpperCase(),
+        color:
+          val.status === "healthy"
+            ? theme.palette.success.main
+            : theme.palette.error.main,
+      }))
+    : [];
 
   return (
-    <>
-      <Box sx={{ p: 3 }}>
-        <Typography variant="h4" fontWeight={800} align="center" gutterBottom>
-          DICGC Compliance Hub
-        </Typography>
+    <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+      {/* Dashboard Header */}
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="center"
+        mb={4}
+      >
+        <Box>
+          <Typography variant="h4" fontWeight="bold">
+            Airflow Health Ops
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Systems Monitoring & DAG Orchestration
+          </Typography>
+        </Box>
+        <IconButton
+          onClick={fetchData}
+          color="primary"
+          sx={{ border: "1px solid", borderColor: "divider" }}
+        >
+          <Refresh />
+        </IconButton>
+      </Stack>
 
-        <Grid container spacing={3}>
+      <Grid container spacing={3}>
+        {/* Component Status Cards */}
+        {health &&
+          Object.entries(health).map(([key, value]) => (
+            <Grid size={{ xs: 12, sm: 6, md: 3 }} key={key}>
+              <Card variant="outlined" sx={{ borderRadius: 2 }}>
+                <CardContent>
+                  <Stack direction="row" spacing={2} alignItems="center">
+                    <Avatar
+                      sx={{
+                        bgcolor:
+                          value.status === "healthy"
+                            ? "success.light"
+                            : "error.light",
+                        color:
+                          value.status === "healthy"
+                            ? "success.dark"
+                            : "error.dark",
+                      }}
+                    >
+                      {getComponentIcon(key)}
+                    </Avatar>
+                    <Box>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        display="block"
+                      >
+                        {key.toUpperCase()}
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                        {value.status.toUpperCase()}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                </CardContent>
+              </Card>
+            </Grid>
+          ))}
 
-          {/* Chart */}
-          <Grid item xs={12} md={5}>
-            <Paper sx={{ p: 3, borderRadius: 4 }}>
-              <Typography fontWeight={700} mb={2}>
-                Completion Overview
+        {/* Live Running DAGs Table */}
+        <Grid size={{ xs: 12, md: 8 }}>
+          <Card variant="outlined" sx={{ height: "100%", borderRadius: 2 }}>
+            <Box
+              p={2}
+              sx={{
+                borderBottom: "1px solid",
+                borderColor: "divider",
+                display: "flex",
+                justifyContent: "space-between",
+              }}
+            >
+              <Typography variant="h6" fontWeight="bold">
+                Active DAG Runs
               </Typography>
-              <PieChart
-                series={[{ data: chartData, innerRadius: 60, outerRadius: 100 }]}
-                width={400}
-                height={250}
+              <Chip
+                size="small"
+                label={`${runningDags.length} Active`}
+                color={runningDags.length > 0 ? "info" : "default"}
               />
-            </Paper>
-          </Grid>
-
-          {/* Search */}
-          <Grid item xs={12} md={7}>
-            <Paper sx={{ p: 2, borderRadius: 3 }}>
-              <FormInput
-                fullWidth
-                variant="standard"
-                placeholder="Search by Circle Name or Code..."
-                onChange={(e) => setSearchTerm(e.target.value)}
-                InputProps={{
-                  disableUnderline: true,
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <SearchIcon />
-                    </InputAdornment>
-                  ),
-                }}
-              />
-            </Paper>
-          </Grid>
-
-          {/* Table */}
-          <Grid item xs={12}>
-            <TableContainer component={Paper} sx={{ borderRadius: 4 }}>
+            </Box>
+            <TableContainer sx={{ maxHeight: 400 }}>
               <Table stickyHeader>
                 <TableHead>
                   <TableRow>
-                    <TableCell>Circle</TableCell>
-                    <TableCell>Maker</TableCell>
-                    <TableCell>Checker</TableCell>
+                    <TableCell>DAG ID</TableCell>
                     <TableCell>Status</TableCell>
-                    <TableCell>View</TableCell>
+                    <TableCell>Start Time</TableCell>
+                    <TableCell>Trigger</TableCell>
                   </TableRow>
                 </TableHead>
-
                 <TableBody>
-                  {loading &&
-                    Array.from(new Array(5)).map((_, i) => (
-                      <TableRow key={i}>
-                        <TableCell colSpan={5}>
-                          <Skeleton height={40} />
-                        </TableCell>
-                      </TableRow>
-                    ))}
-
-                  {!loading && filteredData.length === 0 && (
+                  {runningDags.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} align="center" sx={{ py: 5 }}>
-                        <Stack spacing={1} alignItems="center">
-                          <InboxIcon sx={{ fontSize: 50, color: 'grey.400' }} />
-                          <Typography fontWeight={600}>No Circles Found</Typography>
-                        </Stack>
+                      <TableCell colSpan={4} align="center" sx={{ py: 8 }}>
+                        <Info sx={{ color: "text.disabled", mb: 1 }} />
+                        <Typography variant="body2" color="text.secondary">
+                          No Active DAGs Found
+                        </Typography>
                       </TableCell>
                     </TableRow>
+                  ) : (
+                    runningDags.map((run) => (
+                      <TableRow key={run.dag_run_id} hover>
+                        <TableCell sx={{ fontWeight: 500 }}>
+                          {run.dag_id}
+                        </TableCell>
+                        <TableCell>
+                          <Chip
+                            icon={
+                              <PlayArrow sx={{ fontSize: "14px !important" }} />
+                            }
+                            label={run.state}
+                            size="small"
+                            color="info"
+                            variant="outlined"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          {new Date(run.start_date).toLocaleTimeString()}
+                        </TableCell>
+                        <TableCell>{run.triggered_by}</TableCell>
+                      </TableRow>
+                    ))
                   )}
-
-                  {!loading &&
-                    filteredData.map((row) => {
-
-                      // 🚫 DICGC Not Available
-                      if (!row.BID_FLAG || row.BID_FLAG === 'X') {
-                        return (
-                          <TableRow key={row.CIRCLE_CODE}>
-                            <TableCell colSpan={5} align="center">
-                              <Stack alignItems="center" py={2}>
-                                <ErrorOutlineIcon color="error" />
-                                <Typography color="error" fontWeight={600}>
-                                  DICGC Not Available for {row.CIRCLE_NAME}
-                                </Typography>
-                              </Stack>
-                            </TableCell>
-                          </TableRow>
-                        );
-                      }
-
-                      const status = getStatusConfig(row.MISC_STATUS);
-
-                      return (
-                        <React.Fragment key={row.CIRCLE_CODE}>
-                          <TableRow hover>
-                            <TableCell>
-                              <Typography fontWeight={700}>
-                                {row.CIRCLE_NAME}
-                              </Typography>
-                              <Typography variant="caption">
-                                Code: {row.CIRCLE_CODE}
-                              </Typography>
-
-                              <Stack direction="row" spacing={1} mt={1}>
-                                {row.BID_FLAG === 'Y' && (
-                                  <Chip size="small" label="Automated" color="success" />
-                                )}
-                                {row.BID_FLAG === 'N' && (
-                                  <Chip size="small" label="Manual" color="warning" />
-                                )}
-                              </Stack>
-                            </TableCell>
-
-                            <TableCell>
-                              {row.MISC_MAKERID || 'Not Assigned'}
-                              <br />
-                              <Typography variant="caption">
-                                {formatDate(row.MISC_MAKER_UP_DT)}
-                              </Typography>
-                            </TableCell>
-
-                            <TableCell>
-                              {row.MISC_CHECKERID || 'Pending'}
-                              <br />
-                              <Typography variant="caption">
-                                {formatDate(row.MISC_CHECKER_DT)}
-                              </Typography>
-                            </TableCell>
-
-                            <TableCell>
-                              <Stack spacing={1}>
-                                <Chip
-                                  icon={status.icon}
-                                  label={status.label}
-                                  color={status.muiColor}
-                                />
-                                {row.REQUEST_FLAG === 'Y' && (
-                                  <Chip
-                                    size="small"
-                                    label="Requested for Revised BID Data"
-                                    color="info"
-                                    variant="outlined"
-                                  />
-                                )}
-                              </Stack>
-                            </TableCell>
-
-                            <TableCell>
-                              <IconButton
-                                onClick={() =>
-                                  setExpandedRow(
-                                    expandedRow === row.CIRCLE_CODE
-                                      ? null
-                                      : row.CIRCLE_CODE
-                                  )
-                                }
-                              >
-                                <ExpandMoreIcon />
-                              </IconButton>
-                            </TableCell>
-                          </TableRow>
-
-                          {/* Expand Row */}
-                          <TableRow>
-                            <TableCell colSpan={5} sx={{ p: 0 }}>
-                              <Collapse in={expandedRow === row.CIRCLE_CODE}>
-                                <Box p={2} bgcolor="#f9fafc">
-                                  <Typography variant="body2">
-                                    <strong>Checker Remarks:</strong>{' '}
-                                    {row.MISC_CHECKER_REMARKS || 'N/A'}
-                                  </Typography>
-                                  <Typography variant="body2">
-                                    <strong>Request Remarks:</strong>{' '}
-                                    {row.REQUEST_REMARKS || 'N/A'}
-                                  </Typography>
-                                  <Typography variant="body2">
-                                    <strong>Batch ID:</strong>{' '}
-                                    {row.DR_BATCH_ID_FK || 'N/A'}
-                                  </Typography>
-                                </Box>
-                              </Collapse>
-                            </TableCell>
-                          </TableRow>
-                        </React.Fragment>
-                      );
-                    })}
                 </TableBody>
               </Table>
             </TableContainer>
+          </Card>
+        </Grid>
+
+        {/* System Health Pie Chart (MUI X Charts) */}
+        <Grid size={{ xs: 12, md: 4 }}>
+          <Card variant="outlined" sx={{ height: "100%", borderRadius: 2 }}>
+            <CardContent>
+              <Typography variant="h6" fontWeight="bold" gutterBottom>
+                Health Distribution
+              </Typography>
+              <Box
+                sx={{ height: 300, display: "flex", justifyContent: "center" }}
+              >
+                <PieChart
+                  series={[
+                    {
+                      data: pieData,
+                      innerRadius: 70,
+                      outerRadius: 100,
+                      paddingAngle: 5,
+                      cornerRadius: 5,
+                    },
+                  ]}
+                  height={300}
+                />
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Pipeline Registry Grid */}
+        <Grid size={{ xs: 12 }}>
+          <Typography variant="h6" fontWeight="bold" mb={2}>
+            Pipeline Registry
+          </Typography>
+          <Grid container spacing={2}>
+            {pipelines.map((pipe) => (
+              <Grid size={{ xs: 12, sm: 6, md: 4 }} key={pipe.processId}>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 2,
+                    display: "flex",
+                    gap: 2,
+                    alignItems: "center",
+                    borderRadius: 2,
+                  }}
+                >
+                  <Avatar sx={{ bgcolor: "primary.main" }}>
+                    {pipe.processFlag === "Y" ? (
+                      <CheckCircle />
+                    ) : (
+                      <ErrorOutline />
+                    )}
+                  </Avatar>
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                      {pipe.processName}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {pipe.dagId}
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      sx={{ fontSize: "0.75rem", mt: 0.5 }}
+                    >
+                      {pipe.processDescription}
+                    </Typography>
+                  </Box>
+                </Paper>
+              </Grid>
+            ))}
           </Grid>
         </Grid>
-      </Box>
-
-      <LoadingOverlay loading={loading} />
-    </>
+      </Grid>
+    </Container>
   );
 };
 
-export default DICGCDashboard;
+export default AirflowDashboard;
