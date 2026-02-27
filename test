@@ -13,12 +13,14 @@ import {
   TableHead,
   TableRow,
   Paper,
-  LinearProgress,
   IconButton,
   Container,
   Stack,
   Avatar,
   useTheme,
+  Tooltip,
+  Skeleton,
+  Fade,
 } from "@mui/material";
 import {
   Storage,
@@ -30,9 +32,10 @@ import {
   CheckCircle,
   ErrorOutline,
   Info,
+  Favorite,
 } from "@mui/icons-material";
 import { PieChart } from "@mui/x-charts/PieChart";
-import useApi from "../../hooks/useApi";
+import useApi from "../../hooks/useApi"; // Assuming this is your custom hook
 
 const HEALTH_URL = "/PS/airflow/health";
 const PIPELINE_URL = "/PS/process/all-pipelines";
@@ -44,33 +47,33 @@ const AirflowDashboard = () => {
   const [pipelines, setPipelines] = useState([]);
   const [runningDags, setRunningDags] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const { callApi } = useApi();
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (isManualRefresh = false) => {
+    if (isManualRefresh) setIsRefreshing(true);
     try {
       const [healthRes, pipeRes, runsRes] = await Promise.all([
         callApi(HEALTH_URL, null, "GET"),
         callApi(PIPELINE_URL, null, "GET"),
         callApi(DAGS_URL, null, "GET"),
       ]);
-      console.log(healthRes, pipeRes, runsRes);
       setHealth(healthRes.data);
       setPipelines(pipeRes.data);
-      setRunningDags(runsRes.data.dag_runs || []);
+      setRunningDags(runsRes.data?.dag_runs || []);
     } catch (error) {
       console.error("Dashboard Sync Error:", error);
     } finally {
       setLoading(false);
+      setIsRefreshing(false);
     }
   }, [callApi]);
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 30000); // 30s polling
+    const interval = setInterval(() => fetchData(false), 30000); // 30s polling
     return () => clearInterval(interval);
   }, [fetchData]);
-
-  if (loading) return <LinearProgress />;
 
   // Helper to map components to MUI Icons
   const getComponentIcon = (name) => {
@@ -88,6 +91,13 @@ const AirflowDashboard = () => {
     }
   };
 
+  // Helper to format heartbeat timestamp nicely
+  const formatTime = (isoString) => {
+    if (!isoString) return "";
+    const date = new Date(isoString);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
   // Prepare Data for MUI X PieChart
   const pieData = health
     ? Object.entries(health).map(([key, val], index) => ({
@@ -101,216 +111,347 @@ const AirflowDashboard = () => {
       }))
     : [];
 
-  return (
-    <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-      {/* Dashboard Header */}
-      <Stack
-        direction="row"
-        justifyContent="space-between"
-        alignItems="center"
-        mb={4}
-      >
-        <Box>
-          <Typography variant="h4" fontWeight="bold">
-            Airflow Health Ops
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Systems Monitoring & DAG Orchestration
-          </Typography>
-        </Box>
-        <IconButton
-          onClick={fetchData}
-          color="primary"
-          sx={{ border: "1px solid", borderColor: "divider" }}
-        >
-          <Refresh />
-        </IconButton>
-      </Stack>
-
-      <Grid container spacing={3}>
-        {/* Component Status Cards */}
-        {health &&
-          Object.entries(health).map(([key, value]) => (
-            <Grid size={{ xs: 12, sm: 6, md: 3 }} key={key}>
-              <Card variant="outlined" sx={{ borderRadius: 2 }}>
-                <CardContent>
-                  <Stack direction="row" spacing={2} alignItems="center">
-                    <Avatar
-                      sx={{
-                        bgcolor:
-                          value.status === "healthy"
-                            ? "success.light"
-                            : "error.light",
-                        color:
-                          value.status === "healthy"
-                            ? "success.dark"
-                            : "error.dark",
-                      }}
-                    >
-                      {getComponentIcon(key)}
-                    </Avatar>
-                    <Box>
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        display="block"
-                      >
-                        {key.toUpperCase()}
-                      </Typography>
-                      <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                        {value.status.toUpperCase()}
-                      </Typography>
-                    </Box>
-                  </Stack>
-                </CardContent>
-              </Card>
+  if (loading) {
+    return (
+      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+        <Skeleton variant="text" width={300} height={60} />
+        <Skeleton variant="text" width={400} height={30} sx={{ mb: 4 }} />
+        <Grid container spacing={3}>
+          {[1, 2, 3, 4].map((i) => (
+            <Grid size={{ xs: 12, sm: 6, md: 3 }} key={i}>
+              <Skeleton variant="rounded" height={100} sx={{ borderRadius: 3 }} />
             </Grid>
           ))}
-
-        {/* Live Running DAGs Table */}
-        <Grid size={{ xs: 12, md: 8 }}>
-          <Card variant="outlined" sx={{ height: "100%", borderRadius: 2 }}>
-            <Box
-              p={2}
-              sx={{
-                borderBottom: "1px solid",
-                borderColor: "divider",
-                display: "flex",
-                justifyContent: "space-between",
-              }}
-            >
-              <Typography variant="h6" fontWeight="bold">
-                Active DAG Runs
-              </Typography>
-              <Chip
-                size="small"
-                label={`${runningDags.length} Active`}
-                color={runningDags.length > 0 ? "info" : "default"}
-              />
-            </Box>
-            <TableContainer sx={{ maxHeight: 400 }}>
-              <Table stickyHeader>
-                <TableHead>
-                  <TableRow>
-                    <TableCell>DAG ID</TableCell>
-                    <TableCell>Status</TableCell>
-                    <TableCell>Start Time</TableCell>
-                    <TableCell>Trigger</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {runningDags.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={4} align="center" sx={{ py: 8 }}>
-                        <Info sx={{ color: "text.disabled", mb: 1 }} />
-                        <Typography variant="body2" color="text.secondary">
-                          No Active DAGs Found
-                        </Typography>
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    runningDags.map((run) => (
-                      <TableRow key={run.dag_run_id} hover>
-                        <TableCell sx={{ fontWeight: 500 }}>
-                          {run.dag_id}
-                        </TableCell>
-                        <TableCell>
-                          <Chip
-                            icon={
-                              <PlayArrow sx={{ fontSize: "14px !important" }} />
-                            }
-                            label={run.state}
-                            size="small"
-                            color="info"
-                            variant="outlined"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          {new Date(run.start_date).toLocaleTimeString()}
-                        </TableCell>
-                        <TableCell>{run.triggered_by}</TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </Card>
-        </Grid>
-
-        {/* System Health Pie Chart (MUI X Charts) */}
-        <Grid size={{ xs: 12, md: 4 }}>
-          <Card variant="outlined" sx={{ height: "100%", borderRadius: 2 }}>
-            <CardContent>
-              <Typography variant="h6" fontWeight="bold" gutterBottom>
-                Health Distribution
-              </Typography>
-              <Box
-                sx={{ height: 300, display: "flex", justifyContent: "center" }}
-              >
-                <PieChart
-                  series={[
-                    {
-                      data: pieData,
-                      innerRadius: 70,
-                      outerRadius: 100,
-                      paddingAngle: 5,
-                      cornerRadius: 5,
-                    },
-                  ]}
-                  height={300}
-                />
-              </Box>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        {/* Pipeline Registry Grid */}
-        <Grid size={{ xs: 12 }}>
-          <Typography variant="h6" fontWeight="bold" mb={2}>
-            Pipeline Registry
-          </Typography>
-          <Grid container spacing={2}>
-            {pipelines.map((pipe) => (
-              <Grid size={{ xs: 12, sm: 6, md: 4 }} key={pipe.processId}>
-                <Paper
-                  variant="outlined"
-                  sx={{
-                    p: 2,
-                    display: "flex",
-                    gap: 2,
-                    alignItems: "center",
-                    borderRadius: 2,
-                  }}
-                >
-                  <Avatar sx={{ bgcolor: "primary.main" }}>
-                    {pipe.processFlag === "Y" ? (
-                      <CheckCircle />
-                    ) : (
-                      <ErrorOutline />
-                    )}
-                  </Avatar>
-                  <Box>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                      {pipe.processName}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      {pipe.dagId}
-                    </Typography>
-                    <Typography
-                      variant="body2"
-                      sx={{ fontSize: "0.75rem", mt: 0.5 }}
-                    >
-                      {pipe.processDescription}
-                    </Typography>
-                  </Box>
-                </Paper>
-              </Grid>
-            ))}
+          <Grid size={{ xs: 12, md: 8 }}>
+            <Skeleton variant="rounded" height={400} sx={{ borderRadius: 3 }} />
+          </Grid>
+          <Grid size={{ xs: 12, md: 4 }}>
+            <Skeleton variant="rounded" height={400} sx={{ borderRadius: 3 }} />
           </Grid>
         </Grid>
-      </Grid>
-    </Container>
+      </Container>
+    );
+  }
+
+  return (
+    <Fade in={!loading}>
+      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+        {/* Dashboard Header */}
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          mb={4}
+        >
+          <Box>
+            <Typography variant="h4" fontWeight="800" color="primary.main">
+              Airflow Health Ops
+            </Typography>
+            <Typography variant="body1" color="text.secondary" sx={{ mt: 0.5 }}>
+              Systems Monitoring & DAG Orchestration
+            </Typography>
+          </Box>
+          <Tooltip title="Force Refresh">
+            <IconButton
+              onClick={() => fetchData(true)}
+              color="primary"
+              disabled={isRefreshing}
+              sx={{
+                border: "1px solid",
+                borderColor: "primary.light",
+                transition: "all 0.3s",
+                transform: isRefreshing ? "rotate(180deg)" : "rotate(0deg)",
+                "&:hover": {
+                  backgroundColor: "primary.light",
+                  color: "white",
+                },
+              }}
+            >
+              <Refresh />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+
+        <Grid container spacing={3}>
+          {/* Component Status Cards */}
+          {health &&
+            Object.entries(health).map(([key, value]) => {
+              // Dynamically find heartbeat key
+              const heartbeatKey = Object.keys(value).find((k) =>
+                k.includes("heartbeat")
+              );
+              const heartbeat = heartbeatKey ? value[heartbeatKey] : null;
+
+              return (
+                <Grid size={{ xs: 12, sm: 6, md: 3 }} key={key}>
+                  <Card
+                    variant="outlined"
+                    sx={{
+                      borderRadius: 3,
+                      transition: "all 0.3s ease",
+                      "&:hover": {
+                        transform: "translateY(-4px)",
+                        boxShadow: theme.shadows[6],
+                        borderColor: theme.palette.primary.light,
+                      },
+                    }}
+                  >
+                    <CardContent>
+                      <Stack direction="row" spacing={2} alignItems="center">
+                        <Avatar
+                          sx={{
+                            width: 50,
+                            height: 50,
+                            bgcolor:
+                              value.status === "healthy"
+                                ? "success.light"
+                                : "error.light",
+                            color:
+                              value.status === "healthy"
+                                ? "success.dark"
+                                : "error.dark",
+                          }}
+                        >
+                          {getComponentIcon(key)}
+                        </Avatar>
+                        <Box flex={1}>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            display="block"
+                            fontWeight="bold"
+                            letterSpacing={1}
+                          >
+                            {key.toUpperCase()}
+                          </Typography>
+                          <Typography
+                            variant="h6"
+                            sx={{
+                              fontWeight: 700,
+                              color:
+                                value.status === "healthy"
+                                  ? "success.main"
+                                  : "error.main",
+                            }}
+                          >
+                            {value.status.toUpperCase()}
+                          </Typography>
+                        </Box>
+                      </Stack>
+                      {/* Heartbeat Display */}
+                      {heartbeat && (
+                        <Box
+                          sx={{
+                            mt: 2,
+                            pt: 1.5,
+                            borderTop: "1px dashed",
+                            borderColor: "divider",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 1,
+                          }}
+                        >
+                          <Favorite sx={{ fontSize: 14, color: "text.secondary" }} />
+                          <Typography variant="caption" color="text.secondary">
+                            Last beat: {formatTime(heartbeat)}
+                          </Typography>
+                        </Box>
+                      )}
+                    </CardContent>
+                  </Card>
+                </Grid>
+              );
+            })}
+
+          {/* Live Running DAGs Table */}
+          <Grid size={{ xs: 12, md: 8 }}>
+            <Card
+              variant="outlined"
+              sx={{
+                height: "100%",
+                borderRadius: 3,
+                boxShadow: theme.shadows[1],
+              }}
+            >
+              <Box
+                p={2.5}
+                sx={{
+                  borderBottom: "1px solid",
+                  borderColor: "divider",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  bgcolor: "background.default",
+                }}
+              >
+                <Typography variant="h6" fontWeight="700">
+                  Active DAG Runs
+                </Typography>
+                <Chip
+                  label={`${runningDags.length} Active`}
+                  color={runningDags.length > 0 ? "primary" : "default"}
+                  sx={{ fontWeight: "bold" }}
+                />
+              </Box>
+              <TableContainer sx={{ maxHeight: 400 }}>
+                <Table stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: "bold", bgcolor: "background.paper" }}>DAG ID</TableCell>
+                      <TableCell sx={{ fontWeight: "bold", bgcolor: "background.paper" }}>Status</TableCell>
+                      <TableCell sx={{ fontWeight: "bold", bgcolor: "background.paper" }}>Start Time</TableCell>
+                      <TableCell sx={{ fontWeight: "bold", bgcolor: "background.paper" }}>Trigger</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {runningDags.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={4} align="center" sx={{ py: 8 }}>
+                          <Info sx={{ color: "text.disabled", mb: 1, fontSize: 40 }} />
+                          <Typography variant="h6" color="text.secondary">
+                            No Active DAGs
+                          </Typography>
+                          <Typography variant="body2" color="text.disabled">
+                            Orchestrator is currently idle.
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      runningDags.map((run) => (
+                        <TableRow
+                          key={run.dag_run_id}
+                          hover
+                          sx={{ "&:last-child td, &:last-child th": { border: 0 } }}
+                        >
+                          <TableCell sx={{ fontWeight: 600, color: "text.primary" }}>
+                            {run.dag_id}
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              icon={<PlayArrow sx={{ fontSize: "14px !important" }} />}
+                              label={run.state}
+                              size="small"
+                              color="info"
+                              sx={{ fontWeight: "bold", textTransform: "capitalize" }}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            {new Date(run.start_date).toLocaleTimeString([], {
+                              hour: '2-digit', minute: '2-digit'
+                            })}
+                          </TableCell>
+                          <TableCell>
+                            <Chip size="small" variant="outlined" label={run.triggered_by || "auto"} />
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </Card>
+          </Grid>
+
+          {/* System Health Pie Chart */}
+          <Grid size={{ xs: 12, md: 4 }}>
+            <Card
+              variant="outlined"
+              sx={{
+                height: "100%",
+                borderRadius: 3,
+                boxShadow: theme.shadows[1],
+              }}
+            >
+              <CardContent>
+                <Typography variant="h6" fontWeight="700" gutterBottom>
+                  Health Distribution
+                </Typography>
+                <Box sx={{ height: 320, display: "flex", justifyContent: "center", alignItems: "center" }}>
+                  <PieChart
+                    series={[
+                      {
+                        data: pieData,
+                        innerRadius: 75,
+                        outerRadius: 110,
+                        paddingAngle: 5,
+                        cornerRadius: 8,
+                        highlightScope: { faded: 'global', highlighted: 'item' },
+                        faded: { innerRadius: 30, additionalRadius: -30, color: 'gray' },
+                      },
+                    ]}
+                    height={300}
+                    margin={{ right: 5 }}
+                  />
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+
+          {/* Pipeline Registry Grid */}
+          <Grid size={{ xs: 12 }}>
+            <Typography variant="h6" fontWeight="700" mb={3} mt={2}>
+              Pipeline Registry
+            </Typography>
+            <Grid container spacing={3}>
+              {pipelines.map((pipe) => (
+                <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={pipe.processId}>
+                  <Paper
+                    variant="outlined"
+                    sx={{
+                      p: 2.5,
+                      display: "flex",
+                      gap: 2,
+                      alignItems: "flex-start",
+                      borderRadius: 3,
+                      transition: "all 0.2s ease-in-out",
+                      cursor: "pointer",
+                      "&:hover": {
+                        borderColor: "primary.main",
+                        boxShadow: theme.shadows[4],
+                        bgcolor: "action.hover"
+                      },
+                    }}
+                  >
+                    <Avatar
+                      sx={{
+                        bgcolor: pipe.processFlag === "Y" ? "success.light" : "error.light",
+                        color: pipe.processFlag === "Y" ? "success.dark" : "error.dark",
+                      }}
+                    >
+                      {pipe.processFlag === "Y" ? <CheckCircle /> : <ErrorOutline />}
+                    </Avatar>
+                    <Box sx={{ overflow: "hidden" }}>
+                      <Tooltip title={pipe.processName} placement="top" arrow>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {pipe.processName}
+                        </Typography>
+                      </Tooltip>
+                      <Typography variant="caption" color="primary.main" fontWeight="bold">
+                        {pipe.dagId}
+                      </Typography>
+                      <Typography
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{
+                          fontSize: "0.8rem",
+                          mt: 1,
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden",
+                        }}
+                      >
+                        {pipe.processDescription || "No description provided."}
+                      </Typography>
+                    </Box>
+                  </Paper>
+                </Grid>
+              ))}
+            </Grid>
+          </Grid>
+        </Grid>
+      </Container>
+    </Fade>
   );
 };
 
