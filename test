@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Box,
   Grid,
@@ -15,6 +15,8 @@ import {
   Tooltip,
   Skeleton,
   Fade,
+  Divider,
+  useMediaQuery,
 } from "@mui/material";
 import { DataGrid, GridActionsCellItem } from "@mui/x-data-grid";
 import {
@@ -27,13 +29,12 @@ import {
   CheckCircle,
   ErrorOutline,
   Info,
-  Favorite,
   Visibility,
   HourglassEmpty,
+  Timeline,
 } from "@mui/icons-material";
 import useApi from "../../hooks/useApi";
 import { timeStampFormatter } from "../../utils/CommonUtilities";
-import CustomChip from "../../utils/CustomChip";
 
 const HEALTH_URL = "/PS/airflow/health";
 const PIPELINE_URL = "/PS/process/all-pipelines";
@@ -41,6 +42,8 @@ const DAGS_URL = "/PS/airflow/running-dags";
 
 const AirflowDashboard = () => {
   const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
+
   const [health, setHealth] = useState(null);
   const [pipelines, setPipelines] = useState([]);
   const [runningDags, setRunningDags] = useState([]);
@@ -48,7 +51,6 @@ const AirflowDashboard = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const { callApi } = useApi();
 
-  // Metrics State
   const [dagMetrics, setDagMetrics] = useState({
     total: 0,
     running: 0,
@@ -56,32 +58,28 @@ const AirflowDashboard = () => {
   });
 
   const fetchData = useCallback(
-    async (isManualRefresh = false) => {
-      if (isManualRefresh) setIsRefreshing(true);
+    async (manual = false) => {
+      if (manual) setIsRefreshing(true);
       try {
         const [healthRes, pipeRes, runsRes] = await Promise.all([
           callApi(HEALTH_URL, null, "GET"),
           callApi(PIPELINE_URL, null, "GET"),
           callApi(DAGS_URL, null, "GET"),
         ]);
-        
+
         const dags = runsRes.data?.dag_runs || [];
-        
-        // Corrected logic: Airflow typically uses 'state', not 'status'
-        const runningCount = dags.filter((p) => p.state === "running").length;
-        const queuedCount = dags.filter((p) => p.state === "queued").length;
 
         setDagMetrics({
           total: dags.length,
-          running: runningCount,
-          queued: queuedCount,
+          running: dags.filter(d => d.state === "running").length,
+          queued: dags.filter(d => d.state === "queued").length,
         });
 
         setHealth(healthRes.data);
-        setPipelines(pipeRes.data);
+        setPipelines(pipeRes.data || []);
         setRunningDags(dags);
-      } catch (error) {
-        console.error("Dashboard Sync Error:", error);
+      } catch (err) {
+        console.error("Dashboard Error:", err);
       } finally {
         setLoading(false);
         setIsRefreshing(false);
@@ -92,11 +90,10 @@ const AirflowDashboard = () => {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(() => fetchData(false), 30000); // 30s polling
+    const interval = setInterval(() => fetchData(false), 30000);
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  // Helper to map components to MUI Icons
   const getComponentIcon = (name) => {
     switch (name) {
       case "metadatabase": return <Storage />;
@@ -107,23 +104,14 @@ const AirflowDashboard = () => {
     }
   };
 
-  const handleViewDag = (dagData) => {
-    // Placeholder for your view action (e.g., opening a dialog or side drawer)
-    console.log("Viewing full DAG details:", dagData);
-    alert(`Viewing Details for DAG: ${dagData.dag_id}`);
-  };
-
-  // DataGrid Columns Configuration
-  const columns = [
-    { 
-      field: "dag_id", 
-      headerName: "DAG ID", 
-      flex: 1.5, 
+  const columns = useMemo(() => [
+    {
+      field: "dag_id",
+      headerName: "DAG ID",
+      flex: 1.4,
       minWidth: 200,
       renderCell: (params) => (
-        <Typography variant="body2" fontWeight="600" color="text.primary">
-          {params.value}
-        </Typography>
+        <Typography fontWeight={600}>{params.value}</Typography>
       )
     },
     {
@@ -137,14 +125,13 @@ const AirflowDashboard = () => {
         return (
           <Chip
             icon={
-              isRunning ? <PlayArrow sx={{ fontSize: "16px !important" }} /> : 
-              isQueued ? <HourglassEmpty sx={{ fontSize: "14px !important" }} /> : undefined
+              isRunning ? <PlayArrow sx={{ fontSize: 16 }} /> :
+              isQueued ? <HourglassEmpty sx={{ fontSize: 14 }} /> : null
             }
             label={params.value}
             size="small"
             color={isRunning ? "success" : isQueued ? "warning" : "default"}
-            variant={isRunning || isQueued ? "filled" : "outlined"}
-            sx={{ fontWeight: "bold", textTransform: "capitalize" }}
+            sx={{ fontWeight: 700, textTransform: "capitalize" }}
           />
         );
       },
@@ -154,267 +141,206 @@ const AirflowDashboard = () => {
       headerName: "Start Time",
       flex: 1,
       minWidth: 180,
-      valueFormatter: (params) => {
-        if (!params.value) return "-";
-        return new Date(params.value).toLocaleString([], {
-          month: 'short', day: 'numeric', hour: "2-digit", minute: "2-digit", second: "2-digit"
-        });
-      },
-    },
-    {
-      field: "triggered_by",
-      headerName: "Trigger",
-      flex: 1,
-      minWidth: 150,
-      renderCell: (params) => (
-        <Chip size="small" variant="outlined" label={params.value || "auto"} />
-      ),
+      valueFormatter: (params) =>
+        params.value
+          ? new Date(params.value).toLocaleString()
+          : "-",
     },
     {
       field: "actions",
       type: "actions",
-      headerName: "Actions",
-      width: 100,
+      width: 80,
       getActions: (params) => [
         <GridActionsCellItem
           icon={<Visibility color="primary" />}
-          label="View Details"
-          onClick={() => handleViewDag(params.row)}
-          showInMenu={false}
+          label="View"
+          onClick={() => alert(params.row.dag_id)}
         />,
       ],
     },
-  ];
+  ], []);
 
   if (loading) {
     return (
-      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-        <Skeleton variant="text" width={300} height={60} />
-        <Skeleton variant="text" width={400} height={30} sx={{ mb: 4 }} />
-        <Grid container spacing={3}>
-          {[1, 2, 3, 4].map((i) => (
-            <Grid size={{ xs: 12, sm: 6, md: 3 }} key={i}>
-              <Skeleton variant="rounded" height={120} sx={{ borderRadius: 3 }} />
-            </Grid>
-          ))}
-          <Grid size={{ xs: 12 }}>
-            <Skeleton variant="rounded" height={400} sx={{ borderRadius: 3 }} />
-          </Grid>
-        </Grid>
+      <Container maxWidth="xl" sx={{ mt: 4 }}>
+        <Skeleton height={60} width={300} />
+        <Skeleton height={300} sx={{ mt: 3 }} />
       </Container>
     );
   }
 
   return (
-    <Paper elevation={0} sx={{ minHeight: "100vh", bgcolor: "background.default", pb: 4 }}>
-      <Fade in={!loading}>
+    <Paper
+      elevation={0}
+      sx={{
+        minHeight: "100vh",
+        background: `linear-gradient(to bottom, ${theme.palette.background.default}, ${theme.palette.grey[50]})`,
+        pb: 4,
+      }}
+    >
+      <Fade in>
         <Container maxWidth="xl" sx={{ pt: 4 }}>
-          {/* Dashboard Header */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center" mb={4}>
+          
+          {/* Header */}
+          <Stack
+            direction={isMobile ? "column" : "row"}
+            justifyContent="space-between"
+            alignItems="center"
+            spacing={2}
+            mb={4}
+          >
             <Box>
-              <Typography variant="h4" fontWeight="800" color="primary.main" letterSpacing="-0.5px">
-                Airflow Health Ops
+              <Typography variant="h4" fontWeight={800} color="primary.main">
+                Fincore Airflow Control Center
               </Typography>
-              <Typography variant="body1" color="text.secondary" sx={{ mt: 0.5 }}>
-                Systems Monitoring & DAG Orchestration
+              <Typography variant="body2" color="text.secondary">
+                Real-time orchestration monitoring
               </Typography>
             </Box>
-            <Tooltip title="Sync Dashboard">
-              <IconButton
-                onClick={() => fetchData(true)}
-                color="primary"
-                disabled={isRefreshing}
-                sx={{
-                  border: "1px solid",
-                  borderColor: "primary.main",
-                  bgcolor: "background.paper",
-                  boxShadow: theme.shadows[1],
-                  transition: "all 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
-                  transform: isRefreshing ? "rotate(180deg) scale(0.95)" : "rotate(0deg) scale(1)",
-                  "&:hover": {
-                    backgroundColor: "primary.main",
-                    color: "white",
-                    boxShadow: theme.shadows[4],
-                  },
-                }}
-              >
-                <Refresh />
-              </IconButton>
-            </Tooltip>
+
+            <IconButton
+              onClick={() => fetchData(true)}
+              disabled={isRefreshing}
+              sx={{
+                border: "1px solid",
+                borderColor: "primary.main",
+                transition: "0.3s",
+                transform: isRefreshing ? "rotate(180deg)" : "none",
+                "&:hover": {
+                  bgcolor: "primary.main",
+                  color: "#fff",
+                },
+              }}
+            >
+              <Refresh />
+            </IconButton>
           </Stack>
 
-          <Grid container spacing={3}>
-            {/* Component Status Cards */}
-            {health && Object.entries(health).map(([key, value]) => {
-              const heartbeatKey = Object.keys(value).find((k) => k.includes("heartbeat"));
-              const now = new Date();
-              const microseconds = ((performance.now() % 1) * 1000).toFixed(0).padStart(3, "0");
-              const timestamp = now.toISOString().replace("Z", microseconds + "+00:00");
-              const heartbeat = heartbeatKey ? value[heartbeatKey] : timestamp;
-              const isHealthy = value.status === "healthy";
-
-              return (
-                <Grid size={{ xs: 12, sm: 6, md: 3 }} key={key}>
-                  <Card
-                    elevation={0}
-                    sx={{
-                      borderRadius: 3,
-                      border: "1px solid",
-                      borderColor: isHealthy ? "divider" : "error.light",
-                      background: isHealthy 
-                        ? `linear-gradient(145deg, ${theme.palette.background.paper} 0%, ${theme.palette.action.hover} 100%)`
-                        : `linear-gradient(145deg, ${theme.palette.error.lighter || '#fff0f0'} 0%, ${theme.palette.background.paper} 100%)`,
-                      transition: "all 0.3s ease",
-                      "&:hover": {
-                        transform: "translateY(-4px)",
-                        boxShadow: theme.shadows[4],
-                        borderColor: isHealthy ? "primary.light" : "error.main",
-                      },
-                    }}
-                  >
-                    <CardContent>
-                      <Stack direction="row" spacing={2} alignItems="center">
-                        <Avatar
-                          variant="rounded"
-                          sx={{
-                            width: 48,
-                            height: 48,
-                            borderRadius: 2,
-                            bgcolor: isHealthy ? "primary.main" : "error.main",
-                            color: "primary.contrastText",
-                            boxShadow: theme.shadows[2],
-                          }}
-                        >
-                          {getComponentIcon(key)}
-                        </Avatar>
-                        <Box flex={1}>
-                          <Typography variant="overline" color="text.secondary" fontWeight="700" lineHeight={1.2}>
-                            {key.replace(/_/g, " ")}
-                          </Typography>
-                          <Typography
-                            variant="h6"
-                            sx={{ fontWeight: 800, color: isHealthy ? "text.primary" : "error.main", mt: -0.5 }}
-                          >
-                            {value.status.toUpperCase()}
-                          </Typography>
-                        </Box>
-                      </Stack>
-                      {/* Heartbeat Display */}
-                      {heartbeat && (
-                        <Box sx={{ mt: 2, pt: 1.5, borderTop: "1px dashed", borderColor: "divider", display: "flex", alignItems: "center", gap: 1 }}>
-                          <Favorite sx={{ fontSize: 14, color: isHealthy ? "success.main" : "error.main", animation: isHealthy ? 'pulse 2s infinite' : 'none' }} />
-                          <Typography variant="caption" color="text.secondary" fontWeight="500">
-                            Last Beat: {timeStampFormatter(heartbeat)}
-                          </Typography>
-                        </Box>
-                      )}
-                    </CardContent>
-                  </Card>
-                </Grid>
-              );
-            })}
-
-            {/* Live Running DAGs DataGrid */}
-            <Grid size={{ xs: 12 }}>
-              <Card variant="outlined" sx={{ borderRadius: 3, boxShadow: theme.shadows[2], bgcolor: "background.paper" }}>
-                <Box p={2.5} sx={{ borderBottom: "1px solid", borderColor: "divider", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <Typography variant="h6" fontWeight="800">
-                    Active Orchestrations
-                  </Typography>
-                  <Stack direction="row" spacing={1.5}>
-                    {/* Replaced CustomChip with standard MUI chips for reliable theming, adjust to CustomChip if preferred */}
-                    <Chip label={`Total: ${dagMetrics.total}`} size="small" color="default" sx={{ fontWeight: 600 }} />
-                    <Chip label={`${dagMetrics.running} Running`} size="small" color="primary" sx={{ fontWeight: 600 }} />
-                    <Chip label={`${dagMetrics.queued} Queued`} size="small" color="warning" sx={{ fontWeight: 600 }} />
-                  </Stack>
-                </Box>
-                
-                <Box sx={{ height: 400, width: "100%" }}>
-                  <DataGrid
-                    rows={runningDags}
-                    columns={columns}
-                    getRowId={(row) => row.dag_run_id || row.dag_id + row.start_date}
-                    pageSizeOptions={[5, 10, 25]}
-                    initialState={{
-                      pagination: { paginationModel: { pageSize: 5 } },
-                    }}
-                    disableRowSelectionOnClick
-                    sx={{
-                      border: 0,
-                      "& .MuiDataGrid-columnHeaders": {
-                        bgcolor: "background.default",
-                        borderBottom: "1px solid",
-                        borderColor: "divider",
-                      },
-                      "& .MuiDataGrid-cell": {
-                        borderBottom: "1px solid",
-                        borderColor: "divider",
-                      },
-                    }}
-                  />
-                </Box>
-              </Card>
-            </Grid>
-
-            {/* Pipeline Registry Grid */}
-            <Grid size={{ xs: 12 }}>
-              <Typography variant="h6" fontWeight="800" mb={3} mt={2}>
-                Pipeline Registry
-              </Typography>
-              <Grid container spacing={3}>
-                {pipelines.map((pipe) => (
-                  <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={pipe.processId}>
-                    <Paper
-                      elevation={0}
-                      sx={{
-                        p: 2.5,
-                        display: "flex",
-                        gap: 2,
-                        alignItems: "flex-start",
-                        borderRadius: 3,
-                        border: "1px solid",
-                        borderColor: "divider",
-                        transition: "all 0.2s ease-in-out",
-                        cursor: "pointer",
-                        "&:hover": {
-                          borderColor: "primary.main",
-                          boxShadow: theme.shadows[4],
-                          transform: "translateY(-2px)",
-                        },
-                      }}
-                    >
-                      <Avatar
-                        sx={{
-                          width: 40,
-                          height: 40,
-                          bgcolor: pipe.processFlag === "Y" ? "success.lighter" : "error.lighter",
-                          color: pipe.processFlag === "Y" ? "success.main" : "error.main",
-                        }}
-                      >
-                        {pipe.processFlag === "Y" ? <CheckCircle fontSize="small" /> : <ErrorOutline fontSize="small" />}
-                      </Avatar>
-                      <Box sx={{ overflow: "hidden" }}>
-                        <Tooltip title={pipe.processName} placement="top" arrow>
-                          <Typography variant="subtitle2" sx={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {pipe.processName}
-                          </Typography>
-                        </Tooltip>
-                        <Typography variant="caption" color="primary.main" fontWeight="600">
-                          {pipe.dagId}
+          {/* KPI Metrics */}
+          <Grid container spacing={3} mb={3}>
+            {[
+              { label: "Total DAGs", value: dagMetrics.total },
+              { label: "Running", value: dagMetrics.running, color: "success.main" },
+              { label: "Queued", value: dagMetrics.queued, color: "warning.main" },
+            ].map((item, i) => (
+              <Grid item xs={12} sm={4} key={i}>
+                <Card
+                  sx={{
+                    borderRadius: 3,
+                    boxShadow: theme.shadows[2],
+                    transition: "0.2s",
+                    "&:hover": { transform: "translateY(-3px)" },
+                  }}
+                >
+                  <CardContent>
+                    <Stack direction="row" justifyContent="space-between">
+                      <Box>
+                        <Typography variant="caption" color="text.secondary">
+                          {item.label}
                         </Typography>
                         <Typography
-                          variant="body2"
-                          color="text.secondary"
-                          sx={{ fontSize: "0.8rem", mt: 0.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                          variant="h5"
+                          fontWeight={800}
+                          color={item.color || "text.primary"}
                         >
-                          {pipe.processDescription || "No description provided."}
+                          {item.value}
                         </Typography>
                       </Box>
-                    </Paper>
-                  </Grid>
-                ))}
+                      <Timeline color="primary" />
+                    </Stack>
+                  </CardContent>
+                </Card>
               </Grid>
-            </Grid>
+            ))}
+          </Grid>
+
+          {/* DAG Grid */}
+          <Card sx={{ borderRadius: 3 }}>
+            <Box p={2}>
+              <Typography variant="h6" fontWeight={700}>
+                Active Orchestrations
+              </Typography>
+            </Box>
+            <Divider />
+            <Box sx={{ height: 420 }}>
+              <DataGrid
+                rows={runningDags}
+                columns={columns}
+                getRowId={(row) =>
+                  row.dag_run_id || row.dag_id + row.start_date
+                }
+                pageSizeOptions={[5, 10]}
+                initialState={{
+                  pagination: { paginationModel: { pageSize: 5 } },
+                }}
+                disableRowSelectionOnClick
+                density="compact"
+                sx={{
+                  border: 0,
+                  "& .MuiDataGrid-columnHeaders": {
+                    backgroundColor: theme.palette.grey[100],
+                    fontWeight: 700,
+                  },
+                  "& .MuiDataGrid-row:hover": {
+                    backgroundColor: theme.palette.action.hover,
+                  },
+                }}
+              />
+            </Box>
+          </Card>
+
+          {/* Pipeline Registry */}
+          <Typography variant="h6" fontWeight={800} mt={5} mb={3}>
+            Pipeline Registry
+          </Typography>
+
+          <Grid container spacing={3}>
+            {pipelines.map((pipe) => (
+              <Grid item xs={12} sm={6} md={4} lg={3} key={pipe.processId}>
+                <Paper
+                  sx={{
+                    p: 2.5,
+                    borderRadius: 3,
+                    border: "1px solid",
+                    borderColor: "divider",
+                    transition: "0.2s",
+                    "&:hover": {
+                      borderColor: "primary.main",
+                      boxShadow: theme.shadows[3],
+                    },
+                  }}
+                >
+                  <Stack direction="row" spacing={2}>
+                    <Avatar
+                      sx={{
+                        bgcolor:
+                          pipe.processFlag === "Y"
+                            ? "success.light"
+                            : "error.light",
+                      }}
+                    >
+                      {pipe.processFlag === "Y" ? (
+                        <CheckCircle />
+                      ) : (
+                        <ErrorOutline />
+                      )}
+                    </Avatar>
+                    <Box>
+                      <Typography fontWeight={700}>
+                        {pipe.processName}
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        color="primary"
+                        fontWeight={600}
+                      >
+                        {pipe.dagId}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                </Paper>
+              </Grid>
+            ))}
           </Grid>
         </Container>
       </Fade>
