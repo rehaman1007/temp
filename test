@@ -1,37 +1,34 @@
 package com.tcs.fincore.CommonRequestService.service.strategy;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tcs.fincore.CommonRequestService.dto.BranchRequestPayloadDTO;
 import com.tcs.fincore.CommonRequestService.dto.CreateRequestDto;
 import com.tcs.fincore.CommonRequestService.exception.BusinessRuleViolationException;
-import com.tcs.fincore.CommonRequestService.model.CGLMaster;
-import com.tcs.fincore.CommonRequestService.model.enums.ChangeType;
-import com.tcs.fincore.CommonRequestService.repository.CircleMasterRepository;
-import com.tcs.fincore.CommonRequestService.repository.StateMasterRepository;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.stereotype.Component;
-
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tcs.fincore.CommonRequestService.exception.ResourceNotFoundException;
 import com.tcs.fincore.CommonRequestService.model.BranchMaster;
 import com.tcs.fincore.CommonRequestService.model.CommonReq;
+import com.tcs.fincore.CommonRequestService.model.enums.ChangeType;
 import com.tcs.fincore.CommonRequestService.model.enums.RequestType;
 import com.tcs.fincore.CommonRequestService.repository.BranchMasterRepository;
+import com.tcs.fincore.CommonRequestService.repository.CircleMasterRepository;
+import com.tcs.fincore.CommonRequestService.repository.StateMasterRepository;
+
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validator;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.Date;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.stereotype.Component;
 
-import jakarta.validation.ConstraintViolation;
-import jakarta.validation.Validator;
+import java.util.Date;
 import java.util.Set;
+
 /**
- * A strategy component responsible for processing approval requests related to the
- * {@link BranchMaster} entity. This class implements the {@link RequestTypeStrategy}
- * interface and handles operations (ADD and UPDATE) for branch master data based on
- * the type of change requested in a {@link CommonReq}.
+ * Strategy implementation for handling BRANCH requests
+ * in Maker-Checker flow.
  */
 @Slf4j
 @Component
@@ -42,37 +39,26 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
     private final CircleMasterRepository circleMasterRepository;
     private final StateMasterRepository stateMasterRepository;
     private final ObjectMapper objectMapper;
+    private final Validator validator;
 
-    @Autowired
-    private Validator validator;
-
-
-    /**
-     * Returns the request type handled by this strategy.
-     *
-     * @return The {@link RequestType} enum constant for BRANCH requests.
-     */
     @Override
     public RequestType getRequestType() {
         return RequestType.BRANCH;
     }
 
-
     /**
-     * CORE VALIDATION LOGIC
-     * Runs before the CommonReq is created.
+     * Core Validation Logic
+     * Runs during Maker stage before CommonReq creation.
      */
-
     @Override
     public void validateRequest(CreateRequestDto requestDto) throws JsonProcessingException {
 
-        // Convert JSON payload → DTO
         BranchRequestPayloadDTO payload =
                 objectMapper.convertValue(requestDto.getPayload(), BranchRequestPayloadDTO.class);
 
-        // ================================
-        // 1️⃣ BEAN VALIDATION (DTO Annotations)
-        // ================================
+        // =======================
+        // 1️⃣ DTO Bean Validation
+        // =======================
 
         Set<ConstraintViolation<BranchRequestPayloadDTO>> violations =
                 validator.validate(payload);
@@ -82,15 +68,19 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
             StringBuilder errorMessage = new StringBuilder("Validation Failed: ");
 
             for (ConstraintViolation<BranchRequestPayloadDTO> violation : violations) {
-                errorMessage.append(violation.getMessage()).append(" | ");
+                errorMessage
+                        .append(violation.getPropertyPath())
+                        .append(" - ")
+                        .append(violation.getMessage())
+                        .append(" | ");
             }
 
             throw new BusinessRuleViolationException(errorMessage.toString());
         }
 
-        // ================================
-        // 2️⃣ TRIM & NORMALIZE INPUTS
-        // ================================
+        // =======================
+        // 2️⃣ Normalize Fields
+        // =======================
 
         String branchCode = payload.getCode().trim();
         String circleCode = payload.getCircleCode().trim();
@@ -98,9 +88,9 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
         String branchType = payload.getBranchType();
         String emailId = payload.getEmailId().trim();
 
-        // ================================
-        // 3️⃣ DUPLICATE CHECK (Only for ADD)
-        // ================================
+        // =======================
+        // 3️⃣ Duplicate Check (ADD only)
+        // =======================
 
         if (requestDto.getChangeType() == ChangeType.ADD) {
             if (branchMasterRepository.existsById(branchCode)) {
@@ -109,9 +99,9 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
             }
         }
 
-        // ================================
-        // 4️⃣ MASTER DATA VALIDATION
-        // ================================
+        // =======================
+        // 4️⃣ Master Validation
+        // =======================
 
         if (!circleMasterRepository.existsById(circleCode)) {
             throw new BusinessRuleViolationException(
@@ -123,9 +113,9 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
                     "Invalid State Code: " + stateCode + ". State does not exist.");
         }
 
-        // ================================
-        // 5️⃣ EMAIL BUSINESS RULE
-        // ================================
+        // =======================
+        // 5️⃣ Email Business Rule
+        // =======================
 
         String expectedEmail = "sbi." + branchCode.toLowerCase() + "@sbi.co.in";
 
@@ -134,9 +124,9 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
                     "Invalid Email ID. Expected format: " + expectedEmail);
         }
 
-        // ================================
-        // 6️⃣ STATUS & TYPE BUSINESS RULE
-        // ================================
+        // =======================
+        // 6️⃣ Status & Type Rule
+        // =======================
 
         boolean isLive = Boolean.TRUE.equals(payload.getStatus());
 
@@ -146,7 +136,6 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
                         "Live branches must be of Type 'Automated'.");
             }
         } else {
-
             if (payload.getCloseDate() == null) {
                 throw new BusinessRuleViolationException(
                         "Close Date is mandatory for Closed branches.");
@@ -158,9 +147,9 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
             }
         }
 
-        // ================================
-        // 7️⃣ MERGE XOR VALIDATION
-        // ================================
+        // =======================
+        // 7️⃣ Merge XOR Rule
+        // =======================
 
         boolean hasMergeDate = payload.getMergeDate() != null;
         boolean hasMergeBranch =
@@ -172,19 +161,10 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
                     "Merge Date and 'Merged With Branch' must both be provided together.");
         }
     }
-    
 
-    /**
-     * Processes the approval of a {@link CommonReq} for branch master data.
-     * It delegates to specific handlers for ADD or UPDATE operations based on the
-     * {@code changeType} field in the request.
-     *
-     * @param request The common request object containing the payload and change type.
-     * @throws JsonProcessingException       if the JSON payload cannot be deserialized into a {@link BranchMaster}.
-     * @throws UnsupportedOperationException if the {@code changeType} is not supported.
-     */
     @Override
     public void processApproval(CommonReq request) throws JsonProcessingException {
+
         switch (request.getChangeType()) {
             case ADD:
                 handleAdd(request);
@@ -193,10 +173,10 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
                 handleUpdate(request);
                 break;
             case BLOCK:
-                handleStatusChange(request, Boolean.FALSE); // Inactive/Blocked
+                handleStatusChange(request, Boolean.FALSE);
                 break;
             case UNBLOCK:
-                handleStatusChange(request, Boolean.TRUE); // Active
+                handleStatusChange(request, Boolean.TRUE);
                 break;
             default:
                 throw new UnsupportedOperationException(
@@ -204,53 +184,41 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
         }
     }
 
-
-    /**
-     * Handles the ADD operation for a new branch master record.
-     * It performs a uniqueness check on the branch code before saving the new record.
-     *
-     * @param request The common request object containing the new branch details in the payload.
-     * @throws JsonProcessingException         if the payload cannot be mapped to {@link BranchMaster}.
-     * @throws DataIntegrityViolationException if a branch with the same code already exists.
-     */
     private void handleAdd(CommonReq request) throws JsonProcessingException {
-        BranchMaster payload = objectMapper.readValue(request.getPayload(), BranchMaster.class);
+
+        BranchMaster payload =
+                objectMapper.readValue(request.getPayload(), BranchMaster.class);
 
         String code = payload.getCode();
-        log.info("Performing uniqueness check for Branch Code : {}", code);
+
+        log.info("Checking uniqueness for Branch Code: {}", code);
 
         if (branchMasterRepository.existsById(code)) {
-            log.error("Attempting to add a Branch Code that already exists: {}", code);
-            throw new DataIntegrityViolationException("'Branch Code '" + code + "' already exists");
+            throw new DataIntegrityViolationException(
+                    "'Branch Code' " + code + " already exists.");
         }
 
         BranchMaster saved = branchMasterRepository.save(payload);
-        log.info("Successfully added new Branch with code: {}", saved.getCode());
+        log.info("Successfully added Branch with Code: {}", saved.getCode());
     }
 
-    /**
-     * Handles the UPDATE operation for an existing branch master record.
-     * It fetches the existing entity, applies updates from the payload to specific fields,
-     * and saves the modified entity.
-     *
-     * @param request The common request object containing the target ID and updated details in the payload.
-     * @throws IllegalArgumentException  if the target ID is null or blank.
-     * @throws ResourceNotFoundException if the branch with the specified ID is not found.
-     * @throws JsonProcessingException   if the payload cannot be mapped to {@link BranchMaster}.
-     */
     private void handleUpdate(CommonReq request) throws JsonProcessingException {
+
         String targetId = request.getTargetId();
+
         if (targetId == null || targetId.isBlank()) {
-            throw new IllegalArgumentException("Target ID is required for an UPDATE operation.");
+            throw new IllegalArgumentException(
+                    "Target ID is required for UPDATE operation.");
         }
 
-        log.info("Fetching existing Branch with ID: {} for update.", targetId);
-        BranchMaster existing = branchMasterRepository.findById(targetId).orElseThrow(
-                () -> new ResourceNotFoundException("Branch Code with ID '" + targetId + "' not found for update."));
+        BranchMaster existing = branchMasterRepository.findById(targetId)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Branch Code '" + targetId + "' not found."));
 
-        BranchMaster updated = objectMapper.readValue(request.getPayload(), BranchMaster.class);
+        BranchMaster updated =
+                objectMapper.readValue(request.getPayload(), BranchMaster.class);
 
-        // Set all fields which can be updated
         existing.setName(updated.getName());
         existing.setCircleCode(updated.getCircleCode());
         existing.setState(updated.getState());
@@ -271,23 +239,24 @@ public class BranchMasterStrategy implements RequestTypeStrategy {
         existing.setBranchType(updated.getBranchType());
 
         branchMasterRepository.save(existing);
+
         log.info("Successfully updated Branch with Code: {}", targetId);
     }
 
-    /**
-     * Logic to Block or Unblock a CGL
-     */
     private void handleStatusChange(CommonReq request, Boolean newStatus) {
+
         String targetId = request.getTargetId();
-        log.info("Processing Status Change ({}) for CGL ID: {}", newStatus, targetId);
 
-        BranchMaster existing = branchMasterRepository.findById(targetId).orElseThrow(
-                () -> new ResourceNotFoundException("Branch Code with ID '" + targetId + "' not found for update."));
+        BranchMaster existing = branchMasterRepository.findById(targetId)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Branch Code '" + targetId + "' not found."));
 
-        // Update the status
         existing.setStatus(newStatus);
+        existing.setLastChangeDate(new Date());
 
         branchMasterRepository.save(existing);
-        log.info("Successfully updated Branch Status to {} for ID: {}", newStatus, targetId);
+
+        log.info("Branch status updated to {} for Code: {}", newStatus, targetId);
     }
 }
