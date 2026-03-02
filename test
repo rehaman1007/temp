@@ -1,116 +1,293 @@
-@Override
-public void validateRequest(CreateRequestDto requestDto) throws JsonProcessingException {
+package com.tcs.fincore.CommonRequestService.service.strategy;
 
-    // Convert JSON payload → DTO
-    BranchRequestPayloadDTO payload =
-            objectMapper.convertValue(requestDto.getPayload(), BranchRequestPayloadDTO.class);
+import com.tcs.fincore.CommonRequestService.dto.BranchRequestPayloadDTO;
+import com.tcs.fincore.CommonRequestService.dto.CreateRequestDto;
+import com.tcs.fincore.CommonRequestService.exception.BusinessRuleViolationException;
+import com.tcs.fincore.CommonRequestService.model.CGLMaster;
+import com.tcs.fincore.CommonRequestService.model.enums.ChangeType;
+import com.tcs.fincore.CommonRequestService.repository.CircleMasterRepository;
+import com.tcs.fincore.CommonRequestService.repository.StateMasterRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.stereotype.Component;
 
-    // ================================
-    // 1️⃣ BEAN VALIDATION (DTO Annotations)
-    // ================================
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tcs.fincore.CommonRequestService.exception.ResourceNotFoundException;
+import com.tcs.fincore.CommonRequestService.model.BranchMaster;
+import com.tcs.fincore.CommonRequestService.model.CommonReq;
+import com.tcs.fincore.CommonRequestService.model.enums.RequestType;
+import com.tcs.fincore.CommonRequestService.repository.BranchMasterRepository;
 
-    Set<ConstraintViolation<BranchRequestPayloadDTO>> violations =
-            validator.validate(payload);
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
-    if (!violations.isEmpty()) {
-
-        StringBuilder errorMessage = new StringBuilder("Validation Failed: ");
-
-        for (ConstraintViolation<BranchRequestPayloadDTO> violation : violations) {
-            errorMessage.append(violation.getMessage()).append(" | ");
-        }
-
-        throw new BusinessRuleViolationException(errorMessage.toString());
-    }
-
-    // ================================
-    // 2️⃣ TRIM & NORMALIZE INPUTS
-    // ================================
-
-    String branchCode = payload.getCode().trim();
-    String circleCode = payload.getCircleCode().trim();
-    String stateCode = payload.getState().trim().toUpperCase();
-    String branchType = payload.getBranchType();
-    String emailId = payload.getEmailId().trim();
-
-    // ================================
-    // 3️⃣ DUPLICATE CHECK (Only for ADD)
-    // ================================
-
-    if (requestDto.getChangeType() == ChangeType.ADD) {
-        if (branchMasterRepository.existsById(branchCode)) {
-            throw new BusinessRuleViolationException(
-                    "Branch with Code " + branchCode + " already exists.");
-        }
-    }
-
-    // ================================
-    // 4️⃣ MASTER DATA VALIDATION
-    // ================================
-
-    if (!circleMasterRepository.existsById(circleCode)) {
-        throw new BusinessRuleViolationException(
-                "Invalid Circle Code: " + circleCode + ". Circle does not exist.");
-    }
-
-    if (!stateMasterRepository.existsById(stateCode)) {
-        throw new BusinessRuleViolationException(
-                "Invalid State Code: " + stateCode + ". State does not exist.");
-    }
-
-    // ================================
-    // 5️⃣ EMAIL BUSINESS RULE
-    // ================================
-
-    String expectedEmail = "sbi." + branchCode.toLowerCase() + "@sbi.co.in";
-
-    if (!expectedEmail.equalsIgnoreCase(emailId)) {
-        throw new BusinessRuleViolationException(
-                "Invalid Email ID. Expected format: " + expectedEmail);
-    }
-
-    // ================================
-    // 6️⃣ STATUS & TYPE BUSINESS RULE
-    // ================================
-
-    boolean isLive = Boolean.TRUE.equals(payload.getStatus());
-
-    if (isLive) {
-        if (!"A".equalsIgnoreCase(branchType)) {
-            throw new BusinessRuleViolationException(
-                    "Live branches must be of Type 'Automated'.");
-        }
-    } else {
-
-        if (payload.getCloseDate() == null) {
-            throw new BusinessRuleViolationException(
-                    "Close Date is mandatory for Closed branches.");
-        }
-
-        if (!"M".equalsIgnoreCase(branchType)) {
-            throw new BusinessRuleViolationException(
-                    "Closed branches must be of Type 'Manual'.");
-        }
-    }
-
-    // ================================
-    // 7️⃣ MERGE XOR VALIDATION
-    // ================================
-
-    boolean hasMergeDate = payload.getMergeDate() != null;
-    boolean hasMergeBranch =
-            payload.getMergedWithBranch() != null &&
-            !payload.getMergedWithBranch().isBlank();
-
-    if (hasMergeDate != hasMergeBranch) {
-        throw new BusinessRuleViolationException(
-                "Merge Date and 'Merged With Branch' must both be provided together.");
-    }
-}
+import java.util.Date;
 
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
 import java.util.Set;
+/**
+ * A strategy component responsible for processing approval requests related to the
+ * {@link BranchMaster} entity. This class implements the {@link RequestTypeStrategy}
+ * interface and handles operations (ADD and UPDATE) for branch master data based on
+ * the type of change requested in a {@link CommonReq}.
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class BranchMasterStrategy implements RequestTypeStrategy {
 
-@Autowired
-private Validator validator;
+    private final BranchMasterRepository branchMasterRepository;
+    private final CircleMasterRepository circleMasterRepository;
+    private final StateMasterRepository stateMasterRepository;
+    private final ObjectMapper objectMapper;
+
+    @Autowired
+    private Validator validator;
+
+
+    /**
+     * Returns the request type handled by this strategy.
+     *
+     * @return The {@link RequestType} enum constant for BRANCH requests.
+     */
+    @Override
+    public RequestType getRequestType() {
+        return RequestType.BRANCH;
+    }
+
+
+    /**
+     * CORE VALIDATION LOGIC
+     * Runs before the CommonReq is created.
+     */
+
+    @Override
+    public void validateRequest(CreateRequestDto requestDto) throws JsonProcessingException {
+
+        // Convert JSON payload → DTO
+        BranchRequestPayloadDTO payload =
+                objectMapper.convertValue(requestDto.getPayload(), BranchRequestPayloadDTO.class);
+
+        // ================================
+        // 1️⃣ BEAN VALIDATION (DTO Annotations)
+        // ================================
+
+        Set<ConstraintViolation<BranchRequestPayloadDTO>> violations =
+                validator.validate(payload);
+
+        if (!violations.isEmpty()) {
+
+            StringBuilder errorMessage = new StringBuilder("Validation Failed: ");
+
+            for (ConstraintViolation<BranchRequestPayloadDTO> violation : violations) {
+                errorMessage.append(violation.getMessage()).append(" | ");
+            }
+
+            throw new BusinessRuleViolationException(errorMessage.toString());
+        }
+
+        // ================================
+        // 2️⃣ TRIM & NORMALIZE INPUTS
+        // ================================
+
+        String branchCode = payload.getCode().trim();
+        String circleCode = payload.getCircleCode().trim();
+        String stateCode = payload.getState().trim().toUpperCase();
+        String branchType = payload.getBranchType();
+        String emailId = payload.getEmailId().trim();
+
+        // ================================
+        // 3️⃣ DUPLICATE CHECK (Only for ADD)
+        // ================================
+
+        if (requestDto.getChangeType() == ChangeType.ADD) {
+            if (branchMasterRepository.existsById(branchCode)) {
+                throw new BusinessRuleViolationException(
+                        "Branch with Code " + branchCode + " already exists.");
+            }
+        }
+
+        // ================================
+        // 4️⃣ MASTER DATA VALIDATION
+        // ================================
+
+        if (!circleMasterRepository.existsById(circleCode)) {
+            throw new BusinessRuleViolationException(
+                    "Invalid Circle Code: " + circleCode + ". Circle does not exist.");
+        }
+
+        if (!stateMasterRepository.existsById(stateCode)) {
+            throw new BusinessRuleViolationException(
+                    "Invalid State Code: " + stateCode + ". State does not exist.");
+        }
+
+        // ================================
+        // 5️⃣ EMAIL BUSINESS RULE
+        // ================================
+
+        String expectedEmail = "sbi." + branchCode.toLowerCase() + "@sbi.co.in";
+
+        if (!expectedEmail.equalsIgnoreCase(emailId)) {
+            throw new BusinessRuleViolationException(
+                    "Invalid Email ID. Expected format: " + expectedEmail);
+        }
+
+        // ================================
+        // 6️⃣ STATUS & TYPE BUSINESS RULE
+        // ================================
+
+        boolean isLive = Boolean.TRUE.equals(payload.getStatus());
+
+        if (isLive) {
+            if (!"A".equalsIgnoreCase(branchType)) {
+                throw new BusinessRuleViolationException(
+                        "Live branches must be of Type 'Automated'.");
+            }
+        } else {
+
+            if (payload.getCloseDate() == null) {
+                throw new BusinessRuleViolationException(
+                        "Close Date is mandatory for Closed branches.");
+            }
+
+            if (!"M".equalsIgnoreCase(branchType)) {
+                throw new BusinessRuleViolationException(
+                        "Closed branches must be of Type 'Manual'.");
+            }
+        }
+
+        // ================================
+        // 7️⃣ MERGE XOR VALIDATION
+        // ================================
+
+        boolean hasMergeDate = payload.getMergeDate() != null;
+        boolean hasMergeBranch =
+                payload.getMergedWithBranch() != null &&
+                        !payload.getMergedWithBranch().isBlank();
+
+        if (hasMergeDate != hasMergeBranch) {
+            throw new BusinessRuleViolationException(
+                    "Merge Date and 'Merged With Branch' must both be provided together.");
+        }
+    }
+    
+
+    /**
+     * Processes the approval of a {@link CommonReq} for branch master data.
+     * It delegates to specific handlers for ADD or UPDATE operations based on the
+     * {@code changeType} field in the request.
+     *
+     * @param request The common request object containing the payload and change type.
+     * @throws JsonProcessingException       if the JSON payload cannot be deserialized into a {@link BranchMaster}.
+     * @throws UnsupportedOperationException if the {@code changeType} is not supported.
+     */
+    @Override
+    public void processApproval(CommonReq request) throws JsonProcessingException {
+        switch (request.getChangeType()) {
+            case ADD:
+                handleAdd(request);
+                break;
+            case UPDATE:
+                handleUpdate(request);
+                break;
+            case BLOCK:
+                handleStatusChange(request, Boolean.FALSE); // Inactive/Blocked
+                break;
+            case UNBLOCK:
+                handleStatusChange(request, Boolean.TRUE); // Active
+                break;
+            default:
+                throw new UnsupportedOperationException(
+                        "Change type " + request.getChangeType() + " is not supported.");
+        }
+    }
+
+
+    /**
+     * Handles the ADD operation for a new branch master record.
+     * It performs a uniqueness check on the branch code before saving the new record.
+     *
+     * @param request The common request object containing the new branch details in the payload.
+     * @throws JsonProcessingException         if the payload cannot be mapped to {@link BranchMaster}.
+     * @throws DataIntegrityViolationException if a branch with the same code already exists.
+     */
+    private void handleAdd(CommonReq request) throws JsonProcessingException {
+        BranchMaster payload = objectMapper.readValue(request.getPayload(), BranchMaster.class);
+
+        String code = payload.getCode();
+        log.info("Performing uniqueness check for Branch Code : {}", code);
+
+        if (branchMasterRepository.existsById(code)) {
+            log.error("Attempting to add a Branch Code that already exists: {}", code);
+            throw new DataIntegrityViolationException("'Branch Code '" + code + "' already exists");
+        }
+
+        BranchMaster saved = branchMasterRepository.save(payload);
+        log.info("Successfully added new Branch with code: {}", saved.getCode());
+    }
+
+    /**
+     * Handles the UPDATE operation for an existing branch master record.
+     * It fetches the existing entity, applies updates from the payload to specific fields,
+     * and saves the modified entity.
+     *
+     * @param request The common request object containing the target ID and updated details in the payload.
+     * @throws IllegalArgumentException  if the target ID is null or blank.
+     * @throws ResourceNotFoundException if the branch with the specified ID is not found.
+     * @throws JsonProcessingException   if the payload cannot be mapped to {@link BranchMaster}.
+     */
+    private void handleUpdate(CommonReq request) throws JsonProcessingException {
+        String targetId = request.getTargetId();
+        if (targetId == null || targetId.isBlank()) {
+            throw new IllegalArgumentException("Target ID is required for an UPDATE operation.");
+        }
+
+        log.info("Fetching existing Branch with ID: {} for update.", targetId);
+        BranchMaster existing = branchMasterRepository.findById(targetId).orElseThrow(
+                () -> new ResourceNotFoundException("Branch Code with ID '" + targetId + "' not found for update."));
+
+        BranchMaster updated = objectMapper.readValue(request.getPayload(), BranchMaster.class);
+
+        // Set all fields which can be updated
+        existing.setName(updated.getName());
+        existing.setCircleCode(updated.getCircleCode());
+        existing.setState(updated.getState());
+        existing.setCity(updated.getCity());
+        existing.setAddress(updated.getAddress());
+        existing.setPinCode(updated.getPinCode());
+        existing.setPhoneNumber(updated.getPhoneNumber());
+        existing.setEmailId(updated.getEmailId());
+        existing.setNmrCode(updated.getNmrCode());
+        existing.setStatus(updated.getStatus());
+        existing.setCloseDate(updated.getCloseDate());
+        existing.setMergeDate(updated.getMergeDate());
+        existing.setMergedWithBranch(updated.getMergedWithBranch());
+        existing.setLastChangeDate(new Date());
+        existing.setCpcFlag(updated.getCpcFlag());
+        existing.setFoodCreditFlag(updated.getFoodCreditFlag());
+        existing.setCurrChestFlag(updated.getCurrChestFlag());
+        existing.setBranchType(updated.getBranchType());
+
+        branchMasterRepository.save(existing);
+        log.info("Successfully updated Branch with Code: {}", targetId);
+    }
+
+    /**
+     * Logic to Block or Unblock a CGL
+     */
+    private void handleStatusChange(CommonReq request, Boolean newStatus) {
+        String targetId = request.getTargetId();
+        log.info("Processing Status Change ({}) for CGL ID: {}", newStatus, targetId);
+
+        BranchMaster existing = branchMasterRepository.findById(targetId).orElseThrow(
+                () -> new ResourceNotFoundException("Branch Code with ID '" + targetId + "' not found for update."));
+
+        // Update the status
+        existing.setStatus(newStatus);
+
+        branchMasterRepository.save(existing);
+        log.info("Successfully updated Branch Status to {} for ID: {}", newStatus, targetId);
+    }
+}
