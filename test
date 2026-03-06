@@ -1,263 +1,3 @@
-import React, { useEffect, useState, useMemo } from "react";
-import {
-  Box,
-  Fab,
-  Switch,
-  IconButton,
-  Stack,
-  Tooltip,
-  Typography,
-} from "@mui/material";
-import AddIcon from "@mui/icons-material/Add";
-import { DataGrid } from "@mui/x-data-grid";
-import EditIcon from "@mui/icons-material/Edit";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
-import InfoIcon from "@mui/icons-material/Info";
-import PriorityHighIcon from "@mui/icons-material/PriorityHigh";
-import WarningIcon from "@mui/icons-material/Warning";
-
-import AnnouncementFormDialog from "./components/AnnouncementFormDialog";
-import ViewAnnouncementDialog from "./components/ViewAnnouncementDialog";
-import useApi from "../../hooks/useApi";
-import CustomChip from "../../utils/CustomChip";
-import { timeStampFormatter } from "../../utils/CommonUtilities";
-import LoadingOverlay from "../../utils/LoadingOverlay";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-
-// Extracting URLs as constants
-const API_URLS = {
-  ROLES: "/UM/role/get-roles",
-  LIST: "/CM/announcements/list",
-  CREATE: "/CM/announcements",
-  UPDATE: (id) => `/CM/announcements/${id}`,
-  TOGGLE: (id) => `/CM/announcements/${id}/toggle`,
-};
-
-export default function Announcements() {
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
-
-  const [rows, setRows] = useState([]);
-  const [roles, setRoles] = useState([]);
-  const [loading, setLoading] = useState(false);
-
-  // Unified dialog state for Create/Edit
-  const [formDialog, setFormDialog] = useState({ open: false, data: null });
-  const [viewDialog, setViewDialog] = useState({ open: false, data: null });
-
-  useEffect(() => {
-    fetchRoles();
-    fetchRows();
-  }, []);
-
-  async function fetchRoles() {
-    try {
-      const res = await callApi(API_URLS.ROLES, null, "GET");
-      const data = res?.data?.result?.roles ?? res?.result?.roles ?? [];
-      const activeRoles = Array.isArray(data)
-        ? data.filter((r) => r.roleStatus === "ACTIVE")
-        : [];
-      setRoles(
-        activeRoles.map((r) => ({
-          id: String(r.roleId),
-          name: r.roleName,
-        }))
-      );
-    } catch (err) {
-      console.error("fetchRoles error", err);
-      showSnackbar("Fetching Roles failed, Kindly try again", "error");
-    }
-  }
-
-  const fetchRows = async () => {
-    setLoading(true);
-    try {
-      const res = await callApi(API_URLS.LIST, null, "GET");
-      const list = res?.data?.data ?? res?.data ?? [];
-      setRows(Array.isArray(list) ? list : []);
-    } catch (err) {
-      console.error("fetchRows error", err);
-      showSnackbar("Fetching announcements failed.", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleToggle = async (row) => {
-    setLoading(true);
-    try {
-      const res = await callApi(API_URLS.TOGGLE(row.id), null, "PATCH");
-      const updated = res?.data ?? res;
-      setRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
-      showSnackbar("Status updated successfully", "success");
-    } catch (err) {
-      if (err?.response?.status === 400) {
-        showSnackbar(err.response.data?.message ?? "Toggle not allowed", "error");
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Single save handler for both Create and Edit
-  const handleSave = async (payload, isEdit) => {
-    try {
-      if (isEdit) {
-        await callApi(API_URLS.UPDATE(payload.id), payload, "PUT");
-        showSnackbar("Announcement updated successfully", "success");
-      } else {
-        await callApi(API_URLS.CREATE, payload, "POST");
-        showSnackbar("Announcement created successfully", "success");
-      }
-      setFormDialog({ open: false, data: null });
-      fetchRows();
-    } catch (err) {
-      console.error("save error", err);
-      showSnackbar("Failed to save announcement", "error");
-    }
-  };
-
-  const roleMap = useMemo(() => {
-    const m = {};
-    roles.forEach((r) => (m[r.id] = r.name));
-    return m;
-  }, [roles]);
-
-  const columns = [
-    { field: "title", headerName: "Title", flex: 1 },
-    {
-      field: "severity",
-      headerName: "Severity",
-      flex: 1,
-      renderCell: (params) => {
-        const sev = params.value;
-        const config = {
-          CRITICAL: { icon: <InfoIcon fontSize="small" />, color: "error" },
-          WARN: { icon: <WarningIcon fontSize="small" />, color: "warning" },
-          INFO: { icon: <PriorityHighIcon fontSize="small" />, color: "info" },
-        };
-        const { icon, color } = config[sev] || config.INFO;
-        return <CustomChip variant="outlined" label={sev} color={color} icon={icon} />;
-      },
-    },
-    {
-      field: "targetRoles",
-      headerName: "Target Roles",
-      flex: 1,
-      renderCell: (params) => {
-        const tr = params.row.targetRoles;
-        if (!tr || tr === "ALL") return "ALL";
-        const arr = Array.isArray(tr) ? tr : String(tr).split(",").map((x) => x.trim());
-        return arr.map((id) => roleMap[id] ?? id).join(", ");
-      },
-    },
-    {
-      field: "startDate",
-      headerName: "Start Date",
-      flex: 1,
-      renderCell: (p) => (
-        <Typography variant="body2">{timeStampFormatter(p?.row?.startDate) || "NA"}</Typography>
-      ),
-    },
-    {
-      field: "displayStatus",
-      headerName: "Status",
-      flex: 1,
-      renderCell: (params) => {
-        const colors = {
-          ACTIVE: "#3b803fff",
-          EXPIRED: "#d32f2f",
-          SCHEDULED: "#1976d2",
-        };
-        return (
-          <CustomChip
-            color={colors[params.value] || "#9e9e9e"}
-            variant="outlined"
-            icon={<OnlinePredictionIcon />}
-            label={params.value}
-          />
-        );
-      },
-    },
-    {
-      field: "action",
-      headerName: "Actions",
-      flex: 1,
-      renderCell: (params) => (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ height: "100%" }}>
-          <Tooltip title={params.row.isActive === "Y" ? "Deactivate" : "Activate"}>
-            <Switch
-              checked={params.row.isActive === "Y"}
-              onChange={() => handleToggle(params.row)}
-              color="primary"
-            />
-          </Tooltip>
-          <Tooltip title="Edit">
-            <IconButton onClick={() => setFormDialog({ open: true, data: params.row })}>
-              <EditIcon fontSize="inherit" color="action" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="View">
-            <IconButton onClick={() => setViewDialog({ open: true, data: params.row })}>
-              <VisibilityIcon fontSize="inherit" color="action" />
-            </IconButton>
-          </Tooltip>
-        </Stack>
-      ),
-    },
-  ];
-
-  return (
-    <Box p={3} height="85vh" sx={{ backgroundColor: "#f8fafc", borderRadius: 2 }}>
-      <Box sx={{ height: "100%", bgcolor: "white", borderRadius: 2, boxShadow: 1, p: 1 }}>
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          loading={loading}
-          pageSizeOptions={[5, 10, 25]}
-          disableRowSelectionOnClick
-          sx={{ border: "none" }}
-        />
-      </Box>
-
-      <Fab
-        color="primary"
-        onClick={() => setFormDialog({ open: true, data: null })}
-        variant="extended"
-        sx={{
-          position: "fixed",
-          bottom: 40,
-          right: 40,
-          boxShadow: 3,
-          fontWeight: "bold",
-        }}
-      >
-        <AddIcon sx={{ mr: 1 }} />
-        Create Announcement
-      </Fab>
-
-      <AnnouncementFormDialog
-        open={formDialog.open}
-        initialData={formDialog.data}
-        roles={roles}
-        onClose={() => setFormDialog({ open: false, data: null })}
-        onSave={(payload) => handleSave(payload, Boolean(formDialog.data))}
-      />
-
-      <ViewAnnouncementDialog
-        open={viewDialog.open}
-        data={viewDialog.data}
-        roles={roles}
-        onClose={() => setViewDialog({ open: false, data: null })}
-      />
-
-      <LoadingOverlay loading={loading} />
-    </Box>
-  );
-}
-
-
 import React, { useState, useEffect } from "react";
 import {
   Dialog,
@@ -276,13 +16,24 @@ import {
   Typography,
   Stack,
   Divider,
+  Paper,
+  FormLabel,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
 } from "@mui/material";
 import { LocalizationProvider, DateTimePicker } from "@mui/x-date-pickers";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import dayjs from "dayjs";
 import CustomChip from "../../../utils/CustomChip";
 
-export default function AnnouncementFormDialog({ open, onClose, onSave, initialData, roles }) {
+export default function AnnouncementFormDialog({
+  open,
+  onClose,
+  onSave,
+  initialData,
+  roles,
+}) {
   const [form, setForm] = useState({
     title: "",
     message: "",
@@ -306,10 +57,14 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
             initialData.targetRoles === "ALL"
               ? roles.map((r) => r.id)
               : Array.isArray(initialData.targetRoles)
-              ? initialData.targetRoles.map(String)
-              : [],
-          start_date: initialData.startDate ? dayjs(initialData.startDate) : null,
-          expiry_date: initialData.expiryDate ? dayjs(initialData.expiryDate) : null,
+                ? initialData.targetRoles.map(String)
+                : [],
+          start_date: initialData.startDate
+            ? dayjs(initialData.startDate)
+            : null,
+          expiry_date: initialData.expiryDate
+            ? dayjs(initialData.expiryDate)
+            : null,
         });
       } else {
         setForm({
@@ -327,7 +82,8 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
 
   const handleChange = (e) => {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
-    if (errors[e.target.name]) setErrors((prev) => ({ ...prev, [e.target.name]: null }));
+    if (errors[e.target.name])
+      setErrors((prev) => ({ ...prev, [e.target.name]: null }));
   };
 
   const handleRoleChange = (event) => {
@@ -335,7 +91,10 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
     if (value.includes("all")) {
       setForm((prev) => ({
         ...prev,
-        targetRoles: prev.targetRoles.length === roles.length ? [] : roles.map((r) => r.id),
+        targetRoles:
+          prev.targetRoles.length === roles.length
+            ? []
+            : roles.map((r) => r.id),
       }));
       return;
     }
@@ -346,7 +105,11 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
     let newErrors = {};
     if (!form.title.trim()) newErrors.title = "Title is required";
     if (!form.message.trim()) newErrors.message = "Message is required";
-    if (form.start_date && form.expiry_date && form.expiry_date.isBefore(form.start_date)) {
+    if (
+      form.start_date &&
+      form.expiry_date &&
+      form.expiry_date.isBefore(form.start_date)
+    ) {
       newErrors.date = "Expiry date cannot be before start date";
     }
     setErrors(newErrors);
@@ -362,22 +125,49 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
       message: form.message.trim(),
       severity: form.severity,
       targetRoles:
-        form.targetRoles.length === roles.length || form.targetRoles.length === 0
+        form.targetRoles.length === roles.length ||
+        form.targetRoles.length === 0
           ? "ALL"
           : form.targetRoles.map((id) => (isNaN(Number(id)) ? id : Number(id))),
-      startDate: form.start_date ? form.start_date.format("YYYY-MM-DD HH:mm:ss") : null,
-      expiryDate: form.expiry_date ? form.expiry_date.format("YYYY-MM-DD HH:mm:ss") : null,
+      startDate: form.start_date
+        ? form.start_date.format("YYYY-MM-DD HH:mm:ss")
+        : null,
+      expiryDate: form.expiry_date
+        ? form.expiry_date.format("YYYY-MM-DD HH:mm:ss")
+        : null,
       isActive: initialData?.isActive ?? "Y",
     };
 
     onSave(payload);
   };
 
-  const isAllSelected = roles.length > 0 && form.targetRoles.length === roles.length;
-  const isIndeterminate = form.targetRoles.length > 0 && form.targetRoles.length < roles.length;
+  const isAllSelected =
+    roles.length > 0 && form.targetRoles.length === roles.length;
+  const isIndeterminate =
+    form.targetRoles.length > 0 && form.targetRoles.length < roles.length;
+
+  const toggleRole = (id) => {
+    setForm((prev) => ({
+      ...prev,
+      targetRoles: prev.targetRoles.includes(id)
+        ? prev.targetRoles.filter((r) => r !== id)
+        : [...prev.targetRoles, id],
+    }));
+  };
+
+  const selectAll = () =>
+    setForm((p) => ({ ...p, targetRoles: roles.map((r) => r.id) }));
+
+  const clearRoles = () => setForm((p) => ({ ...p, targetRoles: [] }));
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="md"
+      fullWidth
+      PaperProps={{ sx: { borderRadius: 3 } }}
+    >
       <DialogTitle sx={{ pb: 1, pt: 3, px: 4 }}>
         <Typography variant="h5" fontWeight="700" color="text.primary">
           {initialData ? "Edit Announcement" : "Create New Announcement"}
@@ -386,13 +176,20 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
           Fill in the details below to broadcast a message to your users.
         </Typography>
       </DialogTitle>
-      
+
       <Divider sx={{ mx: 4, mb: 2 }} />
 
-      <DialogContent sx={{ px: 4, pb: 4 }}>
+      <DialogContent component={Paper} sx={{ px: 4, pb: 4 }}>
         <Stack spacing={3}>
           {/* Group 1: Core Info */}
-          <Box p={2.5} sx={{ bgcolor: "#f8fafc", borderRadius: 2, border: "1px solid #e2e8f0" }}>
+          <Box
+            p={2.5}
+            sx={{
+              bgcolor: "#f8fafc",
+              borderRadius: 2,
+              border: "1px solid #e2e8f0",
+            }}
+          >
             <Stack spacing={2.5}>
               <TextField
                 label="Announcement Title"
@@ -405,6 +202,7 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
                 variant="outlined"
                 sx={{ bgcolor: "white" }}
               />
+
               <TextField
                 label="Message Content"
                 name="message"
@@ -418,54 +216,98 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
                 sx={{ bgcolor: "white" }}
               />
             </Stack>
+
+            <Stack mt={3} size={{ xs: 12 }}>
+              <FormControl component="fieldset" fullWidth>
+                <FormLabel component="legend">
+                  Severity level of announcement :
+                </FormLabel>
+                <RadioGroup
+                  row
+                  name="severity"
+                  value={form.severity}
+                  onChange={handleChange}
+                >
+                  <FormControlLabel
+                    value="INFO"
+                    control={<Radio />}
+                    label="Information"
+                  />
+                  <FormControlLabel
+                    value="WARN"
+                    control={<Radio />}
+                    label="Warning"
+                  />
+                  <FormControlLabel
+                    value="CRITICAL"
+                    control={<Radio />}
+                    label="Critical / Important"
+                  />
+                </RadioGroup>
+              </FormControl>
+            </Stack>
           </Box>
 
-          {/* Group 2: Targeting & Settings */}
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={3}>
-            <TextField
-              select
-              fullWidth
-              label="Severity Level"
-              name="severity"
-              value={form.severity}
-              onChange={handleChange}
-            >
-              <MenuItem value="INFO">Information (Default)</MenuItem>
-              <MenuItem value="WARN">Warning</MenuItem>
-              <MenuItem value="CRITICAL">Critical / Urgent</MenuItem>
-            </TextField>
+          {/* Group 2: Targeting roles */}
+          <Paper variant="outlined" sx={{ p: 2, mt: 2 }}>
+            <Stack direction="row" justifyContent="space-between">
+              <Typography fontWeight={600}>
+                Choose roles to publish announcement
+              </Typography>
 
-            <FormControl fullWidth>
-              <InputLabel>Target Roles</InputLabel>
-              <Select
-                multiple
-                value={form.targetRoles}
-                onChange={handleRoleChange}
-                renderValue={(selected) => {
-                  if (selected.length === roles.length) return <CustomChip label="All Roles" color="primary" variant="outlined" />;
+              <Stack direction="row" spacing={1}>
+                <Button size="small" onClick={selectAll}>
+                  Select All
+                </Button>
+                <Button size="small" onClick={clearRoles}>
+                  Clear
+                </Button>
+              </Stack>
+            </Stack>
+
+            <Box
+              sx={{
+                maxHeight: 200,
+                overflow: "auto",
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                mt: 1,
+              }}
+            >
+              {roles.map((role) => (
+                <Stack
+                  key={role.id}
+                  direction="row"
+                  alignItems="center"
+                  spacing={1}
+                  sx={{
+                    cursor: "pointer",
+                    p: 1,
+                    "&:hover": { bgcolor: "action.hover" },
+                  }}
+                  onClick={() => toggleRole(role.id)}
+                >
+                  <Checkbox checked={form.targetRoles.includes(role.id)} />
+                  <Typography>{role.name}</Typography>
+                </Stack>
+              ))}
+            </Box>
+
+            {form.targetRoles.length > 0 && (
+              <Box mt={1} display="flex" gap={1} flexWrap="wrap">
+                {form.targetRoles.map((id) => {
+                  const role = roles.find((r) => r.id === id);
                   return (
-                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                      {selected.slice(0, 2).map((val) => (
-                        <CustomChip key={val} label={roles.find((r) => r.id === val)?.name || val} variant="outlined" size="small" />
-                      ))}
-                      {selected.length > 2 && <CustomChip label={`+${selected.length - 2} more`} size="small" />}
-                    </Box>
+                    <CustomChip
+                      key={id}
+                      variant="outlined"
+                      label={role?.name ?? id}
+                    />
                   );
-                }}
-              >
-                <MenuItem value="all">
-                  <Checkbox checked={isAllSelected} indeterminate={isIndeterminate} color="primary" />
-                  <ListItemText primary="Select All" primaryTypographyProps={{ fontWeight: "bold" }} />
-                </MenuItem>
-                {roles.map((role) => (
-                  <MenuItem key={role.id} value={role.id}>
-                    <Checkbox checked={form.targetRoles.indexOf(role.id) > -1} />
-                    <ListItemText primary={role.name} />
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Stack>
+                })}
+              </Box>
+            )}
+          </Paper>
 
           {/* Group 3: Scheduling */}
           <LocalizationProvider dateAdapter={AdapterDayjs}>
@@ -489,173 +331,36 @@ export default function AnnouncementFormDialog({ open, onClose, onSave, initialD
                 slotProps={{ textField: { fullWidth: true } }}
               />
             </Stack>
-            {errors.date && <Typography color="error" variant="caption">{errors.date}</Typography>}
+            {errors.date && (
+              <Typography color="error" variant="caption">
+                {errors.date}
+              </Typography>
+            )}
           </LocalizationProvider>
         </Stack>
       </DialogContent>
 
-      <DialogActions sx={{ p: 3, pt: 0 }}>
-        <Button onClick={onClose} sx={{ color: "text.secondary", px: 3 }}>
-          Cancel
-        </Button>
-        <Button variant="contained" onClick={handleSubmit} sx={{ px: 4, py: 1, borderRadius: 2, boxShadow: 2 }}>
-          {initialData ? "Save Changes" : "Publish Announcement"}
-        </Button>
+      <DialogActions sx={{ p: 3 }}>
+        <Box
+          sx={{
+            mt: 3,
+            display: "flex",
+            gap: 1,
+            justifyContent: "flex-end",
+          }}
+        >
+          <Button onClick={onClose} sx={{ color: "text.secondary", px: 3 }}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleSubmit}
+            sx={{ px: 4, py: 1, borderRadius: 2, boxShadow: 2 }}
+          >
+            {initialData ? "Save Changes" : "Publish Announcement"}
+          </Button>
+        </Box>
       </DialogActions>
     </Dialog>
   );
 }
-
-
-import React, { useMemo } from "react";
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-  Grid,
-  Box,
-  Divider,
-  Paper,
-} from "@mui/material";
-import { timeStampFormatter, toPascalKebabCase } from "../../../utils/CommonUtilities";
-import InfoIcon from "@mui/icons-material/Info";
-import PriorityHighIcon from "@mui/icons-material/PriorityHigh";
-import WarningIcon from "@mui/icons-material/Warning";
-import CustomChip from "../../../utils/CustomChip";
-
-const ViewAnnouncementDialog = ({ open, onClose, data, roles }) => {
-  const roleMap = useMemo(() => {
-    const map = {};
-    roles?.forEach((role) => (map[role.id || role.roleId] = role.name || role.roleName));
-    return map;
-  }, [roles]);
-
-  if (!data) return null;
-
-  const severityProps = {
-    Info: { icon: <InfoIcon fontSize="small" />, color: "info" },
-    Warn: { icon: <WarningIcon fontSize="small" />, color: "warning" },
-    Critical: { icon: <PriorityHighIcon fontSize="small" />, color: "error" },
-  };
-
-  const formattedSeverity = toPascalKebabCase(data.severity);
-  const { icon, color } = severityProps[formattedSeverity] || severityProps.Info;
-
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
-      <DialogTitle sx={{ bgcolor: "#f8fafc", px: 4, py: 3 }}>
-        <Box display="flex" justifyContent="space-between" alignItems="center">
-          <Typography variant="h5" fontWeight="bold">
-            Announcement Details
-          </Typography>
-          <CustomChip
-            label={data.isActive === "Y" ? "Active" : "Inactive"}
-            color={data.isActive === "Y" ? "success" : "default"}
-            variant="filled"
-            sx={{ fontWeight: 'bold' }}
-          />
-        </Box>
-        <Typography variant="caption" color="text.secondary">
-          Reference ID: {data.id}
-        </Typography>
-      </DialogTitle>
-
-      <DialogContent sx={{ p: 4 }}>
-        <Grid container spacing={4}>
-          {/* Meta Info Row */}
-          <Grid item xs={12}>
-            <Box display="flex" gap={4} flexWrap="wrap">
-              <Box>
-                <Typography variant="caption" color="text.secondary" fontWeight="bold" textTransform="uppercase">
-                  Severity
-                </Typography>
-                <Box mt={0.5}>
-                  <CustomChip label={formattedSeverity} color={color} icon={icon} variant="outlined" size="small" />
-                </Box>
-              </Box>
-              <Box>
-                <Typography variant="caption" color="text.secondary" fontWeight="bold" textTransform="uppercase">
-                  Created Date
-                </Typography>
-                <Typography variant="body2" fontWeight="500" mt={0.5}>
-                  {timeStampFormatter(data.createdAt)}
-                </Typography>
-              </Box>
-              <Box>
-                <Typography variant="caption" color="text.secondary" fontWeight="bold" textTransform="uppercase">
-                  Created By
-                </Typography>
-                <Typography variant="body2" fontWeight="500" mt={0.5}>
-                  {data.createdBy || "System"}
-                </Typography>
-              </Box>
-            </Box>
-          </Grid>
-
-          {/* Main Content Areas */}
-          <Grid item xs={12}>
-            <Paper elevation={0} sx={{ p: 3, bgcolor: "#f1f5f9", borderRadius: 2, border: "1px solid #e2e8f0" }}>
-              <Typography variant="subtitle2" color="primary" fontWeight="bold" mb={1}>
-                TITLE
-              </Typography>
-              <Typography variant="h6" fontWeight="600" mb={3}>
-                {data.title}
-              </Typography>
-
-              <Typography variant="subtitle2" color="primary" fontWeight="bold" mb={1}>
-                MESSAGE CONTENT
-              </Typography>
-              <Typography variant="body1" sx={{ whiteSpace: "pre-wrap", color: "text.secondary" }}>
-                {data.message}
-              </Typography>
-            </Paper>
-          </Grid>
-
-          {/* Scheduling & Targets */}
-          <Grid item xs={12} sm={4}>
-            <Typography variant="caption" color="text.secondary" fontWeight="bold" textTransform="uppercase">
-              Target Roles
-            </Typography>
-            <Typography variant="body2" fontWeight="500" mt={0.5}>
-              {data.targetRoles === "ALL" || !data.targetRoles
-                ? "All Roles"
-                : Array.isArray(data.targetRoles)
-                ? data.targetRoles.map((id) => roleMap[id]).filter(Boolean).join(", ")
-                : roleMap[data.targetRoles] || "-"}
-            </Typography>
-          </Grid>
-
-          <Grid item xs={12} sm={4}>
-            <Typography variant="caption" color="text.secondary" fontWeight="bold" textTransform="uppercase">
-              Start Date
-            </Typography>
-            <Typography variant="body2" fontWeight="500" mt={0.5}>
-              {timeStampFormatter(data.startDate) || "Immediate"}
-            </Typography>
-          </Grid>
-
-          <Grid item xs={12} sm={4}>
-            <Typography variant="caption" color="text.secondary" fontWeight="bold" textTransform="uppercase">
-              Expiry Date
-            </Typography>
-            <Typography variant="body2" fontWeight="500" mt={0.5}>
-              {timeStampFormatter(data.expiryDate) || "No Expiry"}
-            </Typography>
-          </Grid>
-        </Grid>
-      </DialogContent>
-
-      <Divider />
-      <DialogActions sx={{ p: 3, bgcolor: "#f8fafc" }}>
-        <Button onClick={onClose} variant="contained" sx={{ px: 4, borderRadius: 2, textTransform: "none" }}>
-          Close View
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-};
-
-export default ViewAnnouncementDialog;
