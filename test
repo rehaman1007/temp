@@ -1,279 +1,633 @@
-/**
- * ViewRequestDialog
- *
- * This dialog displays the details of a request dynamically.
- * It renders:
- * 1. Request metadata (creator, status, request type, etc.)
- * 2. Dynamic payload fields
- * 3. Optional dynamic table
- * 4. Optional download action
- *
- * Rendering is optimized using useMemo to avoid repeated computations.
- */
+import React, { useEffect, useState, useMemo } from "react";
+import {
+  Box,
+  Fab,
+  Switch,
+  IconButton,
+  Stack,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import { DataGrid } from "@mui/x-data-grid";
+import EditIcon from "@mui/icons-material/Edit";
+import CreateAnnouncementDialog from "./components/CreateAnnouncementDialog";
+import EditAnnouncementDialog from "./components/EditAnnouncementDialog";
+import ViewAnnouncementDialog from "./components/ViewAnnouncementDialog";
+import useApi from "../../hooks/useApi";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
+import CustomChip from "../../utils/CustomChip";
+import { timeStampFormatter } from "../../utils/CommonUtilities";
+import InfoIcon from "@mui/icons-material/Info";
+import PriorityHighIcon from "@mui/icons-material/PriorityHigh";
+import WarningIcon from "@mui/icons-material/Warning";
+import LoadingOverlay from "../../utils/LoadingOverlay";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-import React, { useMemo } from "react";
+export default function Announcements() {
+  const { callApi } = useApi();
+  const showSnackbar = useCustomSnackbar();
 
+  const [rows, setRows] = useState([]);
+  const [roles, setRoles] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const [openCreate, setOpenCreate] = useState(false);
+  const [editRow, setEditRow] = useState(null);
+  const [viewRow, setViewRow] = useState(null);
+  const [openViewDailog, setOpenViewDailog] = useState(false);
+
+  // ---------- INITIAL LOAD ----------
+  useEffect(() => {
+    fetchRoles();
+    fetchRows();
+  }, []);
+
+  // ---------- FETCH ROLES ----------
+  async function fetchRoles() {
+    try {
+      const res = await callApi("/UM/role/get-roles", null, "GET");
+      const data = res?.data?.result?.roles ?? res?.result?.roles ?? [];
+      setRoles(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("fetchRoles error", err);
+      showSnackbar("Fetching Roles failed, Kindly try again", "error");
+      setRoles([]);
+    }
+  }
+
+  // ---------- FETCH ANNOUNCEMENTS ----------
+  const fetchRows = async () => {
+    setLoading(true);
+    try {
+      const res = await callApi("/CM/announcements/list", null, "GET");
+      const payload = res?.data ?? res;
+      const list = payload?.data ?? payload;
+      setRows(Array.isArray(list) ? list : []);
+    } catch (err) {
+      console.error("fetchRows error", err);
+      showSnackbar("Fetching announcements failed, Kindly try again", "error");
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ---------- ACTIVE/INACTIVE TOGGLE ----------
+  const handleToggle = async (row) => {
+    setLoading(true);
+    try {
+      const res = await callApi(
+        `/CM/announcements/${row.id}/toggle`,
+        null,
+        "PATCH",
+      );
+      const updated = res?.data ?? res;
+
+      setRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+    } catch (err) {
+      console.error("toggle error", err);
+      if (err?.response?.status === 400) {
+        showSnackbar(
+          err.response.data?.message ?? "Toggle not allowed",
+          "error",
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ---------- CREATE SAVE ----------
+  const handleCreateSave = async (payload) => {
+    try {
+      await callApi("/CM/announcements", payload, "POST");
+      setOpenCreate(false);
+      fetchRows();
+    } catch (err) {
+      console.error("create error", err);
+    }
+  };
+
+  // ---------- EDIT SAVE ----------
+  const handleEditSave = async (updated) => {
+    try {
+      await callApi(`/CM/announcements/${updated.id}`, updated, "PUT");
+      setEditRow(null);
+      fetchRows();
+    } catch (err) {
+      console.error("edit save error", err);
+    }
+  };
+
+  // ---------- ROLE NAME MAPPING ----------
+  const roleMap = useMemo(() => {
+    const m = {};
+    roles.forEach((r) => (m[String(r.roleId)] = r.roleName));
+    return m;
+  }, [roles]);
+
+  const columns = [
+    { field: "title", headerName: "Title", flex: 1 },
+    {
+      field: "severity",
+      headerName: "Severity",
+      flex: 1,
+
+      renderCell: (params) => {
+        const sev = params.value;
+        const icon =
+          sev === "CRITICAL" ? (
+            <InfoIcon fontSize="small" />
+          ) : sev === "WARN" ? (
+            <WarningIcon fontSize="small" />
+          ) : (
+            <PriorityHighIcon fontSize="small" />
+          );
+        const color =
+          sev === "CRITICAL" ? "error" : sev === "WARN" ? "warning" : "info";
+        return (
+          <CustomChip
+            variant="outlined"
+            label={sev}
+            color={color}
+            icon={icon}
+          />
+        );
+      },
+    },
+    {
+      field: "targetRoles",
+      headerName: "Target Roles",
+      flex: 1,
+      renderCell: (params) => {
+        const tr = params.row.targetRoles;
+
+        if (!tr || tr === "ALL") return "ALL";
+
+        const arr = Array.isArray(tr)
+          ? tr
+          : String(tr)
+              .split(",")
+              .map((x) => x.trim());
+
+        return arr.map((id) => roleMap[id] ?? id).join(", ");
+      },
+    },
+
+    {
+      field: "startDate",
+      headerName: "Start Date",
+      flex: 1,
+      sortable: true,
+      renderCell: (p) => (
+        <Typography
+          variant="body1"
+          component="span"
+          sx={{ fontSize: "0.9rem" }}
+        >
+          {timeStampFormatter(p?.row?.startDate) || "NA"}
+        </Typography>
+      ),
+    },
+
+    {
+      field: "expiryDate",
+      headerName: "Expiry Date",
+      flex: 1,
+      sortable: true,
+      renderCell: (p) => (
+        <Typography
+          variant="body1"
+          component="span"
+          sx={{ fontSize: "0.9rem" }}
+        >
+          {timeStampFormatter(p?.row?.expiryDate) || "NA"}
+        </Typography>
+      ),
+    },
+
+    {
+      field: "displayStatus",
+      headerName: "Status",
+      flex: 1,
+      // sortable: true,
+      renderCell: (params) => (
+        <CustomChip
+          color={
+            params.value === "ACTIVE"
+              ? "#3b803fff"
+              : params.value === "EXPIRED"
+                ? "#d32f2f"
+                : params.value === "SCHEDULED"
+                  ? "#1976d2"
+                  : "#9e9e9e"
+          }
+          variant="outlined"
+          icon={<OnlinePredictionIcon />}
+          label={params.value}
+        />
+      ),
+    },
+
+    {
+      field: "action",
+      headerName: "Actions",
+      flex: 1,
+
+      renderCell: (params) => (
+        <Stack
+          direction="row"
+          spacing={1}
+          justifyContent="center"
+          alignItems="center"
+          sx={{ height: "100%" }}
+        >
+          <Tooltip
+            title={
+              params.row.isActive === "Y"
+                ? "Inactive Announcement"
+                : "Activate Announcement"
+            }
+          >
+            {/* <IconButton
+              color={params.row.isActive === "Y" ? "error" : "success"}
+              onClick={() => handleToggle(params.row)}
+            >
+              <CampaignIcon fontSize="inherit" />
+            </IconButton> */}
+            <Switch
+              checked={params.row.isActive === "Y"}
+              onChange={() => handleToggle(params.row)}
+            />
+          </Tooltip>
+
+          <Tooltip title="Edit Announcement">
+            <IconButton onClick={() => setEditRow(params.row)}>
+              <EditIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title="View Announcement">
+            <IconButton
+              onClick={() => {
+                setOpenViewDailog(true);
+                setViewRow(params.row);
+              }}
+            >
+              <VisibilityIcon fontSize="inherit" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      ),
+    },
+  ];
+  return (
+    <Box p={2} height="80vh">
+      <DataGrid
+        rows={rows}
+        columns={columns}
+        loading={loading}
+        pageSizeOptions={[5, 10, 25]}
+        disableRowSelectionOnClick
+      />
+
+      <Fab
+        color="primary"
+        onClick={() => setOpenCreate(true)}
+        variant="extended"
+        sx={{
+          position: "fixed",
+          borderRadius: 1,
+          fontSize: "15px",
+          bottom: (theme) => theme.spacing(8),
+          right: (theme) => theme.spacing(4),
+        }}
+      >
+        <AddIcon />
+        Create
+      </Fab>
+
+      <CreateAnnouncementDialog
+        open={openCreate}
+        onClose={() => setOpenCreate(false)}
+        onSave={handleCreateSave}
+      />
+
+      {editRow && (
+        <EditAnnouncementDialog
+          open={Boolean(editRow)}
+          record={editRow}
+          onClose={() => setEditRow(null)}
+          onSave={handleEditSave}
+        />
+      )}
+
+      {viewRow && (
+        <ViewAnnouncementDialog
+          open={openViewDailog}
+          data={viewRow}
+          onClose={() => setOpenViewDailog(false)}
+          roles={roles}
+        />
+      )}
+
+      <LoadingOverlay loading={loading} />
+    </Box>
+  );
+}
+
+
+import React, { useState, useEffect, useRef } from "react";
 import {
   Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
+  TextField,
   Button,
-  Typography,
-  Grid,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  Select,
   Box,
-  Divider,
-  IconButton,
-  Stack,
 } from "@mui/material";
+import dayjs from "dayjs";
 
-import CloseIcon from "@mui/icons-material/Close";
+import useApi from "../../../hooks/useApi";
 
-import {
-  timeStampFormatter,
-  toPascalKebabCase,
-  formatKeyForDisplay,
-} from "../../utils/CommonUtilities";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { DateTimePicker } from "@mui/x-date-pickers/DateTimePicker";
+import CustomChip from "../../../utils/CustomChip";
 
-import { ViewCommonDynamicTable } from "./ViewCommonDynamicTable";
-
-const ViewRequestDialog = ({
+export default function EditAnnouncementDialog({
   open,
-  handleClose,
-  data,
-  screenConfig,
-  handleDownload,
-}) => {
-  /**
-   * If no data or payload exists,
-   * do not render dialog.
-   */
-  if (!data?.payload) return null;
+  record,
+  onClose,
+  onSave,
+}) {
+  const { callApi } = useApi();
 
-  const { payload } = data;
+  const [form, setForm] = useState({
+    id: null,
+    title: "",
+    message: "",
+    severity: "INFO",
+    targetRoles: [],
+    start_date: null,
+    expiry_date: null,
+    isActive: "Y",
+  });
 
-  /**
-   * Extract table column configuration
-   * from screenConfig safely
-   */
-  const tableColumns = screenConfig?.columns || [];
+  const formRef = useRef(form);
+  useEffect(() => {
+    formRef.current = form;
+  }, [form]);
+  const [errors, setErrors] = useState({
+    title: null,
+    message: null,
+    date: null,
+  });
+  const [roles, setRoles] = useState([]);
+  const [loadingRoles, setLoadingRoles] = useState(false);
 
-  /**
-   * ==========================================================
-   * Request Metadata
-   * ==========================================================
-   * Static fields displayed at the top of dialog
-   *
-   * useMemo ensures this array is not recreated
-   * on every render unless 'data' changes.
-   */
-  const mainDetails = useMemo(
-    () => [
-      {
-        label: "Creator ID",
-        value: data.creatorId,
-        size: 2,
-      },
-      {
-        label: "Request Type",
-        value: data.changeType === "ADD" ? "Added" : "Modified",
-        size: 2.5,
-      },
-      {
-        label: "Request Status",
-        value: toPascalKebabCase(data.reqStatus),
-        size: 2.5,
-      },
-      {
-        label: "Requested Date",
-        value: timeStampFormatter(data.reqDate),
-        size: 5,
-      },
-    ],
-    [data]
-  );
+  useEffect(() => {
+    if (!open) return;
 
-  /**
-   * ==========================================================
-   * Dynamic Payload Fields
-   * ==========================================================
-   * Filter out system keys that should not be displayed
-   *
-   * Excluded keys:
-   * - ShowCustomTable
-   * - summaryData
-   * - ShowDownload
-   *
-   * useMemo prevents recalculating on each render
-   */
-  const dynamicFields = useMemo(() => {
-    return Object.entries(payload).filter(
-      ([key]) =>
-        !["ShowCustomTable", "summaryData", "ShowDownload"].includes(key)
-    );
-  }, [payload]);
+    fetchRoles();
 
-  /**
-   * ==========================================================
-   * Conditional Rendering Flags
-   * ==========================================================
-   */
+    if (record) {
+      setForm({
+        id: record.id ?? record.announcementId ?? null,
+        title: record.title ?? "",
+        message: record.message ?? "",
+        severity: record.severity ?? "INFO",
+        targetRoles: record.targetRoles ?? record.targetRole ?? [],
+        start_date: record.startDate ?? record.start_date ?? null,
+        expiry_date: record.expiryDate ?? record.expiry_date ?? null,
+        isActive: record.isActive ?? record.is_active ?? "Y",
+      });
+    }
+  }, [open, record]);
 
-  /** Should custom table render */
-  const showTable =
-    payload?.ShowCustomTable &&
-    (tableColumns.length > 0 || payload?.summaryData?.data?.length > 0);
+  async function fetchRoles() {
+    setLoadingRoles(true);
+    try {
+      const res = await callApi("/UM/role/get-roles", null, "GET");
+      const rolesData = res?.result?.roles ?? [];
+      const activeRoles = rolesData.filter((r) => r.roleStatus === "ACTIVE");
+      const normalized = activeRoles.map((r) => ({
+        id: String(r.roleId),
+        name: r.roleName,
+      }));
+      setRoles(normalized);
+    } catch (err) {
+      console.error("fetchRoles error", err);
+      setRoles([]);
+    } finally {
+      setLoadingRoles(false);
+    }
+  }
+  function change(e) {
+    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
+  }
+  function setStartDate(v) {
+    setForm((prev) => ({ ...prev, start_date: v }));
+    setErrors((prev) => ({ ...prev, date: null }));
+  }
+  function setExpiryDate(v) {
+    setForm((prev) => ({ ...prev, expiry_date: v }));
+    setErrors((prev) => ({ ...prev, date: null }));
+  }
 
-  /** Should download button render */
-  const showDownload = payload?.ShowDownload;
+  function validateAll() {
+    const next = { title: null, message: null, date: null };
+    let ok = true;
+    if (!form.title || !String(form.title).trim()) {
+      next.title = "Title is Required";
+      ok = false;
+    }
+    if (!form.message || !String(form.message).trim()) {
+      next.message = "Message is Required";
+      ok = false;
+    }
+    if (form.start_date && form.expiry_date) {
+      const s = dayjs(form.start_date);
+      const e = dayjs(form.expiry_date);
+      if (!e.isAfter(s)) {
+        next.date = "Expiry date must be after Start date";
+        ok = false;
+      }
+    }
+    setErrors(next);
+    return ok;
+  }
 
-  /** Should action section render */
-  const showActions = showDownload;
+  async function handleSave() {
+    // latest snapshot (keeps up-to-date values)
+    const currentForm = formRef.current;
 
-  /**
-   * ==========================================================
-   * Component Render
-   * ==========================================================
-   */
+    // run UI validation (validateAll reads `form` state to populate errors)
+    if (!validateAll()) return;
+
+    // defensive date check on the snapshot as well
+    if (currentForm.start_date && currentForm.expiry_date) {
+      if (
+        !dayjs(currentForm.expiry_date).isAfter(dayjs(currentForm.start_date))
+      ) {
+        setErrors((prev) => ({
+          ...prev,
+          date: "Expiry must be later than Start",
+        }));
+        return;
+      }
+    }
+
+    // build payload from the snapshot (use currentForm, not form)
+    const payload = {
+      // id: currentForm.id ?? null,
+      title: String(currentForm.title ?? "").trim(),
+      message: String(currentForm.message ?? "").trim(),
+      severity: currentForm.severity ?? "INFO",
+      // backend expects numbers for role ids — convert where possible
+      targetRoles: Array.isArray(currentForm.targetRoles)
+        ? currentForm.targetRoles.map((v) => (isNaN(Number(v)) ? v : Number(v)))
+        : currentForm.targetRoles ?? "ALL",
+      startDate: currentForm.start_date
+        ? dayjs(currentForm.start_date).format("YYYY-MM-DD HH:mm:ss")
+        : null,
+      expiryDate: currentForm.expiry_date
+        ? dayjs(currentForm.expiry_date).format("YYYY-MM-DD HH:mm:ss")
+        : null,
+      isActive: currentForm.isActive ?? "Y",
+    };
+
+    // setIsSubmitting(true);
+    try {
+      // assume parent onSave handles API call (PUT) and closing
+      await onSave(payload);
+      // if parent doesn't close the dialog, you may call onClose() here
+    } catch (err) {
+      console.error("[handleSave] save error:", err);
+      // setIsSubmitting(false);
+    }
+  }
+  const isFormvalid =
+    !form.title?.trim() || !form.message?.trim() || Boolean(errors.date);
 
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
-      {/* ======================================================
-          Dialog Header
-         ====================================================== */}
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Edit Announcement</DialogTitle>
 
-      <DialogTitle
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          pr: 1,
-        }}
-      >
-        <Typography variant="h6" fontWeight={700}>
-          Request Details — <b>ID: {data.id}</b>
-        </Typography>
+      <DialogContent dividers>
+        <TextField
+          margin="dense"
+          autoFocus
+          label="Title*"
+          fullWidth
+          name="title"
+          value={form.title ?? ""}
+          onChange={change}
+          error={Boolean(errors.title)}
+          helperText={errors.title}
+        />
 
-        {/* Close Button moved to title area */}
-        <IconButton onClick={handleClose} size="small">
-          <CloseIcon />
-        </IconButton>
-      </DialogTitle>
+        <TextField
+          margin="dense"
+          label="Message*"
+          fullWidth
+          multiline
+          minRows={3}
+          name="message"
+          value={form.message ?? ""}
+          onChange={change}
+        />
 
-      <Divider />
-
-      {/* ======================================================
-          Dialog Content
-         ====================================================== */}
-
-      <DialogContent sx={{ pt: 3 }}>
-        {/* =============================
-            Request Metadata Section
-           ============================= */}
-
-        <Grid container spacing={2}>
-          {mainDetails.map((item) => (
-            <Grid size={{ xs: 12, sm: item.size }} key={item.label}>
-              <Stack spacing={0.5}>
-                <Typography
-                  variant="subtitle2"
-                  sx={{
-                    fontWeight: 700,
-                    color: "text.secondary",
-                  }}
-                >
-                  {item.label}
-                </Typography>
-
-                <Typography variant="body1">
-                  {item.value ?? "N/A"}
-                </Typography>
-              </Stack>
-            </Grid>
-          ))}
-        </Grid>
-
-        {/* Divider shown only if dynamic fields exist */}
-        {dynamicFields.length > 0 && <Divider sx={{ my: 2 }} />}
-
-        {/* =============================
-            Dynamic Payload Fields
-           ============================= */}
-
-        {dynamicFields.length > 0 && (
-          <Grid container spacing={2}>
-            {dynamicFields.map(([key, value]) => (
-              <Grid size={{ xs: 12, sm: 4 }} key={key}>
-                <Box>
-                  {/* Field label */}
-                  <Typography
-                    variant="subtitle2"
-                    sx={{
-                      fontWeight: 700,
-                      color: "text.secondary",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {formatKeyForDisplay(key)}
-                  </Typography>
-
-                  {/* Field value */}
-                  <Typography
-                    variant="body1"
-                    sx={{ wordBreak: "break-word" }}
-                  >
-                    {String(value ?? "N/A")}
-                  </Typography>
-                </Box>
-              </Grid>
+        <TextField
+          select
+          margin="dense"
+          fullWidth
+          label="Severity"
+          name="severity"
+          value={form.severity ?? "INFO"}
+          onChange={change}
+        >
+          <MenuItem value="INFO">INFO</MenuItem>
+          <MenuItem value="WARN">WARN</MenuItem>
+          <MenuItem value="CRITICAL">CRITICAL</MenuItem>
+        </TextField>
+        <FormControl fullWidth margin="dense">
+          <InputLabel>Target Roles</InputLabel>
+          <Select
+            multiple
+            label="Target Roles"
+            name="target_roles"
+            value={form.targetRoles}
+            onChange={(e) =>
+              setForm((prev) => ({ ...prev, target_roles: e.target.value }))
+            }
+            renderValue={(selected) => (
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {selected.map((val) => {
+                  const role = roles.find((r) => String(r.id) === String(val));
+                  const label = role ? role.name : String(val);
+                  return (
+                    <CustomChip variant="outlined" key={val} label={label} />
+                  );
+                })}
+              </Box>
+            )}
+          >
+            {roles.map((role) => (
+              <MenuItem key={role.id} value={role.id}>
+                {role.name}
+              </MenuItem>
             ))}
-          </Grid>
-        )}
+          </Select>
+        </FormControl>
 
-        {/* =============================
-            Dynamic Table Section
-           ============================= */}
+        <LocalizationProvider dateAdapter={AdapterDayjs}>
+          <DateTimePicker
+            label="Start Date & Time"
+            value={
+              form.start_date
+                ? dayjs.isDayjs(form.start_date)
+                  ? form.start_date
+                  : dayjs(form.start_date)
+                : null
+            }
+            onChange={setStartDate}
+            slotProps={{ textField: { fullWidth: true, margin: "dense" } }}
+          />
 
-        {showTable && (
-          <>
-            <Divider sx={{ my: 2 }} />
-
-            {/* Table rendering handled by reusable component */}
-            <ViewCommonDynamicTable data={payload} />
-          </>
-        )}
+          <DateTimePicker
+            label="Expiry Date & Time"
+            value={
+              form.expiry_date
+                ? dayjs.isDayjs(form.expiry_date)
+                  ? form.expiry_date
+                  : dayjs(form.expiry_date)
+                : null
+            }
+            onChange={setExpiryDate}
+            slotProps={{ textField: { fullWidth: true, margin: "dense" } }}
+          />
+          {errors.date && (
+            <Box sx={{ color: "error.main", mt: 1, fontSize: 13 }}>
+              {errors.date}
+            </Box>
+          )}
+        </LocalizationProvider>
       </DialogContent>
 
-      {/* ======================================================
-          Dialog Actions
-          Rendered only if actions exist
-         ====================================================== */}
-
-      {showActions && (
-        <>
-          <Divider />
-
-          <DialogActions sx={{ p: 2 }}>
-            {showDownload && (
-              <Button
-                onClick={handleDownload}
-                variant="contained"
-                sx={{
-                  textTransform: "none",
-                  borderRadius: 2,
-                  px: 3,
-                }}
-              >
-                Download
-              </Button>
-            )}
-          </DialogActions>
-        </>
-      )}
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={handleSave} disabled={isFormvalid}>
+          Save
+        </Button>
+      </DialogActions>
     </Dialog>
   );
-};
-
-export default ViewRequestDialog;
+}
