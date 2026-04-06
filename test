@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef } from "react";
 import {
   Box,
   Paper,
@@ -21,12 +21,11 @@ import {
 } from "@mui/material";
 import {
   PlayArrow,
-  Storage,
   Warning,
   Terminal,
   CleaningServices,
   ContentCopy,
-  FileDownload,
+  QueryStats,
 } from "@mui/icons-material";
 import { DataGrid, GridToolbar } from "@mui/x-data-grid";
 import { useMutation } from "@tanstack/react-query";
@@ -38,41 +37,72 @@ const AdminSupport = () => {
   const [query, setQuery] = useState("SELECT * FROM USERS");
   const [results, setResults] = useState({ rows: [], columns: [] });
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [execTime, setExecTime] = useState(null);
+
+  const timerRef = useRef();
 
   const showSnackbar = useCustomSnackbar();
   const { callApi } = useApi();
 
-  const isDestructive = useMemo(() => {
-    const q = query.toUpperCase();
-    return ["DELETE", "DROP", "TRUNCATE", "UPDATE", "ALTER"].some((k) =>
-      q.includes(k),
-    );
+  // 🔍 Query Type Detection
+  const queryType = useMemo(() => {
+    const q = query.trim().toUpperCase();
+
+    if (q.startsWith("SELECT")) return "READ";
+    if (["INSERT", "UPDATE", "DELETE"].some((k) => q.startsWith(k)))
+      return "WRITE";
+    if (["CREATE", "ALTER", "DROP", "TRUNCATE"].some((k) => q.startsWith(k)))
+      return "STRUCTURE";
+
+    return "UNKNOWN";
   }, [query]);
+
+  const isCritical = queryType === "STRUCTURE";
+
+  // 🎨 Mode Colors
+  const modeColor = {
+    READ: "success",
+    WRITE: "warning",
+    STRUCTURE: "error",
+    UNKNOWN: "default",
+  };
 
   const { mutate: executeSql, isPending } = useMutation({
     mutationFn: async (sql) => {
-      return await callApi(
-        "/TS/transaction-con/admin-execute",
-        { sql },
-        "POST",
-      );
+      timerRef.current = performance.now();
+      return await callApi("/TS/transaction-con/admin-execute", { sql }, "POST");
     },
     onSuccess: (data) => {
+      const end = performance.now();
+      setExecTime((end - timerRef.current).toFixed(0));
+
       const formattedCols = (data?.columns || []).map((col) => ({
         field: col.name,
         headerName: col.name.toUpperCase(),
         flex: 1,
-        minWidth: 150,
+        minWidth: 140,
       }));
-      setResults({ rows: data?.rows || [], columns: formattedCols });
-      showSnackbar("Query Successful", "success");
+
+      setResults({
+        rows: data?.rows || [],
+        columns: formattedCols,
+      });
+
+      showSnackbar("Operation Successful", "success");
     },
-    onError: (err) => showSnackbar(err?.message || "Execution Error", "error"),
+    onError: (err) => {
+      showSnackbar(err?.message || "Execution Error", "error");
+    },
   });
 
   const handleRun = () => {
     if (!query.trim()) return;
-    isDestructive ? setConfirmOpen(true) : executeSql(query);
+
+    if (isCritical) {
+      setConfirmOpen(true);
+    } else {
+      executeSql(query);
+    }
   };
 
   return (
@@ -81,21 +111,17 @@ const AdminSupport = () => {
         display: "flex",
         flexDirection: "column",
         height: "100vh",
-        bgcolor: theme.palette.background.default,
         p: 2,
         gap: 2,
+        bgcolor: theme.palette.background.default,
       }}
     >
-      {/* MERGED EDITOR & EXECUTE BAR */}
+      {/* HEADER / EDITOR */}
       <Paper
-        elevation={0}
         sx={{
-          display: "flex",
-          flexDirection: "column",
-          border: `1px solid ${theme.palette.divider}`,
           borderRadius: 2,
+          border: `1px solid ${theme.palette.divider}`,
           overflow: "hidden",
-          bgcolor: theme.palette.background.paper,
         }}
       >
         <Box
@@ -103,54 +129,48 @@ const AdminSupport = () => {
             px: 2,
             py: 1,
             display: "flex",
-            alignItems: "center",
             justifyContent: "space-between",
-            bgcolor: alpha(theme.palette.action.hover, 0.5),
-            borderBottom: `1px solid ${theme.palette.divider}`,
+            alignItems: "center",
+            bgcolor: alpha(theme.palette.primary.main, 0.05),
           }}
         >
           <Stack direction="row" spacing={1} alignItems="center">
             <Terminal fontSize="small" color="primary" />
             <Typography variant="caption" fontWeight="bold">
-              SQL COMMAND CENTER
+              DATA OPERATIONS CONSOLE
             </Typography>
-            {isDestructive && (
-              <Chip
-                label="DESTRUCTIVE"
-                size="small"
-                color="error"
-                variant="filled"
-                sx={{ height: 18, fontSize: 9 }}
-              />
-            )}
+
+            <Chip
+              label={queryType}
+              size="small"
+              color={modeColor[queryType]}
+            />
           </Stack>
 
           <Stack direction="row" spacing={1}>
-            <Tooltip title="Clear Content">
-              <IconButton size="small" onClick={() => setQuery("")}>
-                <CleaningServices fontSize="inherit" />
+            <Tooltip title="Clear">
+              <IconButton onClick={() => setQuery("")}>
+                <CleaningServices fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Tooltip title="Copy SQL">
+
+            <Tooltip title="Copy">
               <IconButton
-                size="small"
                 onClick={() => navigator.clipboard.writeText(query)}
               >
-                <ContentCopy fontSize="inherit" />
+                <ContentCopy fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+
             <Button
               variant="contained"
-              disableElevation
               size="small"
-              color={isDestructive ? "error" : "primary"}
               startIcon={<PlayArrow />}
+              color={modeColor[queryType]}
               onClick={handleRun}
               disabled={isPending}
-              sx={{ px: 2, fontWeight: "bold", textTransform: "none" }}
             >
-              Execute
+              Run
             </Button>
           </Stack>
         </Box>
@@ -167,95 +187,86 @@ const AdminSupport = () => {
             disableUnderline: true,
             sx: {
               fontFamily: "monospace",
-              fontSize: "14px",
+              fontSize: 14,
               p: 2,
-              color: theme.palette.text.primary,
             },
           }}
         />
       </Paper>
 
-      {/* RESULTS GRID WITH EXPORT */}
-      <Paper
-        elevation={0}
-        sx={{
-          flex: 1,
-          border: `1px solid ${theme.palette.divider}`,
-          overflow: "hidden",
-          position: "relative",
-          bgcolor: theme.palette.background.paper,
-          borderRadius: 2,
-        }}
-      >
-        {isPending && (
-          <LinearProgress
-            sx={{ position: "absolute", top: 0, width: "100%", zIndex: 1 }}
-          />
-        )}
+      {/* RESULT GRID */}
+      <Paper sx={{ flex: 1, borderRadius: 2, overflow: "hidden" }}>
+        {isPending && <LinearProgress />}
+
+        {/* STATUS BAR */}
+        <Box
+          sx={{
+            px: 2,
+            py: 0.5,
+            display: "flex",
+            justifyContent: "space-between",
+            bgcolor: alpha(theme.palette.action.hover, 0.3),
+          }}
+        >
+          <Typography variant="caption">
+            Rows: {results.rows.length}
+          </Typography>
+
+          {execTime && (
+            <Typography variant="caption">
+              Execution: {execTime} ms
+            </Typography>
+          )}
+        </Box>
+
         <DataGrid
           rows={results.rows}
           columns={results.columns}
-          getRowId={(row) => row.ID || row.id || Math.random()}
-          loading={isPending}
+          getRowId={(row) =>
+            row.ID || row.id || JSON.stringify(row)
+          }
           density="compact"
-          // GridToolbar includes "Export" button by default (CSV and Print)
+          disableRowSelectionOnClick
           slots={{ toolbar: GridToolbar }}
-          slotProps={{
-            toolbar: {
-              showQuickFilter: true,
-              printOptions: { disableToolbarButton: false },
-              csvOptions: { fileName: `sql_export_${new Date().getTime()}` },
-            },
-          }}
           sx={{
             border: "none",
             "& .MuiDataGrid-columnHeaders": {
-              bgcolor: alpha(theme.palette.action.hover, 0.3),
-              borderBottom: `1px solid ${theme.palette.divider}`,
-            },
-            "& .MuiDataGrid-footerContainer": {
-              borderTop: `1px solid ${theme.palette.divider}`,
-            },
-            "& .MuiDataGrid-toolbarContainer": {
-              p: 1,
-              borderBottom: `1px solid ${theme.palette.divider}`,
-              gap: 1,
+              position: "sticky",
+              top: 0,
+              zIndex: 1,
             },
           }}
         />
       </Paper>
 
-      {/* CONFIRMATION DIALOG */}
+      {/* CONFIRM */}
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
-        <DialogTitle
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            gap: 1,
-            color: theme.palette.error.main,
-          }}
-        >
-          <Warning /> Confirm Destructive Run
+        <DialogTitle color="error">
+          ⚠ Critical Operation
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Warning: This SQL contains data-modifying statements. Execute on
-            Production?
+            This action may permanently affect data or structure.
           </DialogContentText>
+
+          <Paper sx={{ p: 1, mt: 2, bgcolor: "#111", color: "#0f0" }}>
+            <Typography variant="caption">{query}</Typography>
+          </Paper>
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setConfirmOpen(false)} color="inherit">
-            Abort
+
+        <DialogActions>
+          <Button onClick={() => setConfirmOpen(false)}>
+            Cancel
           </Button>
           <Button
+            color="error"
+            variant="contained"
             onClick={() => {
               setConfirmOpen(false);
               executeSql(query);
             }}
-            variant="contained"
-            color="error"
           >
-            Proceed
+            Execute Anyway
           </Button>
         </DialogActions>
       </Dialog>
