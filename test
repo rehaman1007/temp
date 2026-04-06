@@ -1,3 +1,267 @@
+package com.fincore.transactions_service.dto;
+
+import jakarta.validation.constraints.NotNull;
+import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+
+
+@Getter
+@Setter
+@Data
+public class GetPayloadDTO{
+	
+	@NotNull(message="BranchCode cannot be null")
+	public String branch;
+	
+	@NotNull(message="currency cannot be null")
+	public String currency;
+	
+	@NotNull(message="cgl cannot be null")
+	public String cgl;
+	
+	@NotNull(message="fromDate cannot be null")
+	public String fromDate;
+	
+	@NotNull(message="toDate cannot be null")
+	public String toDate;
+
+
+	// --- Fields for Admin Support Screen ---
+
+	/**
+	 * Raw SQL query string sent from the React editor
+	 */
+	public String sql;
+
+	/**
+	 * Current page index for server-side pagination (starts at 0)
+	 */
+	public Integer page;
+
+	/**
+	 * Number of rows to fetch per page (e.g., 50 or 100)
+	 */
+	public Integer size;
+}
+/////////////////////
+
+package com.fincore.transactions_service.service;
+
+import java.io.IOException;
+import java.sql.ResultSetMetaData;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+
+import com.fincore.transactions_service.dto.GetPayloadDTO;
+import com.fincore.transactions_service.dto.GetResponseDTO;
+import com.fincore.transactions_service.model.GLBalance;
+import com.fincore.transactions_service.model.GlTransactions;
+import com.fincore.transactions_service.repository.GLBalanceRepository;
+import com.fincore.transactions_service.repository.GlTransactionsRepository;
+import com.fincore.transactions_service.service.utils.TransactionsExcelGenerator;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
+@Service("TransactionsService")
+@RequiredArgsConstructor
+public class TransactionsServiceImpl implements TransactionsService {
+
+	private final JdbcTemplate jdbcTemplate;
+
+	private final GlTransactionsRepository glTransactionsRepository;
+	private final GLBalanceRepository glBalanceRepository;
+
+	private static final int TRANSACTIONS_THRESHOLD = 2000;
+
+	@Override
+	public Map<String, Object> getTransactionsData(GetPayloadDTO getPayloadDTO) {
+		log.info("GetPayloadDTO>>>>" + getPayloadDTO);
+
+		String branch = getPayloadDTO.getBranch();
+		String currency = getPayloadDTO.getCurrency();
+		String cgl = getPayloadDTO.getCgl();
+		String fromDate = getPayloadDTO.getFromDate();
+		String toDate = getPayloadDTO.getToDate();
+
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+		LocalDate formattedFromDate = LocalDate.parse(fromDate, formatter);
+		LocalDate formattedToDate = LocalDate.parse(toDate, formatter);
+
+		LocalDate fromMinusOneDay = formattedFromDate.minusDays(1);
+
+		GLBalance openingGLBalance = glBalanceRepository.getGlBalanceData(fromMinusOneDay.format(formatter), branch,
+				currency, cgl);
+		GLBalance closingGLBalance = glBalanceRepository.getGlBalanceData(formattedToDate.format(formatter), branch,
+				currency, cgl);
+
+		List<GetResponseDTO> responseList = new ArrayList<>();
+		Map<String, Object> finalMap = new HashMap<>();
+
+		if (openingGLBalance != null && closingGLBalance != null) {
+
+			finalMap = new HashMap<>();
+			finalMap.put("openingBalance", openingGLBalance.getBalance());
+			finalMap.put("closingBalance", closingGLBalance.getBalance());
+
+			Long count = glTransactionsRepository.getDataCount(branch, currency, cgl, fromDate, toDate);
+
+			if (count <= TRANSACTIONS_THRESHOLD) {
+
+				List<GlTransactions> transactionsList = glTransactionsRepository.getData(branch, currency, cgl,
+						fromDate, toDate);
+
+				double runningBalance = openingGLBalance.getBalance();
+
+				for (GlTransactions individualTransaction : transactionsList) {
+					GetResponseDTO transactionDTO = new GetResponseDTO();
+
+					double transactionAmount = individualTransaction.getDebitAmount()
+							+ individualTransaction.getCreditAmount();
+
+					runningBalance += transactionAmount;
+
+					transactionDTO.setDate(formatter.format(individualTransaction.getTransactionDate()));
+					transactionDTO.setJournalNumber(individualTransaction.getJournalId());
+					transactionDTO.setParticulars(individualTransaction.getNarration());
+					transactionDTO.setCreditAmount(individualTransaction.getCreditAmount());
+					transactionDTO.setDebitAmount(individualTransaction.getDebitAmount());
+					transactionDTO.setBalance(runningBalance);
+
+					responseList.add(transactionDTO);
+				}
+				finalMap.put("transactions", responseList);
+			} else {
+				finalMap.put("count", count);
+			}
+		}
+		return finalMap;
+	}
+
+	@Override
+	public byte[] getTransactionsFile(GetPayloadDTO getPayloadDTO) throws IOException {
+		log.info("GetPayloadDTO>>>>" + getPayloadDTO);
+
+		String branch = getPayloadDTO.getBranch();
+		String currency = getPayloadDTO.getCurrency();
+		String cgl = getPayloadDTO.getCgl();
+		String fromDate = getPayloadDTO.getFromDate();
+		String toDate = getPayloadDTO.getToDate();
+
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+		LocalDate formattedFromDate = LocalDate.parse(fromDate, formatter);
+
+		LocalDate fromMinusOneDay = formattedFromDate.minusDays(1);
+
+		GLBalance openingGLBalance = glBalanceRepository.getGlBalanceData(fromMinusOneDay.format(formatter), branch,
+				currency, cgl);
+
+		if (openingGLBalance == null) {
+			return null;
+		}
+
+		List<GlTransactions> transactionsList = glTransactionsRepository.getData(branch, currency, cgl, fromDate,
+				toDate);
+
+		return TransactionsExcelGenerator.getFileContents(branch, currency, cgl, fromDate, toDate, transactionsList,
+				openingGLBalance.getBalance());
+	}
+
+	@Override
+	public Map<String, Object> executeAdminSql(GetPayloadDTO getPayloadDTO) {
+		String sql = getPayloadDTO.getSql().trim();
+		log.info("Executing Admin SQL with Pagination: {}", sql);
+
+		// Default pagination values if not provided by FE
+		int page = (getPayloadDTO.getPage() != null) ? getPayloadDTO.getPage() : 0;
+		int size = (getPayloadDTO.getSize() != null) ? getPayloadDTO.getSize() : 50;
+
+		// 1. Syntax Validation using EXPLAIN PLAN (Does not execute the actual query)
+		try {
+			jdbcTemplate.execute("EXPLAIN PLAN FOR " + sql);
+		} catch (DataAccessException e) {
+			log.error("SQL Syntax Error: {}", e.getMostSpecificCause().getMessage());
+			return Map.of(
+					"error", true,
+					"message", "Oracle Syntax Error: " + e.getMostSpecificCause().getMessage()
+			);
+		}
+
+		boolean isSelect = sql.toUpperCase().startsWith("SELECT");
+
+		if (isSelect) {
+			// 2. Server-Side Pagination (Oracle 12c+ Syntax)
+			String paginatedSql = String.format("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
+					sql, (page * size), size);
+
+			return jdbcTemplate.query(paginatedSql, rs -> {
+				ResultSetMetaData metaData = rs.getMetaData();
+				int columnCount = metaData.getColumnCount();
+
+				// Prepare Columns
+				List<Map<String, String>> columns = new ArrayList<>();
+				for (int i = 1; i <= columnCount; i++) {
+					Map<String, String> col = new HashMap<>();
+					col.put("name", metaData.getColumnLabel(i));
+					columns.add(col);
+				}
+
+				// Prepare Rows
+				List<Map<String, Object>> rows = new ArrayList<>();
+				while (rs.next()) {
+					Map<String, Object> row = new HashMap<>();
+					for (int i = 1; i <= columnCount; i++) {
+						Object value = rs.getObject(i);
+
+						// Serialization & BLOB Safety
+						if (value instanceof java.io.InputStream) {
+							value = "[BINARY/BLOB DATA]";
+						} else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) {
+							value = value.toString();
+						}
+
+						row.put(metaData.getColumnLabel(i), value);
+					}
+					rows.add(row);
+				}
+
+				Map<String, Object> result = new HashMap<>();
+				result.put("columns", columns);
+				result.put("rows", rows);
+				result.put("page", page);
+				result.put("size", size);
+				result.put("error", false);
+				return result;
+			});
+		} else {
+			// For DELETE/TRUNCATE/UPDATE
+			int affectedRows = jdbcTemplate.update(sql);
+
+			List<Map<String, String>> columns = List.of(Map.of("name", "RESULT"));
+			List<Map<String, Object>> rows = List.of(Map.of("RESULT", "Success: " + affectedRows + " rows affected"));
+
+			Map<String, Object> result = new HashMap<>();
+			result.put("columns", columns);
+			result.put("rows", rows);
+			result.put("error", false);
+			return result;
+		}
+	}
+}
+
+\\\\\\\\\\\\\\\
 import React, { useState, useMemo, useRef } from "react";
 import {
   Box,
@@ -34,7 +298,7 @@ import useCustomSnackbar from "../../utils/useCustomSnackbar";
 const AdminSupport = () => {
   const theme = useTheme();
 
-  const [query, setQuery] = useState("SELECT * FROM USERS_MASTER");
+  const [query, setQuery] = useState("SELECT * FROM USERS");
   const [results, setResults] = useState({
     rows: [],
     columns: [],
@@ -54,16 +318,14 @@ const AdminSupport = () => {
   const { callApi } = useApi();
   const showSnackbar = useCustomSnackbar();
 
-  // 🧠 Query Type Detection
+  // Query Type Detection
   const queryType = useMemo(() => {
     const q = query.trim().toUpperCase();
 
     if (q.startsWith("SELECT")) return "READ";
     if (["INSERT", "UPDATE", "DELETE"].some((k) => q.startsWith(k)))
       return "WRITE";
-    if (["CREATE", "ALTER", "DROP", "TRUNCATE"].some((k) =>
-      q.startsWith(k)
-    ))
+    if (["CREATE", "ALTER", "DROP", "TRUNCATE"].some((k) => q.startsWith(k)))
       return "STRUCTURE";
 
     return "UNKNOWN";
@@ -79,15 +341,15 @@ const AdminSupport = () => {
     UNKNOWN: "default",
   };
 
-  // 🚀 API CALL
+  // API CALL
   const { mutate: executeSql, isPending } = useMutation({
     mutationFn: async ({ sql, page, size }) => {
       timerRef.current = performance.now();
 
       return await callApi(
-        "/api/transaction-con/admin-execute",
+        "/TS/transaction-con/admin-execute",
         { sql, page, size },
-        "POST"
+        "POST",
       );
     },
 
@@ -121,7 +383,7 @@ const AdminSupport = () => {
     },
   });
 
-  // ▶️ Execute
+  //  Execute
   const handleRun = () => {
     if (!query.trim()) return;
 
@@ -141,11 +403,11 @@ const AdminSupport = () => {
     });
   };
 
-  // 📄 Pagination Change
+  // Pagination Change
   const handlePaginationChange = (newModel) => {
     setPaginationModel(newModel);
 
-    // ⚠️ Only paginate SELECT queries
+    // Only paginate SELECT queries
     if (!isReadQuery) return;
 
     executeSql({
@@ -166,7 +428,7 @@ const AdminSupport = () => {
         bgcolor: theme.palette.background.default,
       }}
     >
-      {/* 🧾 HEADER */}
+      {/* HEADER */}
       <Paper sx={{ borderRadius: 2, overflow: "hidden" }}>
         <Box
           sx={{
@@ -183,11 +445,7 @@ const AdminSupport = () => {
               DATA OPERATIONS CONSOLE
             </Typography>
 
-            <Chip
-              label={queryType}
-              size="small"
-              color={modeColor[queryType]}
-            />
+            <Chip label={queryType} size="small" color={modeColor[queryType]} />
           </Stack>
 
           <Stack direction="row" spacing={1}>
@@ -198,9 +456,7 @@ const AdminSupport = () => {
             </Tooltip>
 
             <Tooltip title="Copy">
-              <IconButton
-                onClick={() => navigator.clipboard.writeText(query)}
-              >
+              <IconButton onClick={() => navigator.clipboard.writeText(query)}>
                 <ContentCopy fontSize="small" />
               </IconButton>
             </Tooltip>
@@ -233,7 +489,7 @@ const AdminSupport = () => {
         />
       </Paper>
 
-      {/* 📊 GRID */}
+      {/* GRID */}
       <Paper sx={{ flex: 1, borderRadius: 2, overflow: "hidden" }}>
         {isPending && <LinearProgress />}
 
@@ -251,9 +507,7 @@ const AdminSupport = () => {
           </Typography>
 
           {execTime && (
-            <Typography variant="caption">
-              Execution: {execTime} ms
-            </Typography>
+            <Typography variant="caption">Execution: {execTime} ms</Typography>
           )}
         </Box>
 
@@ -281,7 +535,7 @@ const AdminSupport = () => {
         />
       </Paper>
 
-      {/* ⚠ CONFIRM */}
+      {/* CONFIRM */}
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
         <DialogTitle color="error">Critical Operation</DialogTitle>
 
