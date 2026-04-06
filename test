@@ -1,267 +1,3 @@
-package com.fincore.transactions_service.dto;
-
-import jakarta.validation.constraints.NotNull;
-import lombok.Data;
-import lombok.Getter;
-import lombok.Setter;
-
-
-@Getter
-@Setter
-@Data
-public class GetPayloadDTO{
-	
-	@NotNull(message="BranchCode cannot be null")
-	public String branch;
-	
-	@NotNull(message="currency cannot be null")
-	public String currency;
-	
-	@NotNull(message="cgl cannot be null")
-	public String cgl;
-	
-	@NotNull(message="fromDate cannot be null")
-	public String fromDate;
-	
-	@NotNull(message="toDate cannot be null")
-	public String toDate;
-
-
-	// --- Fields for Admin Support Screen ---
-
-	/**
-	 * Raw SQL query string sent from the React editor
-	 */
-	public String sql;
-
-	/**
-	 * Current page index for server-side pagination (starts at 0)
-	 */
-	public Integer page;
-
-	/**
-	 * Number of rows to fetch per page (e.g., 50 or 100)
-	 */
-	public Integer size;
-}
-/////////////////////
-
-package com.fincore.transactions_service.service;
-
-import java.io.IOException;
-import java.sql.ResultSetMetaData;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
-import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-
-import com.fincore.transactions_service.dto.GetPayloadDTO;
-import com.fincore.transactions_service.dto.GetResponseDTO;
-import com.fincore.transactions_service.model.GLBalance;
-import com.fincore.transactions_service.model.GlTransactions;
-import com.fincore.transactions_service.repository.GLBalanceRepository;
-import com.fincore.transactions_service.repository.GlTransactionsRepository;
-import com.fincore.transactions_service.service.utils.TransactionsExcelGenerator;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-@Slf4j
-@Service("TransactionsService")
-@RequiredArgsConstructor
-public class TransactionsServiceImpl implements TransactionsService {
-
-	private final JdbcTemplate jdbcTemplate;
-
-	private final GlTransactionsRepository glTransactionsRepository;
-	private final GLBalanceRepository glBalanceRepository;
-
-	private static final int TRANSACTIONS_THRESHOLD = 2000;
-
-	@Override
-	public Map<String, Object> getTransactionsData(GetPayloadDTO getPayloadDTO) {
-		log.info("GetPayloadDTO>>>>" + getPayloadDTO);
-
-		String branch = getPayloadDTO.getBranch();
-		String currency = getPayloadDTO.getCurrency();
-		String cgl = getPayloadDTO.getCgl();
-		String fromDate = getPayloadDTO.getFromDate();
-		String toDate = getPayloadDTO.getToDate();
-
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
-
-		LocalDate formattedFromDate = LocalDate.parse(fromDate, formatter);
-		LocalDate formattedToDate = LocalDate.parse(toDate, formatter);
-
-		LocalDate fromMinusOneDay = formattedFromDate.minusDays(1);
-
-		GLBalance openingGLBalance = glBalanceRepository.getGlBalanceData(fromMinusOneDay.format(formatter), branch,
-				currency, cgl);
-		GLBalance closingGLBalance = glBalanceRepository.getGlBalanceData(formattedToDate.format(formatter), branch,
-				currency, cgl);
-
-		List<GetResponseDTO> responseList = new ArrayList<>();
-		Map<String, Object> finalMap = new HashMap<>();
-
-		if (openingGLBalance != null && closingGLBalance != null) {
-
-			finalMap = new HashMap<>();
-			finalMap.put("openingBalance", openingGLBalance.getBalance());
-			finalMap.put("closingBalance", closingGLBalance.getBalance());
-
-			Long count = glTransactionsRepository.getDataCount(branch, currency, cgl, fromDate, toDate);
-
-			if (count <= TRANSACTIONS_THRESHOLD) {
-
-				List<GlTransactions> transactionsList = glTransactionsRepository.getData(branch, currency, cgl,
-						fromDate, toDate);
-
-				double runningBalance = openingGLBalance.getBalance();
-
-				for (GlTransactions individualTransaction : transactionsList) {
-					GetResponseDTO transactionDTO = new GetResponseDTO();
-
-					double transactionAmount = individualTransaction.getDebitAmount()
-							+ individualTransaction.getCreditAmount();
-
-					runningBalance += transactionAmount;
-
-					transactionDTO.setDate(formatter.format(individualTransaction.getTransactionDate()));
-					transactionDTO.setJournalNumber(individualTransaction.getJournalId());
-					transactionDTO.setParticulars(individualTransaction.getNarration());
-					transactionDTO.setCreditAmount(individualTransaction.getCreditAmount());
-					transactionDTO.setDebitAmount(individualTransaction.getDebitAmount());
-					transactionDTO.setBalance(runningBalance);
-
-					responseList.add(transactionDTO);
-				}
-				finalMap.put("transactions", responseList);
-			} else {
-				finalMap.put("count", count);
-			}
-		}
-		return finalMap;
-	}
-
-	@Override
-	public byte[] getTransactionsFile(GetPayloadDTO getPayloadDTO) throws IOException {
-		log.info("GetPayloadDTO>>>>" + getPayloadDTO);
-
-		String branch = getPayloadDTO.getBranch();
-		String currency = getPayloadDTO.getCurrency();
-		String cgl = getPayloadDTO.getCgl();
-		String fromDate = getPayloadDTO.getFromDate();
-		String toDate = getPayloadDTO.getToDate();
-
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
-
-		LocalDate formattedFromDate = LocalDate.parse(fromDate, formatter);
-
-		LocalDate fromMinusOneDay = formattedFromDate.minusDays(1);
-
-		GLBalance openingGLBalance = glBalanceRepository.getGlBalanceData(fromMinusOneDay.format(formatter), branch,
-				currency, cgl);
-
-		if (openingGLBalance == null) {
-			return null;
-		}
-
-		List<GlTransactions> transactionsList = glTransactionsRepository.getData(branch, currency, cgl, fromDate,
-				toDate);
-
-		return TransactionsExcelGenerator.getFileContents(branch, currency, cgl, fromDate, toDate, transactionsList,
-				openingGLBalance.getBalance());
-	}
-
-	@Override
-	public Map<String, Object> executeAdminSql(GetPayloadDTO getPayloadDTO) {
-		String sql = getPayloadDTO.getSql().trim();
-		log.info("Executing Admin SQL with Pagination: {}", sql);
-
-		// Default pagination values if not provided by FE
-		int page = (getPayloadDTO.getPage() != null) ? getPayloadDTO.getPage() : 0;
-		int size = (getPayloadDTO.getSize() != null) ? getPayloadDTO.getSize() : 50;
-
-		// 1. Syntax Validation using EXPLAIN PLAN (Does not execute the actual query)
-		try {
-			jdbcTemplate.execute("EXPLAIN PLAN FOR " + sql);
-		} catch (DataAccessException e) {
-			log.error("SQL Syntax Error: {}", e.getMostSpecificCause().getMessage());
-			return Map.of(
-					"error", true,
-					"message", "Oracle Syntax Error: " + e.getMostSpecificCause().getMessage()
-			);
-		}
-
-		boolean isSelect = sql.toUpperCase().startsWith("SELECT");
-
-		if (isSelect) {
-			// 2. Server-Side Pagination (Oracle 12c+ Syntax)
-			String paginatedSql = String.format("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
-					sql, (page * size), size);
-
-			return jdbcTemplate.query(paginatedSql, rs -> {
-				ResultSetMetaData metaData = rs.getMetaData();
-				int columnCount = metaData.getColumnCount();
-
-				// Prepare Columns
-				List<Map<String, String>> columns = new ArrayList<>();
-				for (int i = 1; i <= columnCount; i++) {
-					Map<String, String> col = new HashMap<>();
-					col.put("name", metaData.getColumnLabel(i));
-					columns.add(col);
-				}
-
-				// Prepare Rows
-				List<Map<String, Object>> rows = new ArrayList<>();
-				while (rs.next()) {
-					Map<String, Object> row = new HashMap<>();
-					for (int i = 1; i <= columnCount; i++) {
-						Object value = rs.getObject(i);
-
-						// Serialization & BLOB Safety
-						if (value instanceof java.io.InputStream) {
-							value = "[BINARY/BLOB DATA]";
-						} else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) {
-							value = value.toString();
-						}
-
-						row.put(metaData.getColumnLabel(i), value);
-					}
-					rows.add(row);
-				}
-
-				Map<String, Object> result = new HashMap<>();
-				result.put("columns", columns);
-				result.put("rows", rows);
-				result.put("page", page);
-				result.put("size", size);
-				result.put("error", false);
-				return result;
-			});
-		} else {
-			// For DELETE/TRUNCATE/UPDATE
-			int affectedRows = jdbcTemplate.update(sql);
-
-			List<Map<String, String>> columns = List.of(Map.of("name", "RESULT"));
-			List<Map<String, Object>> rows = List.of(Map.of("RESULT", "Success: " + affectedRows + " rows affected"));
-
-			Map<String, Object> result = new HashMap<>();
-			result.put("columns", columns);
-			result.put("rows", rows);
-			result.put("error", false);
-			return result;
-		}
-	}
-}
-
-\\\\\\\\\\\\\\\
 import React, { useState, useMemo, useRef } from "react";
 import {
   Box,
@@ -269,7 +5,6 @@ import {
   TextField,
   Button,
   Typography,
-  Divider,
   IconButton,
   Tooltip,
   Stack,
@@ -314,43 +49,25 @@ const AdminSupport = () => {
   const [execTime, setExecTime] = useState(null);
 
   const timerRef = useRef();
-
   const { callApi } = useApi();
   const showSnackbar = useCustomSnackbar();
 
-  // Query Type Detection
   const queryType = useMemo(() => {
     const q = query.trim().toUpperCase();
-
     if (q.startsWith("SELECT")) return "READ";
-    if (["INSERT", "UPDATE", "DELETE"].some((k) => q.startsWith(k)))
-      return "WRITE";
+    if (["INSERT", "UPDATE", "DELETE"].some((k) => q.startsWith(k))) return "WRITE";
     if (["CREATE", "ALTER", "DROP", "TRUNCATE"].some((k) => q.startsWith(k)))
       return "STRUCTURE";
-
     return "UNKNOWN";
   }, [query]);
 
   const isCritical = queryType === "STRUCTURE";
   const isReadQuery = queryType === "READ";
 
-  const modeColor = {
-    READ: "success",
-    WRITE: "warning",
-    STRUCTURE: "error",
-    UNKNOWN: "default",
-  };
-
-  // API CALL
   const { mutate: executeSql, isPending } = useMutation({
     mutationFn: async ({ sql, page, size }) => {
       timerRef.current = performance.now();
-
-      return await callApi(
-        "/TS/transaction-con/admin-execute",
-        { sql, page, size },
-        "POST",
-      );
+      return await callApi("/TS/transaction-con/admin-execute", { sql, page, size }, "POST");
     },
 
     onSuccess: (data) => {
@@ -362,208 +79,113 @@ const AdminSupport = () => {
         return;
       }
 
-      const formattedCols = (data?.columns || []).map((col) => ({
+      const cols = (data?.columns || []).map((col) => ({
         field: col.name,
         headerName: col.name,
         flex: 1,
         minWidth: 140,
       }));
 
+      const total = data?.total ?? data?.rows?.length ?? 0;
+
       setResults({
         rows: data?.rows || [],
-        columns: formattedCols,
-        total: data?.total || 1000000, // fallback if backend doesn’t send
+        columns: cols,
+        total,
       });
-
-      showSnackbar("Operation Successful", "success");
-    },
-
-    onError: (err) => {
-      showSnackbar(err?.message || "Execution Error", "error");
     },
   });
 
-  //  Execute
   const handleRun = () => {
-    if (!query.trim()) return;
+    const init = { page: 0, pageSize: paginationModel.pageSize };
+    setPaginationModel(init);
 
-    // reset pagination on new query
-    const initialPage = { page: 0, pageSize: paginationModel.pageSize };
-    setPaginationModel(initialPage);
+    if (isCritical) return setConfirmOpen(true);
 
-    if (isCritical) {
-      setConfirmOpen(true);
-      return;
-    }
-
-    executeSql({
-      sql: query,
-      page: 0,
-      size: initialPage.pageSize,
-    });
+    executeSql({ sql: query, page: 0, size: init.pageSize });
   };
 
-  // Pagination Change
-  const handlePaginationChange = (newModel) => {
-    setPaginationModel(newModel);
+  const handlePaginationChange = (model) => {
+    setPaginationModel(model);
 
-    // Only paginate SELECT queries
     if (!isReadQuery) return;
+
+    const maxPage = Math.ceil(results.total / model.pageSize) - 1;
+    if (model.page > maxPage) return;
 
     executeSql({
       sql: query,
-      page: newModel.page,
-      size: newModel.pageSize,
+      page: model.page,
+      size: model.pageSize,
     });
   };
 
   return (
-    <Box
-      sx={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100vh",
-        p: 2,
-        gap: 2,
-        bgcolor: theme.palette.background.default,
-      }}
-    >
-      {/* HEADER */}
-      <Paper sx={{ borderRadius: 2, overflow: "hidden" }}>
-        <Box
-          sx={{
-            px: 2,
-            py: 1,
-            display: "flex",
-            justifyContent: "space-between",
-            bgcolor: alpha(theme.palette.primary.main, 0.05),
-          }}
-        >
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Terminal fontSize="small" />
-            <Typography variant="caption" fontWeight="bold">
-              DATA OPERATIONS CONSOLE
-            </Typography>
-
-            <Chip label={queryType} size="small" color={modeColor[queryType]} />
+    <Box sx={{ display: "flex", flexDirection: "column", height: "100vh", p: 2, gap: 2 }}>
+      <Paper>
+        <Stack direction="row" justifyContent="space-between" p={1}>
+          <Stack direction="row" spacing={1}>
+            <Terminal />
+            <Chip label={queryType} />
           </Stack>
 
           <Stack direction="row" spacing={1}>
-            <Tooltip title="Clear">
-              <IconButton onClick={() => setQuery("")}>
-                <CleaningServices fontSize="small" />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title="Copy">
-              <IconButton onClick={() => navigator.clipboard.writeText(query)}>
-                <ContentCopy fontSize="small" />
-              </IconButton>
-            </Tooltip>
-
-            <Button
-              variant="contained"
-              size="small"
-              startIcon={<PlayArrow />}
-              color={modeColor[queryType]}
-              onClick={handleRun}
-              disabled={isPending}
-            >
+            <IconButton onClick={() => setQuery("")}>
+              <CleaningServices />
+            </IconButton>
+            <IconButton onClick={() => navigator.clipboard.writeText(query)}>
+              <ContentCopy />
+            </IconButton>
+            <Button onClick={handleRun} startIcon={<PlayArrow />}>
               Run
             </Button>
           </Stack>
-        </Box>
+        </Stack>
 
         <TextField
           multiline
           fullWidth
-          rows={6}
+          rows={5}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.ctrlKey && e.key === "Enter" && handleRun()}
-          variant="standard"
-          InputProps={{
-            disableUnderline: true,
-            sx: { fontFamily: "monospace", p: 2 },
-          }}
         />
       </Paper>
 
-      {/* GRID */}
-      <Paper sx={{ flex: 1, borderRadius: 2, overflow: "hidden" }}>
+      <Paper sx={{ flex: 1 }}>
         {isPending && <LinearProgress />}
 
-        {/* STATUS BAR */}
-        <Box
-          sx={{
-            px: 2,
-            py: 0.5,
-            display: "flex",
-            justifyContent: "space-between",
-          }}
-        >
-          <Typography variant="caption">
-            Rows Loaded: {results.rows.length}
-          </Typography>
-
-          {execTime && (
-            <Typography variant="caption">Execution: {execTime} ms</Typography>
-          )}
-        </Box>
+        <Typography variant="caption" p={1}>
+          Total: {results.total} | Loaded: {results.rows.length}
+        </Typography>
 
         <DataGrid
           rows={results.rows}
           columns={results.columns}
-          loading={isPending}
-          getRowId={(row) => row.ID || row.id || JSON.stringify(row)}
-          paginationMode="server"
           rowCount={results.total}
+          paginationMode={results.total > paginationModel.pageSize ? "server" : "client"}
           paginationModel={paginationModel}
           onPaginationModelChange={handlePaginationChange}
           pageSizeOptions={[25, 50, 100]}
-          density="compact"
-          disableRowSelectionOnClick
+          getRowId={(row) => row.ID || JSON.stringify(row)}
           slots={{ toolbar: GridToolbar }}
-          sx={{
-            border: "none",
-            "& .MuiDataGrid-columnHeaders": {
-              position: "sticky",
-              top: 0,
-              zIndex: 1,
-            },
-          }}
         />
       </Paper>
 
-      {/* CONFIRM */}
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
-        <DialogTitle color="error">Critical Operation</DialogTitle>
-
+        <DialogTitle>Critical Operation</DialogTitle>
         <DialogContent>
-          <DialogContentText>
-            This action may permanently modify data or structure.
-          </DialogContentText>
-
-          <Paper sx={{ p: 1, mt: 2, bgcolor: "#111", color: "#0f0" }}>
-            <Typography variant="caption">{query}</Typography>
-          </Paper>
+          <DialogContentText>{query}</DialogContentText>
         </DialogContent>
-
         <DialogActions>
           <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
           <Button
             color="error"
-            variant="contained"
             onClick={() => {
               setConfirmOpen(false);
-              executeSql({
-                sql: query,
-                page: 0,
-                size: paginationModel.pageSize,
-              });
+              executeSql({ sql: query, page: 0, size: paginationModel.pageSize });
             }}
           >
-            Execute Anyway
+            Execute
           </Button>
         </DialogActions>
       </Dialog>
@@ -572,3 +194,111 @@ const AdminSupport = () => {
 };
 
 export default AdminSupport;
+
+@Override
+public Map<String, Object> executeAdminSql(GetPayloadDTO getPayloadDTO) {
+
+    String sql = getPayloadDTO.getSql().trim();
+    log.info("Executing Admin SQL with Pagination: {}", sql);
+
+    int page = (getPayloadDTO.getPage() != null) ? getPayloadDTO.getPage() : 0;
+    int size = (getPayloadDTO.getSize() != null) ? getPayloadDTO.getSize() : 50;
+
+    // 🔍 Syntax validation
+    try {
+        jdbcTemplate.execute("EXPLAIN PLAN FOR " + sql);
+    } catch (DataAccessException e) {
+        return Map.of(
+            "error", true,
+            "message", "Oracle Syntax Error: " + e.getMostSpecificCause().getMessage()
+        );
+    }
+
+    boolean isSelect = sql.toUpperCase().startsWith("SELECT");
+
+    if (isSelect) {
+
+        try {
+            // 🔥 COUNT QUERY
+            String countSql = "SELECT COUNT(*) FROM (" + sql + ")";
+            Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+
+            if (total == null) total = 0;
+
+            // 🚫 No data case
+            if (total == 0) {
+                return Map.of(
+                    "columns", new ArrayList<>(),
+                    "rows", new ArrayList<>(),
+                    "total", 0,
+                    "page", page,
+                    "size", size,
+                    "error", false
+                );
+            }
+
+            // 🔥 PAGINATION (Oracle 12c+)
+            String paginatedSql = String.format(
+                "SELECT * FROM (%s) OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
+                sql,
+                page * size,
+                size
+            );
+
+            return jdbcTemplate.query(paginatedSql, rs -> {
+
+                ResultSetMetaData metaData = rs.getMetaData();
+                int columnCount = metaData.getColumnCount();
+
+                List<Map<String, String>> columns = new ArrayList<>();
+                for (int i = 1; i <= columnCount; i++) {
+                    columns.add(Map.of("name", metaData.getColumnLabel(i)));
+                }
+
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new HashMap<>();
+
+                    for (int i = 1; i <= columnCount; i++) {
+                        Object value = rs.getObject(i);
+
+                        if (value instanceof java.io.InputStream) {
+                            value = "[BLOB]";
+                        }
+
+                        row.put(metaData.getColumnLabel(i), value);
+                    }
+
+                    rows.add(row);
+                }
+
+                return Map.of(
+                    "columns", columns,
+                    "rows", rows,
+                    "total", total,
+                    "page", page,
+                    "size", size,
+                    "error", false
+                );
+            });
+
+        } catch (Exception e) {
+            log.error("Execution Error", e);
+            return Map.of(
+                "error", true,
+                "message", "Execution failed: " + e.getMessage()
+            );
+        }
+
+    } else {
+        // Non-select queries
+        int affected = jdbcTemplate.update(sql);
+
+        return Map.of(
+            "columns", List.of(Map.of("name", "RESULT")),
+            "rows", List.of(Map.of("RESULT", "Success: " + affected + " rows affected")),
+            "total", 1,
+            "error", false
+        );
+    }
+}
