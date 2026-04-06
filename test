@@ -1,55 +1,320 @@
-const AdminSupport = () => {
-  const [paginationModel, setPaginationModel] = useState({ page: 0, pageSize: 50 });
-  const [query, setQuery] = useState("SELECT * FROM USERS_MASTER");
-  const [results, setResults] = useState({ rows: [], columns: [] });
+import React, { useState, useMemo, useRef } from "react";
+import {
+  Box,
+  Paper,
+  TextField,
+  Button,
+  Typography,
+  Divider,
+  IconButton,
+  Tooltip,
+  Stack,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Chip,
+  LinearProgress,
+  useTheme,
+  alpha,
+} from "@mui/material";
+import {
+  PlayArrow,
+  Warning,
+  Terminal,
+  CleaningServices,
+  ContentCopy,
+} from "@mui/icons-material";
+import { DataGrid, GridToolbar } from "@mui/x-data-grid";
+import { useMutation } from "@tanstack/react-query";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
+const AdminSupport = () => {
+  const theme = useTheme();
+
+  const [query, setQuery] = useState("SELECT * FROM USERS_MASTER");
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 50,
+  });
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [execTime, setExecTime] = useState(null);
+
+  const timerRef = useRef();
+
+  const { callApi } = useApi();
+  const showSnackbar = useCustomSnackbar();
+
+  // 🧠 Query Type Detection
+  const queryType = useMemo(() => {
+    const q = query.trim().toUpperCase();
+
+    if (q.startsWith("SELECT")) return "READ";
+    if (["INSERT", "UPDATE", "DELETE"].some((k) => q.startsWith(k)))
+      return "WRITE";
+    if (["CREATE", "ALTER", "DROP", "TRUNCATE"].some((k) =>
+      q.startsWith(k)
+    ))
+      return "STRUCTURE";
+
+    return "UNKNOWN";
+  }, [query]);
+
+  const isCritical = queryType === "STRUCTURE";
+  const isReadQuery = queryType === "READ";
+
+  const modeColor = {
+    READ: "success",
+    WRITE: "warning",
+    STRUCTURE: "error",
+    UNKNOWN: "default",
+  };
+
+  // 🚀 API CALL
   const { mutate: executeSql, isPending } = useMutation({
     mutationFn: async ({ sql, page, size }) => {
-      return await callApi("/api/transaction-con/admin-execute", { 
-        sql, 
-        page, 
-        size 
-      }, "POST");
+      timerRef.current = performance.now();
+
+      return await callApi(
+        "/api/transaction-con/admin-execute",
+        { sql, page, size },
+        "POST"
+      );
     },
+
     onSuccess: (data) => {
-      if (data.error) {
-        showSnackbar(data.message, "error"); // Shows Oracle Syntax Error
+      const end = performance.now();
+      setExecTime((end - timerRef.current).toFixed(0));
+
+      if (data?.error) {
+        showSnackbar(data.message, "error");
         return;
       }
-      
-      // Map columns...
-      const formattedCols = (data?.columns || []).map(col => ({
+
+      const formattedCols = (data?.columns || []).map((col) => ({
         field: col.name,
         headerName: col.name,
         flex: 1,
-        minWidth: 150,
+        minWidth: 140,
       }));
-      
-      setResults({ rows: data?.rows || [], columns: formattedCols });
-    }
+
+      setResults({
+        rows: data?.rows || [],
+        columns: formattedCols,
+        total: data?.total || 1000000, // fallback if backend doesn’t send
+      });
+
+      showSnackbar("Operation Successful", "success");
+    },
+
+    onError: (err) => {
+      showSnackbar(err?.message || "Execution Error", "error");
+    },
   });
 
-  // Re-run when page changes
+  // ▶️ Execute
+  const handleRun = () => {
+    if (!query.trim()) return;
+
+    // reset pagination on new query
+    const initialPage = { page: 0, pageSize: paginationModel.pageSize };
+    setPaginationModel(initialPage);
+
+    if (isCritical) {
+      setConfirmOpen(true);
+      return;
+    }
+
+    executeSql({
+      sql: query,
+      page: 0,
+      size: initialPage.pageSize,
+    });
+  };
+
+  // 📄 Pagination Change
   const handlePaginationChange = (newModel) => {
     setPaginationModel(newModel);
-    executeSql({ sql: query, page: newModel.page, size: newModel.pageSize });
+
+    // ⚠️ Only paginate SELECT queries
+    if (!isReadQuery) return;
+
+    executeSql({
+      sql: query,
+      page: newModel.page,
+      size: newModel.pageSize,
+    });
   };
 
   return (
-    <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', p: 2, gap: 2 }}>
-      {/* ... Editor Section ... */}
-      
-      <DataGrid
-        rows={results.rows}
-        columns={results.columns}
-        loading={isPending}
-        paginationMode="server" // Crucial for large data
-        rowCount={1000000} // You can implement a count query for total rows
-        paginationModel={paginationModel}
-        onPaginationModelChange={handlePaginationChange}
-        pageSizeOptions={[25, 50, 100]}
-        // ... styling ...
-      />
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        p: 2,
+        gap: 2,
+        bgcolor: theme.palette.background.default,
+      }}
+    >
+      {/* 🧾 HEADER */}
+      <Paper sx={{ borderRadius: 2, overflow: "hidden" }}>
+        <Box
+          sx={{
+            px: 2,
+            py: 1,
+            display: "flex",
+            justifyContent: "space-between",
+            bgcolor: alpha(theme.palette.primary.main, 0.05),
+          }}
+        >
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Terminal fontSize="small" />
+            <Typography variant="caption" fontWeight="bold">
+              DATA OPERATIONS CONSOLE
+            </Typography>
+
+            <Chip
+              label={queryType}
+              size="small"
+              color={modeColor[queryType]}
+            />
+          </Stack>
+
+          <Stack direction="row" spacing={1}>
+            <Tooltip title="Clear">
+              <IconButton onClick={() => setQuery("")}>
+                <CleaningServices fontSize="small" />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title="Copy">
+              <IconButton
+                onClick={() => navigator.clipboard.writeText(query)}
+              >
+                <ContentCopy fontSize="small" />
+              </IconButton>
+            </Tooltip>
+
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={<PlayArrow />}
+              color={modeColor[queryType]}
+              onClick={handleRun}
+              disabled={isPending}
+            >
+              Run
+            </Button>
+          </Stack>
+        </Box>
+
+        <TextField
+          multiline
+          fullWidth
+          rows={6}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.ctrlKey && e.key === "Enter" && handleRun()}
+          variant="standard"
+          InputProps={{
+            disableUnderline: true,
+            sx: { fontFamily: "monospace", p: 2 },
+          }}
+        />
+      </Paper>
+
+      {/* 📊 GRID */}
+      <Paper sx={{ flex: 1, borderRadius: 2, overflow: "hidden" }}>
+        {isPending && <LinearProgress />}
+
+        {/* STATUS BAR */}
+        <Box
+          sx={{
+            px: 2,
+            py: 0.5,
+            display: "flex",
+            justifyContent: "space-between",
+          }}
+        >
+          <Typography variant="caption">
+            Rows Loaded: {results.rows.length}
+          </Typography>
+
+          {execTime && (
+            <Typography variant="caption">
+              Execution: {execTime} ms
+            </Typography>
+          )}
+        </Box>
+
+        <DataGrid
+          rows={results.rows}
+          columns={results.columns}
+          loading={isPending}
+          getRowId={(row) => row.ID || row.id || JSON.stringify(row)}
+          paginationMode="server"
+          rowCount={results.total}
+          paginationModel={paginationModel}
+          onPaginationModelChange={handlePaginationChange}
+          pageSizeOptions={[25, 50, 100]}
+          density="compact"
+          disableRowSelectionOnClick
+          slots={{ toolbar: GridToolbar }}
+          sx={{
+            border: "none",
+            "& .MuiDataGrid-columnHeaders": {
+              position: "sticky",
+              top: 0,
+              zIndex: 1,
+            },
+          }}
+        />
+      </Paper>
+
+      {/* ⚠ CONFIRM */}
+      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
+        <DialogTitle color="error">Critical Operation</DialogTitle>
+
+        <DialogContent>
+          <DialogContentText>
+            This action may permanently modify data or structure.
+          </DialogContentText>
+
+          <Paper sx={{ p: 1, mt: 2, bgcolor: "#111", color: "#0f0" }}>
+            <Typography variant="caption">{query}</Typography>
+          </Paper>
+        </DialogContent>
+
+        <DialogActions>
+          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => {
+              setConfirmOpen(false);
+              executeSql({
+                sql: query,
+                page: 0,
+                size: paginationModel.pageSize,
+              });
+            }}
+          >
+            Execute Anyway
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };
+
+export default AdminSupport;
