@@ -1,304 +1,147 @@
-import React, { useState, useMemo, useRef } from "react";
-import {
-  Box,
-  Paper,
-  TextField,
-  Button,
-  Typography,
-  IconButton,
-  Tooltip,
-  Stack,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-  Chip,
-  LinearProgress,
-  useTheme,
-  alpha,
-} from "@mui/material";
-import {
-  PlayArrow,
-  Warning,
-  Terminal,
-  CleaningServices,
-  ContentCopy,
-} from "@mui/icons-material";
-import { DataGrid, GridToolbar } from "@mui/x-data-grid";
-import { useMutation } from "@tanstack/react-query";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import React, { useMemo, Suspense } from "react";
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { useSelector } from "react-redux";
+import PrivateRouter from "./PrivateRouter";
 
-const AdminSupport = () => {
-  const theme = useTheme();
+// Page Components
+import Login from "../features/auth/pages/Login";
+import Home from "../pages/Home";
+import NotFound from "../pages/NotFound";
+import ServerError from "../pages/ServerError";
+import CommonLayout from "../layout/CommonLayout";
+import FullscreenLayout from "../layout/FullscreenLayout";
+import SubmenuSelectionPage from "../pages/SubmenuSelectionPage";
 
-  const [query, setQuery] = useState("SELECT * FROM USERS");
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
+import { generateRouteObjects } from "./RouteGenerator";
+import Help from "../features/help/Help";
+import LaunchScreen from "../components/live-countdown/components/LaunchScreen";
 
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 50,
-  });
+const PageLoader = () => (
+  <div
+    style={{
+      display: "flex",
+      height: "100vh",
+      justifyContent: "center",
+      alignItems: "center",
+    }}
+  >
+    Loading...
+  </div>
+);
 
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [execTime, setExecTime] = useState(null);
+const DynamicLayout = () => {
+  const isComponentFullscreen = useSelector(
+    (state) => state.ui.isComponentFullscreen,
+  );
+  return !isComponentFullscreen ? <CommonLayout /> : <FullscreenLayout />;
+};
 
-  const timerRef = useRef();
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
+const AppRouter = () => {
+  const menus = useSelector((state) => state.menus.menus);
 
-  const queryType = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    if (q.startsWith("SELECT")) return "READ";
-    if (["INSERT", "UPDATE", "DELETE"].some((k) => q.startsWith(k))) return "WRITE";
-    if (["CREATE", "ALTER", "DROP", "TRUNCATE"].some((k) => q.startsWith(k)))
-      return "STRUCTURE";
-    return "UNKNOWN";
-  }, [query]);
+  const router = useMemo(() => {
+    const dynamicRoutes = generateRouteObjects(menus || []);
 
-  const isCritical = queryType === "STRUCTURE";
-  const isReadQuery = queryType === "READ";
+    const routeConfig = [
+      {
+        path: "/",
+        element: <LaunchScreen />, // <-- CHANGED: Replaced <Login /> with <LaunchScreen />
+        errorElement: <ServerError />,
+      },
+      {
+        path: "/server-error",
+        element: <ServerError />,
+      },
+      // Protected Routes
+      {
+        element: <PrivateRouter />,
+        children: [
+          {
+            element: <DynamicLayout />,
+            children: [
+              { path: "/home", element: <Home /> },
+              { path: "/help", element: <Help /> },
+              {
+                path: "/choose-option/:mainMenuTitle",
+                element: <SubmenuSelectionPage />,
+              },
+              ...dynamicRoutes,
+            ],
+          },
+        ].filter(Boolean),
+      },
+      {
+        path: "*",
+        element: <NotFound />,
+      },
+    ];
 
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      timerRef.current = performance.now();
-      return await callApi("/TS/transaction-con/admin-execute", { sql, page, size }, "POST");
-    },
-
-    onSuccess: (data) => {
-      const end = performance.now();
-      setExecTime((end - timerRef.current).toFixed(0));
-
-      if (data?.error) {
-        showSnackbar(data.message, "error");
-        return;
-      }
-
-      const cols = (data?.columns || []).map((col) => ({
-        field: col.name,
-        headerName: col.name,
-        flex: 1,
-        minWidth: 140,
-      }));
-
-      const total = data?.total ?? data?.rows?.length ?? 0;
-
-      setResults({
-        rows: data?.rows || [],
-        columns: cols,
-        total,
-      });
-    },
-  });
-
-  const handleRun = () => {
-    const init = { page: 0, pageSize: paginationModel.pageSize };
-    setPaginationModel(init);
-
-    if (isCritical) return setConfirmOpen(true);
-
-    executeSql({ sql: query, page: 0, size: init.pageSize });
-  };
-
-  const handlePaginationChange = (model) => {
-    setPaginationModel(model);
-
-    if (!isReadQuery) return;
-
-    const maxPage = Math.ceil(results.total / model.pageSize) - 1;
-    if (model.page > maxPage) return;
-
-    executeSql({
-      sql: query,
-      page: model.page,
-      size: model.pageSize,
-    });
-  };
+    return createBrowserRouter(routeConfig);
+  }, [menus]);
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", height: "100vh", p: 2, gap: 2 }}>
-      <Paper>
-        <Stack direction="row" justifyContent="space-between" p={1}>
-          <Stack direction="row" spacing={1}>
-            <Terminal />
-            <Chip label={queryType} />
-          </Stack>
-
-          <Stack direction="row" spacing={1}>
-            <IconButton onClick={() => setQuery("")}>
-              <CleaningServices />
-            </IconButton>
-            <IconButton onClick={() => navigator.clipboard.writeText(query)}>
-              <ContentCopy />
-            </IconButton>
-            <Button onClick={handleRun} startIcon={<PlayArrow />}>
-              Run
-            </Button>
-          </Stack>
-        </Stack>
-
-        <TextField
-          multiline
-          fullWidth
-          rows={5}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-      </Paper>
-
-      <Paper sx={{ flex: 1 }}>
-        {isPending && <LinearProgress />}
-
-        <Typography variant="caption" p={1}>
-          Total: {results.total} | Loaded: {results.rows.length}
-        </Typography>
-
-        <DataGrid
-          rows={results.rows}
-          columns={results.columns}
-          rowCount={results.total}
-          paginationMode={results.total > paginationModel.pageSize ? "server" : "client"}
-          paginationModel={paginationModel}
-          onPaginationModelChange={handlePaginationChange}
-          pageSizeOptions={[25, 50, 100]}
-          getRowId={(row) => row.ID || JSON.stringify(row)}
-          slots={{ toolbar: GridToolbar }}
-        />
-      </Paper>
-
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
-        <DialogTitle>Critical Operation</DialogTitle>
-        <DialogContent>
-          <DialogContentText>{query}</DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
-          <Button
-            color="error"
-            onClick={() => {
-              setConfirmOpen(false);
-              executeSql({ sql: query, page: 0, size: paginationModel.pageSize });
-            }}
-          >
-            Execute
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
+    <Suspense fallback={<PageLoader />}>
+      <RouterProvider router={router} />
+    </Suspense>
   );
 };
 
-export default AdminSupport;
+export default AppRouter;
 
-@Override
-public Map<String, Object> executeAdminSql(GetPayloadDTO getPayloadDTO) {
 
-    String sql = getPayloadDTO.getSql().trim();
-    log.info("Executing Admin SQL with Pagination: {}", sql);
+import "./App.css";
+import AppRouter from "./routes/AppRouter";
+import {
+  Box,
+  CssBaseline,
+  StyledEngineProvider,
+  useColorScheme,
+} from "@mui/material";
+import { useEffect } from "react";
+import { SnackbarProviderComponent } from "./utils/SnackbarContext";
+import GlobalBackground from "./theme/GlobalBackground";
+import AppTheme from "./theme/AppTheme";
+import { AuthProvider } from "./context/AuthContext";
 
-    int page = (getPayloadDTO.getPage() != null) ? getPayloadDTO.getPage() : 0;
-    int size = (getPayloadDTO.getSize() != null) ? getPayloadDTO.getSize() : 50;
+// component to handle color scheme logic
+const ColorSchemeInitializer = () => {
+  const { mode, setMode } = useColorScheme();
 
-    // 🔍 Syntax validation
-    try {
-        jdbcTemplate.execute("EXPLAIN PLAN FOR " + sql);
-    } catch (DataAccessException e) {
-        return Map.of(
-            "error", true,
-            "message", "Oracle Syntax Error: " + e.getMostSpecificCause().getMessage()
-        );
+  useEffect(() => {
+    // Only log and set mode if it's not undefined
+    if (mode === "system" || mode === undefined) {
+      setMode("light");
     }
+  }, [mode, setMode]);
 
-    boolean isSelect = sql.toUpperCase().startsWith("SELECT");
+  // This component doesn't render anything visible, it just manages the state
+  return null;
+};
 
-    if (isSelect) {
-
-        try {
-            // 🔥 COUNT QUERY
-            String countSql = "SELECT COUNT(*) FROM (" + sql + ")";
-            Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
-
-            if (total == null) total = 0;
-
-            // 🚫 No data case
-            if (total == 0) {
-                return Map.of(
-                    "columns", new ArrayList<>(),
-                    "rows", new ArrayList<>(),
-                    "total", 0,
-                    "page", page,
-                    "size", size,
-                    "error", false
-                );
-            }
-
-            // 🔥 PAGINATION (Oracle 12c+)
-            String paginatedSql = String.format(
-                "SELECT * FROM (%s) OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
-                sql,
-                page * size,
-                size
-            );
-
-            return jdbcTemplate.query(paginatedSql, rs -> {
-
-                ResultSetMetaData metaData = rs.getMetaData();
-                int columnCount = metaData.getColumnCount();
-
-                List<Map<String, String>> columns = new ArrayList<>();
-                for (int i = 1; i <= columnCount; i++) {
-                    columns.add(Map.of("name", metaData.getColumnLabel(i)));
-                }
-
-                List<Map<String, Object>> rows = new ArrayList<>();
-                while (rs.next()) {
-                    Map<String, Object> row = new HashMap<>();
-
-                    for (int i = 1; i <= columnCount; i++) {
-                        Object value = rs.getObject(i);
-
-                        if (value instanceof java.io.InputStream) {
-                            value = "[BLOB]";
-                        }
-
-                        row.put(metaData.getColumnLabel(i), value);
-                    }
-
-                    rows.add(row);
-                }
-
-                return Map.of(
-                    "columns", columns,
-                    "rows", rows,
-                    "total", total,
-                    "page", page,
-                    "size", size,
-                    "error", false
-                );
-            });
-
-        } catch (Exception e) {
-            log.error("Execution Error", e);
-            return Map.of(
-                "error", true,
-                "message", "Execution failed: " + e.getMessage()
-            );
-        }
-
-    } else {
-        // Non-select queries
-        int affected = jdbcTemplate.update(sql);
-
-        return Map.of(
-            "columns", List.of(Map.of("name", "RESULT")),
-            "rows", List.of(Map.of("RESULT", "Success: " + affected + " rows affected")),
-            "total", 1,
-            "error", false
-        );
-    }
+function App() {
+  return (
+    <>
+      <AppTheme>
+        <StyledEngineProvider enableCssLayer>
+          <ColorSchemeInitializer />
+          <CssBaseline enableColorScheme />
+          <GlobalBackground />
+          <Box
+            sx={{
+              transition:
+                "background-color 0.6s ease, color 0.6s ease, filter 0.6s ease",
+            }}
+          >
+            <AuthProvider>
+              <SnackbarProviderComponent>
+                <AppRouter />
+              </SnackbarProviderComponent>
+            </AuthProvider>
+          </Box>
+        </StyledEngineProvider>
+      </AppTheme>
+    </>
+  );
 }
+
+export default App;
