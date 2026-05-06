@@ -1,30 +1,1370 @@
-{
-  field: "sourceFlag",
-  headerName: "Source",
-  width: 180,
-  type: "singleSelect",
+import React, { useState, useCallback, useEffect } from "react";
+import { useSelector } from "react-redux";
+import { Box } from "@mui/material";
+import { LocalizationProvider } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import dayjs from "dayjs";
 
-  valueOptions:
-    sourceOptions?.map((flag) => ({
-      value: flag.flagId,
-      label: flag.flagName,
-    })) || [],
+import LedgerForm from "./components/LedgerForm";
+import LedgerDataGrid from "./components/LedgerDataGrid";
 
-  valueFormatter: ({ value }) => {
-    const matchedFlag = sourceOptions?.find(
-      (flag) => flag.flagId === value,
-    );
+import { getPermissions } from "../../utils/CommonUtilities";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-    return matchedFlag?.flagName || value || "-";
-  },
-},
+const LedgerWiseEnquiry = () => {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
 
-const selectedSourceOptions =
-  filters?.sourceFlags?.length > 0
-    ? sourceOptions.filter((option) =>
-        filters.sourceFlags.some(
-          (selected) =>
-            selected.flagId === option.flagId,
-        ),
+  const user = useSelector((state) => state.auth.user);
+  const menu = useSelector((state) => state.menus.selectedMenuItem);
+
+  const permissions = getPermissions(menu);
+
+  const hasWholeBank = !!permissions.wholebank;
+  const hasCircle = user?.isCircle === "Y" || !!permissions.circle;
+  const isCircleUser = user?.isCircle === "Y" && !hasWholeBank;
+
+  // ================= MASTER DATA =================
+  const [circles, setCircles] = useState([]);
+  const [currencies, setCurrencies] = useState([]);
+  const [sourceOptions, setSourceOptions] = useState([]);
+  const [etlDate, setEtlDate] = useState(null);
+
+  // ================= GRID DATA =================
+  const [rows, setRows] = useState([]);
+  const [rowCount, setRowCount] = useState(0);
+
+  // ================= LOADING =================
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  // ================= GRID CONTROLS =================
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 20,
+  });
+
+  const [sortModel, setSortModel] = useState([
+    {
+      field: "transactionDate",
+      sort: "desc",
+    },
+  ]);
+
+  const [filterModel, setFilterModel] = useState({
+    items: [],
+  });
+
+  // ================= FILTER STATE =================
+  const initialState = {
+    level: hasWholeBank ? "BANK" : isCircleUser ? "CIRCLE" : "BRANCH",
+    circle: hasWholeBank ? "ALL" : user?.circleCode,
+    branches:
+      user?.isCircle === "N" && !hasWholeBank ? [user?.branchCode] : ["ALL"],
+    currencies: "ALL",
+    sourceFlags: [],
+    cgl: "",
+    fromDate: null,
+    toDate: null,
+  };
+
+  const [filters, setFilters] = useState(initialState);
+
+  const [searchQuery, setSearchQuery] = useState(null);
+
+  // ================= FETCH MASTERS =================
+  const fetchMasters = useCallback(async () => {
+    try {
+      const [dateRes, currRes, flagRes] = await Promise.all([
+        callApi("/PS/file/fincore-date", {}, "GET"),
+        callApi("/CM/common-master/currency-code-name-only", null, "GET"),
+        callApi("/CM/common-master/source-flag", null, "GET"),
+      ]);
+
+      if (dateRes?.data?.etlDate) {
+        setEtlDate(dayjs(dateRes.data.etlDate, "DD-MM-YYYY"));
+      }
+
+      const formattedCurrencies =
+        currRes?.data?.map((c) => `${c.currencyCode} (${c.currencyName})`) ||
+        [];
+
+      setCurrencies(formattedCurrencies.sort((a, b) => a.localeCompare(b)));
+
+      if (flagRes?.data) {
+        setSourceOptions(flagRes.data);
+
+        setFilters((prev) => ({
+          ...prev,
+          sourceFlags: flagRes.data,
+        }));
+      }
+
+      if (hasWholeBank) {
+        const circleRes = await callApi(
+          "/CM/common-master/circle-codes",
+          null,
+          "GET",
+        );
+
+        setCircles(circleRes?.data || []);
+      }
+    } catch (error) {
+      showSnackBar("Failed to load master configuration", "error");
+    }
+  }, [callApi, hasWholeBank, showSnackBar]);
+
+  useEffect(() => {
+    fetchMasters();
+  }, [fetchMasters]);
+
+  // ================= RESET PAGE WHEN GRID CHANGES =================
+  useEffect(() => {
+    setPaginationModel((prev) => ({
+      ...prev,
+      page: 0,
+    }));
+  }, [sortModel, filterModel, searchQuery]);
+
+  // ================= PAYLOAD BUILDER =================
+  const buildPayload = useCallback(() => {
+    if (!searchQuery) return null;
+
+    const gridFilters = filterModel.items
+      .filter(
+        (item) =>
+          item.field &&
+          item.operator &&
+          item.value !== undefined &&
+          item.value !== null &&
+          item.value !== "",
       )
-    : sourceOptions;
+      .map((item) => ({
+        field: item.field,
+        operator: item.operator,
+        value: item.value,
+      }));
+
+    return {
+      circle:
+        searchQuery.circle === "ALL"
+          ? "ALL"
+          : searchQuery.circle.split(" - ")[0],
+
+      cgl: searchQuery.cgl.split(" - ")[0],
+
+      currencies:
+        searchQuery.currencies === "ALL"
+          ? "ALL"
+          : searchQuery.currencies.split(" (")[0],
+
+      branches: searchQuery.branches.includes("ALL")
+        ? ["ALL"]
+        : searchQuery.branches.map((b) => b.split("-")[0]),
+
+      sourceFlags: searchQuery.sourceFlags.map((f) => f.flagId),
+
+      fromDate: searchQuery.fromDate.format("DD/MM/YYYY"),
+
+      toDate: searchQuery.toDate.format("DD/MM/YYYY"),
+
+      page: paginationModel.page,
+
+      size: paginationModel.pageSize,
+
+      sortField: sortModel?.[0]?.field || "transactionDate",
+
+      sortOrder: sortModel?.[0]?.sort || "desc",
+
+      gridFilters,
+    };
+  }, [searchQuery, paginationModel, sortModel, filterModel]);
+
+  const selectedSourceOptions =
+    filters?.sourceFlags?.length > 0
+      ? sourceOptions.filter((option) =>
+          filters.sourceFlags.some(
+            (selected) => selected.flagId === option.flagId,
+          ),
+        )
+      : sourceOptions;
+
+  // ================= FETCH ROWS =================
+  const fetchRows = useCallback(async () => {
+    const payload = buildPayload();
+    if (!payload) return;
+    try {
+      setLoading(true);
+      const res = await callApi("/ES/ledger-enquiries/search", payload, "POST");
+      setRows(res?.data?.content || []);
+      setRowCount(res?.data?.totalElements || 0);
+    } catch (error) {
+      showSnackBar("Enquiry failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [callApi, buildPayload, showSnackBar]);
+
+  useEffect(() => {
+    fetchRows();
+  }, [fetchRows]);
+
+  // ================= SEARCH =================
+  const handleSearch = () => {
+    if (!filters.cgl || !filters.fromDate || !filters.toDate) {
+      showSnackBar("Please fill all required fields", "warning");
+
+      return;
+    }
+    setPaginationModel((prev) => ({
+      ...prev,
+      page: 0,
+    }));
+    setSearchQuery({ ...filters });
+  };
+
+  // ================= RESET =================
+  const handleReset = () => {
+    setFilters(initialState);
+    setSearchQuery(null);
+    setRows([]);
+    setRowCount(0);
+    setPaginationModel({
+      page: 0,
+      pageSize: 20,
+    });
+    setSortModel([
+      {
+        field: "transactionDate",
+        sort: "desc",
+      },
+    ]);
+    setFilterModel({
+      items: [],
+    });
+  };
+
+  // ================= EXCEL EXPORT =================
+  const handleExcelExport = async () => {
+    const payload = buildPayload();
+
+    if (!payload) return;
+
+    try {
+      setExporting(true);
+
+      const exportPayload = {
+        ...payload,
+        page: 0,
+        size: 100000,
+      };
+
+      const response = await callApi(
+        "/ES/ledger-enquiries/export",
+        exportPayload,
+        "POST",
+        {
+          responseType: "blob",
+        },
+      );
+
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute(
+        "download",
+        `Ledger_${
+          searchQuery.cgl.split(" - ")[0]
+        }_${dayjs().format("YYYYMMDD")}.xlsx`,
+      );
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      showSnackBar("Export failed", "error");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <LocalizationProvider dateAdapter={AdapterDayjs}>
+      <Box sx={{ p: 3 }}>
+        <LedgerForm
+          filters={filters}
+          onFilterChange={(field, value) =>
+            setFilters((prev) => ({
+              ...prev,
+              [field]: value,
+            }))
+          }
+          onFetch={handleSearch}
+          onReset={handleReset}
+          permissions={{
+            hasWholeBank,
+            hasCircle,
+          }}
+          user={user}
+          circles={circles}
+          currencies={currencies}
+          sourceOptions={sourceOptions}
+          etlDate={etlDate}
+        />
+
+        <LedgerDataGrid
+          rows={rows}
+          loading={loading}
+          rowCount={rowCount}
+          paginationModel={paginationModel}
+          setPaginationModel={setPaginationModel}
+          sortModel={sortModel}
+          setSortModel={setSortModel}
+          filterModel={filterModel}
+          setFilterModel={setFilterModel}
+          onExcelExport={handleExcelExport}
+          exporting={exporting}
+          selectedCurrency={searchQuery?.currencies || "ALL"}
+          circles={circles}
+          selectedCircle={searchQuery?.circle || "ALL"}
+          sourceOptions={selectedSourceOptions}
+        />
+      </Box>
+    </LocalizationProvider>
+  );
+};
+
+export default LedgerWiseEnquiry;
+
+
+import React, { useState, useCallback, useMemo, useEffect } from "react";
+import {
+  Card,
+  CardContent,
+  TextField,
+  Button,
+  Autocomplete,
+  Checkbox,
+  Typography,
+  Stack,
+  Divider,
+  Box,
+  IconButton,
+  Grid,
+  InputAdornment,
+  Paper,
+  Collapse,
+  Chip,
+} from "@mui/material";
+import { DatePicker } from "@mui/x-date-pickers";
+
+// Icons
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import SearchIcon from "@mui/icons-material/Search";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import CloseIcon from "@mui/icons-material/Close";
+import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
+import DateRangeIcon from "@mui/icons-material/DateRange";
+import DeleteSweepIcon from "@mui/icons-material/DeleteSweep";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+
+// Utilities & Hooks
+import { debounce } from "lodash";
+import dayjs from "dayjs";
+import useApi from "../../../hooks/useApi";
+import CustomChip from "../../../utils/CustomChip";
+
+const LedgerForm = ({
+  filters,
+  onFilterChange,
+  onReset,
+  onFetch,
+  permissions,
+  user,
+  circles,
+  currencies,
+  sourceOptions,
+  etlDate,
+}) => {
+  const { callApi } = useApi();
+  const { hasWholeBank, hasCircle } = permissions;
+  const [branches, setBranches] = useState([]);
+  const [cgls, setCgls] = useState([]);
+  const [loading, setLoading] = useState({ branch: false, cgl: false });
+  const [viewBranchList, setViewBranchList] = useState(false);
+
+  const minLimit = dayjs("31/03/2026");
+  const maxLimit = etlDate || dayjs();
+
+  const isCircleVisible = hasWholeBank;
+  const isBranchVisible =
+    (hasWholeBank && filters.circle !== "ALL") ||
+    (user?.isCircle === "Y" && !hasWholeBank);
+
+  const hasSelectedBranches =
+    !filters.branches.includes("ALL") && filters.branches.length > 0;
+
+  const searchLogic = useCallback(
+    async (type, term) => {
+      if (!term || term.length < 3) return;
+      try {
+        setLoading((p) => ({ ...p, [type]: true }));
+        let cp =
+          hasWholeBank && filters.circle !== "ALL"
+            ? `&circleCode=${filters.circle}`
+            : !hasWholeBank
+              ? `&circleCode=${user.circleCode}`
+              : "";
+        const url =
+          type === "branch"
+            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(term)}${cp}`
+            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(term)}`;
+
+        const res = await callApi(url, null, "GET");
+        if (res?.data) {
+          const opts = res.data.map((i) =>
+            type === "branch"
+              ? `${i.code}-${i.name}`
+              : `${i.cglNumber} - ${i.description}`,
+          );
+          type === "branch" ? setBranches(opts) : setCgls(opts);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading((p) => ({ ...p, [type]: false }));
+      }
+    },
+    [callApi, user, hasWholeBank, filters.circle],
+  );
+
+  const fetchSearchData = useMemo(
+    () => debounce((t, v) => searchLogic(t, v), 300),
+    [searchLogic],
+  );
+  useEffect(() => () => fetchSearchData.cancel(), [fetchSearchData]);
+
+  const handleBranchChange = (val) => {
+    const clickedAll = val.includes("ALL") && !filters.branches.includes("ALL");
+
+    // 2. If nothing is selected, default back to "ALL"
+    const isEmpty = val.length === 0;
+
+    if (clickedAll || isEmpty) {
+      onFilterChange("branches", ["ALL"]);
+      setViewBranchList(false); // Close the tray automatically on reset
+      return;
+    }
+
+    // 3. If user selects a specific branch while "ALL" was active, remove "ALL"
+    const valWithoutAll = val.filter((v) => v !== "ALL");
+    onFilterChange("branches", valWithoutAll);
+  };
+
+  const removeBranch = (branchToRemove) => {
+    const updated = filters.branches.filter((b) => b !== branchToRemove);
+
+    if (updated.length === 0) {
+      onFilterChange("branches", ["ALL"]);
+      setViewBranchList(false); // Auto-close tray if no specific branches left
+    } else {
+      onFilterChange("branches", updated);
+    }
+  };
+
+  const SectionHeader = ({ icon, title }) => (
+    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
+      <Box
+        sx={{
+          p: 0.5,
+          bgcolor: "primary.main",
+          borderRadius: 1,
+          color: "white",
+          display: "flex",
+        }}
+      >
+        {icon}
+      </Box>
+      <Typography
+        variant="subtitle2"
+        sx={{ fontWeight: 800, color: "text.primary", letterSpacing: 1 }}
+      >
+        {title}
+      </Typography>
+    </Stack>
+  );
+
+  return (
+    <Box sx={{ position: "relative", mb: 4 }}>
+      <Card
+        sx={{
+          borderRadius: "24px",
+          boxShadow: "0 20px 50px rgba(0,0,0,0.1)",
+          border: "1px solid rgba(255,255,255,0.3)",
+        }}
+      >
+        <CardContent sx={{ p: 4 }}>
+          <Stack direction="row" justifyContent="space-between" sx={{ mb: 4 }}>
+            <Box>
+              <Typography variant="h4" sx={{ fontWeight: 900, color: "#000" }}>
+                Ledger{" "}
+                <Typography
+                  component="span"
+                  variant="h4"
+                  sx={{ color: "primary.main", fontWeight: 900 }}
+                >
+                  Explorer
+                </Typography>
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Hierarchical data filtering & enquiry
+              </Typography>
+            </Box>
+            <CustomChip
+              icon={<AccountBalanceIcon />}
+              label={`${hasWholeBank ? "Whole Bank" : hasCircle ? "Circle" : "Branch"} Level`}
+              color="primary"
+            />
+          </Stack>
+
+          {/* 1. HIERARCHY ZONE */}
+          <Grid container spacing={4}>
+            {(isCircleVisible || isBranchVisible) && (
+              <Grid size={{ xs: 12, md: 6 }}>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 3,
+                    borderRadius: "20px",
+                    bgcolor: "rgba(0,0,0,0.01)",
+                    borderStyle: "dashed",
+                    position: "relative",
+                  }}
+                >
+                  <SectionHeader
+                    icon={<AccountBalanceIcon fontSize="small" />}
+                    title="Hierarchy"
+                  />
+
+                  <Grid container spacing={2}>
+                    {isCircleVisible && (
+                      <Grid size={{ xs: 12, sm: isBranchVisible ? 6 : 12 }}>
+                        <Autocomplete
+                          size="small"
+                          options={[
+                            "All Circles",
+                            ...circles.map(
+                              (c) => `${c.circleCode} - ${c.circleName}`,
+                            ),
+                          ]}
+                          // Match the short code in 'filters.circle' to the long string in 'options'
+                          value={
+                            filters.circle === "ALL"
+                              ? "All Circles"
+                              : circles.find(
+                                    (c) => c.circleCode === filters.circle,
+                                  )
+                                ? `${filters.circle} - ${circles.find((c) => c.circleCode === filters.circle).circleName}`
+                                : filters.circle
+                          }
+                          // This logic is key: it tells MUI how to link the saved code to the list item
+                          isOptionEqualToValue={(option, value) => {
+                            if (value === "All Circles")
+                              return option === "All Circles";
+                            return option.startsWith(value);
+                          }}
+                          onChange={(_, v) =>
+                            onFilterChange(
+                              "circle",
+                              v === "All Circles" || !v
+                                ? "ALL"
+                                : v.split(" - ")[0],
+                            )
+                          }
+                          renderInput={(p) => (
+                            <TextField
+                              {...p}
+                              label="Select Circle"
+                              required
+                              variant="standard"
+                            />
+                          )}
+                        />
+                      </Grid>
+                    )}
+                    {isBranchVisible && (
+                      <Grid size={{ xs: 12, sm: 6 }}>
+                        <Autocomplete
+                          multiple
+                          size="small"
+                          disableCloseOnSelect
+                          options={["ALL", ...branches]}
+                          loading={loading.branch}
+                          value={filters.branches}
+                          onInputChange={(e, v, r) => {
+                            if (r === "input" && v.length >= 3)
+                              fetchSearchData("branch", v);
+                          }}
+                          onChange={(_, val) => handleBranchChange(val)}
+                          renderTags={() => null}
+                          // Add Checkboxes to the dropdown
+                          renderOption={(props, option, { selected }) => (
+                            <li {...props} key={option}>
+                              <Checkbox
+                                size="small"
+                                style={{ marginRight: 8 }}
+                                checked={selected}
+                              />
+                              <Typography variant="body2">{option}</Typography>
+                            </li>
+                          )}
+                          renderInput={(p) => (
+                            <TextField
+                              {...p}
+                              label="Select Branches"
+                              variant="standard"
+                              required
+                              placeholder={
+                                filters.branches.includes("ALL")
+                                  ? "Search specific branches..."
+                                  : ""
+                              }
+                              InputProps={{
+                                ...p.InputProps,
+                                endAdornment: (
+                                  <InputAdornment
+                                    position="end"
+                                    sx={{ mb: 0.5 }}
+                                  >
+                                    <Stack
+                                      direction="row"
+                                      alignItems="center"
+                                      spacing={1}
+                                    >
+                                      <CustomChip
+                                        label={
+                                          filters.branches.includes("ALL")
+                                            ? "All Branches"
+                                            : `${filters.branches.length} Selected`
+                                        }
+                                        color={
+                                          filters.branches.includes("ALL")
+                                            ? "default"
+                                            : "primary"
+                                        }
+                                        sx={{
+                                          fontWeight: 700,
+                                          fontSize: "0.7rem",
+                                        }}
+                                      />
+                                      {!filters.branches.includes("ALL") &&
+                                        filters.branches.length > 0 && (
+                                          <IconButton
+                                            size="small"
+                                            onClick={() =>
+                                              setViewBranchList(!viewBranchList)
+                                            }
+                                            color={
+                                              viewBranchList
+                                                ? "primary"
+                                                : "default"
+                                            }
+                                            sx={{
+                                              transition: "0.2s",
+                                              bgcolor: viewBranchList
+                                                ? "rgba(25, 118, 210, 0.08)"
+                                                : "transparent",
+                                            }}
+                                          >
+                                            {viewBranchList ? (
+                                              <VisibilityOffIcon fontSize="small" />
+                                            ) : (
+                                              <VisibilityIcon fontSize="small" />
+                                            )}
+                                          </IconButton>
+                                        )}
+                                    </Stack>
+                                    {p.InputProps.endAdornment}
+                                  </InputAdornment>
+                                ),
+                              }}
+                            />
+                          )}
+                        />
+                      </Grid>
+                    )}
+                  </Grid>
+                </Paper>
+              </Grid>
+            )}
+
+            {/* 2. ACCOUNT ZONE */}
+            <Grid
+              size={{ xs: 12, md: isCircleVisible || isBranchVisible ? 6 : 12 }}
+            >
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 3,
+                  borderRadius: "20px",
+                  bgcolor: "rgba(0,0,0,0.01)",
+                  borderStyle: "dashed",
+                }}
+              >
+                <SectionHeader
+                  icon={<SearchIcon fontSize="small" />}
+                  title="Account Details"
+                />
+                <Grid container spacing={2}>
+                  <Grid size={{ xs: 12, sm: 7 }}>
+                    <Autocomplete
+                      size="small"
+                      options={cgls}
+                      value={filters.cgl}
+                      onInputChange={(e, v) => {
+                        if (v.length >= 3) fetchSearchData("cgl", v);
+                      }}
+                      onChange={(_, v) => onFilterChange("cgl", v)}
+                      renderInput={(p) => (
+                        <TextField
+                          {...p}
+                          label="CGL Account"
+                          required
+                          variant="standard"
+                        />
+                      )}
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 5 }}>
+                    <Autocomplete
+                      size="small"
+                      options={["ALL", ...currencies]}
+                      value={filters.currencies}
+                      onChange={(_, v) =>
+                        onFilterChange("currencies", v || "ALL")
+                      }
+                      renderInput={(p) => (
+                        <TextField
+                          {...p}
+                          label="Currency"
+                          required
+                          variant="standard"
+                        />
+                      )}
+                    />
+                  </Grid>
+                </Grid>
+              </Paper>
+            </Grid>
+
+            {/* ROW 2: INDIVIDUAL BRANCH TRAY */}
+            <Grid size={{ xs: 12 }}>
+              <Collapse in={viewBranchList && hasSelectedBranches}>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    borderRadius: "20px",
+                    bgcolor: "#fff",
+                    border: "1px solid #e0e6ed",
+                    overflow: "hidden",
+                    mb: 2,
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.05)",
+                  }}
+                >
+                  {/* Sticky Header */}
+                  <Stack
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    sx={{
+                      p: 2,
+                      borderBottom: "1px solid #f0f0f0",
+                      bgcolor: "rgba(25, 118, 210, 0.02)",
+                    }}
+                  >
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontWeight: 800,
+                          color: "primary.main",
+                          letterSpacing: 1,
+                        }}
+                      >
+                        SELECTED BRANCHES
+                      </Typography>
+                      <CustomChip
+                        label={filters.branches.length}
+                        color="primary"
+                        sx={{ height: 20 }}
+                      />
+                    </Stack>
+
+                    <Button
+                      size="small"
+                      color="error"
+                      variant="text"
+                      startIcon={<DeleteSweepIcon />}
+                      onClick={() => {
+                        onFilterChange("branches", ["ALL"]);
+                        setViewBranchList(false);
+                      }}
+                      sx={{ fontWeight: 700, textTransform: "none" }}
+                    >
+                      Clear All & Reset
+                    </Button>
+                  </Stack>
+
+                  {/* Scrollable Area with Individual Remove */}
+                  {/* Scrollable Area with Individual Remove using standard MUI Chip */}
+                  <Box
+                    sx={{
+                      p: 2,
+                      maxHeight: "250px",
+                      overflowY: "auto",
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 1,
+                      "&::-webkit-scrollbar": { width: "6px" },
+                      "&::-webkit-scrollbar-track": { background: "#f1f1f1" },
+                      "&::-webkit-scrollbar-thumb": {
+                        background: "#ccc",
+                        borderRadius: "10px",
+                      },
+                    }}
+                  >
+                    {filters.branches.map((b) => (
+                      <Chip
+                        key={b}
+                        label={b}
+                        color="primary"
+                        variant="outlined"
+                        // Standard MUI Chip handles onDelete by showing the 'X' icon automatically
+                        onDelete={() => removeBranch(b)}
+                        sx={{
+                          borderRadius: "8px",
+                          bgcolor: "white",
+                          fontWeight: 500,
+                          "& .MuiChip-deleteIcon": {
+                            color: "error.main",
+                            transition: "0.2s",
+                            "&:hover": {
+                              color: "#d32f2f",
+                              transform: "scale(1.2)",
+                            },
+                          },
+                          "&:hover": {
+                            bgcolor: "#f5f9ff",
+                            borderColor: "primary.main",
+                          },
+                        }}
+                      />
+                    ))}
+                  </Box>
+                </Paper>
+              </Collapse>
+            </Grid>
+
+            {/* 3. TIMELINE & FLAGS ZONE */}
+            <Grid size={{ xs: 12 }}>
+              <Paper
+                sx={{
+                  p: 2.5,
+                  borderRadius: "20px",
+                  // background:
+                  //   "linear-gradient(90deg, #1976d2 0%, #1565c0 100%)",
+                  background: "#58469f",
+                  color: "white",
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  spacing={3}
+                  alignItems="center"
+                >
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    alignItems="center"
+                    sx={{ minWidth: 100 }}
+                  >
+                    <DateRangeIcon />
+                    <Typography sx={{ fontWeight: 700 }}>Timeline</Typography>
+                  </Stack>
+
+                  <DatePicker
+                    value={filters.fromDate}
+                    onChange={(v) => onFilterChange("fromDate", v)}
+                    slotProps={{
+                      textField: {
+                        size: "small",
+                        sx: { bgcolor: "white", borderRadius: 2, flex: 1 },
+                        placeholder: "From Date",
+                      },
+                    }}
+                  />
+                  <DatePicker
+                    value={filters.toDate}
+                    onChange={(v) => onFilterChange("toDate", v)}
+                    slotProps={{
+                      textField: {
+                        size: "small",
+                        sx: { bgcolor: "white", borderRadius: 2, flex: 1 },
+                        placeholder: "To Date",
+                      },
+                    }}
+                  />
+
+                  <Autocomplete
+                    multiple
+                    size="small"
+                    disableCloseOnSelect
+                    sx={{ flex: 1.5, minWidth: 250 }}
+                    options={sourceOptions}
+                    value={filters.sourceFlags}
+                    getOptionLabel={(o) => o.flagName || ""}
+                    isOptionEqualToValue={(option, value) =>
+                      option.flagId === value.flagId
+                    }
+                    // LOGIC: Handle Select All toggle
+                    onChange={(_, selectedOptions) => {
+                      const isSelectAllClicked = selectedOptions.some(
+                        (option) => option.flagId === "select-all",
+                      );
+                      if (isSelectAllClicked) {
+                        // If already all selected, clear them. Otherwise, select all.
+                        if (
+                          filters.sourceFlags.length === sourceOptions.length
+                        ) {
+                          onFilterChange("sourceFlags", []);
+                        } else {
+                          onFilterChange("sourceFlags", sourceOptions);
+                        }
+                      } else {
+                        onFilterChange("sourceFlags", selectedOptions);
+                      }
+                    }}
+                    // INJECT: "Select All" option at the top of the list
+                    filterOptions={(options, params) => {
+                      const filtered = options;
+                      return [
+                        { flagId: "select-all", flagName: "Select All" },
+                        ...filtered,
+                      ];
+                    }}
+                    renderTags={(v) => (
+                      <CustomChip
+                        label={
+                          v.length === sourceOptions.length
+                            ? "All Sources"
+                            : `${v.length} Sources`
+                        }
+                        color="default"
+                        sx={{ bgcolor: "white" }}
+                      />
+                    )}
+                    renderOption={(props, option, { selected }) => {
+                      // Check if everything is selected to show the "Select All" box as checked
+                      const isAllSelected =
+                        filters.sourceFlags.length === sourceOptions.length;
+                      const isChecked =
+                        option.flagId === "select-all"
+                          ? isAllSelected
+                          : selected;
+
+                      return (
+                        <li {...props} key={option.flagId}>
+                          <Checkbox
+                            size="small"
+                            style={{ marginRight: 8 }}
+                            checked={isChecked}
+                          />
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              fontWeight:
+                                option.flagId === "select-all" ? 700 : 400,
+                            }}
+                          >
+                            {option.flagName}
+                          </Typography>
+                        </li>
+                      );
+                    }}
+                    renderInput={(p) => (
+                      <TextField
+                        {...p}
+                        placeholder="Source Flags"
+                        sx={{
+                          bgcolor: "white",
+                          borderRadius: 2,
+                          "& .MuiOutlinedInput-root": { borderRadius: 2 },
+                        }}
+                      />
+                    )}
+                  />
+                </Stack>
+              </Paper>
+            </Grid>
+          </Grid>
+
+          <Box
+            sx={{
+              mt: 4,
+              display: "flex",
+              justifyContent: "flex-end", // Aligns both buttons to the right
+              alignItems: "center",
+              gap: 2, // Adds space between the buttons
+            }}
+          >
+            <Button
+              variant="text"
+              // color="error"
+              startIcon={<RestartAltIcon />}
+              onClick={onReset}
+              sx={{
+                fontWeight: 700,
+                textTransform: "none",
+                borderRadius: "12px",
+                px: 3,
+              }}
+            >
+              Reset All
+            </Button>
+            <Button
+              variant="contained"
+              size="large"
+              startIcon={<SearchIcon />}
+              onClick={onFetch}
+              disabled={!filters.cgl || !filters.fromDate || !filters.toDate}
+              sx={{
+                px: 8,
+                py: 1.5,
+                borderRadius: "16px",
+                fontWeight: 900,
+                textTransform: "none",
+                background: "#000",
+                boxShadow: "0 10px 20px rgba(0,0,0,0.15)",
+                "&:hover": {
+                  background: "#333",
+                  transform: "translateY(-1px)",
+                },
+                "&:active": { transform: "translateY(0)" },
+                transition: "all 0.2s",
+              }}
+            >
+              Fetch Records
+            </Button>
+          </Box>
+        </CardContent>
+      </Card>
+    </Box>
+  );
+};
+
+export default LedgerForm;
+
+import React, { useMemo } from "react";
+import {
+  Box,
+  Typography,
+  Button,
+  CircularProgress,
+  Stack,
+  Chip,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import FileDownloadIcon from "@mui/icons-material/FileDownload";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import TrendingDownIcon from "@mui/icons-material/TrendingDown";
+import dayjs from "dayjs";
+
+const LedgerDataGrid = ({
+  rows,
+  loading,
+  rowCount,
+  paginationModel,
+  setPaginationModel,
+  sortModel,
+  setSortModel,
+  filterModel,
+  setFilterModel,
+  onExcelExport,
+  exporting,
+  selectedCurrency,
+  circles,
+  selectedCircle,
+  sourceOptions,
+}) => {
+  console.log(sourceOptions);
+  const transactionColumns = useMemo(() => {
+    const cols = [
+      {
+        field: "transactionId",
+        headerName: "ID",
+        width: 110,
+        filterable: false,
+      },
+      {
+        field: "transactionDate",
+        headerName: "Date",
+        width: 100,
+        valueFormatter: (v) => (v ? dayjs(v).format("DD/MM/YYYY") : "-"),
+      },
+      {
+        field: "branchName",
+        headerName: "Branch",
+        width: 180,
+        type: "singleSelect",
+        valueOptions: Array.from(new Set(rows.map((r) => r.branchName))),
+        renderCell: (params) => (
+          <Box sx={{ lineHeight: "1.2", py: 0.5 }}>
+            <Typography
+              variant="body2"
+              sx={{ fontWeight: 700, fontSize: "0.8rem" }}
+            >
+              {params.row.branchCode}
+            </Typography>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", fontSize: "0.7rem" }}
+            >
+              {params.row.branchName}
+            </Typography>
+          </Box>
+        ),
+      },
+      { field: "narration", headerName: "Narration", flex: 1.5, minWidth: 250 },
+      {
+        field: "debitAmount",
+        headerName: "Debit",
+        width: 130,
+        align: "right",
+        headerAlign: "right",
+        type: "number",
+        valueFormatter: (v) =>
+          new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2 }).format(
+            v || 0,
+          ),
+      },
+      {
+        field: "creditAmount",
+        headerName: "Credit",
+        width: 130,
+        align: "right",
+        headerAlign: "right",
+        type: "number",
+        valueFormatter: (v) =>
+          new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2 }).format(
+            v || 0,
+          ),
+      },
+      {
+        field: "sourceFlag",
+        headerName: "Source",
+        width: 180,
+        type: "singleSelect",
+
+        valueOptions:
+          sourceOptions?.map((flag) => ({
+            value: flag.flagId,
+            label: flag.flagName,
+          })) || [],
+
+        valueFormatter: (value) => {
+          const matchedFlag = sourceOptions?.find(
+            (flag) => flag.flagId === value,
+          );
+
+          return matchedFlag?.flagName || value || "-";
+        },
+      },
+    ];
+
+    if (selectedCircle === "ALL") {
+      cols.splice(2, 0, {
+        field: "circleName",
+        headerName: "Circle",
+        width: 150,
+        type: "singleSelect",
+        valueOptions: circles.map((c) => ({
+          value: c.circleName,
+          label: `${c.circleCode} - ${c.circleName}`,
+        })),
+        renderCell: (params) => (
+          <Box sx={{ lineHeight: "1.2", py: 0.5 }}>
+            <Typography
+              variant="body2"
+              sx={{ fontWeight: 700, fontSize: "0.8rem" }}
+            >
+              {params.row.circleCode}
+            </Typography>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", fontSize: "0.7rem" }}
+            >
+              {params.row.circleName}
+            </Typography>
+          </Box>
+        ),
+      });
+    }
+    if (selectedCurrency === "ALL") {
+      console.log("Length >", cols.length);
+      const index = cols.length == 8 ? 7 : 6;
+      cols.splice(index, 0, {
+        field: "currencyName",
+        headerName: "Currency",
+        width: 180,
+        type: "singleSelect",
+        valueOptions: Array.from(new Set(rows.map((r) => r.currencyName))),
+        renderCell: (params) => (
+          <Box sx={{ lineHeight: "1.2", py: 0.5 }}>
+            <Typography
+              variant="body2"
+              sx={{ fontWeight: 700, fontSize: "0.8rem" }}
+            >
+              {params.row.currency}
+            </Typography>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", fontSize: "0.7rem" }}
+            >
+              {params.row.currencyName}
+            </Typography>
+          </Box>
+        ),
+      });
+    }
+    return cols;
+  }, [rows, sourceOptions, selectedCircle, selectedCurrency, circles]);
+
+  const CustomNoRowsOverlay = () => (
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
+      <ErrorOutlineIcon fontSize="large" color="action" />
+      <Typography variant="body1" sx={{ mt: 1, color: "text.secondary" }}>
+        Data is not available
+      </Typography>
+    </Box>
+  );
+
+  return (
+    <Box sx={{ width: "100%", mt: 3 }}>
+      {/* SEPARATE HEADER SECTION (Replacing Internal Toolbar) */}
+      <Box
+        sx={{
+          p: 2.5,
+          mb: 3,
+          borderRadius: "20px",
+          background: "rgba(255, 255, 255, 0.4)",
+          backdropFilter: "blur(12px)",
+          border: "1px solid rgba(255, 255, 255, 0.3)",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.05)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 2.5,
+        }}
+      >
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+        >
+          <Box sx={{ display: "flex", alignItems: "baseline", gap: 1.5 }}>
+            <Typography
+              variant="h6"
+              fontWeight={800}
+              sx={{ color: "#1a1a1a", letterSpacing: "-0.5px" }}
+            >
+              Transactions Ledger
+            </Typography>
+            <Chip
+              label={
+                rowCount > 0
+                  ? `${rowCount.toLocaleString()} Records Found`
+                  : "No Records"
+              }
+              size="small"
+              sx={{
+                fontWeight: 700,
+                color: "#58469f",
+                bgcolor: "rgba(88, 70, 159, 0.1)",
+                borderRadius: "8px",
+              }}
+            />
+          </Box>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={
+              exporting ? (
+                <CircularProgress size={16} color="inherit" />
+              ) : (
+                <FileDownloadIcon />
+              )
+            }
+            onClick={onExcelExport}
+            disabled={!rowCount || loading || exporting}
+            sx={{
+              textTransform: "none",
+              bgcolor: "#58469f",
+              fontWeight: 700,
+              borderRadius: "8px",
+              px: 3,
+              "&:hover": { bgcolor: "#45357a" },
+            }}
+          >
+            {exporting ? "Preparing..." : "Export"}
+          </Button>
+        </Stack>
+
+        {/* DATA GRID SECTION */}
+        <Box sx={{ height: 600 }}>
+          <DataGrid
+            rows={rows}
+            columns={transactionColumns}
+            rowCount={rowCount}
+            loading={loading}
+            getRowId={(row) => row.transactionId}
+            pagination
+            paginationMode="server"
+            sortingMode="server"
+            filterMode="server"
+            pageSizeOptions={[10, 20, 50, 100]}
+            paginationModel={paginationModel}
+            onPaginationModelChange={setPaginationModel}
+            sortModel={sortModel}
+            onSortModelChange={setSortModel}
+            filterModel={filterModel}
+            onFilterModelChange={setFilterModel}
+            rowHeight={60}
+            disableRowSelectionOnClick
+            slots={{ noRowsOverlay: CustomNoRowsOverlay }}
+            sx={{
+              borderRadius: "20px",
+              backgroundColor: "rgba(255, 255, 255, 0.4)",
+              border: "1px solid rgba(255, 255, 255, 0.3)",
+              "& .MuiDataGrid-columnHeaders": {
+                bgcolor: "#f8f9fa",
+                fontWeight: 700,
+              },
+            }}
+          />
+        </Box>
+      </Box>
+    </Box>
+  );
+};
+
+export default LedgerDataGrid;
