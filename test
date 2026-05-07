@@ -1,314 +1,376 @@
+package com.fincore.enquiry_service.specification;
+
+import com.fincore.enquiry_service.dto.GridFilter;
+import com.fincore.enquiry_service.dto.LedgerWiseRequest;
+import com.fincore.enquiry_service.model.LedgerTransaction;
+
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.Path;
+import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
+
+import org.springframework.data.jpa.domain.Specification;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+public class LedgerSpecification {
+
+    public static Specification<LedgerTransaction> build(
+            LedgerWiseRequest dto
+    ) {
+
+        return (root, query, cb) -> {
+
+            List<Predicate> predicates = new ArrayList<>();
+
+            /*
+             * CGL
+             */
+            predicates.add(
+                    cb.equal(
+                            root.get("cglMaster")
+                                    .get("cglNumber"),
+                            dto.getCgl()
+                    )
+            );
+
+            /*
+             * DATE RANGE
+             */
+            predicates.add(
+                    cb.between(
+                            root.get("transactionDate"),
+                            parseDate(dto.getFromDate()),
+                            parseDate(dto.getToDate())
+                    )
+            );
+
+            /*
+             * CURRENCY
+             */
+            if (
+                    dto.getCurrencies() != null &&
+                            !"ALL".equalsIgnoreCase(dto.getCurrencies())
+            ) {
+
+                predicates.add(
+                        cb.equal(
+                                root.get("currencyMaster")
+                                        .get("currencyCode"),
+                                dto.getCurrencies()
+                        )
+                );
+            }
+
+            /*
+             * CIRCLE
+             */
+            if (
+                    dto.getCircle() != null &&
+                            !"ALL".equalsIgnoreCase(dto.getCircle())
+            ) {
+
+                predicates.add(
+                        cb.equal(
+                                root.get("branch")
+                                        .get("circle")
+                                        .get("circleCode"),
+                                dto.getCircle()
+                        )
+                );
+            }
+
+            /*
+             * BRANCHES
+             */
+            if (
+                    dto.getBranches() != null &&
+                            !dto.getBranches().isEmpty() &&
+                            !dto.getBranches().contains("ALL")
+            ) {
+
+                predicates.add(
+                        root.get("branch")
+                                .get("code")
+                                .in(dto.getBranches())
+                );
+            }
+
+            /*
+             * SOURCE FLAGS
+             */
+            if (
+                    dto.getSourceFlags() != null &&
+                            !dto.getSourceFlags().isEmpty() &&
+                            !dto.getSourceFlags().contains("ALL")
+            ) {
+
+                predicates.add(
+                        root.get("sourceFlag")
+                                .in(dto.getSourceFlags())
+                );
+            }
+
+            /*
+             * GRID FILTERS
+             */
+            if (
+                    dto.getGridFilters() != null &&
+                            !dto.getGridFilters().isEmpty()
+            ) {
+
+                for (GridFilter filter : dto.getGridFilters()) {
+
+                    if (
+                            filter == null ||
+                                    filter.getField() == null ||
+                                    filter.getOperator() == null
+                    ) {
+                        continue;
+                    }
+
+                    Object value = filter.getValue();
+
+                    if (
+                            value == null ||
+                                    value.toString().trim().isEmpty()
+                    ) {
+                        continue;
+                    }
+
+                    Path<?> path =
+                            getPath(root, filter.getField());
+
+                    String operator =
+                            filter.getOperator();
+
+                    switch (operator) {
+
+                        /*
+                         * CONTAINS
+                         */
+                        case "contains" -> predicates.add(
+                                cb.like(
+                                        cb.upper(path.as(String.class)),
+                                        "%" + value.toString().toUpperCase() + "%"
+                                )
+                        );
+
+                        /*
+                         * EQUALS
+                         */
+                        case "equals", "is" -> predicates.add(
+                                cb.equal(path, value)
+                        );
+
+                        /*
+                         * STARTS WITH
+                         */
+                        case "startsWith" -> predicates.add(
+                                cb.like(
+                                        cb.upper(path.as(String.class)),
+                                        value.toString().toUpperCase() + "%"
+                                )
+                        );
+
+                        /*
+                         * ENDS WITH
+                         */
+                        case "endsWith" -> predicates.add(
+                                cb.like(
+                                        cb.upper(path.as(String.class)),
+                                        "%" + value.toString().toUpperCase()
+                                )
+                        );
+
+                        /*
+                         * NOT
+                         */
+                        case "not" -> predicates.add(
+                                cb.notEqual(path, value)
+                        );
+
+                        /*
+                         * isAnyOf
+                         */
+                        case "isAnyOf" -> {
+
+                            if (value instanceof List<?> values) {
+
+                                CriteriaBuilder.In<Object> inClause =
+                                        cb.in(path);
+
+                                for (Object v : values) {
+                                    inClause.value(v);
+                                }
+
+                                predicates.add(inClause);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return cb.and(
+                    predicates.toArray(new Predicate[0])
+            );
+        };
+    }
+
+    private static Path<?> getPath(
+            Root<LedgerTransaction> root,
+            String field
+    ) {
+
+        return switch (field) {
+
+            /*
+             * BRANCH
+             */
+            case "branchCode" -> root.get("branch")
+                    .get("code");
+
+            case "branchName" -> root.get("branch")
+                    .get("name");
+
+            /*
+             * CIRCLE
+             */
+            case "circleCode" -> root.get("branch")
+                    .get("circle")
+                    .get("circleCode");
+
+            case "circleName" -> root.get("branch")
+                    .get("circle")
+                    .get("circleName");
+
+            /*
+             * CURRENCY
+             */
+            case "currency" -> root.get("currencyMaster")
+                    .get("currencyCode");
+
+            case "currencyName" -> root.get("currencyMaster")
+                    .get("currencyName");
+
+            /*
+             * CGL
+             */
+            case "cgl" -> root.get("cglMaster")
+                    .get("cglNumber");
+
+            case "description" -> root.get("cglMaster")
+                    .get("description");
+
+            default -> root.get(field);
+        };
+    }
+
+    private static Date parseDate(
+            String date
+    ) {
+
+        try {
+
+            return new SimpleDateFormat(
+                    "dd/MM/yyyy"
+            ).parse(date);
+
+        } catch (Exception e) {
+
+            throw new RuntimeException(
+                    "Invalid date format : " + date
+            );
+        }
+    }
+}
+
+
 package com.fincore.enquiry_service.service;
 
 import com.fincore.enquiry_service.dto.*;
+import com.fincore.enquiry_service.model.LedgerTransaction;
 import com.fincore.enquiry_service.repository.GlTransactionsRepository;
+import com.fincore.enquiry_service.repository.LedgerWiseRepository;
 import com.fincore.enquiry_service.specification.LedgerSpecification;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
-import org.apache.poi.ss.usermodel.Cell;
-import org.apache.poi.ss.usermodel.CellStyle;
-import org.apache.poi.ss.usermodel.CreationHelper;
-import org.apache.poi.ss.usermodel.Font;
-import org.apache.poi.ss.usermodel.HorizontalAlignment;
-import org.apache.poi.ss.usermodel.Row;
-import org.apache.poi.ss.usermodel.Sheet;
-import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
+
+import org.springframework.data.domain.*;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.text.SimpleDateFormat;
-import java.util.Date;
 import java.util.List;
 import java.util.stream.Collectors;
-
-import com.fincore.enquiry_service.model.LedgerTransaction;
-import com.fincore.enquiry_service.repository.LedgerWiseRepository;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
-
-import jakarta.persistence.criteria.Path;
-import jakarta.persistence.criteria.Root;
-
 
 @Slf4j
 @RequiredArgsConstructor
 @Service("LedgerEnquiryService")
-public class LedgerEnquiryServiceImpl implements LedgerEnquiryService {
+public class LedgerEnquiryServiceImpl
+        implements LedgerEnquiryService {
 
     private final GlTransactionsRepository glTransactionsRepository;
     private final LedgerWiseRepository ledgerTransactionRepository;
 
+    /*
+     * OLD API
+     */
     @Override
-    public Page<LedgerEnquiryResponse> search(LedgerEnquiryRequest dto, Pageable pageable) {
+    public Page<LedgerEnquiryResponse> search(
+            LedgerEnquiryRequest dto,
+            Pageable pageable
+    ) {
 
-        String cgl = dto.getCgl();
-        List<String> sourceFlags = dto.getSourceFlags();
-        String currency = (dto.getCurrencies().equalsIgnoreCase("ALL")) ? null : dto.getCurrencies();
-        String fromDate = dto.getFromDate();
-        String toDate = dto.getToDate();
-        List<String> branches = dto.getBranches();
-        String circle = (dto.getCircle().equalsIgnoreCase("ALL")) ? null : dto.getCircle();
+        String currency =
+                "ALL".equalsIgnoreCase(dto.getCurrencies())
+                        ? null
+                        : dto.getCurrencies();
 
-        int skipSource = (dto.getSourceFlags().contains("ALL")) ? 1 : 0;
-        int skipBranches = (dto.getBranches().contains("ALL")) ? 1 : 0;
+        String circle =
+                "ALL".equalsIgnoreCase(dto.getCircle())
+                        ? null
+                        : dto.getCircle();
 
-        log.info("cgl    " + cgl);
-        log.info("sourceFlags   " + sourceFlags);
-        log.info("currency    " + currency);
-        log.info("fromDate   " + fromDate);
-        log.info("toDate   " + toDate);
-        log.info("branches   " + branches);
-        log.info("circle  " + circle);
+        int skipSource =
+                dto.getSourceFlags() != null &&
+                        dto.getSourceFlags().contains("ALL")
+                        ? 1
+                        : 0;
 
-        Page<SearchProjection> projectionList = glTransactionsRepository.getSearchList(cgl, skipSource, sourceFlags,
-                currency, fromDate, toDate, skipBranches, branches, circle, pageable);
+        int skipBranches =
+                dto.getBranches() != null &&
+                        dto.getBranches().contains("ALL")
+                        ? 1
+                        : 0;
+
+        Page<SearchProjection> projectionList =
+                glTransactionsRepository.getSearchList(
+                        dto.getCgl(),
+                        skipSource,
+                        dto.getSourceFlags(),
+                        currency,
+                        dto.getFromDate(),
+                        dto.getToDate(),
+                        skipBranches,
+                        dto.getBranches(),
+                        circle,
+                        pageable
+                );
+
         return projectionList.map(this::mapToResponseDto);
     }
 
-    private LedgerEnquiryResponse mapToResponseDto(SearchProjection searchProjection) {
-        log.info("inside mappinggggggggggggggggggg");
-        return new LedgerEnquiryResponse(
-
-                searchProjection.getTransactionId(), searchProjection.getBatchId(), searchProjection.getJournalId(),
-                searchProjection.getTransactionDate(), searchProjection.getPostDate(), searchProjection.getBranchCode(),
-                searchProjection.getBranchName(), searchProjection.getCircleCode(), searchProjection.getCircleName(),
-                searchProjection.getCurrency(), searchProjection.getCurrencyName(), searchProjection.getCgl(),
-                searchProjection.getDescription(), searchProjection.getNarration(), searchProjection.getDebitAmount(),
-                searchProjection.getCreditAmount(), searchProjection.getTransactionCount(),
-                searchProjection.getSourceFlag());
-    }
-
-
-    @Override
-    public byte[] excelExport(LedgerEnquiryRequest dto) {
-
-        String cgl = dto.getCgl();
-        List<String> sourceFlags = dto.getSourceFlags();
-        String currency = (dto.getCurrencies().equalsIgnoreCase("ALL")) ? null : dto.getCurrencies();
-        String fromDate = dto.getFromDate();
-        String toDate = dto.getToDate();
-        List<String> branches = dto.getBranches();
-        String circle = (dto.getCircle().equalsIgnoreCase("ALL")) ? null : dto.getCircle();
-
-        int skipSource = (dto.getSourceFlags().contains("ALL")) ? 1 : 0;
-        int skipBranches = (dto.getBranches().contains("ALL")) ? 1 : 0;
-
-        List<SearchProjection> exportContent = glTransactionsRepository.getExportContent(cgl, skipSource, sourceFlags,
-                currency, fromDate, toDate, skipBranches, branches, circle);
-        log.info("SearchProjection>>>>>>>" + exportContent);
-        List<LedgerEnquiryResponse> mappedContent = exportContent.stream().map(this::mapToResponseDto)
-                .collect(Collectors.toList());
-
-        try (Workbook workbook = new SXSSFWorkbook(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-
-            Sheet sheet = workbook.createSheet("TransactionsData");
-
-            CellStyle titleSTyle = workbook.createCellStyle();
-            Font font = workbook.createFont();
-            font.setBold(true);
-            font.setFontHeightInPoints((short) 14);
-
-            titleSTyle.setFont(font);
-            titleSTyle.setAlignment(HorizontalAlignment.CENTER);
-
-            Font headerFont = workbook.createFont();
-            headerFont.setBold(true);
-
-            CellStyle headerStyle = workbook.createCellStyle();
-
-            headerStyle.setFont(headerFont);
-
-            CellStyle leftAlignStyle = workbook.createCellStyle();
-            leftAlignStyle.setAlignment(HorizontalAlignment.CENTER);
-
-            CellStyle rightAlignStyle = workbook.createCellStyle();
-            rightAlignStyle.setAlignment(HorizontalAlignment.RIGHT);
-
-            CellStyle dateStyle = workbook.createCellStyle();
-            CreationHelper creationHelper = workbook.getCreationHelper();
-
-            dateStyle.setDataFormat(creationHelper.createDataFormat().getFormat("dd/MM/yyyy"));
-
-            Row title = sheet.createRow(0);
-            Cell titleCell = title.createCell(0);
-            titleCell.setCellValue("Ledger-Wise Enquiry From " + fromDate + " To " + toDate);
-            titleCell.setCellStyle(titleSTyle);
-
-            Row subTitle = sheet.createRow(1);
-            Cell subTitleCell = subTitle.createCell(0);
-            subTitleCell.setCellValue("CGL " + cgl + " - " + dto.getCglName());
-            subTitleCell.setCellStyle(titleSTyle);
-
-            Row header = sheet.createRow(2);
-
-            Cell h1 = header.createCell(0);
-            h1.setCellValue("TRANSACTION ID");
-            h1.setCellStyle(headerStyle);
-
-            Cell h2 = header.createCell(1);
-            h2.setCellValue("BATCH ID");
-            h2.setCellStyle(headerStyle);
-
-            Cell h3 = header.createCell(2);
-            h3.setCellValue("JOURNAL ID");
-            h3.setCellStyle(headerStyle);
-
-            Cell h4 = header.createCell(3);
-            h4.setCellValue("TRANSACTION DATE");
-            h4.setCellStyle(headerStyle);
-
-            Cell h5 = header.createCell(4);
-            h5.setCellValue("POST DATE");
-            h5.setCellStyle(headerStyle);
-
-            Cell h6 = header.createCell(5);
-            h6.setCellValue("BRANCH CODE");
-            h6.setCellStyle(headerStyle);
-
-            Cell h7 = header.createCell(6);
-            h7.setCellValue("BRANCH NAME");
-            h7.setCellStyle(headerStyle);
-
-            Cell h8 = header.createCell(7);
-            h8.setCellValue("CIRCLE CODE");
-            h8.setCellStyle(headerStyle);
-
-            Cell h9 = header.createCell(8);
-            h9.setCellValue("CIRCLE NAME");
-            h9.setCellStyle(headerStyle);
-
-            Cell h10 = header.createCell(9);
-            h10.setCellValue("CURRENCY");
-            h10.setCellStyle(headerStyle);
-
-            Cell h11 = header.createCell(10);
-            h11.setCellValue("CURRENCY NAME");
-            h11.setCellStyle(headerStyle);
-
-            Cell h12 = header.createCell(11);
-            h12.setCellValue("CGL");
-            h12.setCellStyle(headerStyle);
-
-            Cell h13 = header.createCell(12);
-            h13.setCellValue("CGL DESCRIPTION");
-            h13.setCellStyle(headerStyle);
-
-            Cell h14 = header.createCell(13);
-            h14.setCellValue("NARRATION");
-            h14.setCellStyle(headerStyle);
-
-            Cell h15 = header.createCell(14);
-            h15.setCellValue("DEBIT AMOUNT");
-            h15.setCellStyle(headerStyle);
-
-            Cell h16 = header.createCell(15);
-            h16.setCellValue("CREDIT AMOUNT");
-            h16.setCellStyle(headerStyle);
-
-            Cell h17 = header.createCell(16);
-            h17.setCellValue("TRANSACTION COUNT");
-            h17.setCellStyle(headerStyle);
-
-            Cell h18 = header.createCell(17);
-            h18.setCellValue("SOURCE FLAG");
-            h18.setCellStyle(headerStyle);
-
-
-            int rowNum = 3;
-            for (LedgerEnquiryResponse dtoList : mappedContent) {
-                Row row = sheet.createRow(rowNum++);
-
-                Cell c1 = row.createCell(0);
-                c1.setCellValue(dtoList.getTransactionId().toString());
-                c1.setCellStyle(leftAlignStyle);
-
-                Cell c2 = row.createCell(1);
-                c2.setCellValue(dtoList.getBatchId());
-                c2.setCellStyle(leftAlignStyle);
-
-                Cell c3 = row.createCell(2);
-                c3.setCellValue(dtoList.getJournalId());
-                c3.setCellStyle(leftAlignStyle);
-
-                Cell c4 = row.createCell(3);
-                c4.setCellValue(dtoList.getTransactionDate());
-                c4.setCellStyle(leftAlignStyle);
-
-                Cell c5 = row.createCell(4);
-                c5.setCellValue(dtoList.getPostDate());
-                c5.setCellStyle(leftAlignStyle);
-
-                Cell c6 = row.createCell(5);
-                c6.setCellValue(dtoList.getBranchCode());
-                c6.setCellStyle(leftAlignStyle);
-
-                Cell c7 = row.createCell(6);
-                c7.setCellValue(dtoList.getBranchName());
-                c7.setCellStyle(leftAlignStyle);
-
-                Cell c8 = row.createCell(7);
-                c8.setCellValue(dtoList.getCircleCode());
-                c8.setCellStyle(leftAlignStyle);
-
-                Cell c9 = row.createCell(8);
-                c9.setCellValue(dtoList.getCircleName());
-                c9.setCellStyle(leftAlignStyle);
-
-                Cell c10 = row.createCell(9);
-                c10.setCellValue(dtoList.getCurrency());
-                c10.setCellStyle(leftAlignStyle);
-
-                Cell c11 = row.createCell(10);
-                c11.setCellValue(dtoList.getCurrencyName());
-                c11.setCellStyle(leftAlignStyle);
-
-                Cell c12 = row.createCell(11);
-                c12.setCellValue(dtoList.getCgl());
-                c12.setCellStyle(leftAlignStyle);
-
-                Cell c13 = row.createCell(12);
-                c13.setCellValue(dtoList.getDescription());
-                c13.setCellStyle(leftAlignStyle);
-
-                Cell c14 = row.createCell(13);
-                c14.setCellValue(dtoList.getNarration());
-                c14.setCellStyle(leftAlignStyle);
-
-                Cell c15 = row.createCell(14);
-                c15.setCellValue(dtoList.getDebitAmount().toString());
-                c15.setCellStyle(rightAlignStyle);
-
-                Cell c16 = row.createCell(15);
-                c16.setCellValue(dtoList.getCreditAmount().toString());
-                c16.setCellStyle(rightAlignStyle);
-
-                Cell c17 = row.createCell(16);
-                c17.setCellValue(dtoList.getTransactionCount());
-                c17.setCellStyle(leftAlignStyle);
-
-                Cell c18 = row.createCell(17);
-                c18.setCellValue(dtoList.getSourceFlag());
-                c18.setCellStyle(leftAlignStyle);
-
-            }
-
-
-            /*
-             * for(int i = 0; i<16; i++) { sheet.autoSizeColumn(i); }
-             */
-            workbook.write(out);
-            return out.toByteArray();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to generate excel", e);
-        }
-    }
-
-
+    /*
+     * NEW API
+     */
     @Override
     public Page<LedgerWiseResponse> search(
             LedgerWiseRequest dto
@@ -337,48 +399,31 @@ public class LedgerEnquiryServiceImpl implements LedgerEnquiryService {
         return page.map(this::mapToDto);
     }
 
-    private String safeCircleCode(
-            LedgerTransaction entity
+    private LedgerEnquiryResponse mapToResponseDto(
+            SearchProjection searchProjection
     ) {
 
-        try {
+        return new LedgerEnquiryResponse(
 
-            if (
-                    entity.getBranch() != null &&
-                            entity.getBranch().getCircle() != null
-            ) {
-
-                return entity.getBranch()
-                        .getCircle()
-                        .getCircleCode();
-            }
-
-        } catch (Exception ignored) {
-        }
-
-        return null;
-    }
-
-    private String safeCircleName(
-            LedgerTransaction entity
-    ) {
-
-        try {
-
-            if (
-                    entity.getBranch() != null &&
-                            entity.getBranch().getCircle() != null
-            ) {
-
-                return entity.getBranch()
-                        .getCircle()
-                        .getCircleName();
-            }
-
-        } catch (Exception ignored) {
-        }
-
-        return null;
+                searchProjection.getTransactionId(),
+                searchProjection.getBatchId(),
+                searchProjection.getJournalId(),
+                searchProjection.getTransactionDate(),
+                searchProjection.getPostDate(),
+                searchProjection.getBranchCode(),
+                searchProjection.getBranchName(),
+                searchProjection.getCircleCode(),
+                searchProjection.getCircleName(),
+                searchProjection.getCurrency(),
+                searchProjection.getCurrencyName(),
+                searchProjection.getCgl(),
+                searchProjection.getDescription(),
+                searchProjection.getNarration(),
+                searchProjection.getDebitAmount(),
+                searchProjection.getCreditAmount(),
+                searchProjection.getTransactionCount(),
+                searchProjection.getSourceFlag()
+        );
     }
 
     private LedgerWiseResponse mapToDto(
@@ -420,7 +465,7 @@ public class LedgerEnquiryServiceImpl implements LedgerEnquiryService {
         } catch (Exception e) {
 
             log.warn(
-                    "Branch/Circle mapping failed for transactionId : {}",
+                    "Circle mapping failed for transaction : {}",
                     entity.getTransactionId()
             );
         }
@@ -473,9 +518,6 @@ public class LedgerEnquiryServiceImpl implements LedgerEnquiryService {
 
         return switch (field) {
 
-            /*
-             * TRANSACTION
-             */
             case "transactionId" -> "transactionId";
             case "batchId" -> "batchId";
             case "journalId" -> "journalId";
@@ -487,320 +529,19 @@ public class LedgerEnquiryServiceImpl implements LedgerEnquiryService {
             case "transactionCount" -> "transactionCount";
             case "sourceFlag" -> "sourceFlag";
 
-            /*
-             * BRANCH
-             */
             case "branchCode" -> "branch.code";
             case "branchName" -> "branch.name";
 
-            /*
-             * CIRCLE
-             */
             case "circleCode" -> "branch.circle.circleCode";
             case "circleName" -> "branch.circle.circleName";
 
-            /*
-             * CURRENCY
-             */
             case "currency" -> "currencyMaster.currencyCode";
             case "currencyName" -> "currencyMaster.currencyName";
 
-            /*
-             * CGL
-             */
             case "cgl" -> "cglMaster.cglNumber";
             case "description" -> "cglMaster.description";
 
             default -> "transactionDate";
         };
     }
-
-    private Path<?> getPath(
-            Root<LedgerTransaction> root,
-            String field
-    ) {
-
-        return switch (field) {
-
-            /*
-             * BRANCH
-             */
-            case "branchCode" -> root.get("branch")
-                    .get("code");
-
-            case "branchName" -> root.get("branch")
-                    .get("name");
-
-            /*
-             * CIRCLE
-             */
-            case "circleCode" -> root.get("branch")
-                    .get("circle")
-                    .get("circleCode");
-
-            case "circleName" -> root.get("branch")
-                    .get("circle")
-                    .get("circleName");
-
-            /*
-             * CURRENCY
-             */
-            case "currency" -> root.get("currencyMaster")
-                    .get("currencyCode");
-
-            case "currencyName" -> root.get("currencyMaster")
-                    .get("currencyName");
-
-            /*
-             * CGL
-             */
-            case "cgl" -> root.get("cglMaster")
-                    .get("cglNumber");
-
-            case "description" -> root.get("cglMaster")
-                    .get("description");
-
-            default -> root.get(field);
-        };
-    }
-
-    private Date parseDate(
-            String date
-    ) {
-
-        try {
-
-            return new SimpleDateFormat(
-                    "dd/MM/yyyy"
-            ).parse(date);
-
-        } catch (Exception e) {
-
-            throw new RuntimeException(
-                    "Invalid date format : " + date
-            );
-        }
-    }
 }
-
-
-.servlet.DispatcherServlet","message":"Initializing Servlet 'dispatcherServlet'","stack_trace":""}
-2026-05-07 17:51:06.528 INFO  [http-nio-4001-exec-1] o.s.w.s.FrameworkServlet: Completed initialization in 3 ms 
-{"@timestamp":"2026-05-07T17:51:06.5288819+05:30","level":"INFO","service":"TransactionsService","traceId":"","userId":"","clientIp":"","apiPath":"","class":"o.s.web.servlet.DispatcherServlet","message":"Completed initialization in 3 ms","stack_trace":""}
-2026-05-07 17:51:06.758 ERROR [http-nio-4001-exec-1] c.f.e.e.GlobalException: An unexpected error occurred: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap 
-org.springframework.orm.jpa.JpaSystemException: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap
-	at org.springframework.orm.jpa.vendor.HibernateJpaDialect.convertHibernateAccessException(HibernateJpaDialect.java:341)
-	at org.springframework.orm.jpa.vendor.HibernateJpaDialect.translateExceptionIfPossible(HibernateJpaDialect.java:241)
-	at org.springframework.orm.jpa.AbstractEntityManagerFactoryBean.translateExceptionIfPossible(AbstractEntityManagerFactoryBean.java:550)
-	at org.springframework.dao.support.ChainedPersistenceExceptionTranslator.translateExceptionIfPossible(ChainedPersistenceExceptionTranslator.java:61)
-	at org.springframework.dao.support.DataAccessUtils.translateIfNecessary(DataAccessUtils.java:335)
-	at org.springframework.dao.support.PersistenceExceptionTranslationInterceptor.invoke(PersistenceExceptionTranslationInterceptor.java:152)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.data.jpa.repository.support.CrudMethodMetadataPostProcessor$CrudMethodMetadataPopulatingMethodInterceptor.invoke(CrudMethodMetadataPostProcessor.java:165)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.JdkDynamicAopProxy.invoke(JdkDynamicAopProxy.java:223)
-	at jdk.proxy6/jdk.proxy6.$Proxy223.findAll(Unknown Source)
-	at com.fincore.enquiry_service.service.LedgerEnquiryServiceImpl.search(LedgerEnquiryServiceImpl.java:332)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
-	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
-	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
-	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:720)
-	at com.fincore.enquiry_service.service.LedgerEnquiryServiceImpl$$SpringCGLIB$$0.search(<generated>)
-	at com.fincore.enquiry_service.controller.LedgerEnquiryController.search(LedgerEnquiryController.java:40)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:255)
-	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:188)
-	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
-	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
-	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
-	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
-	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
-	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
-	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
-	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
-	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
-	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
-	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
-	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
-	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
-	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
-	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
-	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
-	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
-	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
-	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
-	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
-	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
-	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
-	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
-	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
-	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
-	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
-	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
-	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
-	at java.base/java.lang.Thread.run(Thread.java:1570)
-Caused by: org.hibernate.HibernateException: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap
-	at org.hibernate.type.descriptor.java.JavaTypeHelper.unknownWrap(JavaTypeHelper.java:28)
-	at org.hibernate.type.descriptor.java.AbstractClassJavaType.unknownWrap(AbstractClassJavaType.java:116)
-	at org.hibernate.type.descriptor.java.JdbcTimestampJavaType.wrap(JdbcTimestampJavaType.java:192)
-	at org.hibernate.type.descriptor.java.JdbcTimestampJavaType.coerce(JdbcTimestampJavaType.java:117)
-	at org.hibernate.type.descriptor.java.JdbcTimestampJavaType.coerce(JdbcTimestampJavaType.java:44)
-	at org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.valueParameter(SqmCriteriaNodeBuilder.java:1888)
-	at org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.value(SqmCriteriaNodeBuilder.java:1812)
-	at org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.between(SqmCriteriaNodeBuilder.java:2130)
-	at org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.between(SqmCriteriaNodeBuilder.java:190)
-	at com.fincore.enquiry_service.specification.LedgerSpecification.lambda$build$7294c44f$1(LedgerSpecification.java:47)
-	at org.springframework.data.jpa.repository.support.SimpleJpaRepository.applySpecificationToCriteria(SimpleJpaRepository.java:840)
-	at org.springframework.data.jpa.repository.support.SimpleJpaRepository.getQuery(SimpleJpaRepository.java:759)
-	at org.springframework.data.jpa.repository.support.SimpleJpaRepository.getQuery(SimpleJpaRepository.java:720)
-	at org.springframework.data.jpa.repository.support.SimpleJpaRepository.findAll(SimpleJpaRepository.java:455)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
-	at org.springframework.data.repository.core.support.RepositoryMethodInvoker$RepositoryFragmentMethodInvoker.lambda$new$0(RepositoryMethodInvoker.java:277)
-	at org.springframework.data.repository.core.support.RepositoryMethodInvoker.doInvoke(RepositoryMethodInvoker.java:170)
-	at org.springframework.data.repository.core.support.RepositoryMethodInvoker.invoke(RepositoryMethodInvoker.java:158)
-	at org.springframework.data.repository.core.support.RepositoryComposition$RepositoryFragments.invoke(RepositoryComposition.java:516)
-	at org.springframework.data.repository.core.support.RepositoryComposition.invoke(RepositoryComposition.java:285)
-	at org.springframework.data.repository.core.support.RepositoryFactorySupport$ImplementationMethodExecutionInterceptor.invoke(RepositoryFactorySupport.java:628)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.data.repository.core.support.QueryExecutorMethodInterceptor.doInvoke(QueryExecutorMethodInterceptor.java:168)
-	at org.springframework.data.repository.core.support.QueryExecutorMethodInterceptor.invoke(QueryExecutorMethodInterceptor.java:143)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.data.projection.DefaultMethodInvokingMethodInterceptor.invoke(DefaultMethodInvokingMethodInterceptor.java:70)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.transaction.interceptor.TransactionInterceptor$1.proceedWithInvocation(TransactionInterceptor.java:123)
-	at org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:392)
-	at org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.dao.support.PersistenceExceptionTranslationInterceptor.invoke(PersistenceExceptionTranslationInterceptor.java:137)
-	... 169 common frames omitted
-{"@timestamp":"2026-05-07T17:51:06.7585643+05:30","level":"ERROR","service":"TransactionsService","traceId":"58745623-f80c-49e3-b16f-85dc2923517c","userId":"1015698","clientIp":"","apiPath":"/api/ledger-enquiries/search","class":"c.f.e.exception.GlobalException","message":"An unexpected error occurred: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap","stack_trace":"org.springframework.orm.jpa.JpaSystemException: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap\r\n\tat org.springframework.orm.jpa.vendor.HibernateJpaDialect.convertHibernateAccessException(HibernateJpaDialect.java:341)\r\n\tat org.springframework.orm.jpa.vendor.HibernateJpaDialect.translateExceptionIfPossible(HibernateJpaDialect.java:241)\r\n\tat org.springframework.orm.jpa.AbstractEntityManagerFactoryBean.translateExceptionIfPossible(AbstractEntityManagerFactoryBean.java:550)\r\n\tat org.springframework.dao.support.ChainedPersistenceExceptionTranslator.translateExceptionIfPossible(ChainedPersistenceExceptionTranslator.java:61)\r\n\tat org.springframework.dao.support.DataAccessUtils.translateIfNecessary(DataAccessUtils.java:335)\r\n\tat org.springframework.dao.support.PersistenceExceptionTranslationInterceptor.invoke(PersistenceExceptionTranslationInterceptor.java:152)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)\r\n\tat org.springframework.data.jpa.repository.support.CrudMethodMetadataPostProcessor$CrudMethodMetadataPopulatingMethodInterceptor.invoke(CrudMethodMetadataPostProcessor.java:165)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)\r\n\tat org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)\r\nCaused by: org.hibernate.HibernateException: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap\r\n\tat org.hibernate.type.descriptor.java.JavaTypeHelper.unknownWrap(JavaTypeHelper.java:28)\r\n\tat org.hibernate.type.descriptor.java.AbstractClassJavaType.unknownWrap(AbstractClassJavaType.java:116)\r\n\tat org.hibernate.type.descriptor.java.JdbcTimestampJavaType.wrap(JdbcTimestampJavaType.java:192)\r\n\tat org.hibernate.type.descriptor.java.JdbcTimestampJavaType.coerce(JdbcTimestampJavaType.java:117)\r\n\tat org.hibernate.type.descriptor.java.JdbcTimestampJavaType.coerce(JdbcTimestampJavaType.java:44)\r\n\tat org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.valueParameter(SqmCriteriaNodeBuilder.java:1888)\r\n\tat org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.value(SqmCriteriaNodeBuilder.java:1812)\r\n\tat org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.between(SqmCriteriaNodeBuilder.java:2130)\r\n\tat org.hibernate.query.sqm.internal.SqmCriteriaNodeBuilder.between(SqmCriteriaNodeBuilder.java:190)\r\n\tat com.fincore.enquiry_service.specification.LedgerSpecification.lambda$build$7294c44f$1(LedgerSpecification.java:47)\r\n"}
-2026-05-07 17:51:06.778 WARN  [http-nio-4001-exec-1] o.s.w.s.h.AbstractHandlerExceptionResolver: Resolved [org.springframework.orm.jpa.JpaSystemException: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap] 
-{"@timestamp":"2026-05-07T17:51:06.7785947+05:30","level":"WARN","service":"TransactionsService","traceId":"58745623-f80c-49e3-b16f-85dc2923517c","userId":"1015698","clientIp":"","apiPath":"/api/ledger-enquiries/search","class":"o.s.w.s.m.m.a.ExceptionHandlerExceptionResolver","message":"Resolved [org.springframework.orm.jpa.JpaSystemException: Could not convert 'java.time.LocalDate' to 'java.sql.Timestamp' using 'org.hibernate.type.descriptor.java.JdbcTimestampJavaType' to wrap]","stack_trace":""}
-
