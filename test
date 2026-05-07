@@ -1,379 +1,215 @@
-@Override
-public Page<LedgerWiseResponse> search(
-        LedgerWiseRequest dto
-) {
-
-    Sort.Direction direction =
-            "asc".equalsIgnoreCase(dto.getSortOrder())
-                    ? Sort.Direction.ASC
-                    : Sort.Direction.DESC;
-
-    Pageable pageable = PageRequest.of(
-            dto.getPage(),
-            dto.getSize()
-    );
-
-    Specification<LedgerTransaction> specification =
-            (root, query, cb) -> {
-
-                List<Predicate> predicates = new ArrayList<>();
-
-                // ---------------- CGL ----------------
-                predicates.add(
-                        cb.equal(
-                                root.get("cglMaster")
-                                        .get("cglNumber"),
-                                dto.getCgl()
-                        )
-                );
-
-                // ---------------- DATE RANGE ----------------
-                predicates.add(
-                        cb.between(
-                                root.get("transactionDate"),
-                                parseDate(dto.getFromDate()),
-                                parseDate(dto.getToDate())
-                        )
-                );
-
-                // ---------------- CURRENCY ----------------
-                if (
-                        dto.getCurrencies() != null &&
-                                !"ALL".equalsIgnoreCase(dto.getCurrencies())
-                ) {
-
-                    predicates.add(
-                            cb.equal(
-                                    root.get("currencyMaster")
-                                            .get("currencyCode"),
-                                    dto.getCurrencies()
-                            )
-                    );
-                }
-
-                // ---------------- CIRCLE ----------------
-                if (
-                        dto.getCircle() != null &&
-                                !"ALL".equalsIgnoreCase(dto.getCircle())
-                ) {
-
-                    predicates.add(
-                            cb.equal(
-                                    root.get("branch")
-                                            .get("circle")
-                                            .get("circleCode"),
-                                    dto.getCircle()
-                            )
-                    );
-                }
-
-                // ---------------- SOURCE FLAGS ----------------
-                if (
-                        dto.getSourceFlags() != null &&
-                                !dto.getSourceFlags().isEmpty() &&
-                                !dto.getSourceFlags().contains("ALL")
-                ) {
-
-                    predicates.add(
-                            root.get("sourceFlag")
-                                    .in(dto.getSourceFlags())
-                    );
-                }
-
-                // ---------------- BRANCHES ----------------
-                if (
-                        dto.getBranches() != null &&
-                                !dto.getBranches().isEmpty() &&
-                                !dto.getBranches().contains("ALL")
-                ) {
-
-                    predicates.add(
-                            root.get("branch")
-                                    .get("code")
-                                    .in(dto.getBranches())
-                    );
-                }
-
-                // ---------------- GRID FILTERS ----------------
-                if (
-                        dto.getGridFilters() != null &&
-                                !dto.getGridFilters().isEmpty()
-                ) {
-
-                    for (GridFilter filter : dto.getGridFilters()) {
-
-                        if (
-                                filter.getValue() == null ||
-                                        filter.getValue()
-                                                .toString()
-                                                .trim()
-                                                .isEmpty()
-                        ) {
-                            continue;
-                        }
-
-                        Path<?> path =
-                                getPath(root, filter.getField());
-
-                        String operator =
-                                filter.getOperator();
-
-                        Object value =
-                                filter.getValue();
-
-                        switch (operator) {
-
-                            case "contains" -> predicates.add(
-                                    cb.like(
-                                            cb.upper(path.as(String.class)),
-                                            "%" + value.toString().toUpperCase() + "%"
-                                    )
-                            );
-
-                            case "equals", "is" -> predicates.add(
-                                    cb.equal(path, value)
-                            );
-
-                            case "startsWith" -> predicates.add(
-                                    cb.like(
-                                            cb.upper(path.as(String.class)),
-                                            value.toString().toUpperCase() + "%"
-                                    )
-                            );
-
-                            case "endsWith" -> predicates.add(
-                                    cb.like(
-                                            cb.upper(path.as(String.class)),
-                                            "%" + value.toString().toUpperCase()
-                                    )
-                            );
-                        }
-                    }
-                }
-
-                return cb.and(
-                        predicates.toArray(new Predicate[0])
-                );
-            };
-
-    Page<LedgerTransaction> page =
-            ledgerTransactionRepository.findAll(
-                    specification,
-                    pageable
-            );
-
-    // ---------------- MANUAL SORTING ----------------
-    List<LedgerWiseResponse> mappedList =
-            page.getContent()
-                    .stream()
-                    .map(this::mapToDto)
-                    .collect(Collectors.toList());
-
-    Comparator<LedgerWiseResponse> comparator =
-            switch (dto.getSortField()) {
-
-                case "branchCode" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getBranchCode,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "branchName" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getBranchName,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "circleCode" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getCircleCode,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "circleName" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getCircleName,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "currency" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getCurrency,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "currencyName" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getCurrencyName,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "cgl" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getCgl,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "description" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getDescription,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "sourceFlag" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getSourceFlag,
-                                Comparator.nullsLast(String::compareTo)
-                        );
-
-                case "debitAmount" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getDebitAmount,
-                                Comparator.nullsLast(java.math.BigDecimal::compareTo)
-                        );
-
-                case "creditAmount" ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getCreditAmount,
-                                Comparator.nullsLast(java.math.BigDecimal::compareTo)
-                        );
-
-                default ->
-                        Comparator.comparing(
-                                LedgerWiseResponse::getTransactionDate,
-                                Comparator.nullsLast(java.util.Date::compareTo)
-                        );
-            };
-
-    if ("desc".equalsIgnoreCase(dto.getSortOrder())) {
-        comparator = comparator.reversed();
-    }
-
-    mappedList.sort(comparator);
-
-    return new PageImpl<>(
-            mappedList,
-            pageable,
-            page.getTotalElements()
-    );
+{
+    "circle": "ALL",
+    "cgl": "1106505001",
+    "cglName": "CORE INTER BRANCH A/C",
+    "currencies": "ALL",
+    "branches": [
+        "ALL"
+    ],
+    "sourceFlags": [
+        "C",
+        "F",
+        "J",
+        "P",
+        "T",
+        "V"
+    ],
+    "fromDate": "31/03/2026",
+    "toDate": "10/04/2026",
+    "page": 0,
+    "size": 20,
+    "sortField": "transactionDate",
+    "sortOrder": "desc",
+    "gridFilters": []
 }
 
-private LedgerWiseResponse mapToDto(
-        LedgerTransaction entity
-) {
-
-    return new LedgerWiseResponse(
-
-            entity.getTransactionId(),
-            entity.getBatchId(),
-            entity.getJournalId(),
-            entity.getTransactionDate(),
-            entity.getPostDate(),
-
-            entity.getBranch() != null
-                    ? entity.getBranch().getCode()
-                    : null,
-
-            entity.getBranch() != null
-                    ? entity.getBranch().getName()
-                    : null,
-
-            entity.getBranch() != null &&
-                    entity.getBranch().getCircle() != null
-                    ? entity.getBranch()
-                    .getCircle()
-                    .getCircleCode()
-                    : null,
-
-            entity.getBranch() != null &&
-                    entity.getBranch().getCircle() != null
-                    ? entity.getBranch()
-                    .getCircle()
-                    .getCircleName()
-                    : null,
-
-            entity.getCurrencyMaster() != null
-                    ? entity.getCurrencyMaster().getCurrencyCode()
-                    : null,
-
-            entity.getCurrencyMaster() != null
-                    ? entity.getCurrencyMaster().getCurrencyName()
-                    : null,
-
-            entity.getCglMaster() != null
-                    ? entity.getCglMaster().getCglNumber()
-                    : null,
-
-            entity.getCglMaster() != null
-                    ? entity.getCglMaster().getDescription()
-                    : null,
-
-            entity.getNarration(),
-            entity.getDebitAmount(),
-            entity.getCreditAmount(),
-            entity.getTransactionCount(),
-            entity.getSourceFlag()
-    );
+{
+    "status": "INTERNAL_SERVER_ERROR",
+    "data": null,
+    "message": "An internal server error occurred.",
+    "localDatetime": "2026-05-07T16:14:39.1885976"
 }
 
-private Path<?> getPath(
-        Root<LedgerTransaction> root,
-        String field
-) {
 
-    return switch (field) {
-
-        case "branchCode" ->
-                root.get("branch")
-                        .get("code");
-
-        case "branchName" ->
-                root.get("branch")
-                        .get("name");
-
-        case "circleCode" ->
-                root.get("branch")
-                        .get("circle")
-                        .get("circleCode");
-
-        case "circleName" ->
-                root.get("branch")
-                        .get("circle")
-                        .get("circleName");
-
-        case "currency" ->
-                root.get("currencyMaster")
-                        .get("currencyCode");
-
-        case "currencyName" ->
-                root.get("currencyMaster")
-                        .get("currencyName");
-
-        case "cgl" ->
-                root.get("cglMaster")
-                        .get("cglNumber");
-
-        case "description" ->
-                root.get("cglMaster")
-                        .get("description");
-
-        default ->
-                root.get(field);
-    };
-}
-
-private java.util.Date parseDate(String date) {
-
-    try {
-
-        return new java.text.SimpleDateFormat(
-                "dd/MM/yyyy"
-        ).parse(date);
-
-    } catch (Exception e) {
-
-        throw new RuntimeException(
-                "Invalid date format : " + date
-        );
-    }
-}
+2026-05-07 16:14:39.187 ERROR [http-nio-4001-exec-8] c.f.e.e.GlobalException: An unexpected error occurred: Unable to find com.fincore.enquiry_service.model.CircleMaster with id 026 
+jakarta.persistence.EntityNotFoundException: Unable to find com.fincore.enquiry_service.model.CircleMaster with id 026
+	at org.hibernate.jpa.boot.internal.EntityManagerFactoryBuilderImpl$JpaEntityNotFoundDelegate.handleEntityNotFound(EntityManagerFactoryBuilderImpl.java:190)
+	at org.hibernate.proxy.AbstractLazyInitializer.checkTargetState(AbstractLazyInitializer.java:290)
+	at org.hibernate.proxy.AbstractLazyInitializer.initialize(AbstractLazyInitializer.java:176)
+	at org.hibernate.proxy.AbstractLazyInitializer.getImplementation(AbstractLazyInitializer.java:314)
+	at org.hibernate.proxy.pojo.bytebuddy.ByteBuddyInterceptor.intercept(ByteBuddyInterceptor.java:44)
+	at org.hibernate.proxy.ProxyConfiguration$InterceptorDispatcher.intercept(ProxyConfiguration.java:102)
+	at com.fincore.enquiry_service.model.CircleMaster$HibernateProxy$WORqOkEZ.getCircleName(Unknown Source)
+	at com.fincore.enquiry_service.service.LedgerEnquiryServiceImpl.mapToDto(LedgerEnquiryServiceImpl.java:606)
+	at java.base/java.util.stream.ReferencePipeline$3$1.accept(ReferencePipeline.java:212)
+	at java.base/java.util.ArrayList$ArrayListSpliterator.forEachRemaining(ArrayList.java:1709)
+	at java.base/java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:556)
+	at java.base/java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:546)
+	at java.base/java.util.stream.ReduceOps$ReduceOp.evaluateSequential(ReduceOps.java:921)
+	at java.base/java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:265)
+	at java.base/java.util.stream.ReferencePipeline.collect(ReferencePipeline.java:702)
+	at com.fincore.enquiry_service.service.LedgerEnquiryServiceImpl.search(LedgerEnquiryServiceImpl.java:484)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
+	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
+	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
+	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
+	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
+	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
+	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:720)
+	at com.fincore.enquiry_service.service.LedgerEnquiryServiceImpl$$SpringCGLIB$$0.search(<generated>)
+	at com.fincore.enquiry_service.controller.LedgerEnquiryController.search(LedgerEnquiryController.java:40)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:255)
+	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:188)
+	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
+	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
+	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
+	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
+	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
+	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
+	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
+	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
+	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
+	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
+	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
+	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
+	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
+	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
+	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
+	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
+	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
+	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
+	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
+	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
+	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
+	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
+	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
+	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
+	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
+	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
+	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
+	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
+	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
+	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
+	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
+	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
+	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
+	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
+	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
+	at java.base/java.lang.Thread.run(Thread.java:1570)
+{"@timestamp":"2026-05-07T16:14:39.187599+05:30","level":"ERROR","service":"TransactionsService","traceId":"0befcfdf-9699-466b-b307-a485fb3ae0e6","userId":"1015698","clientIp":"","apiPath":"/api/ledger-enquiries/search","class":"c.f.e.exception.GlobalException","message":"An unexpected error occurred: Unable to find com.fincore.enquiry_service.model.CircleMaster with id 026","stack_trace":"jakarta.persistence.EntityNotFoundException: Unable to find com.fincore.enquiry_service.model.CircleMaster with id 026\r\n\tat org.hibernate.jpa.boot.internal.EntityManagerFactoryBuilderImpl$JpaEntityNotFoundDelegate.handleEntityNotFound(EntityManagerFactoryBuilderImpl.java:190)\r\n\tat org.hibernate.proxy.AbstractLazyInitializer.checkTargetState(AbstractLazyInitializer.java:290)\r\n\tat org.hibernate.proxy.AbstractLazyInitializer.initialize(AbstractLazyInitializer.java:176)\r\n\tat org.hibernate.proxy.AbstractLazyInitializer.getImplementation(AbstractLazyInitializer.java:314)\r\n\tat org.hibernate.proxy.pojo.bytebuddy.ByteBuddyInterceptor.intercept(ByteBuddyInterceptor.java:44)\r\n\tat org.hibernate.proxy.ProxyConfiguration$InterceptorDispatcher.intercept(ProxyConfiguration.java:102)\r\n\tat com.fincore.enquiry_service.model.CircleMaster$HibernateProxy$WORqOkEZ.getCircleName(Unknown Source)\r\n\tat com.fincore.enquiry_service.service.LedgerEnquiryServiceImpl.mapToDto(LedgerEnquiryServiceImpl.java:606)\r\n\tat java.base/java.util.stream.ReferencePipeline$3$1.accept(ReferencePipeline.java:212)\r\n\tat java.base/java.util.ArrayList$ArrayListSpliterator.forEachRemaining(ArrayList.java:1709)\r\n"}
+2026-05-07 16:14:39.188 WARN  [http-nio-4001-exec-8] o.s.w.s.h.AbstractHandlerExceptionResolver: Resolved [jakarta.persistence.EntityNotFoundException: Unable to find com.fincore.enquiry_service.model.CircleMaster with id 026] 
+{"@timestamp":"2026-05-07T16:14:39.1885976+05:30","level":"WARN","service":"TransactionsService","traceId":"0befcfdf-9699-466b-b307-a485fb3ae0e6","userId":"1015698","clientIp":"","apiPath":"/api/ledger-enquiries/search","class":"o.s.w.s.m.m.a.ExceptionHandlerExceptionResolver","message":"Resolved [jakarta.persistence.EntityNotFoundException: Unable to find com.fincore.enquiry_service.model.CircleMaster with id 026]","stack_trace":""}
