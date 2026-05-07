@@ -1,96 +1,312 @@
-private LedgerEnquiryResponse mapEntityToDto(
-        GlTransactions entity
-) {
+package com.fincore.enquiry_service.repository;
 
-    return new LedgerEnquiryResponse(
+import com.fincore.enquiry_service.dto.GridFilter;
+import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
+import com.fincore.enquiry_service.dto.SearchProjection;
 
-            entity.getTransactionId(),
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+import jakarta.persistence.Query;
 
-            entity.getBatchId(),
+import lombok.RequiredArgsConstructor;
 
-            entity.getJournalId(),
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 
-            entity.getTransactionDate(),
+import org.springframework.stereotype.Repository;
 
-            entity.getPostDate(),
+import java.math.BigDecimal;
+import java.util.*;
 
-            entity.getBranchCode(),
+@Repository
+@RequiredArgsConstructor
+public class LedgerEnquiryCustomRepositoryImpl
+        implements LedgerEnquiryCustomRepository {
 
-            entity.getBranch() != null
-                    ? entity.getBranch().getName()
-                    : null,
+    @PersistenceContext
+    private EntityManager entityManager;
 
-            entity.getBranch() != null
-                    ? entity.getBranch()
-                        .getCircleCode()
-                    : null,
+    @Override
+    public Page<SearchProjection> search(
+            LedgerEnquiryRequest dto
+    ) {
 
-            entity.getBranch() != null &&
-            entity.getBranch().getCircle() != null
-                    ? entity.getBranch()
-                        .getCircle()
-                        .getCircleName()
-                    : null,
+        StringBuilder sql =
+                new StringBuilder();
 
-            entity.getCurrency(),
+        sql.append("""
+            SELECT
+                g.TRANSACTION_ID as transactionId,
+                g.BATCH_ID as batchId,
+                g.JOURNAL_ID as journalId,
+                g.TRANSACTION_DATE as transactionDate,
+                g.POST_DATE as postDate,
+                g.BRANCH_CODE as branchCode,
+                b.NAME AS branchName,
+                b.CIRCLE_CODE as circleCode,
+                cr.CIRCLE_NAME as circleName,
+                g.CURRENCY as currency,
+                cu.CURRENCY_NAME as currencyName,
+                g.CGL as cgl,
+                c.DESCRIPTION as description,
+                g.NARRATION as narration,
+                g.DEBIT_AMOUNT as debitAmount,
+                g.CREDIT_AMOUNT as creditAmount,
+                g.TRANSACTION_COUNT as transactionCount,
+                g.SOURCE_FLAG as sourceFlag
 
-            entity.getCurrencyMaster() != null
-                    ? entity.getCurrencyMaster()
-                        .getCurrencyName()
-                    : null,
+            FROM gl_transactions g
 
-            entity.getCgl(),
+            JOIN branch_master b
+                ON g.BRANCH_CODE = b.CODE
 
-            entity.getCglMaster() != null
-                    ? entity.getCglMaster()
-                        .getDescription()
-                    : null,
+            JOIN circle_master cr
+                ON b.CIRCLE_CODE = cr.CIRCLE_CODE
 
-            entity.getNarration(),
+            LEFT JOIN cgl_master c
+                ON c.CGL_NUMBER = g.CGL
 
-            entity.getDebitAmount(),
+            LEFT JOIN currency_master cu
+                ON g.CURRENCY = cu.CURRENCY_CODE
 
-            entity.getCreditAmount(),
+            WHERE 1=1
+        """);
 
-            entity.getTransactionCount(),
+        Map<String, Object> params =
+                new HashMap<>();
 
-            entity.getSourceFlag()
-    );
+        // ================= CGL =================
+
+        sql.append("""
+            AND g.CGL = :cgl
+        """);
+
+        params.put(
+                "cgl",
+                dto.getCgl()
+        );
+
+        // ================= SOURCE =================
+
+        if (
+                dto.getSourceFlags() != null &&
+                !dto.getSourceFlags()
+                        .contains("ALL")
+        ) {
+
+            sql.append("""
+                AND g.SOURCE_FLAG IN :sourceFlags
+            """);
+
+            params.put(
+                    "sourceFlags",
+                    dto.getSourceFlags()
+            );
+        }
+
+        // ================= CURRENCY =================
+
+        if (
+                dto.getCurrencies() != null &&
+                !"ALL".equalsIgnoreCase(
+                        dto.getCurrencies()
+                )
+        ) {
+
+            sql.append("""
+                AND g.CURRENCY = :currency
+            """);
+
+            params.put(
+                    "currency",
+                    dto.getCurrencies()
+            );
+        }
+
+        // ================= BRANCHES =================
+
+        if (
+                dto.getBranches() != null &&
+                !dto.getBranches()
+                        .contains("ALL")
+        ) {
+
+            sql.append("""
+                AND g.BRANCH_CODE IN :branches
+            """);
+
+            params.put(
+                    "branches",
+                    dto.getBranches()
+            );
+        }
+
+        // ================= CIRCLE =================
+
+        if (
+                dto.getCircle() != null &&
+                !"ALL".equalsIgnoreCase(
+                        dto.getCircle()
+                )
+        ) {
+
+            sql.append("""
+                AND b.CIRCLE_CODE = :circle
+            """);
+
+            params.put(
+                    "circle",
+                    dto.getCircle()
+            );
+        }
+
+        // ================= DATES =================
+
+        sql.append("""
+            AND g.TRANSACTION_DATE
+            BETWEEN
+            TO_DATE(:fromDate,'DD/MM/YYYY')
+            AND
+            TO_DATE(:toDate,'DD/MM/YYYY')
+        """);
+
+        params.put(
+                "fromDate",
+                dto.getFromDate()
+        );
+
+        params.put(
+                "toDate",
+                dto.getToDate()
+        );
+
+        // ================= GRID FILTERS =================
+
+        if (
+                dto.getGridFilters() != null
+        ) {
+
+            int i = 0;
+
+            for (
+                    GridFilter filter :
+                    dto.getGridFilters()
+            ) {
+
+                if (
+                        filter.getValue() == null ||
+                        filter.getValue().isBlank()
+                ) {
+                    continue;
+                }
+
+                String param =
+                        "filter" + i++;
+
+                sql.append("""
+                    AND LOWER("""
+                        + mapField(
+                                filter.getField()
+                        )
+                        + """)
+                    LIKE LOWER(:"""
+                        + param
+                        + ")"
+                );
+
+                params.put(
+                        param,
+                        "%" +
+                        filter.getValue() +
+                        "%"
+                );
+            }
+        }
+
+        // ================= SORTING =================
+
+        sql.append("""
+            ORDER BY
+        """);
+
+        sql.append(
+                mapField(
+                        dto.getSortField()
+                )
+        );
+
+        sql.append(" ");
+
+        sql.append(
+                "asc".equalsIgnoreCase(
+                        dto.getSortOrder()
+                )
+                        ? "ASC"
+                        : "DESC"
+        );
+
+        Query query =
+                entityManager
+                        .createNativeQuery(
+                                sql.toString(),
+                                "SearchProjectionMapping"
+                        );
+
+        params.forEach(
+                query::setParameter
+        );
+
+        // ================= PAGINATION =================
+
+        query.setFirstResult(
+                dto.getPage() *
+                dto.getSize()
+        );
+
+        query.setMaxResults(
+                dto.getSize()
+        );
+
+        List<SearchProjection> result =
+                query.getResultList();
+
+        return new PageImpl<>(
+                result
+        );
+    }
+
+    private String mapField(
+            String field
+    ) {
+
+        return switch (field) {
+
+            case "transactionDate" ->
+                    "g.TRANSACTION_DATE";
+
+            case "branchName" ->
+                    "b.NAME";
+
+            case "circleName" ->
+                    "cr.CIRCLE_NAME";
+
+            case "currencyName" ->
+                    "cu.CURRENCY_NAME";
+
+            case "narration" ->
+                    "g.NARRATION";
+
+            case "debitAmount" ->
+                    "g.DEBIT_AMOUNT";
+
+            case "creditAmount" ->
+                    "g.CREDIT_AMOUNT";
+
+            case "sourceFlag" ->
+                    "g.SOURCE_FLAG";
+
+            default ->
+                    "g.TRANSACTION_DATE";
+        };
+    }
 }
-
-
-@ManyToOne(fetch = FetchType.LAZY)
-@JoinColumn(
-    name = "BRANCH_CODE",
-    referencedColumnName = "CODE",
-    insertable = false,
-    updatable = false
-)
-private BranchMaster branch;
-
-@ManyToOne(fetch = FetchType.LAZY)
-@JoinColumn(
-    name = "CURRENCY",
-    referencedColumnName = "CURRENCY_CODE",
-    insertable = false,
-    updatable = false
-)
-private CurrencyMaster currencyMaster;
-
-@ManyToOne(fetch = FetchType.LAZY)
-@JoinColumn(
-    name = "CGL",
-    referencedColumnName = "CGL_NUMBER",
-    insertable = false,
-    updatable = false
-)
-private CglMaster cglMaster;
-
-@ManyToOne(fetch = FetchType.LAZY)
-@JoinColumn(
-    name = "CIRCLE_CODE",
-    referencedColumnName = "CIRCLE_CODE",
-    insertable = false,
-    updatable = false
-)
-private CircleMaster circle;
