@@ -1,191 +1,422 @@
-
-
-@PostMapping("/cgls")
-    public PaginatedResponseDto<?> getCGLs(
-            @RequestHeader("Authorization") String authorizationHeader,
-            @RequestHeader("X-Request-Type") String requestType,
-            @RequestBody SearchRequest request) {
-        log.info("Received request to fetch all CGLs");
-        return service.searchAnyMaster(requestType, request);
-    }
-	
-package com.tcs.fincore.CommonMasterService.dto;
-
-import java.util.List;
-
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-@Data
-@AllArgsConstructor
-@NoArgsConstructor
-public class PaginatedResponseDto<T> {
-
-    private int currentPage;
-    private int totalPages;
-    private int pageSize;
-    private long totalElements;
-    private String sortIn;
-    private List<?> data;
-
-}
-
-
-PaginatedResponseDto<?> searchAnyMaster(String requestType, SearchRequest request);
-
 @Override
-	public PaginatedResponseDto<?> searchAnyMaster(String requestType, SearchRequest request) {
-		MasterType masterType;
-		try {
-			masterType = MasterType.valueOf(requestType.toUpperCase());
-		} catch (IllegalArgumentException e) {
-			throw new IllegalArgumentException("Invalid X-Request-Type: " + requestType);
-		}
+public Page<LedgerWiseResponse> search(
+        LedgerWiseRequest dto
+) {
 
-		JpaSpecificationExecutor<?> repo = resolver.resolve(masterType);
+    Sort.Direction direction =
+            "asc".equalsIgnoreCase(dto.getSortOrder())
+                    ? Sort.Direction.ASC
+                    : Sort.Direction.DESC;
 
-		PageRequest pageRequest;
+    Sort sort = Sort.by(
+            direction,
+            getSortField(dto.getSortField())
+    );
 
-		if (request.getSortField() != null && request.getSortOrder() != null) {
-			Sort.Direction direction = Sort.Direction.fromString(request.getSortOrder());
-			pageRequest = PageRequest.of(request.getPage(), request.getSize(),
-					Sort.by(direction, request.getSortField()));
-		} else {
-			pageRequest = PageRequest.of(request.getPage(), request.getSize());
-		}
-		Page<?> page = repo.findAll(
-				GenericSpecification.build(request.getFilters()),
-				pageRequest);
+    Pageable pageable = PageRequest.of(
+            dto.getPage(),
+            dto.getSize(),
+            sort
+    );
 
-		PaginatedResponseDto<Object> response = new PaginatedResponseDto<>();
-		response.setData(page.getContent());
-		response.setCurrentPage(page.getNumber());
-		response.setPageSize(page.getSize());
-		response.setTotalPages(page.getTotalPages());
-		response.setTotalElements(page.getTotalElements());
+    Specification<LedgerTransaction> specification =
+            (root, query, cb) -> {
 
-		return response;
-	}
-	
-	
-package com.tcs.fincore.CommonMasterService.Specification;
+                List<Predicate> predicates =
+                        new ArrayList<>();
 
-import com.tcs.fincore.CommonMasterService.dto.FilterRequest;
-import com.tcs.fincore.CommonMasterService.enums.Operators;
+                /*
+                 * CGL
+                 */
+                if (
+                        dto.getCgl() != null &&
+                        !dto.getCgl().trim().isEmpty() &&
+                        !"ALL".equalsIgnoreCase(dto.getCgl())
+                ) {
 
-import org.springframework.data.jpa.domain.Specification;
-
-import jakarta.persistence.criteria.CriteriaBuilder;
-import jakarta.persistence.criteria.Predicate;
-import java.util.ArrayList;
-import jakarta.persistence.criteria.Path;
-import java.util.List;
-
-public class GenericSpecification<T> {
-
-    public static <T> Specification<T> build(List<FilterRequest> filters) {
-
-        return (root, query, cb) -> {
-
-            if (filters == null || filters.isEmpty()) {
-                return cb.conjunction();
-            }
-
-            List<Predicate> predicates = new ArrayList<>();
-
-            for (FilterRequest filter : filters) {
-
-                String field = filter.getField();
-                Operators operator = Operators.from(filter.getOperator());
-                Object value = filter.getValue();
-
-                // skip invalid filters
-                if (operator == null) {
-                    continue;
+                    predicates.add(
+                            cb.equal(
+                                    root.get("cglMaster")
+                                            .get("cglNumber"),
+                                    dto.getCgl()
+                            )
+                    );
                 }
 
-                if (value == null && operator != Operators.IS_NULL && operator != Operators.IS_NOT_NULL) {
-                    continue;
+                /*
+                 * DATE RANGE
+                 */
+                predicates.add(
+                        cb.between(
+                                root.get("transactionDate"),
+                                parseDate(dto.getFromDate()),
+                                parseDate(dto.getToDate())
+                        )
+                );
+
+                /*
+                 * CURRENCY
+                 */
+                if (
+                        dto.getCurrencies() != null &&
+                        !"ALL".equalsIgnoreCase(dto.getCurrencies())
+                ) {
+
+                    predicates.add(
+                            cb.equal(
+                                    root.get("currencyMaster")
+                                            .get("currencyCode"),
+                                    dto.getCurrencies()
+                            )
+                    );
                 }
 
-                if (value != null && value.toString().isBlank()
-                        && operator != Operators.IS_NULL
-                        && operator != Operators.IS_NOT_NULL) {
-                    continue;
+                /*
+                 * CIRCLE
+                 */
+                if (
+                        dto.getCircle() != null &&
+                        !"ALL".equalsIgnoreCase(dto.getCircle())
+                ) {
+
+                    predicates.add(
+                            cb.equal(
+                                    root.get("branch")
+                                            .get("circle")
+                                            .get("circleCode"),
+                                    dto.getCircle()
+                            )
+                    );
                 }
 
-                Path<?> path = root.get(field);
-                Class<?> type = path.getJavaType();
+                /*
+                 * SOURCE FLAGS
+                 */
+                if (
+                        dto.getSourceFlags() != null &&
+                        !dto.getSourceFlags().isEmpty() &&
+                        !dto.getSourceFlags().contains("ALL")
+                ) {
 
-                switch (operator) {
+                    predicates.add(
+                            root.get("sourceFlag")
+                                    .in(dto.getSourceFlags())
+                    );
+                }
 
-                    case CONTAINS ->
-                        predicates.add(cb.like(
-                                cb.lower(path.as(String.class)),
-                                "%" + value.toString().toLowerCase() + "%"));
+                /*
+                 * BRANCHES
+                 */
+                if (
+                        dto.getBranches() != null &&
+                        !dto.getBranches().isEmpty() &&
+                        !dto.getBranches().contains("ALL")
+                ) {
 
-                    case NOT_CONTAINS ->
-                        predicates.add(cb.notLike(
-                                cb.lower(path.as(String.class)),
-                                "%" + value.toString().toLowerCase() + "%"));
+                    predicates.add(
+                            root.get("branch")
+                                    .get("code")
+                                    .in(dto.getBranches())
+                    );
+                }
 
-                    case STARTS_WITH ->
-                        predicates.add(cb.like(
-                                cb.lower(path.as(String.class)),
-                                value.toString().toLowerCase() + "%"));
+                /*
+                 * GRID FILTERS
+                 */
+                if (
+                        dto.getGridFilters() != null &&
+                        !dto.getGridFilters().isEmpty()
+                ) {
 
-                    case ENDS_WITH ->
-                        predicates.add(cb.like(
-                                cb.lower(path.as(String.class)),
-                                "%" + value.toString().toLowerCase()));
+                    for (GridFilter filter : dto.getGridFilters()) {
 
-                    case EQUALS ->
-                        predicates.add(cb.equal(
-                                path, convert(type, value)));
+                        if (
+                                filter.getValue() == null ||
+                                filter.getValue()
+                                        .toString()
+                                        .trim()
+                                        .isEmpty()
+                        ) {
+                            continue;
+                        }
 
-                    case NOT_EQUALS ->
-                        predicates.add(cb.notEqual(
-                                path, convert(type, value)));
+                        Path<?> path =
+                                getPath(
+                                        root,
+                                        filter.getField()
+                                );
 
-                    case IS_NULL ->
-                        predicates.add(cb.isNull(path));
+                        String operator =
+                                filter.getOperator();
 
-                    case IS_NOT_NULL ->
-                        predicates.add(cb.isNotNull(path));
+                        Object value =
+                                filter.getValue();
 
-                    case IN -> {
-                        CriteriaBuilder.In<Object> in = cb.in(path);
-                        ((List<?>) value)
-                                .forEach(v -> in.value(convert(type, v)));
-                        predicates.add(in);
+                        switch (operator) {
+
+                            case "contains" -> predicates.add(
+                                    cb.like(
+                                            cb.upper(
+                                                    path.as(String.class)
+                                            ),
+                                            "%" +
+                                                    value.toString()
+                                                            .toUpperCase()
+                                                    + "%"
+                                    )
+                            );
+
+                            case "equals", "is" -> predicates.add(
+                                    cb.equal(path, value)
+                            );
+
+                            case "startsWith" -> predicates.add(
+                                    cb.like(
+                                            cb.upper(
+                                                    path.as(String.class)
+                                            ),
+                                            value.toString()
+                                                    .toUpperCase()
+                                                    + "%"
+                                    )
+                            );
+
+                            case "endsWith" -> predicates.add(
+                                    cb.like(
+                                            cb.upper(
+                                                    path.as(String.class)
+                                            ),
+                                            "%" +
+                                                    value.toString()
+                                                            .toUpperCase()
+                                    )
+                            );
+                        }
                     }
                 }
-            }
 
-            return cb.and(predicates.toArray(new Predicate[0]));
-        };
+                return cb.and(
+                        predicates.toArray(
+                                new Predicate[0]
+                        )
+                );
+            };
+
+    Page<LedgerTransaction> page =
+            ledgerTransactionRepository.findAll(
+                    specification,
+                    pageable
+            );
+
+    return page.map(this::mapToDto);
+}
+
+private LedgerWiseResponse mapToDto(
+        LedgerTransaction entity
+) {
+
+    String branchCode = null;
+    String branchName = null;
+    String circleCode = null;
+    String circleName = null;
+
+    try {
+
+        if (entity.getBranch() != null) {
+
+            branchCode =
+                    entity.getBranch().getCode();
+
+            branchName =
+                    entity.getBranch().getName();
+
+            if (
+                    entity.getBranch().getCircle()
+                            != null
+            ) {
+
+                circleCode =
+                        entity.getBranch()
+                                .getCircle()
+                                .getCircleCode();
+
+                circleName =
+                        entity.getBranch()
+                                .getCircle()
+                                .getCircleName();
+            }
+        }
+
+    } catch (Exception e) {
+
+        log.warn(
+                "Branch/Circle mapping failed for transactionId : {}",
+                entity.getTransactionId()
+        );
     }
 
-    private static Object convert(Class<?> type, Object value) {
+    return new LedgerWiseResponse(
 
-        if (value == null)
-            return null;
+            entity.getTransactionId(),
+            entity.getBatchId(),
+            entity.getJournalId(),
+            entity.getTransactionDate(),
+            entity.getPostDate(),
 
-        String v = value.toString();
+            branchCode,
+            branchName,
 
-        if (type == Integer.class || type == int.class)
-            return Integer.valueOf(v);
+            circleCode,
+            circleName,
 
-        if (type == Long.class || type == long.class)
-            return Long.valueOf(v);
+            entity.getCurrencyMaster() != null
+                    ? entity.getCurrencyMaster()
+                    .getCurrencyCode()
+                    : null,
 
-        if (type == Boolean.class || type == boolean.class)
-            return Boolean.valueOf(v);
+            entity.getCurrencyMaster() != null
+                    ? entity.getCurrencyMaster()
+                    .getCurrencyName()
+                    : null,
 
-        if (Enum.class.isAssignableFrom(type))
-            return Enum.valueOf((Class<Enum>) type, v);
+            entity.getCglMaster() != null
+                    ? entity.getCglMaster()
+                    .getCglNumber()
+                    : null,
 
-        return v;
+            entity.getCglMaster() != null
+                    ? entity.getCglMaster()
+                    .getDescription()
+                    : null,
+
+            entity.getNarration(),
+            entity.getDebitAmount(),
+            entity.getCreditAmount(),
+            entity.getTransactionCount(),
+            entity.getSourceFlag()
+    );
+}
+
+private String getSortField(
+        String field
+) {
+
+    return switch (field) {
+
+        /*
+         * TRANSACTION
+         */
+        case "transactionId" -> "transactionId";
+        case "batchId" -> "batchId";
+        case "journalId" -> "journalId";
+        case "transactionDate" -> "transactionDate";
+        case "postDate" -> "postDate";
+        case "narration" -> "narration";
+        case "debitAmount" -> "debitAmount";
+        case "creditAmount" -> "creditAmount";
+        case "transactionCount" -> "transactionCount";
+        case "sourceFlag" -> "sourceFlag";
+
+        /*
+         * BRANCH
+         */
+        case "branchCode" -> "branch.code";
+        case "branchName" -> "branch.name";
+
+        /*
+         * CIRCLE
+         */
+        case "circleCode" -> "branch.circle.circleCode";
+        case "circleName" -> "branch.circle.circleName";
+
+        /*
+         * CURRENCY
+         */
+        case "currency" -> "currencyMaster.currencyCode";
+        case "currencyName" -> "currencyMaster.currencyName";
+
+        /*
+         * CGL
+         */
+        case "cgl" -> "cglMaster.cglNumber";
+        case "description" -> "cglMaster.description";
+
+        default -> "transactionDate";
+    };
+}
+
+private Path<?> getPath(
+        Root<LedgerTransaction> root,
+        String field
+) {
+
+    return switch (field) {
+
+        /*
+         * BRANCH
+         */
+        case "branchCode" ->
+                root.get("branch")
+                        .get("code");
+
+        case "branchName" ->
+                root.get("branch")
+                        .get("name");
+
+        /*
+         * CIRCLE
+         */
+        case "circleCode" ->
+                root.get("branch")
+                        .get("circle")
+                        .get("circleCode");
+
+        case "circleName" ->
+                root.get("branch")
+                        .get("circle")
+                        .get("circleName");
+
+        /*
+         * CURRENCY
+         */
+        case "currency" ->
+                root.get("currencyMaster")
+                        .get("currencyCode");
+
+        case "currencyName" ->
+                root.get("currencyMaster")
+                        .get("currencyName");
+
+        /*
+         * CGL
+         */
+        case "cgl" ->
+                root.get("cglMaster")
+                        .get("cglNumber");
+
+        case "description" ->
+                root.get("cglMaster")
+                        .get("description");
+
+        default ->
+                root.get(field);
+    };
+}
+
+private Date parseDate(
+        String date
+) {
+
+    try {
+
+        return new SimpleDateFormat(
+                "dd/MM/yyyy"
+        ).parse(date);
+
+    } catch (Exception e) {
+
+        throw new RuntimeException(
+                "Invalid date format : " + date
+        );
     }
 }
