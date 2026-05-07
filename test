@@ -1,312 +1,58 @@
-package com.fincore.enquiry_service.repository;
-
-import com.fincore.enquiry_service.dto.GridFilter;
-import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
-import com.fincore.enquiry_service.dto.SearchProjection;
-
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
-import jakarta.persistence.Query;
-
-import lombok.RequiredArgsConstructor;
-
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
-
-import org.springframework.stereotype.Repository;
-
-import java.math.BigDecimal;
-import java.util.*;
-
-@Repository
-@RequiredArgsConstructor
-public class LedgerEnquiryCustomRepositoryImpl
-        implements LedgerEnquiryCustomRepository {
-
-    @PersistenceContext
-    private EntityManager entityManager;
-
-    @Override
-    public Page<SearchProjection> search(
-            LedgerEnquiryRequest dto
-    ) {
-
-        StringBuilder sql =
-                new StringBuilder();
-
-        sql.append("""
-            SELECT
-                g.TRANSACTION_ID as transactionId,
-                g.BATCH_ID as batchId,
-                g.JOURNAL_ID as journalId,
-                g.TRANSACTION_DATE as transactionDate,
-                g.POST_DATE as postDate,
-                g.BRANCH_CODE as branchCode,
-                b.NAME AS branchName,
-                b.CIRCLE_CODE as circleCode,
-                cr.CIRCLE_NAME as circleName,
-                g.CURRENCY as currency,
-                cu.CURRENCY_NAME as currencyName,
-                g.CGL as cgl,
-                c.DESCRIPTION as description,
-                g.NARRATION as narration,
-                g.DEBIT_AMOUNT as debitAmount,
-                g.CREDIT_AMOUNT as creditAmount,
-                g.TRANSACTION_COUNT as transactionCount,
-                g.SOURCE_FLAG as sourceFlag
-
-            FROM gl_transactions g
-
-            JOIN branch_master b
-                ON g.BRANCH_CODE = b.CODE
-
-            JOIN circle_master cr
-                ON b.CIRCLE_CODE = cr.CIRCLE_CODE
-
-            LEFT JOIN cgl_master c
-                ON c.CGL_NUMBER = g.CGL
-
-            LEFT JOIN currency_master cu
-                ON g.CURRENCY = cu.CURRENCY_CODE
-
-            WHERE 1=1
-        """);
-
-        Map<String, Object> params =
-                new HashMap<>();
-
-        // ================= CGL =================
-
-        sql.append("""
-            AND g.CGL = :cgl
-        """);
-
-        params.put(
-                "cgl",
-                dto.getCgl()
-        );
-
-        // ================= SOURCE =================
-
-        if (
-                dto.getSourceFlags() != null &&
-                !dto.getSourceFlags()
-                        .contains("ALL")
-        ) {
-
-            sql.append("""
-                AND g.SOURCE_FLAG IN :sourceFlags
-            """);
-
-            params.put(
-                    "sourceFlags",
-                    dto.getSourceFlags()
-            );
-        }
-
-        // ================= CURRENCY =================
-
-        if (
-                dto.getCurrencies() != null &&
-                !"ALL".equalsIgnoreCase(
-                        dto.getCurrencies()
-                )
-        ) {
-
-            sql.append("""
-                AND g.CURRENCY = :currency
-            """);
-
-            params.put(
-                    "currency",
-                    dto.getCurrencies()
-            );
-        }
-
-        // ================= BRANCHES =================
-
-        if (
-                dto.getBranches() != null &&
-                !dto.getBranches()
-                        .contains("ALL")
-        ) {
-
-            sql.append("""
-                AND g.BRANCH_CODE IN :branches
-            """);
-
-            params.put(
-                    "branches",
-                    dto.getBranches()
-            );
-        }
-
-        // ================= CIRCLE =================
-
-        if (
-                dto.getCircle() != null &&
-                !"ALL".equalsIgnoreCase(
-                        dto.getCircle()
-                )
-        ) {
-
-            sql.append("""
-                AND b.CIRCLE_CODE = :circle
-            """);
-
-            params.put(
-                    "circle",
-                    dto.getCircle()
-            );
-        }
-
-        // ================= DATES =================
-
-        sql.append("""
-            AND g.TRANSACTION_DATE
-            BETWEEN
-            TO_DATE(:fromDate,'DD/MM/YYYY')
-            AND
-            TO_DATE(:toDate,'DD/MM/YYYY')
-        """);
-
-        params.put(
-                "fromDate",
-                dto.getFromDate()
-        );
-
-        params.put(
-                "toDate",
-                dto.getToDate()
-        );
-
-        // ================= GRID FILTERS =================
-
-        if (
-                dto.getGridFilters() != null
-        ) {
-
-            int i = 0;
-
-            for (
-                    GridFilter filter :
-                    dto.getGridFilters()
-            ) {
-
-                if (
-                        filter.getValue() == null ||
-                        filter.getValue().isBlank()
-                ) {
-                    continue;
-                }
-
-                String param =
-                        "filter" + i++;
-
-                sql.append("""
-                    AND LOWER("""
-                        + mapField(
-                                filter.getField()
-                        )
-                        + """)
-                    LIKE LOWER(:"""
-                        + param
-                        + ")"
-                );
-
-                params.put(
-                        param,
-                        "%" +
-                        filter.getValue() +
-                        "%"
-                );
-            }
-        }
-
-        // ================= SORTING =================
-
-        sql.append("""
-            ORDER BY
-        """);
-
-        sql.append(
-                mapField(
-                        dto.getSortField()
-                )
-        );
-
-        sql.append(" ");
-
-        sql.append(
-                "asc".equalsIgnoreCase(
-                        dto.getSortOrder()
-                )
-                        ? "ASC"
-                        : "DESC"
-        );
-
-        Query query =
-                entityManager
-                        .createNativeQuery(
-                                sql.toString(),
-                                "SearchProjectionMapping"
-                        );
-
-        params.forEach(
-                query::setParameter
-        );
-
-        // ================= PAGINATION =================
-
-        query.setFirstResult(
-                dto.getPage() *
-                dto.getSize()
-        );
-
-        query.setMaxResults(
-                dto.getSize()
-        );
-
-        List<SearchProjection> result =
-                query.getResultList();
-
-        return new PageImpl<>(
-                result
-        );
-    }
-
-    private String mapField(
-            String field
-    ) {
-
-        return switch (field) {
-
-            case "transactionDate" ->
-                    "g.TRANSACTION_DATE";
-
-            case "branchName" ->
-                    "b.NAME";
-
-            case "circleName" ->
-                    "cr.CIRCLE_NAME";
-
-            case "currencyName" ->
-                    "cu.CURRENCY_NAME";
-
-            case "narration" ->
-                    "g.NARRATION";
-
-            case "debitAmount" ->
-                    "g.DEBIT_AMOUNT";
-
-            case "creditAmount" ->
-                    "g.CREDIT_AMOUNT";
-
-            case "sourceFlag" ->
-                    "g.SOURCE_FLAG";
-
-            default ->
-                    "g.TRANSACTION_DATE";
-        };
-    }
-}
+Name               Null?    Type               
+------------------ -------- ------------------ 
+CODE               NOT NULL VARCHAR2(255 CHAR) 
+NAME               NOT NULL VARCHAR2(255 CHAR) 
+CIRCLE_CODE        NOT NULL VARCHAR2(255 CHAR) 
+STATE              NOT NULL VARCHAR2(255 CHAR) 
+CITY                        VARCHAR2(255 CHAR) 
+ADDRESS                     VARCHAR2(255 CHAR) 
+PINCODE                     VARCHAR2(255 CHAR) 
+PHONE_NUMBER       NOT NULL VARCHAR2(255 CHAR) 
+EMAIL_ID           NOT NULL VARCHAR2(255 CHAR) 
+NMR_CODE           NOT NULL VARCHAR2(255 CHAR) 
+STATUS             NOT NULL NUMBER(1)          
+OPEN_DATE          NOT NULL DATE               
+CLOSE_DATE                  DATE               
+MERGE_DATE                  DATE               
+MERGED_WITH_BRANCH          VARCHAR2(255 CHAR) 
+LAST_CHANGE_DATE            DATE               
+CPC_FLAG                    NUMBER(1)          
+FOOD_CREDIT_FLAG   NOT NULL NUMBER(1)          
+CURR_CHEST_FLAG    NOT NULL NUMBER(1)          
+BRANCH_TYPE        NOT NULL VARCHAR2(255 CHAR) 
+Name         Null?    Type          
+------------ -------- ------------- 
+CIRCLE_CODE  NOT NULL VARCHAR2(3)   
+CIRCLE_NAME  NOT NULL VARCHAR2(150) 
+ZONE_CODE    NOT NULL VARCHAR2(3)   
+CREATED_DATE          DATE          
+BRANCH_CODE           VARCHAR2(5)   
+SHORT_NAME            VARCHAR2(10)  
+Name              Null?    Type          
+----------------- -------- ------------- 
+COMP_1            NOT NULL VARCHAR2(4)   
+SEGMENT_CODE      NOT NULL VARCHAR2(4)   
+COMP_2            NOT NULL VARCHAR2(2)   
+CGL_NUMBER        NOT NULL VARCHAR2(10)  
+DESCRIPTION       NOT NULL VARCHAR2(100) 
+AC_CLASSIFICATION NOT NULL VARCHAR2(1)   
+BAL_FWD           NOT NULL NUMBER(1)     
+DEF_BAL_TYPE      NOT NULL VARCHAR2(1)   
+STATUS            NOT NULL NUMBER(1)     
+OPEN_DATE         NOT NULL DATE          
+CLOSE_DATE                 DATE          
+BAL_COMPARE       NOT NULL NUMBER(1)     
+MANUAL_POSTING    NOT NULL NUMBER(1)     
+Name          Null?    Type         
+------------- -------- ------------ 
+CURRENCY_CODE NOT NULL VARCHAR2(3)  
+CURRENCY_NAME NOT NULL VARCHAR2(50) 
+FLAG          NOT NULL NUMBER(1)    
+CURRENCY_RATE          NUMBER(12,6) 
+RATE_DATE              DATE         
+CREATED_AT             TIMESTAMP(6) 
+UPDATED_AT             TIMESTAMP(6) 
+Name      Null? Type          
+--------- ----- ------------- 
+FLAG_ID         VARCHAR2(255) 
+FLAG_NAME       VARCHAR2(255) 
