@@ -1,191 +1,857 @@
+import React, {
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+} from "react";
 
+import { useSelector } from "react-redux";
 
-@PostMapping("/cgls")
-    public PaginatedResponseDto<?> getCGLs(
-            @RequestHeader("Authorization") String authorizationHeader,
-            @RequestHeader("X-Request-Type") String requestType,
-            @RequestBody SearchRequest request) {
-        log.info("Received request to fetch all CGLs");
-        return service.searchAnyMaster(requestType, request);
+import { Box } from "@mui/material";
+
+import { LocalizationProvider } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+
+import dayjs from "dayjs";
+import debounce from "lodash/debounce";
+
+import LedgerForm from "./components/LedgerForm";
+import LedgerDataGrid from "./components/LedgerDataGrid";
+
+import { getPermissions } from "../../utils/CommonUtilities";
+
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import downloadFile from "../../utils/DownloadUtils";
+
+const DEFAULT_PAGE_SIZE = 20;
+
+const LedgerWiseEnquiry = () => {
+
+  const { callApi } = useApi();
+
+  const showSnackBar =
+    useCustomSnackbar();
+
+  const user = useSelector(
+    (state) => state.auth.user
+  );
+
+  const menu = useSelector(
+    (state) => state.menus.selectedMenuItem
+  );
+
+  const permissions =
+    getPermissions(menu);
+
+  const MIN_ALLOWED_DATE =
+    dayjs("2026-03-31");
+
+  const DATE_FORMAT =
+    "DD/MM/YYYY";
+
+  const hasWholeBank =
+    !!permissions.wholebank;
+
+  const hasCircle =
+    user?.isCircle === "Y" ||
+    !!permissions.circle;
+
+  const isCircleUser =
+    user?.isCircle === "Y" &&
+    !hasWholeBank;
+
+  /*
+   * MASTER DATA
+   */
+  const [circles, setCircles] =
+    useState([]);
+
+  const [currencies, setCurrencies] =
+    useState([]);
+
+  const [sourceOptions, setSourceOptions] =
+    useState([]);
+
+  const [etlDate, setEtlDate] =
+    useState(null);
+
+  /*
+   * GRID DATA
+   */
+  const [rows, setRows] =
+    useState([]);
+
+  const [rowCount, setRowCount] =
+    useState(0);
+
+  /*
+   * LOADING
+   */
+  const [loading, setLoading] =
+    useState(false);
+
+  const [exporting, setExporting] =
+    useState(false);
+
+  /*
+   * GRID CONTROLS
+   */
+  const [paginationModel, setPaginationModel] =
+    useState({
+      page: 0,
+      pageSize: DEFAULT_PAGE_SIZE,
+    });
+
+  const [sortModel, setSortModel] =
+    useState([
+      {
+        field: "transactionDate",
+        sort: "desc",
+      },
+    ]);
+
+  const [filterModel, setFilterModel] =
+    useState({
+      items: [],
+      logicOperator: "and",
+    });
+
+  /*
+   * INITIAL FILTERS
+   */
+  const initialState = useMemo(
+    () => ({
+      level: hasWholeBank
+        ? "BANK"
+        : isCircleUser
+          ? "CIRCLE"
+          : "BRANCH",
+
+      circle: hasWholeBank
+        ? "ALL"
+        : user?.circleCode,
+
+      branches:
+        user?.isCircle === "N" &&
+        !hasWholeBank
+          ? [
+              `${user?.branch}-${user?.branchName}`,
+            ]
+          : ["ALL"],
+
+      currencies: "All Currencies",
+
+      sourceFlags: [],
+
+      cgl:
+        "1106505001 - CORE INTER BRANCH A/C",
+
+      fromDate:
+        dayjs("2026-03-31"),
+
+      toDate:
+        dayjs("2026-04-10"),
+    }),
+    [
+      hasWholeBank,
+      isCircleUser,
+      user?.circleCode,
+      user?.isCircle,
+      user?.branch,
+      user?.branchName,
+    ]
+  );
+
+  const [filters, setFilters] =
+    useState(initialState);
+
+  const [searchQuery, setSearchQuery] =
+    useState(null);
+
+  /*
+   * FETCH MASTERS
+   */
+  const fetchMasters =
+    useCallback(async () => {
+
+      try {
+
+        const [
+          dateRes,
+          currRes,
+          flagRes,
+        ] = await Promise.all([
+          callApi(
+            "/PS/file/fincore-date",
+            {},
+            "GET"
+          ),
+
+          callApi(
+            "/CM/common-master/currency-code-name-only",
+            null,
+            "GET"
+          ),
+
+          callApi(
+            "/CM/common-master/source-flag",
+            null,
+            "GET"
+          ),
+        ]);
+
+        if (
+          dateRes?.data?.etlDate
+        ) {
+
+          setEtlDate(
+            dayjs(
+              dateRes.data.etlDate,
+              "YYYY-MM-DD"
+            )
+          );
+        }
+
+        const formattedCurrencies =
+          currRes?.data?.map(
+            (c) =>
+              `${c.currencyCode} (${c.currencyName})`
+          ) || [];
+
+        setCurrencies(
+          formattedCurrencies.sort(
+            (a, b) =>
+              a.localeCompare(b)
+          )
+        );
+
+        if (flagRes?.data) {
+
+          setSourceOptions(
+            flagRes.data
+          );
+
+          setFilters((prev) => ({
+            ...prev,
+            sourceFlags:
+              flagRes.data,
+          }));
+        }
+
+        if (hasWholeBank) {
+
+          const circleRes =
+            await callApi(
+              "/CM/common-master/circle-codes",
+              null,
+              "GET"
+            );
+
+          setCircles(
+            circleRes?.data || []
+          );
+        }
+
+      } catch (error) {
+
+        console.error(error);
+
+        showSnackBar(
+          "Failed to load master configuration, Kindly try again",
+          "error"
+        );
+      }
+
+    }, [
+      callApi,
+      hasWholeBank,
+      showSnackBar,
+    ]);
+
+  useEffect(() => {
+    fetchMasters();
+  }, [fetchMasters]);
+
+  /*
+   * PAYLOAD
+   */
+  const buildPayload =
+    useCallback(() => {
+
+      if (!searchQuery) {
+        return null;
+      }
+
+      const gridFilters =
+        filterModel.items
+          .filter(
+            (item) =>
+              item.field &&
+              item.operator &&
+              item.value !==
+                undefined &&
+              item.value !==
+                null &&
+              item.value !== ""
+          )
+          .map((item) => ({
+            field:
+              item.field,
+
+            operator:
+              item.operator,
+
+            value:
+              typeof item.value ===
+              "string"
+                ? item.value.trim()
+                : item.value,
+          }));
+
+      return {
+
+        circle:
+          searchQuery.circle ===
+          "ALL"
+            ? "ALL"
+            : searchQuery.circle,
+
+        cgl:
+          searchQuery.cgl.split(
+            " - "
+          )[0],
+
+        cglName:
+          searchQuery.cgl.split(
+            " - "
+          )[1],
+
+        currencies:
+          searchQuery.currencies ===
+          "All Currencies"
+            ? "ALL"
+            : searchQuery.currencies.split(
+                " ("
+              )[0],
+
+        branches:
+          searchQuery.branches.includes(
+            "ALL"
+          )
+            ? ["ALL"]
+            : searchQuery.branches.map(
+                (b) =>
+                  b.split("-")[0]
+              ),
+
+        sourceFlags:
+          searchQuery.sourceFlags
+            ?.length
+            ? searchQuery.sourceFlags.map(
+                (f) =>
+                  f.flagId
+              )
+            : ["ALL"],
+
+        fromDate:
+          searchQuery.fromDate.format(
+            "DD/MM/YYYY"
+          ),
+
+        toDate:
+          searchQuery.toDate.format(
+            "DD/MM/YYYY"
+          ),
+
+        page:
+          paginationModel.page,
+
+        size:
+          paginationModel.pageSize,
+
+        sortField:
+          sortModel?.[0]?.field ||
+          "transactionDate",
+
+        sortOrder:
+          sortModel?.[0]?.sort ||
+          "desc",
+
+        gridFilters,
+      };
+
+    }, [
+      searchQuery,
+      paginationModel,
+      sortModel,
+      filterModel,
+    ]);
+
+  /*
+   * FETCH ROWS
+   */
+  const fetchRows =
+    useCallback(async () => {
+
+      const payload =
+        buildPayload();
+
+      if (!payload) {
+        return;
+      }
+
+      try {
+
+        setLoading(true);
+
+        const res =
+          await callApi(
+            "/ES/ledger-enquiries/search",
+            payload,
+            "POST"
+          );
+
+        setRows(
+          res?.data?.content || []
+        );
+
+        setRowCount(
+          res?.data?.page
+            ?.totalElements || 0
+        );
+
+      } catch (error) {
+
+        console.error(error);
+
+        showSnackBar(
+          "Enquiry failed",
+          "error"
+        );
+
+      } finally {
+
+        setLoading(false);
+      }
+
+    }, [
+      callApi,
+      buildPayload,
+      showSnackBar,
+    ]);
+
+  /*
+   * DEBOUNCED FETCH
+   */
+  const debouncedFetch =
+    useMemo(
+      () =>
+        debounce(() => {
+          fetchRows();
+        }, 350),
+      [fetchRows]
+    );
+
+  /*
+   * MAIN FETCH EFFECT
+   */
+  useEffect(() => {
+
+    if (!searchQuery) {
+      return;
     }
-	
-package com.tcs.fincore.CommonMasterService.dto;
 
-import java.util.List;
+    debouncedFetch();
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+    return () =>
+      debouncedFetch.cancel();
 
-@Data
-@AllArgsConstructor
-@NoArgsConstructor
-public class PaginatedResponseDto<T> {
+  }, [
+    paginationModel.page,
+    paginationModel.pageSize,
+    sortModel,
+    filterModel,
+    searchQuery,
+    debouncedFetch,
+  ]);
 
-    private int currentPage;
-    private int totalPages;
-    private int pageSize;
-    private long totalElements;
-    private String sortIn;
-    private List<?> data;
+  /*
+   * SEARCH
+   */
+  const handleSearch = (
+    isFetched = false
+  ) => {
 
-}
+    const {
+      cgl,
+      fromDate,
+      toDate,
+    } = filters;
 
+    if (
+      !cgl ||
+      !fromDate ||
+      !toDate
+    ) {
 
-PaginatedResponseDto<?> searchAnyMaster(String requestType, SearchRequest request);
+      showSnackBar(
+        "Please fill all required fields",
+        "warning"
+      );
 
-@Override
-	public PaginatedResponseDto<?> searchAnyMaster(String requestType, SearchRequest request) {
-		MasterType masterType;
-		try {
-			masterType = MasterType.valueOf(requestType.toUpperCase());
-		} catch (IllegalArgumentException e) {
-			throw new IllegalArgumentException("Invalid X-Request-Type: " + requestType);
-		}
-
-		JpaSpecificationExecutor<?> repo = resolver.resolve(masterType);
-
-		PageRequest pageRequest;
-
-		if (request.getSortField() != null && request.getSortOrder() != null) {
-			Sort.Direction direction = Sort.Direction.fromString(request.getSortOrder());
-			pageRequest = PageRequest.of(request.getPage(), request.getSize(),
-					Sort.by(direction, request.getSortField()));
-		} else {
-			pageRequest = PageRequest.of(request.getPage(), request.getSize());
-		}
-		Page<?> page = repo.findAll(
-				GenericSpecification.build(request.getFilters()),
-				pageRequest);
-
-		PaginatedResponseDto<Object> response = new PaginatedResponseDto<>();
-		response.setData(page.getContent());
-		response.setCurrentPage(page.getNumber());
-		response.setPageSize(page.getSize());
-		response.setTotalPages(page.getTotalPages());
-		response.setTotalElements(page.getTotalElements());
-
-		return response;
-	}
-	
-	
-package com.tcs.fincore.CommonMasterService.Specification;
-
-import com.tcs.fincore.CommonMasterService.dto.FilterRequest;
-import com.tcs.fincore.CommonMasterService.enums.Operators;
-
-import org.springframework.data.jpa.domain.Specification;
-
-import jakarta.persistence.criteria.CriteriaBuilder;
-import jakarta.persistence.criteria.Predicate;
-import java.util.ArrayList;
-import jakarta.persistence.criteria.Path;
-import java.util.List;
-
-public class GenericSpecification<T> {
-
-    public static <T> Specification<T> build(List<FilterRequest> filters) {
-
-        return (root, query, cb) -> {
-
-            if (filters == null || filters.isEmpty()) {
-                return cb.conjunction();
-            }
-
-            List<Predicate> predicates = new ArrayList<>();
-
-            for (FilterRequest filter : filters) {
-
-                String field = filter.getField();
-                Operators operator = Operators.from(filter.getOperator());
-                Object value = filter.getValue();
-
-                // skip invalid filters
-                if (operator == null) {
-                    continue;
-                }
-
-                if (value == null && operator != Operators.IS_NULL && operator != Operators.IS_NOT_NULL) {
-                    continue;
-                }
-
-                if (value != null && value.toString().isBlank()
-                        && operator != Operators.IS_NULL
-                        && operator != Operators.IS_NOT_NULL) {
-                    continue;
-                }
-
-                Path<?> path = root.get(field);
-                Class<?> type = path.getJavaType();
-
-                switch (operator) {
-
-                    case CONTAINS ->
-                        predicates.add(cb.like(
-                                cb.lower(path.as(String.class)),
-                                "%" + value.toString().toLowerCase() + "%"));
-
-                    case NOT_CONTAINS ->
-                        predicates.add(cb.notLike(
-                                cb.lower(path.as(String.class)),
-                                "%" + value.toString().toLowerCase() + "%"));
-
-                    case STARTS_WITH ->
-                        predicates.add(cb.like(
-                                cb.lower(path.as(String.class)),
-                                value.toString().toLowerCase() + "%"));
-
-                    case ENDS_WITH ->
-                        predicates.add(cb.like(
-                                cb.lower(path.as(String.class)),
-                                "%" + value.toString().toLowerCase()));
-
-                    case EQUALS ->
-                        predicates.add(cb.equal(
-                                path, convert(type, value)));
-
-                    case NOT_EQUALS ->
-                        predicates.add(cb.notEqual(
-                                path, convert(type, value)));
-
-                    case IS_NULL ->
-                        predicates.add(cb.isNull(path));
-
-                    case IS_NOT_NULL ->
-                        predicates.add(cb.isNotNull(path));
-
-                    case IN -> {
-                        CriteriaBuilder.In<Object> in = cb.in(path);
-                        ((List<?>) value)
-                                .forEach(v -> in.value(convert(type, v)));
-                        predicates.add(in);
-                    }
-                }
-            }
-
-            return cb.and(predicates.toArray(new Predicate[0]));
-        };
+      return;
     }
 
-    private static Object convert(Class<?> type, Object value) {
+    if (
+      !fromDate?.isValid?.() ||
+      !toDate?.isValid?.()
+    ) {
 
-        if (value == null)
-            return null;
+      showSnackBar(
+        "Invalid date selected",
+        "warning"
+      );
 
-        String v = value.toString();
-
-        if (type == Integer.class || type == int.class)
-            return Integer.valueOf(v);
-
-        if (type == Long.class || type == long.class)
-            return Long.valueOf(v);
-
-        if (type == Boolean.class || type == boolean.class)
-            return Boolean.valueOf(v);
-
-        if (Enum.class.isAssignableFrom(type))
-            return Enum.valueOf((Class<Enum>) type, v);
-
-        return v;
+      return;
     }
-}
+
+    if (
+      fromDate.isBefore(
+        MIN_ALLOWED_DATE,
+        "day"
+      )
+    ) {
+
+      showSnackBar(
+        `From date cannot be earlier than ${MIN_ALLOWED_DATE.format(
+          DATE_FORMAT
+        )}`,
+        "warning"
+      );
+
+      return;
+    }
+
+    if (
+      toDate.isBefore(
+        MIN_ALLOWED_DATE,
+        "day"
+      )
+    ) {
+
+      showSnackBar(
+        `To date cannot be earlier than ${MIN_ALLOWED_DATE.format(
+          DATE_FORMAT
+        )}`,
+        "warning"
+      );
+
+      return;
+    }
+
+    if (
+      fromDate.isAfter(
+        toDate,
+        "day"
+      )
+    ) {
+
+      showSnackBar(
+        "From date cannot be greater than To date",
+        "warning"
+      );
+
+      return;
+    }
+
+    if (
+      toDate.isAfter(
+        fromDate.add(
+          1,
+          "year"
+        ),
+        "day"
+      )
+    ) {
+
+      showSnackBar(
+        "Date range cannot exceed 12 months",
+        "warning"
+      );
+
+      return;
+    }
+
+    if (
+      etlDate?.isValid?.() &&
+      toDate.isAfter(
+        etlDate,
+        "day"
+      )
+    ) {
+
+      showSnackBar(
+        `To date cannot exceed ETL date ${etlDate.format(
+          DATE_FORMAT
+        )}`,
+        "warning"
+      );
+
+      return;
+    }
+
+    /*
+     * RESET ONLY ON FETCH
+     */
+    if (isFetched) {
+
+      setPaginationModel({
+        page: 0,
+        pageSize:
+          DEFAULT_PAGE_SIZE,
+      });
+
+      setSortModel([
+        {
+          field:
+            "transactionDate",
+          sort: "desc",
+        },
+      ]);
+
+      setFilterModel({
+        items: [],
+        logicOperator:
+          "and",
+      });
+    }
+
+    setSearchQuery(
+      structuredClone(filters)
+    );
+  };
+
+  /*
+   * RESET
+   */
+  const handleReset = () => {
+
+    setFilters(initialState);
+
+    setSearchQuery(null);
+
+    setRows([]);
+
+    setRowCount(0);
+
+    setPaginationModel({
+      page: 0,
+      pageSize:
+        DEFAULT_PAGE_SIZE,
+    });
+
+    setSortModel([
+      {
+        field:
+          "transactionDate",
+        sort: "desc",
+      },
+    ]);
+
+    setFilterModel({
+      items: [],
+      logicOperator:
+        "and",
+    });
+  };
+
+  /*
+   * EXPORT
+   */
+  const handleExcelExport =
+    async () => {
+
+      const payload =
+        buildPayload();
+
+      if (!payload) {
+        return;
+      }
+
+      try {
+
+        setExporting(true);
+
+        const response =
+          await callApi(
+            "/ES/ledger-enquiries/export-excel",
+            payload,
+            "POST",
+            "arraybuffer"
+          );
+
+        const fileName =
+          `Ledger_${
+            searchQuery.cgl.split(
+              " - "
+            )[0]
+          }`;
+
+        if (
+          response?.byteLength
+        ) {
+
+          downloadFile(
+            response,
+            "excel",
+            fileName
+          );
+        }
+
+      } catch (error) {
+
+        console.error(error);
+
+        showSnackBar(
+          "Failed to export Something went wrong, Kindly try again",
+          "error"
+        );
+
+      } finally {
+
+        setExporting(false);
+      }
+    };
+
+  return (
+
+    <LocalizationProvider
+      dateAdapter={
+        AdapterDayjs
+      }
+    >
+
+      <Box
+        sx={{
+          p: 2.5,
+        }}
+      >
+
+        <LedgerForm
+          filters={filters}
+
+          onFilterChange={(
+            field,
+            value
+          ) =>
+            setFilters(
+              (prev) => ({
+                ...prev,
+                [field]:
+                  value,
+              })
+            )
+          }
+
+          onReset={
+            handleReset
+          }
+
+          onFetch={() =>
+            handleSearch(
+              true
+            )
+          }
+
+          permissions={{
+            hasWholeBank,
+            hasCircle,
+          }}
+
+          user={user}
+
+          circles={circles}
+
+          currencies={
+            currencies
+          }
+
+          sourceOptions={
+            sourceOptions
+          }
+
+          etlDate={etlDate}
+        />
+
+        <LedgerDataGrid
+          rows={rows}
+
+          loading={
+            loading
+          }
+
+          rowCount={
+            rowCount
+          }
+
+          paginationModel={
+            paginationModel
+          }
+
+          setPaginationModel={
+            setPaginationModel
+          }
+
+          sortModel={
+            sortModel
+          }
+
+          setSortModel={
+            setSortModel
+          }
+
+          filterModel={
+            filterModel
+          }
+
+          setFilterModel={
+            setFilterModel
+          }
+
+          onExcelExport={
+            handleExcelExport
+          }
+
+          exporting={
+            exporting
+          }
+
+          selectedCurrency={
+            searchQuery
+              ?.currencies ||
+            "ALL"
+          }
+
+          selectedCircle={
+            searchQuery
+              ?.circle ||
+            "ALL"
+          }
+
+          sourceOptions={
+            sourceOptions
+          }
+
+          searchPerformed={
+            !!searchQuery
+          }
+        />
+
+      </Box>
+
+    </LocalizationProvider>
+  );
+};
+
+export default LedgerWiseEnquiry;
