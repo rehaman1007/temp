@@ -1,641 +1,295 @@
-package com.fincore.enquiry_service.controller;
-
-import com.fincore.enquiry_service.dto.ApiResponse; 
-import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
-import com.fincore.enquiry_service.dto.LedgerEnquiryResponse;
-import com.fincore.enquiry_service.service.LedgerEnquiryService;
-import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
-import org.springframework.http.ContentDisposition;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-
-@RestController
-@RequiredArgsConstructor
-@RequestMapping("/api/ledger-enquiries")
-public class LedgerEnquiryController {
-
-    private final LedgerEnquiryService ledgerEnquiryService;
-
-    @PostMapping("/search")
-    public ResponseEntity<ApiResponse<Page<LedgerEnquiryResponse>>> search (@Valid @RequestBody LedgerEnquiryRequest dto, Pageable pageable) {
-        Page<LedgerEnquiryResponse> result = ledgerEnquiryService.search(dto,pageable);
-        return ResponseEntity.ok(ApiResponse.success(result, "Transaction records fetched Successfully"));
-    }
-    
-    @PostMapping("/export-excel")
-    public ResponseEntity<byte[]> excelExport (@Valid @RequestBody LedgerEnquiryRequest dto) {
-    	byte[] excelFile =  ledgerEnquiryService.excelExport(dto);
-    	
-    	HttpHeaders headers = new HttpHeaders();
-		headers.setContentType(
-				MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
-
-		headers.setContentDisposition(
-				ContentDisposition.builder("attachment")
-						.filename("transactions_ledger.xlsx")
-						.build());
-
-		headers.setContentLength(excelFile.length);
-
-		return new ResponseEntity<>(excelFile, headers, HttpStatus.OK);
-    }
-}
-
-package com.fincore.enquiry_service.service;
-
-import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
-import com.fincore.enquiry_service.dto.LedgerEnquiryResponse;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
-
-public interface LedgerEnquiryService {
-
-    Page<LedgerEnquiryResponse> search (LedgerEnquiryRequest dto, Pageable pageable);
-    
-    byte[] excelExport (LedgerEnquiryRequest dto);
-}
-
-
-package com.fincore.enquiry_service.service;
-
-import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
-import com.fincore.enquiry_service.dto.LedgerEnquiryResponse;
-import com.fincore.enquiry_service.dto.SearchProjection;
-import com.fincore.enquiry_service.repository.GlTransactionsRepository;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.apache.poi.ss.usermodel.Cell;
-import org.apache.poi.ss.usermodel.CellStyle;
-import org.apache.poi.ss.usermodel.CreationHelper;
-import org.apache.poi.ss.usermodel.Font;
-import org.apache.poi.ss.usermodel.HorizontalAlignment;
-import org.apache.poi.ss.usermodel.Row;
-import org.apache.poi.ss.usermodel.Sheet;
-import org.apache.poi.ss.usermodel.Workbook;
-import org.apache.poi.xssf.streaming.SXSSFSheet;
-import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
-import org.springframework.stereotype.Service;
-
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.List;
-import java.util.stream.Collectors;
-
-@Slf4j
-@RequiredArgsConstructor
-@Service("LedgerEnquiryService")
-public class LedgerEnquiryServiceImpl implements LedgerEnquiryService {
-
-	private final GlTransactionsRepository glTransactionsRepository;
-
-	@Override
-	public Page<LedgerEnquiryResponse> search(LedgerEnquiryRequest dto, Pageable pageable) {
-
-		String cgl = dto.getCgl();
-		List<String> sourceFlags = dto.getSourceFlags();
-		String currency = (dto.getCurrencies().equalsIgnoreCase("ALL")) ? null : dto.getCurrencies();
-		String fromDate = dto.getFromDate();
-		String toDate = dto.getToDate();
-		List<String> branches = dto.getBranches();
-		String circle = (dto.getCircle().equalsIgnoreCase("ALL")) ? null : dto.getCircle();
-
-		int skipSource = (dto.getSourceFlags().contains("ALL")) ? 1 : 0;
-		int skipBranches = (dto.getBranches().contains("ALL")) ? 1 : 0;
-
-		log.info("cgl    " + cgl);
-		log.info("sourceFlags   " + sourceFlags);
-		log.info("currency    " + currency);
-		log.info("fromDate   " + fromDate);
-		log.info("toDate   " + toDate);
-		log.info("branches   " + branches);
-		log.info("circle  " + circle);
-
-		Page<SearchProjection> projectionList = glTransactionsRepository.getSearchList(cgl, skipSource, sourceFlags,
-				currency, fromDate, toDate, skipBranches, branches, circle, pageable);
-		return projectionList.map(this::mapToResponseDto);
-	}
-
-	private LedgerEnquiryResponse mapToResponseDto(SearchProjection searchProjection) {
-		log.info("inside mappinggggggggggggggggggg");
-		return new LedgerEnquiryResponse(
-
-				searchProjection.getTransactionId(), searchProjection.getBatchId(), searchProjection.getJournalId(),
-				searchProjection.getTransactionDate(), searchProjection.getPostDate(), searchProjection.getBranchCode(),
-				searchProjection.getBranchName(), searchProjection.getCircleCode(), searchProjection.getCircleName(),
-				searchProjection.getCurrency(), searchProjection.getCurrencyName(), searchProjection.getCgl(),
-				searchProjection.getDescription(), searchProjection.getNarration(), searchProjection.getDebitAmount(),
-				searchProjection.getCreditAmount(), searchProjection.getTransactionCount(),
-				searchProjection.getSourceFlag());
-	}
-	
-
-	@Override
-	public byte[] excelExport(LedgerEnquiryRequest dto) {
-
-		String cgl = dto.getCgl();
-		List<String> sourceFlags = dto.getSourceFlags();
-		String currency = (dto.getCurrencies().equalsIgnoreCase("ALL")) ? null : dto.getCurrencies();
-		String fromDate = dto.getFromDate();
-		String toDate = dto.getToDate();
-		List<String> branches = dto.getBranches();
-		String circle = (dto.getCircle().equalsIgnoreCase("ALL")) ? null : dto.getCircle();
-
-		int skipSource = (dto.getSourceFlags().contains("ALL")) ? 1 : 0;
-		int skipBranches = (dto.getBranches().contains("ALL")) ? 1 : 0;
-
-		List<SearchProjection> exportContent = glTransactionsRepository.getExportContent(cgl, skipSource, sourceFlags,
-				currency, fromDate, toDate, skipBranches, branches, circle);
-		log.info("SearchProjection>>>>>>>" + exportContent);
-		List<LedgerEnquiryResponse> mappedContent = exportContent.stream().map(this::mapToResponseDto)
-				.collect(Collectors.toList());
-
-		try (Workbook workbook = new SXSSFWorkbook(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-
-			Sheet sheet = workbook.createSheet("TransactionsData");
-			
-			CellStyle titleSTyle = workbook.createCellStyle();
-			Font font = workbook.createFont();
-			font.setBold(true);
-			font.setFontHeightInPoints((short) 14);
-
-			titleSTyle.setFont(font);
-			titleSTyle.setAlignment(HorizontalAlignment.CENTER);
-
-			Font headerFont = workbook.createFont();
-			headerFont.setBold(true);
-
-			CellStyle headerStyle = workbook.createCellStyle();
-
-			headerStyle.setFont(headerFont);
-
-			CellStyle leftAlignStyle = workbook.createCellStyle();
-			leftAlignStyle.setAlignment(HorizontalAlignment.CENTER);
-
-			CellStyle rightAlignStyle = workbook.createCellStyle();
-			rightAlignStyle.setAlignment(HorizontalAlignment.RIGHT);
-
-			CellStyle dateStyle = workbook.createCellStyle();
-			CreationHelper creationHelper = workbook.getCreationHelper();
-
-			dateStyle.setDataFormat(creationHelper.createDataFormat().getFormat("dd/MM/yyyy"));
-			
-			Row title = sheet.createRow(0);
-			Cell titleCell = title.createCell(0);
-			titleCell.setCellValue("Ledger-Wise Enquiry From "+fromDate +" To "+toDate);
-			titleCell.setCellStyle(titleSTyle);
-			
-			Row subTitle = sheet.createRow(1);
-			Cell subTitleCell = subTitle.createCell(0);
-			subTitleCell.setCellValue("CGL "+cgl + " - " +dto.getCglName());
-			subTitleCell.setCellStyle(titleSTyle);
-			
-			Row header = sheet.createRow(2);
-
-			Cell h1 = header.createCell(0);
-			h1.setCellValue("TRANSACTION ID");
-			h1.setCellStyle(headerStyle);
-
-			Cell h2 = header.createCell(1);
-			h2.setCellValue("BATCH ID");
-			h2.setCellStyle(headerStyle);
-
-			Cell h3 = header.createCell(2);
-			h3.setCellValue("JOURNAL ID");
-			h3.setCellStyle(headerStyle);
-
-			Cell h4 = header.createCell(3);
-			h4.setCellValue("TRANSACTION DATE");
-			h4.setCellStyle(headerStyle);
-
-			Cell h5 = header.createCell(4);
-			h5.setCellValue("POST DATE");
-			h5.setCellStyle(headerStyle);
-
-			Cell h6 = header.createCell(5);
-			h6.setCellValue("BRANCH CODE");
-			h6.setCellStyle(headerStyle);
-
-			Cell h7 = header.createCell(6);
-			h7.setCellValue("BRANCH NAME");
-			h7.setCellStyle(headerStyle);
-
-			Cell h8 = header.createCell(7);
-			h8.setCellValue("CIRCLE CODE");
-			h8.setCellStyle(headerStyle);
-
-			Cell h9 = header.createCell(8);
-			h9.setCellValue("CIRCLE NAME");
-			h9.setCellStyle(headerStyle);
-
-			Cell h10 = header.createCell(9);
-			h10.setCellValue("CURRENCY");
-			h10.setCellStyle(headerStyle);
-
-			Cell h11 = header.createCell(10);
-			h11.setCellValue("CURRENCY NAME");
-			h11.setCellStyle(headerStyle);
-
-			Cell h12 = header.createCell(11);
-			h12.setCellValue("CGL");
-			h12.setCellStyle(headerStyle);
-
-			Cell h13 = header.createCell(12);
-			h13.setCellValue("CGL DESCRIPTION");
-			h13.setCellStyle(headerStyle);
-
-			Cell h14 = header.createCell(13);
-			h14.setCellValue("NARRATION");
-			h14.setCellStyle(headerStyle);
-
-			Cell h15 = header.createCell(14);
-			h15.setCellValue("DEBIT AMOUNT");
-			h15.setCellStyle(headerStyle);
-
-			Cell h16 = header.createCell(15);
-			h16.setCellValue("CREDIT AMOUNT");
-			h16.setCellStyle(headerStyle);
-
-			Cell h17 = header.createCell(16);
-			h17.setCellValue("TRANSACTION COUNT");
-			h17.setCellStyle(headerStyle);
-
-			Cell h18 = header.createCell(17);
-			h18.setCellValue("SOURCE FLAG");
-			h18.setCellStyle(headerStyle);
-			
-			
-
-			int rowNum = 3;
-			for (LedgerEnquiryResponse dtoList : mappedContent) {
-				Row row = sheet.createRow(rowNum++);
-
-				Cell c1 = row.createCell(0);
-				c1.setCellValue(dtoList.getTransactionId().toString());
-				c1.setCellStyle(leftAlignStyle);
-
-				Cell c2 = row.createCell(1);
-				c2.setCellValue(dtoList.getBatchId());
-				c2.setCellStyle(leftAlignStyle);
-
-				Cell c3 = row.createCell(2);
-				c3.setCellValue(dtoList.getJournalId());
-				c3.setCellStyle(leftAlignStyle);
-
-				Cell c4 = row.createCell(3);
-				c4.setCellValue(dtoList.getTransactionDate());
-				c4.setCellStyle(leftAlignStyle);
-
-				Cell c5 = row.createCell(4);
-				c5.setCellValue(dtoList.getPostDate());
-				c5.setCellStyle(leftAlignStyle);
-
-				Cell c6 = row.createCell(5);
-				c6.setCellValue(dtoList.getBranchCode());
-				c6.setCellStyle(leftAlignStyle);
-
-				Cell c7 = row.createCell(6);
-				c7.setCellValue(dtoList.getBranchName());
-				c7.setCellStyle(leftAlignStyle);
-
-				Cell c8 = row.createCell(7);
-				c8.setCellValue(dtoList.getCircleCode());
-				c8.setCellStyle(leftAlignStyle);
-
-				Cell c9 = row.createCell(8);
-				c9.setCellValue(dtoList.getCircleName());
-				c9.setCellStyle(leftAlignStyle);
-
-				Cell c10 = row.createCell(9);
-				c10.setCellValue(dtoList.getCurrency());
-				c10.setCellStyle(leftAlignStyle);
-
-				Cell c11 = row.createCell(10);
-				c11.setCellValue(dtoList.getCurrencyName());
-				c11.setCellStyle(leftAlignStyle);
-
-				Cell c12 = row.createCell(11);
-				c12.setCellValue(dtoList.getCgl());
-				c12.setCellStyle(leftAlignStyle);
-
-				Cell c13 = row.createCell(12);
-				c13.setCellValue(dtoList.getDescription());
-				c13.setCellStyle(leftAlignStyle);
-
-				Cell c14 = row.createCell(13);
-				c14.setCellValue(dtoList.getNarration());
-				c14.setCellStyle(leftAlignStyle);
-
-				Cell c15 = row.createCell(14);
-				c15.setCellValue(dtoList.getDebitAmount().toString());
-				c15.setCellStyle(rightAlignStyle);
-
-				Cell c16 = row.createCell(15);
-				c16.setCellValue(dtoList.getCreditAmount().toString());
-				c16.setCellStyle(rightAlignStyle);
-
-				Cell c17 = row.createCell(16);
-				c17.setCellValue(dtoList.getTransactionCount());
-				c17.setCellStyle(leftAlignStyle);
-
-				Cell c18 = row.createCell(17);
-				c18.setCellValue(dtoList.getSourceFlag());
-				c18.setCellStyle(leftAlignStyle);
-
-			}
-					
-
-			/*
-			 * for(int i = 0; i<16; i++) { sheet.autoSizeColumn(i); }
-			 */
-			workbook.write(out);
-			return out.toByteArray();
-		} catch (IOException e) {
-			throw new RuntimeException("Failed to generate excel", e);
-		}
-	}
-}
-
-
-package com.fincore.enquiry_service.repository;
-
-import com.fincore.enquiry_service.dto.GlTransactionProjection;
-import com.fincore.enquiry_service.dto.SearchProjection;
-import com.fincore.enquiry_service.model.GlTransactions;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
-import org.springframework.stereotype.Repository;
-
-import java.util.Date;
-import java.util.List;
-
-@Repository
-public interface GlTransactionsRepository extends JpaRepository<GlTransactions, Integer> {
-
-	// @Query(value = "SELECT * FROM GL_TRANSACTIONS WHERE BRANCH_CODE = :branch AND
-	// CURRENCY = :currency AND CGL = :cgl AND TRUNC(TRANSACTION_DATE) BETWEEN
-	// TO_DATE(:fromDate, 'dd/MM/yyyy') AND TO_DATE(:toDate,
-	// 'dd/MM/yyyy')",countQuery = "SELECT Count(*) FROM GL_TRANSACTIONS WHERE
-	// BRANCH_CODE = :branch AND CURRENCY = :currency AND CGL = :cgl AND
-	// TRUNC(TRANSACTION_DATE) BETWEEN TO_DATE(:fromDate, 'dd/MM/yyyy') AND
-	// TO_DATE(:toDate, 'dd/MM/yyyy')", nativeQuery = true)
-	// Page<GlTransactions> getData(
-	// @Param("branch") String branch,
-	// @Param("currency") String currency,
-	// @Param("cgl") String cgl,
-	// @Param("fromDate") String fromDate,
-	// @Param("toDate") String toDate,
-	// Pageable pageable
-
-	// );
-
-	@Query(value = """
-			    SELECT * FROM GL_TRANSACTIONS
-			    WHERE BRANCH_CODE = :branch
-			      AND CURRENCY = :currency
-			      AND CGL = :cgl
-			      AND TRUNC(TRANSACTION_DATE) BETWEEN TO_DATE(:fromDate, 'dd/MM/yyyy')
-			      AND TO_DATE(:toDate, 'dd/MM/yyyy')
-			      AND (:minAmount IS NULL OR GREATEST(NVL(DEBIT_AMOUNT,0), NVL(CREDIT_AMOUNT,0)) >= :minAmount)
-				  AND (:maxAmount IS NULL OR GREATEST(NVL(DEBIT_AMOUNT,0), NVL(CREDIT_AMOUNT,0)) <= :maxAmount)
-				  AND (:applySourceFlag = 0  OR SOURCE_FLAG IN (:sourceFlag))
-			""", countQuery = """
-			    SELECT COUNT(*) FROM GL_TRANSACTIONS
-			    WHERE BRANCH_CODE = :branch
-			      AND CURRENCY = :currency
-			      AND CGL = :cgl
-			      AND TRUNC(TRANSACTION_DATE) BETWEEN TO_DATE(:fromDate, 'dd/MM/yyyy')
-			      AND TO_DATE(:toDate, 'dd/MM/yyyy')
-			      AND (:minAmount IS NULL OR GREATEST(NVL(DEBIT_AMOUNT,0), NVL(CREDIT_AMOUNT,0)) >= :minAmount)
-				  AND (:maxAmount IS NULL OR GREATEST(NVL(DEBIT_AMOUNT,0), NVL(CREDIT_AMOUNT,0)) <= :maxAmount)
-				  AND (:applySourceFlag = 0 OR SOURCE_FLAG IN (:sourceFlag))
-			""", nativeQuery = true)
-	Page<GlTransactions> getData(String branch, String currency, String cgl, String fromDate, String toDate,
-			Double minAmount, Double maxAmount, List<String> sourceFlag, int applySourceFlag, Pageable pageable);
-
-	@Query(value = """
-			  SELECT SUM(DEBIT_AMOUNT + CREDIT_AMOUNT)
-			FROM (
-			    SELECT DEBIT_AMOUNT, CREDIT_AMOUNT
-			    FROM GL_TRANSACTIONS
-			    WHERE BRANCH_CODE = :branch
-			      AND CURRENCY = :currency
-			      AND CGL = :cgl
-			      AND TRANSACTION_DATE >= :fromDate
-			    ORDER BY TRANSACTION_DATE, JOURNAL_ID
-			)
-			WHERE ROWNUM <= :offset
-			""", nativeQuery = true)
-	Double getSumTillOffset(String branch, String currency, String cgl, Date fromDate, long offset);
-
-	// Page<GlTransactions> findByBranchCodeAndCglAndCurrencyAndDateBetween(
-	// String branch,
-	// String cgl,
-	// String currency,
-	// Date startDate,
-	// Date endDate,
-	// Pageable pageable);
-
-	@Query(value = "SELECT COUNT(*) FROM GL_TRANSACTIONS WHERE BRANCH_CODE = :branch AND CURRENCY = :currency AND CGL = :cgl AND TRANSACTION_DATE BETWEEN TO_DATE(:fromDate, 'dd/MM/YYYY') AND TO_DATE(:toDate, 'dd/MM/YYYY')", nativeQuery = true)
-	Long getDataCount(@Param("branch") String branch, @Param("currency") String currency, @Param("cgl") String cgl,
-			@Param("fromDate") String fromDate, @Param("toDate") String toDate
-
-	);
-
-	@Query(value = """
-			SELECT
-			    c.CIRCLE_CODE, c.CIRCLE_NAME, b.NAME AS BRANCH_NAME, b.CODE AS BRANCH_CODE,
-			    g.CGL, d.DESCRIPTION AS CGL_DESCRIPTION, g.NARRATION, g.TRANSACTION_DATE,
-			    g.CURRENCY, SUM(g.DEBIT_AMOUNT) AS TOTAL_DEBIT, SUM(g.CREDIT_AMOUNT) AS TOTAL_CREDIT
-			FROM GL_TRANSACTIONS g
-			INNER JOIN BRANCH_MASTER b ON g.BRANCH_CODE = b.CODE
-			LEFT JOIN CIRCLE_MASTER c ON b.CIRCLE_CODE = c.CIRCLE_CODE
-			LEFT JOIN CGL_MASTER d ON g.CGL = d.CGL_NUMBER
-			WHERE g.TRANSACTION_DATE >= TO_DATE(:startDate,'DD/MM/YYYY')
-			  AND g.TRANSACTION_DATE < TO_DATE(:endDate,'DD/MM/YYYY')
-			  AND g.CURRENCY =:currency
-			  AND (:v_circle IS NULL OR c.CIRCLE_CODE = :v_circle)
-			  AND (:v_branch IS NULL OR b.CODE = :v_branch)
-			  AND (:v_cgl IS NULL OR g.CGL = :v_cgl)
-			GROUP BY c.CIRCLE_CODE, c.CIRCLE_NAME, b.NAME, b.CODE, g.CGL, d.DESCRIPTION,
-			         g.NARRATION, g.TRANSACTION_DATE, g.CURRENCY
-			""", countQuery = """
-			SELECT count(*) FROM (
-			    SELECT g.CGL FROM GL_TRANSACTIONS g
-			    INNER JOIN BRANCH_MASTER b ON g.BRANCH_CODE = b.CODE
-			    LEFT JOIN CIRCLE_MASTER c ON b.CIRCLE_CODE = c.CIRCLE_CODE
-			    WHERE g.TRANSACTION_DATE >= TO_DATE(:startDate,'DD/MM/YYYY')
-			      AND g.TRANSACTION_DATE < TO_DATE(:endDate,'DD/MM/YYYY')
-			      AND g.CURRENCY = :currency
-			      AND (:v_circle IS NULL OR c.CIRCLE_CODE = :v_circle)
-			      AND (:v_branch IS NULL OR b.CODE = :v_branch)
-			      AND (:v_cgl IS NULL OR g.CGL = :v_cgl)
-			    GROUP BY c.CIRCLE_CODE, c.CIRCLE_NAME, b.NAME, b.CODE, g.CGL,
-			             g.NARRATION, g.TRANSACTION_DATE, g.CURRENCY
-			)
-			""", nativeQuery = true)
-	Page<GlTransactionProjection> findGlTransactions(@Param("startDate") String start, @Param("endDate") String end,
-			@Param("currency") String currency, @Param("v_circle") String circle, @Param("v_branch") String branch,
-			@Param("v_cgl") String cgl, Pageable pageable);
-
-	@Query(value = """
-						SELECT
-			            g.TRANSACTION_ID as transactionId, g.BATCH_ID as batchId, g.JOURNAL_ID as journalId,
-			            g.TRANSACTION_DATE as transactionDate, g.POST_DATE as postDate,g.BRANCH_CODE as branchCode,
-			            b.NAME AS branchName, b.CIRCLE_CODE as circleCode, cr.CIRCLE_NAME as circleName,
-			            g.CURRENCY as currency, cu.CURRENCY_NAME as currencyName, g.CGL as cgl, c.DESCRIPTION as description,
-			            g.NARRATION as narration,g.DEBIT_AMOUNT as debitAmount, g.CREDIT_AMOUNT as creditAmount,
-			            g.TRANSACTION_COUNT as transactionCount, g.SOURCE_FLAG as sourceFlag
-			        FROM gl_transactions g
-			        JOIN branch_master b ON g.BRANCH_CODE = b.CODE
-			        JOIN circle_master cr ON b.CIRCLE_CODE = cr.CIRCLE_CODE
-			        LEFT JOIN cgl_master c ON c.CGL_NUMBER = g.CGL
-			        LEFT JOIN currency_master cu ON g.CURRENCY = cu.CURRENCY_CODE
-			        WHERE g.CGL = :cgl
-			        AND (:skipSource = 1 OR g.SOURCE_FLAG IN :source)
-			          AND (:currency IS NULL OR g.CURRENCY = :currency)
-			          AND g.TRANSACTION_DATE BETWEEN TO_DATE(:fromDate, 'dd/MM/yyyy')
-			      AND TO_DATE(:toDate, 'dd/MM/yyyy')
-			      AND (:skipBranches = 1 OR g.BRANCH_CODE IN :branches)
-			          AND (:circle IS NULL OR b.CIRCLE_CODE = :circle)
-			""", countQuery = """
-			select count(*) from gl_transactions g
-			                    JOIN branch_master b ON g.BRANCH_CODE = b.CODE
-			                    JOIN circle_master cr ON b.CIRCLE_CODE = cr.CIRCLE_CODE
-			                    LEFT JOIN cgl_master c ON c.CGL_NUMBER = g.CGL
-			                    LEFT JOIN currency_master cu ON g.CURRENCY = cu.CURRENCY_CODE
-			                    WHERE g.CGL = :cgl
-			                    AND (:skipSource = 1 OR g.SOURCE_FLAG IN :source)
-			                      AND (:currency IS NULL OR g.CURRENCY = :currency)
-			                      AND g.TRANSACTION_DATE BETWEEN TO_DATE(:fromDate, 'dd/MM/yyyy')
-			                  AND TO_DATE(:toDate, 'dd/MM/yyyy')
-			                  AND (:skipBranches = 1 OR g.BRANCH_CODE IN :branches)
-			                      AND (:circle IS NULL OR b.CIRCLE_CODE = :circle)
-			""", nativeQuery = true)
-	Page<SearchProjection> getSearchList(@Param("cgl") String cgl, @Param("skipSource") int skipSource,
-			@Param("source") List<String> source, @Param("currency") String currency,
-			@Param("fromDate") String fromDate, @Param("toDate") String toDate, @Param("skipBranches") int skipBranches,
-			@Param("branches") List<String> branches, @Param("circle") String circle, Pageable pageable);
-
-	
-	@Query(value = """
-						SELECT
-			            g.TRANSACTION_ID as transactionId, g.BATCH_ID as batchId, g.JOURNAL_ID as journalId,
-			            g.TRANSACTION_DATE as transactionDate, g.POST_DATE as postDate,g.BRANCH_CODE as branchCode,
-			            b.NAME AS branchName, b.CIRCLE_CODE as circleCode, cr.CIRCLE_NAME as circleName,
-			            g.CURRENCY as currency, cu.CURRENCY_NAME as currencyName, g.CGL as cgl, c.DESCRIPTION as description,
-			            g.NARRATION as narration,g.DEBIT_AMOUNT as debitAmount, g.CREDIT_AMOUNT as creditAmount,
-			            nvl(g.TRANSACTION_COUNT,0) as transactionCount, g.SOURCE_FLAG as sourceFlag
-			        FROM gl_transactions g
-			        JOIN branch_master b ON g.BRANCH_CODE = b.CODE
-			        JOIN circle_master cr ON b.CIRCLE_CODE = cr.CIRCLE_CODE
-			        LEFT JOIN cgl_master c ON c.CGL_NUMBER = g.CGL
-			        LEFT JOIN currency_master cu ON g.CURRENCY = cu.CURRENCY_CODE
-			        WHERE g.CGL = :cgl
-			        AND (:skipSource = 1 OR g.SOURCE_FLAG IN :source)
-			          AND (:currency IS NULL OR g.CURRENCY = :currency)
-			          AND g.TRANSACTION_DATE BETWEEN TO_DATE(:fromDate, 'dd/MM/yyyy')
-			      AND TO_DATE(:toDate, 'dd/MM/yyyy')
-			      AND (:skipBranches = 1 OR g.BRANCH_CODE IN :branches)
-			          AND (:circle IS NULL OR b.CIRCLE_CODE = :circle)
-			""", countQuery = """
-			select count(*) from gl_transactions g
-			                    JOIN branch_master b ON g.BRANCH_CODE = b.CODE
-			                    JOIN circle_master cr ON b.CIRCLE_CODE = cr.CIRCLE_CODE
-			                    LEFT JOIN cgl_master c ON c.CGL_NUMBER = g.CGL
-			                    LEFT JOIN currency_master cu ON g.CURRENCY = cu.CURRENCY_CODE
-			                    WHERE g.CGL = :cgl
-			                    AND (:skipSource = 1 OR g.SOURCE_FLAG IN :source)
-			                      AND (:currency IS NULL OR g.CURRENCY = :currency)
-			                      AND g.TRANSACTION_DATE BETWEEN TO_DATE(:fromDate, 'dd/MM/yyyy')
-			                  AND TO_DATE(:toDate, 'dd/MM/yyyy')
-			                  AND (:skipBranches = 1 OR g.BRANCH_CODE IN :branches)
-			                      AND (:circle IS NULL OR b.CIRCLE_CODE = :circle)
-			""", nativeQuery = true)
-	List<SearchProjection> getExportContent(@Param("cgl") String cgl, @Param("skipSource") int skipSource,
-			@Param("source") List<String> source, @Param("currency") String currency,
-			@Param("fromDate") String fromDate, @Param("toDate") String toDate, @Param("skipBranches") int skipBranches,
-			@Param("branches") List<String> branches, @Param("circle") String circle);
-}
-
-
-
 package com.fincore.enquiry_service.dto;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 
-import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.sql.Timestamp;
-import java.util.Date;
+@Data
+public class GridFilter {
 
-@AllArgsConstructor
-@Data 
-public class LedgerEnquiryResponse {
+    private String field;
 
-private BigInteger transactionId;
-private String batchId;
-private String journalId;
-private Date transactionDate;
-private Timestamp postDate;
-private String branchCode;
-private String branchName;
-private String circleCode;
-private String circleName;
-private String currency;
-private String currencyName;
-private String cgl;
-private String description;
-private String narration;
-private BigDecimal debitAmount;
-private BigDecimal creditAmount;
-private Long transactionCount;
-private String sourceFlag;
+    private String operator;
+
+    private String value;
 }
 
+===========
 
-package com.fincore.enquiry_service.dto;
 
-import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.sql.Timestamp;
-import java.util.Date;
+private Integer page;
 
-public interface SearchProjection {
+private Integer size;
 
-     BigInteger getTransactionId();
-     String getBatchId();
-     String getJournalId();
-     Date getTransactionDate();
-     Timestamp getPostDate();
-     String getBranchCode();
-     String getBranchName();
-     String getCircleCode();
-     String getCircleName();
-     String getCurrency();
-     String getCurrencyName();
-     String getCgl();
-     String getDescription();
-     String getNarration();
-     BigDecimal getDebitAmount();
-     BigDecimal getCreditAmount();
-     Long getTransactionCount();
-     String getSourceFlag();
+private String sortField;
 
+private String sortOrder;
+
+private List<GridFilter> gridFilters;
+
+=============
+
+@Repository
+public interface GlTransactionsRepository
+extends JpaRepository<GlTransactions, Integer>,
+        JpaSpecificationExecutor<GlTransactions> {
+
+================
+
+package com.fincore.enquiry_service.specification;
+
+import com.fincore.enquiry_service.dto.GridFilter;
+import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
+import com.fincore.enquiry_service.model.GlTransactions;
+
+import jakarta.persistence.criteria.Predicate;
+
+import org.springframework.data.jpa.domain.Specification;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class LedgerEnquirySpecification {
+
+    public static Specification<GlTransactions> filter(
+            LedgerEnquiryRequest dto
+    ) {
+
+        return (root, query, cb) -> {
+
+            List<Predicate> predicates =
+                    new ArrayList<>();
+
+            // ================= CGL =================
+
+            predicates.add(
+                    cb.equal(
+                            root.get("cgl"),
+                            dto.getCgl()
+                    )
+            );
+
+            // ================= CURRENCY =================
+
+            if (
+                    dto.getCurrencies() != null &&
+                    !"ALL".equalsIgnoreCase(
+                            dto.getCurrencies()
+                    )
+            ) {
+
+                predicates.add(
+                        cb.equal(
+                                root.get("currency"),
+                                dto.getCurrencies()
+                        )
+                );
+            }
+
+            // ================= SOURCE FLAGS =================
+
+            if (
+                    dto.getSourceFlags() != null &&
+                    !dto.getSourceFlags().contains(
+                            "ALL"
+                    )
+            ) {
+
+                predicates.add(
+                        root.get("sourceFlag")
+                                .in(dto.getSourceFlags())
+                );
+            }
+
+            // ================= BRANCHES =================
+
+            if (
+                    dto.getBranches() != null &&
+                    !dto.getBranches().contains(
+                            "ALL"
+                    )
+            ) {
+
+                predicates.add(
+                        root.get("branchCode")
+                                .in(dto.getBranches())
+                );
+            }
+
+            // ================= DATE RANGE =================
+
+            predicates.add(
+                    cb.between(
+                            root.get(
+                                    "transactionDate"
+                            ),
+                            java.sql.Date.valueOf(
+                                    dto.getFromDate()
+                            ),
+                            java.sql.Date.valueOf(
+                                    dto.getToDate()
+                            )
+                    )
+            );
+
+            // ================= GRID FILTERS =================
+
+            if (
+                    dto.getGridFilters() != null
+            ) {
+
+                for (GridFilter filter :
+                        dto.getGridFilters()) {
+
+                    if (
+                            filter.getValue() == null ||
+                            filter.getValue().isBlank()
+                    ) {
+                        continue;
+                    }
+
+                    String field =
+                            filter.getField();
+
+                    String value =
+                            filter.getValue();
+
+                    switch (
+                            filter.getOperator()
+                    ) {
+
+                        case "contains":
+
+                            predicates.add(
+                                    cb.like(
+                                            cb.lower(
+                                                    root.get(
+                                                            field
+                                                    )
+                                            ),
+                                            "%" +
+                                            value.toLowerCase() +
+                                            "%"
+                                    )
+                            );
+
+                            break;
+
+                        case "equals":
+
+                            predicates.add(
+                                    cb.equal(
+                                            root.get(
+                                                    field
+                                            ),
+                                            value
+                                    )
+                            );
+
+                            break;
+
+                        case "startsWith":
+
+                            predicates.add(
+                                    cb.like(
+                                            cb.lower(
+                                                    root.get(
+                                                            field
+                                                    )
+                                            ),
+                                            value.toLowerCase() +
+                                            "%"
+                                    )
+                            );
+
+                            break;
+                    }
+                }
+            }
+
+            return cb.and(
+                    predicates.toArray(
+                            new Predicate[0]
+                    )
+            );
+        };
+    }
 }
+
+==============
+
+@Override
+public Page<LedgerEnquiryResponse> search(
+        LedgerEnquiryRequest dto,
+        Pageable pageable
+) {
+
+    Sort.Direction direction =
+            "asc".equalsIgnoreCase(
+                    dto.getSortOrder()
+            )
+                    ? Sort.Direction.ASC
+                    : Sort.Direction.DESC;
+
+    Pageable dynamicPageable =
+            PageRequest.of(
+                    dto.getPage(),
+                    dto.getSize(),
+                    Sort.by(
+                            direction,
+                            dto.getSortField()
+                    )
+            );
+
+    Specification<GlTransactions>
+            specification =
+            LedgerEnquirySpecification
+                    .filter(dto);
+
+    Page<GlTransactions> page =
+            glTransactionsRepository.findAll(
+                    specification,
+                    dynamicPageable
+            );
+
+    return page.map(
+            this::mapEntityToDto
+    );
+}
+
+===============
+
+
+private LedgerEnquiryResponse mapEntityToDto(
+        GlTransactions entity
+) {
+
+    return new LedgerEnquiryResponse(
+
+            entity.getTransactionId(),
+            entity.getBatchId(),
+            entity.getJournalId(),
+            entity.getTransactionDate(),
+            entity.getPostDate(),
+            entity.getBranchCode(),
+            entity.getBranchName(),
+            entity.getCircleCode(),
+            entity.getCircleName(),
+            entity.getCurrency(),
+            entity.getCurrencyName(),
+            entity.getCgl(),
+            entity.getDescription(),
+            entity.getNarration(),
+            entity.getDebitAmount(),
+            entity.getCreditAmount(),
+            entity.getTransactionCount(),
+            entity.getSourceFlag()
+    );
+}
+
+=============
+
+
+search(
+ @RequestBody LedgerEnquiryRequest dto
+)
+
+======
