@@ -500,3 +500,884 @@ const LedgerWiseEnquiry = () => {
 };
 
 export default React.memo(LedgerWiseEnquiry);
+
+
+import React, { useState, useCallback, useMemo, useEffect } from "react";
+import {
+  Card,
+  CardContent,
+  TextField,
+  Button,
+  Autocomplete,
+  Checkbox,
+  Typography,
+  Stack,
+  Divider,
+  Box,
+  IconButton,
+  Grid,
+  InputAdornment,
+  Paper,
+  Collapse,
+  Chip,
+} from "@mui/material";
+import { DatePicker } from "@mui/x-date-pickers";
+
+// Icons
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import SearchIcon from "@mui/icons-material/Search";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import CloseIcon from "@mui/icons-material/Close";
+import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
+import DateRangeIcon from "@mui/icons-material/DateRange";
+import DeleteSweepIcon from "@mui/icons-material/DeleteSweep";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+
+// Utilities & Hooks
+import { debounce } from "lodash";
+import dayjs from "dayjs";
+import useApi from "../../../hooks/useApi";
+import CustomChip from "../../../utils/CustomChip";
+
+const LedgerForm = ({
+  filters,
+  onFilterChange,
+  onReset,
+  onFetch,
+  permissions,
+  user,
+  circles,
+  currencies,
+  sourceOptions,
+  etlDate,
+}) => {
+  const { callApi } = useApi();
+  const { hasWholeBank, hasCircle } = permissions;
+  const [branches, setBranches] = useState([]);
+  const [cgls, setCgls] = useState([]);
+  const [loading, setLoading] = useState({ branch: false, cgl: false });
+  const [viewBranchList, setViewBranchList] = useState(false);
+
+  const minLimit = dayjs("31/03/2020", "DD/MM/YYYY");
+  const maxLimit = etlDate || dayjs();
+
+  const isCircleVisible = hasWholeBank;
+  const isBranchVisible =
+    (hasWholeBank && filters.circle !== "ALL") ||
+    (user?.isCircle === "Y" && !hasWholeBank);
+
+  const hasSelectedBranches =
+    !filters.branches.includes("ALL") && filters.branches.length > 0;
+
+  const searchLogic = useCallback(
+    async (type, term) => {
+      if (!term || term.length < 3) return;
+      try {
+        setLoading((p) => ({ ...p, [type]: true }));
+        let cp =
+          hasWholeBank && filters.circle !== "ALL"
+            ? `&circleCode=${filters.circle}`
+            : !hasWholeBank
+              ? `&circleCode=${user.circleCode}`
+              : "";
+        const url =
+          type === "branch"
+            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(term)}${cp}`
+            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(term)}`;
+
+        const res = await callApi(url, null, "GET");
+        if (res?.data) {
+          const opts = res.data.map((i) =>
+            type === "branch"
+              ? `${i.code}-${i.name}`
+              : `${i.cglNumber} - ${i.description}`,
+          );
+          type === "branch" ? setBranches(opts) : setCgls(opts);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading((p) => ({ ...p, [type]: false }));
+      }
+    },
+    [callApi, user, hasWholeBank, filters.circle],
+  );
+
+  const fetchSearchData = useMemo(
+    () => debounce((t, v) => searchLogic(t, v), 300),
+    [searchLogic],
+  );
+  useEffect(() => () => fetchSearchData.cancel(), [fetchSearchData]);
+
+  const handleBranchChange = (val) => {
+    const clickedAll = val.includes("ALL") && !filters.branches.includes("ALL");
+
+    // 2. If nothing is selected, default back to "ALL"
+    const isEmpty = val.length === 0;
+
+    if (clickedAll || isEmpty) {
+      onFilterChange("branches", ["ALL"]);
+      setViewBranchList(false); // Close the tray automatically on reset
+      return;
+    }
+
+    // 3. If user selects a specific branch while "ALL" was active, remove "ALL"
+    const valWithoutAll = val.filter((v) => v !== "ALL");
+    onFilterChange("branches", valWithoutAll);
+  };
+
+  const removeBranch = (branchToRemove) => {
+    const updated = filters.branches.filter((b) => b !== branchToRemove);
+
+    if (updated.length === 0) {
+      onFilterChange("branches", ["ALL"]);
+      setViewBranchList(false); // Auto-close tray if no specific branches left
+    } else {
+      onFilterChange("branches", updated);
+    }
+  };
+
+  const SectionHeader = ({ icon, title }) => (
+    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
+      <Box
+        sx={{
+          p: 0.5,
+          bgcolor: "primary.main",
+          borderRadius: 1,
+          color: "white",
+          display: "flex",
+        }}
+      >
+        {icon}
+      </Box>
+      <Typography
+        variant="subtitle2"
+        sx={{ fontWeight: 800, color: "text.primary", letterSpacing: 1 }}
+      >
+        {title}
+      </Typography>
+    </Stack>
+  );
+
+  return (
+    <Box sx={{ position: "relative", mb: 2 }}>
+      <Card
+        sx={{
+          borderRadius: "24px",
+          boxShadow: "0 20px 50px rgba(0,0,0,0.1)",
+          border: "1px solid rgba(255,255,255,0.3)",
+        }}
+      >
+        <CardContent sx={{ p: 4 }}>
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            sx={{ mb: 1.5 }}
+          >
+            <Box>
+              <Typography variant="h4" sx={{ fontWeight: 900, color: "#000" }}>
+                Ledger{" "}
+                <Typography
+                  component="span"
+                  variant="h4"
+                  sx={{ color: "primary.main", fontWeight: 900 }}
+                >
+                  Explorer
+                </Typography>
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Hierarchical data filtering & enquiry
+              </Typography>
+            </Box>
+            <CustomChip
+              icon={<AccountBalanceIcon />}
+              label={`${hasWholeBank ? "Whole Bank" : hasCircle ? "Circle" : "Branch"} Level`}
+              color="primary"
+            />
+          </Stack>
+
+          {/* 1. HIERARCHY ZONE */}
+          <Grid container spacing={4}>
+            {(isCircleVisible || isBranchVisible) && (
+              <Grid size={{ xs: 12, md: 6 }}>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 3,
+                    borderRadius: "20px",
+                    bgcolor: "rgba(0,0,0,0.01)",
+                    borderStyle: "dashed",
+                    position: "relative",
+                  }}
+                >
+                  <SectionHeader
+                    icon={<AccountBalanceIcon fontSize="small" />}
+                    title="Hierarchy"
+                  />
+
+                  <Grid container spacing={2}>
+                    {isCircleVisible && (
+                      <Grid size={{ xs: 12, sm: isBranchVisible ? 6 : 12 }}>
+                        <Autocomplete
+                          size="small"
+                          options={[
+                            "All Circles",
+                            "Domestic Circles",
+                            "Foriegn Circles",
+                            ...circles.map(
+                              (c) => `${c.circleCode} - ${c.circleName}`,
+                            ),
+                          ]}
+                          // Match the short code in 'filters.circle' to the long string in 'options'
+                          value={
+                            filters.circle === "ALL"
+                              ? "All Circles"
+                              : circles.find(
+                                    (c) => c.circleCode === filters.circle,
+                                  )
+                                ? `${filters.circle} - ${circles.find((c) => c.circleCode === filters.circle).circleName}`
+                                : filters.circle
+                          }
+                          // This logic is key: it tells MUI how to link the saved code to the list item
+                          isOptionEqualToValue={(option, value) => {
+                            if (value === "All Circles")
+                              return option === "All Circles";
+                            return option.startsWith(value);
+                          }}
+                          onChange={(_, v) =>
+                            onFilterChange(
+                              "circle",
+                              v === "All Circles" || !v
+                                ? "ALL"
+                                : v.split(" - ")[0],
+                            )
+                          }
+                          renderInput={(p) => (
+                            <TextField
+                              {...p}
+                              label="Select Circle"
+                              required
+                              variant="standard"
+                            />
+                          )}
+                        />
+                      </Grid>
+                    )}
+                    {isBranchVisible && (
+                      <Grid size={{ xs: 12, sm: isCircleVisible ? 6 : 12 }}>
+                        <Autocomplete
+                          multiple
+                          size="small"
+                          disableCloseOnSelect
+                          options={["ALL", ...branches]}
+                          loading={loading.branch}
+                          value={filters.branches}
+                          onInputChange={(e, v, r) => {
+                            if (r === "input" && v.length >= 3)
+                              fetchSearchData("branch", v);
+                          }}
+                          onChange={(_, val) => handleBranchChange(val)}
+                          renderTags={() => null}
+                          // Add Checkboxes to the dropdown
+                          renderOption={(props, option, { selected }) => (
+                            <li {...props} key={option}>
+                              <Checkbox
+                                size="small"
+                                style={{ marginRight: 8 }}
+                                checked={selected}
+                              />
+                              <Typography variant="body2">{option}</Typography>
+                            </li>
+                          )}
+                          renderInput={(p) => (
+                            <TextField
+                              {...p}
+                              label="Select Branches"
+                              variant="standard"
+                              required
+                              placeholder={
+                                filters.branches.includes("ALL")
+                                  ? "Search specific branches..."
+                                  : ""
+                              }
+                              InputProps={{
+                                ...p.InputProps,
+                                endAdornment: (
+                                  <InputAdornment
+                                    position="end"
+                                    sx={{ mb: 0.5 }}
+                                  >
+                                    <Stack
+                                      direction="row"
+                                      alignItems="center"
+                                      spacing={1}
+                                    >
+                                      <CustomChip
+                                        label={
+                                          filters.branches.includes("ALL")
+                                            ? "All Branches"
+                                            : `${filters.branches.length} Selected`
+                                        }
+                                        color={
+                                          filters.branches.includes("ALL")
+                                            ? "default"
+                                            : "primary"
+                                        }
+                                        sx={{
+                                          fontWeight: 700,
+                                          fontSize: "0.7rem",
+                                        }}
+                                      />
+                                      {!filters.branches.includes("ALL") &&
+                                        filters.branches.length > 0 && (
+                                          <IconButton
+                                            size="small"
+                                            onClick={() =>
+                                              setViewBranchList(!viewBranchList)
+                                            }
+                                            color={
+                                              viewBranchList
+                                                ? "primary"
+                                                : "default"
+                                            }
+                                            sx={{
+                                              transition: "0.2s",
+                                              bgcolor: viewBranchList
+                                                ? "rgba(25, 118, 210, 0.08)"
+                                                : "transparent",
+                                            }}
+                                          >
+                                            {viewBranchList ? (
+                                              <VisibilityOffIcon fontSize="small" />
+                                            ) : (
+                                              <VisibilityIcon fontSize="small" />
+                                            )}
+                                          </IconButton>
+                                        )}
+                                    </Stack>
+                                    {p.InputProps.endAdornment}
+                                  </InputAdornment>
+                                ),
+                              }}
+                            />
+                          )}
+                        />
+                      </Grid>
+                    )}
+                  </Grid>
+                </Paper>
+              </Grid>
+            )}
+
+            {/* 2. ACCOUNT ZONE */}
+            <Grid
+              size={{ xs: 12, md: isCircleVisible || isBranchVisible ? 6 : 12 }}
+            >
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 3,
+                  borderRadius: "20px",
+                  bgcolor: "rgba(0,0,0,0.01)",
+                  borderStyle: "dashed",
+                }}
+              >
+                <SectionHeader
+                  icon={<SearchIcon fontSize="small" />}
+                  title="Account Details"
+                />
+                <Grid container spacing={2}>
+                  <Grid size={{ xs: 12, sm: 7 }}>
+                    <Autocomplete
+                      size="small"
+                      options={cgls}
+                      value={filters.cgl}
+                      onInputChange={(e, v) => {
+                        if (v.length >= 3) fetchSearchData("cgl", v);
+                      }}
+                      onChange={(_, v) => onFilterChange("cgl", v)}
+                      renderInput={(p) => (
+                        <TextField
+                          {...p}
+                          label="CGL Account"
+                          required
+                          variant="standard"
+                        />
+                      )}
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 5 }}>
+                    <Autocomplete
+                      size="small"
+                      options={["All Currencies", ...currencies]}
+                      value={filters.currencies}
+                      onChange={(_, v) =>
+                        onFilterChange("currencies", v || "ALL")
+                      }
+                      renderInput={(p) => (
+                        <TextField
+                          {...p}
+                          label="Currency"
+                          required
+                          variant="standard"
+                        />
+                      )}
+                    />
+                  </Grid>
+                </Grid>
+              </Paper>
+            </Grid>
+
+            {/* ROW 2: INDIVIDUAL BRANCH TRAY */}
+            {viewBranchList && hasSelectedBranches && (
+              <Grid size={{ xs: 12 }}>
+                <Collapse in={viewBranchList && hasSelectedBranches}>
+                  <Paper
+                    variant="outlined"
+                    sx={{
+                      borderRadius: "20px",
+                      bgcolor: "#fff",
+                      border: "1px solid #e0e6ed",
+                      overflow: "hidden",
+                      mb: 1.5,
+                      boxShadow: "0 4px 20px rgba(0,0,0,0.05)",
+                    }}
+                  >
+                    {/* Sticky Header */}
+                    <Stack
+                      direction="row"
+                      justifyContent="space-between"
+                      alignItems="center"
+                      sx={{
+                        p: 2,
+                        borderBottom: "1px solid #f0f0f0",
+                        bgcolor: "rgba(25, 118, 210, 0.02)",
+                      }}
+                    >
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            fontWeight: 800,
+                            color: "primary.main",
+                            letterSpacing: 1,
+                          }}
+                        >
+                          SELECTED BRANCHES
+                        </Typography>
+                        <CustomChip
+                          label={filters.branches.length}
+                          color="primary"
+                          sx={{ height: 20 }}
+                        />
+                      </Stack>
+
+                      <Button
+                        size="small"
+                        color="error"
+                        variant="text"
+                        startIcon={<DeleteSweepIcon />}
+                        onClick={() => {
+                          onFilterChange("branches", ["ALL"]);
+                          setViewBranchList(false);
+                        }}
+                        sx={{
+                          p: 1,
+                          fontWeight: 700,
+                          "&:hover": {
+                            color: "white",
+                            background: "#9f0400",
+                          },
+                        }}
+                      >
+                        Clear All
+                      </Button>
+                    </Stack>
+
+                    {/* Scrollable Area with Individual Remove */}
+                    {/* Scrollable Area with Individual Remove using standard MUI Chip */}
+                    <Box
+                      sx={{
+                        p: 2,
+                        maxHeight: "250px",
+                        overflowY: "auto",
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 1,
+                        "&::-webkit-scrollbar": { width: "6px" },
+                        "&::-webkit-scrollbar-track": { background: "#f1f1f1" },
+                        "&::-webkit-scrollbar-thumb": {
+                          background: "#ccc",
+                          borderRadius: "10px",
+                        },
+                      }}
+                    >
+                      {filters.branches.map((b) => (
+                        <Chip
+                          key={b}
+                          label={b}
+                          color="primary"
+                          variant="outlined"
+                          // Standard MUI Chip handles onDelete by showing the 'X' icon automatically
+                          onDelete={() => removeBranch(b)}
+                          sx={{
+                            borderRadius: "8px",
+                            bgcolor: "white",
+                            fontWeight: 500,
+                            "& .MuiChip-deleteIcon": {
+                              color: "error.main",
+                              transition: "0.2s",
+                              "&:hover": {
+                                color: "#d32f2f",
+                                transform: "scale(1.2)",
+                              },
+                            },
+                            "&:hover": {
+                              bgcolor: "#f5f9ff",
+                              borderColor: "primary.main",
+                            },
+                          }}
+                        />
+                      ))}
+                    </Box>
+                  </Paper>
+                </Collapse>
+              </Grid>
+            )}
+
+            {/* 3. TIMELINE & FLAGS ZONE */}
+            <Grid size={{ xs: 12 }}>
+              <Paper
+                sx={{
+                  p: 2.5,
+                  borderRadius: "20px",
+                  // background:
+                  //   "linear-gradient(90deg, #1976d2 0%, #1565c0 100%)",
+                  background: "#58469f",
+                  color: "white",
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  spacing={3}
+                  alignItems="center"
+                >
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    alignItems="center"
+                    sx={{ minWidth: 100 }}
+                  >
+                    <DateRangeIcon />
+                    <Typography sx={{ fontWeight: 700 }}>
+                      Timeline Period
+                    </Typography>
+                  </Stack>
+
+                  <DatePicker
+                    value={filters.fromDate}
+                    format="DD/MM/YYYY"
+                    minDate={minLimit}
+                    maxDate={filters.toDate || maxLimit}
+                    views={["year", "month", "day"]}
+                    onChange={(v) => onFilterChange("fromDate", v)}
+                    slotProps={{
+                      textField: {
+                        size: "small",
+                        fullWidth: true,
+                        placeholder: "DD/MM/YYYY",
+
+                        sx: {
+                          bgcolor: "white",
+                          borderRadius: 2,
+                          flex: 1,
+                        },
+                      },
+
+                      day: {
+                        sx: {
+                          fontWeight: 600,
+                          "&.MuiPickersDay-root": {
+                            color: "#111",
+                          },
+                          "&.MuiPickersDay-today": {
+                            border: "2px solid #58469f",
+                            fontWeight: 800,
+                          },
+                          "&.Mui-selected": {
+                            backgroundColor: "#58469f !important",
+                            color: "#fff !important",
+                            fontWeight: 800,
+                          },
+                          "&:hover": {
+                            backgroundColor: "rgba(88,70,159,0.08)",
+                          },
+                          "&.Mui-disabled": {
+                            color: "rgba(0,0,0,0.25) !important",
+                            backgroundColor: "rgba(0,0,0,0.04)",
+                            opacity: 0.45,
+                            textDecoration: "line-through",
+                          },
+                        },
+                      },
+
+                      monthButton: {
+                        sx: {
+                          fontWeight: 700,
+                          "&.Mui-selected": {
+                            backgroundColor: "#58469f !important",
+                            color: "#fff !important",
+                          },
+                          "&.Mui-disabled": {
+                            color: "rgba(0,0,0,0.25) !important",
+                            opacity: 0.45,
+                            textDecoration: "line-through",
+                            backgroundColor: "rgba(0,0,0,0.04)",
+                          },
+                        },
+                      },
+
+                      yearButton: {
+                        sx: {
+                          fontWeight: 700,
+                          "&.Mui-selected": {
+                            backgroundColor: "#58469f !important",
+                            color: "#fff !important",
+                          },
+                          "&.Mui-disabled": {
+                            color: "rgba(0,0,0,0.25) !important",
+                            opacity: 0.45,
+                            textDecoration: "line-through",
+                            backgroundColor: "rgba(0,0,0,0.04)",
+                          },
+                        },
+                      },
+                    }}
+                  />
+
+                  <DatePicker
+                    value={filters.toDate}
+                    format="DD/MM/YYYY"
+                    minDate={filters?.fromDate || minLimit}
+                    maxDate={maxLimit}
+                    views={["year", "month", "day"]}
+                    onChange={(v) => onFilterChange("toDate", v)}
+                    slotProps={{
+                      textField: {
+                        size: "small",
+                        fullWidth: true,
+                        placeholder: "DD/MM/YYYY",
+
+                        sx: {
+                          bgcolor: "white",
+                          borderRadius: 2,
+                          flex: 1,
+                        },
+                      },
+
+                      day: {
+                        sx: {
+                          fontWeight: 600,
+                          "&.MuiPickersDay-root": {
+                            color: "#111",
+                          },
+                          "&.MuiPickersDay-today": {
+                            border: "2px solid #58469f",
+                            fontWeight: 800,
+                          },
+                          "&.Mui-selected": {
+                            backgroundColor: "#58469f !important",
+                            color: "#fff !important",
+                            fontWeight: 800,
+                          },
+                          "&:hover": {
+                            backgroundColor: "rgba(88,70,159,0.08)",
+                          },
+                          "&.Mui-disabled": {
+                            color: "rgba(0,0,0,0.25) !important",
+                            backgroundColor: "rgba(0,0,0,0.04)",
+                            opacity: 0.45,
+                            textDecoration: "line-through",
+                          },
+                        },
+                      },
+
+                      monthButton: {
+                        sx: {
+                          fontWeight: 700,
+                          "&.Mui-selected": {
+                            backgroundColor: "#58469f !important",
+                            color: "#fff !important",
+                          },
+                          "&.Mui-disabled": {
+                            color: "rgba(0,0,0,0.25) !important",
+                            opacity: 0.45,
+                            textDecoration: "line-through",
+                            backgroundColor: "rgba(0,0,0,0.04)",
+                          },
+                        },
+                      },
+
+                      yearButton: {
+                        sx: {
+                          fontWeight: 700,
+                          "&.Mui-selected": {
+                            backgroundColor: "#58469f !important",
+                            color: "#fff !important",
+                          },
+                          "&.Mui-disabled": {
+                            color: "rgba(0,0,0,0.25) !important",
+                            opacity: 0.45,
+                            textDecoration: "line-through",
+                            backgroundColor: "rgba(0,0,0,0.04)",
+                          },
+                        },
+                      },
+                    }}
+                  />
+
+                  <Autocomplete
+                    multiple
+                    size="small"
+                    disableCloseOnSelect
+                    sx={{ flex: 1.5, minWidth: 250 }}
+                    options={sourceOptions}
+                    value={filters.sourceFlags}
+                    getOptionLabel={(o) => o.flagName || ""}
+                    isOptionEqualToValue={(option, value) =>
+                      option.flagId === value.flagId
+                    }
+                    // LOGIC: Handle Select All toggle
+                    onChange={(_, selectedOptions) => {
+                      const isSelectAllClicked = selectedOptions.some(
+                        (option) => option.flagId === "select-all",
+                      );
+                      if (isSelectAllClicked) {
+                        // If already all selected, clear them. Otherwise, select all.
+                        if (
+                          filters.sourceFlags.length === sourceOptions.length
+                        ) {
+                          onFilterChange("sourceFlags", []);
+                        } else {
+                          onFilterChange("sourceFlags", sourceOptions);
+                        }
+                      } else {
+                        onFilterChange("sourceFlags", selectedOptions);
+                      }
+                    }}
+                    // INJECT: "Select All" option at the top of the list
+                    filterOptions={(options) => {
+                      const filtered = options;
+                      return [
+                        { flagId: "select-all", flagName: "Select All" },
+                        ...filtered,
+                      ];
+                    }}
+                    renderTags={(v) => (
+                      <CustomChip
+                        label={
+                          v.length === sourceOptions.length
+                            ? "All Sources"
+                            : `${v.length} Sources`
+                        }
+                        color="default"
+                        sx={{ bgcolor: "white" }}
+                      />
+                    )}
+                    renderOption={(props, option, { selected }) => {
+                      // Check if everything is selected to show the "Select All" box as checked
+                      const isAllSelected =
+                        filters.sourceFlags.length === sourceOptions.length;
+                      const isChecked =
+                        option.flagId === "select-all"
+                          ? isAllSelected
+                          : selected;
+
+                      return (
+                        <li {...props} key={option.flagId}>
+                          <Checkbox
+                            size="small"
+                            style={{ marginRight: 8 }}
+                            checked={isChecked}
+                          />
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              fontWeight:
+                                option.flagId === "select-all" ? 700 : 400,
+                            }}
+                          >
+                            {option.flagName}
+                          </Typography>
+                        </li>
+                      );
+                    }}
+                    renderInput={(p) => (
+                      <TextField
+                        {...p}
+                        placeholder="Source Flags"
+                        sx={{
+                          bgcolor: "white",
+                          borderRadius: 2,
+                          "& .MuiOutlinedInput-root": { borderRadius: 2 },
+                        }}
+                      />
+                    )}
+                  />
+                </Stack>
+              </Paper>
+            </Grid>
+          </Grid>
+
+          <Box
+            sx={{
+              mt: 2,
+              position: "sticky",
+              bottom: 12,
+              zIndex: 20,
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 2,
+            }}
+          >
+            <Button
+              // variant="text"
+              // color="error"
+              variant="outlined"
+              startIcon={<RestartAltIcon />}
+              onClick={onReset}
+              sx={{
+                borderRadius: 2,
+                textTransform: "none",
+                fontWeight: 700,
+                // "&:hover": {
+                //   color: "white",
+                //   background: "#9f0400",
+                // },
+              }}
+            >
+              Reset
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<SearchIcon />}
+              onClick={onFetch}
+              disabled={!filters.cgl || !filters.fromDate || !filters.toDate}
+              sx={{
+                borderRadius: 2,
+                px: 4,
+                textTransform: "none",
+                fontWeight: 800,
+              }}
+            >
+              Fetch Records
+            </Button>
+          </Box>
+        </CardContent>
+      </Card>
+    </Box>
+  );
+};
+
+export default LedgerForm;
