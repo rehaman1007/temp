@@ -1,7 +1,8 @@
 package com.fincore.enquiry_service.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fincore.enquiry_service.dto.*;
+import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
+import com.fincore.enquiry_service.dto.MyDownloadsRequestDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.*;
@@ -12,7 +13,9 @@ import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
@@ -20,15 +23,38 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RequiredArgsConstructor
 public class LedgerExportService {
 
+    /*
+     * =========================================================
+     * CONFIG
+     * =========================================================
+     */
+
+    private static final int FETCH_SIZE = 20000;
+
+    private static final int SXSSF_WINDOW_SIZE = 2000;
+
+    private static final long MAX_EXPORT_RECORDS = 1_000_000;
+
     private final JdbcTemplate jdbcTemplate;
+
     private final MyDownloadsService myDownloadsService;
 
-    public byte[] export(LedgerEnquiryRequest dto, String userId) {
+    /*
+     * =========================================================
+     * EXPORT
+     * =========================================================
+     */
+
+    public byte[] export(
+            LedgerEnquiryRequest dto,
+            String userId
+    ) {
 
         validateExportLimit(dto);
 
         String sql = """
                 SELECT
+                
                     g.TRANSACTION_ID,
                     g.BATCH_ID,
                     g.JOURNAL_ID,
@@ -70,7 +96,7 @@ public class LedgerExportService {
                 LEFT JOIN CGL_MASTER cg
                     ON g.CGL = cg.CGL_NUMBER
                 
-                LEFT JOIN SOURCE_FLAG sf
+                LEFT JOIN SOURCE_FLAG_MASTER sf
                     ON g.SOURCE_FLAG = sf.FLAG_ID
                 
                 WHERE g.CGL = ?
@@ -81,91 +107,266 @@ public class LedgerExportService {
                     TO_DATE(?,'DD/MM/YYYY')
                     AND TO_DATE(?,'DD/MM/YYYY')
                 
+                AND (
+                    ? = 1
+                    OR g.BRANCH_CODE IN (%s)
+                )
+                
+                AND (
+                    ? = 1
+                    OR g.SOURCE_FLAG IN (%s)
+                )
+                
+                AND (
+                    ? IS NULL
+                    OR c.CIRCLE_CODE = ?
+                )
+                
                 ORDER BY g.TRANSACTION_DATE
                 """;
 
-        try (SXSSFWorkbook workbook = new SXSSFWorkbook(1000);
+        /*
+         * DYNAMIC IN CLAUSE
+         */
 
-             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+        String branchPlaceholders =
+                dto.getBranches()
+                        .stream()
+                        .map(b -> "?")
+                        .reduce((a, b) -> a + "," + b)
+                        .orElse("?");
+
+        String sourcePlaceholders =
+                dto.getSourceFlags()
+                        .stream()
+                        .map(s -> "?")
+                        .reduce((a, b) -> a + "," + b)
+                        .orElse("?");
+
+        sql =
+                String.format(
+                        sql,
+                        branchPlaceholders,
+                        sourcePlaceholders
+                );
+
+        try (
+
+                SXSSFWorkbook workbook =
+                        new SXSSFWorkbook(SXSSF_WINDOW_SIZE);
+
+                ByteArrayOutputStream out =
+                        new ByteArrayOutputStream()
+
+        ) {
 
             workbook.setCompressTempFiles(true);
 
-            SXSSFSheet sheet = workbook.createSheet("Ledger");
+            SXSSFSheet sheet =
+                    workbook.createSheet("Ledger");
 
             createHeader(workbook, sheet);
 
-            AtomicInteger rowNum = new AtomicInteger(1);
+            AtomicInteger rowNum =
+                    new AtomicInteger(1);
 
-            jdbcTemplate.setFetchSize(10000);
+            jdbcTemplate.setFetchSize(FETCH_SIZE);
 
-            jdbcTemplate.query(connection -> {
+            jdbcTemplate.query(
 
-                        var ps = connection.prepareStatement(sql);
+                    connection -> {
 
-                        ps.setFetchSize(10000);
+                        PreparedStatement ps =
+                                connection.prepareStatement(
+                                        sql,
+                                        ResultSet.TYPE_FORWARD_ONLY,
+                                        ResultSet.CONCUR_READ_ONLY
+                                );
 
-                        ps.setString(1, dto.getCgl());
+                        ps.setFetchSize(FETCH_SIZE);
 
-                        String currency = dto.getCurrencies().equalsIgnoreCase("ALL") ? null : dto.getCurrencies();
+                        int index = 1;
 
-                        ps.setString(2, currency);
-                        ps.setString(3, currency);
+                        /*
+                         * CGL
+                         */
 
-                        ps.setString(4, dto.getFromDate());
-                        ps.setString(5, dto.getToDate());
+                        ps.setString(
+                                index++,
+                                dto.getCgl()
+                        );
+
+                        /*
+                         * CURRENCY
+                         */
+
+                        String currency =
+                                dto.getCurrencies()
+                                        .equalsIgnoreCase("ALL")
+                                        ? null
+                                        : dto.getCurrencies();
+
+                        ps.setString(index++, currency);
+
+                        ps.setString(index++, currency);
+
+                        /*
+                         * DATES
+                         */
+
+                        ps.setString(index++, dto.getFromDate());
+
+                        ps.setString(index++, dto.getToDate());
+
+                        /*
+                         * BRANCHES
+                         */
+
+                        boolean skipBranches =
+                                dto.getBranches()
+                                        .contains("ALL");
+
+                        ps.setInt(
+                                index++,
+                                skipBranches ? 1 : 0
+                        );
+
+                        if (!skipBranches) {
+
+                            for (String branch : dto.getBranches()) {
+
+                                ps.setString(index++, branch);
+                            }
+                        }
+
+                        /*
+                         * SOURCE FLAGS
+                         */
+
+                        boolean skipSource =
+                                dto.getSourceFlags()
+                                        .contains("ALL");
+
+                        ps.setInt(
+                                index++,
+                                skipSource ? 1 : 0
+                        );
+
+                        if (!skipSource) {
+
+                            for (String source : dto.getSourceFlags()) {
+
+                                ps.setString(index++, source);
+                            }
+                        }
+
+                        /*
+                         * CIRCLE
+                         */
+
+                        String circle =
+                                dto.getCircle()
+                                        .equalsIgnoreCase("ALL")
+                                        ? null
+                                        : dto.getCircle();
+
+                        ps.setString(index++, circle);
+
+                        ps.setString(index++, circle);
 
                         return ps;
                     },
 
-                    (ResultSet rs) -> {
+                    rs -> {
 
                         while (rs.next()) {
 
-                            Row row = sheet.createRow(rowNum.getAndIncrement());
+                            Row row =
+                                    sheet.createRow(
+                                            rowNum.getAndIncrement()
+                                    );
 
                             int col = 0;
 
-                            row.createCell(col++).setCellValue(rs.getString("TRANSACTION_ID"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("TRANSACTION_ID"));
 
-                            row.createCell(col++).setCellValue(rs.getString("BATCH_ID"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("BATCH_ID"));
 
-                            row.createCell(col++).setCellValue(rs.getString("JOURNAL_ID"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("JOURNAL_ID"));
 
-                            row.createCell(col++).setCellValue(rs.getString("BRANCH_CODE"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("BRANCH_CODE"));
 
-                            row.createCell(col++).setCellValue(rs.getString("BRANCH_NAME"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("BRANCH_NAME"));
 
-                            row.createCell(col++).setCellValue(rs.getString("CIRCLE_CODE"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("CIRCLE_CODE"));
 
-                            row.createCell(col++).setCellValue(rs.getString("CIRCLE_NAME"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("CIRCLE_NAME"));
 
-                            row.createCell(col++).setCellValue(rs.getString("CURRENCY"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("CURRENCY"));
 
-                            row.createCell(col++).setCellValue(rs.getString("CURRENCY_NAME"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("CURRENCY_NAME"));
 
-                            row.createCell(col++).setCellValue(rs.getString("CGL"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("CGL"));
 
-                            row.createCell(col++).setCellValue(rs.getString("DESCRIPTION"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("DESCRIPTION"));
 
-                            row.createCell(col++).setCellValue(rs.getString("NARRATION"));
+                            row.createCell(col++)
+                                    .setCellValue(rs.getString("NARRATION"));
 
-                            row.createCell(col++).setCellValue(rs.getBigDecimal("DEBIT_AMOUNT") != null ? rs.getBigDecimal("DEBIT_AMOUNT").doubleValue() : 0);
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getBigDecimal("DEBIT_AMOUNT") != null
+                                                    ? rs.getBigDecimal("DEBIT_AMOUNT").doubleValue()
+                                                    : 0
+                                    );
 
-                            row.createCell(col++).setCellValue(rs.getBigDecimal("CREDIT_AMOUNT") != null ? rs.getBigDecimal("CREDIT_AMOUNT").doubleValue() : 0);
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getBigDecimal("CREDIT_AMOUNT") != null
+                                                    ? rs.getBigDecimal("CREDIT_AMOUNT").doubleValue()
+                                                    : 0
+                                    );
 
-                            row.createCell(col++).setCellValue(rs.getLong("TRANSACTION_COUNT"));
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getLong("TRANSACTION_COUNT")
+                                    );
 
-                            row.createCell(col++).setCellValue(rs.getString("SOURCE_NAME"));
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("SOURCE_NAME")
+                                    );
 
-                            if (rowNum.get() % 1000 == 0) {
+                            /*
+                             * MEMORY FLUSH
+                             */
+
+                            if (rowNum.get() % 2000 == 0) {
 
                                 try {
+
                                     sheet.flushRows(1000);
+
                                 } catch (IOException e) {
+
                                     throw new RuntimeException(e);
                                 }
 
-                                log.info("Processed rows : {}", rowNum.get());
+                                log.info(
+                                        "Processed rows : {}",
+                                        rowNum.get()
+                                );
                             }
                         }
                     });
@@ -174,19 +375,46 @@ public class LedgerExportService {
 
             workbook.write(out);
 
-            byte[] bytes = out.toByteArray();
+            workbook.dispose();
 
-            sendToMyDownloads(userId, dto, bytes);
+            byte[] bytes =
+                    out.toByteArray();
+
+            sendToMyDownloads(
+                    userId,
+                    dto,
+                    bytes
+            );
+
+            log.info(
+                    "Ledger Export Completed Successfully"
+            );
 
             return bytes;
 
         } catch (Exception e) {
 
-            throw new RuntimeException("Export failed", e);
+            log.error(
+                    "Ledger Export Failed",
+                    e
+            );
+
+            throw new RuntimeException(
+                    "Export failed",
+                    e
+            );
         }
     }
 
-    private void validateExportLimit(LedgerEnquiryRequest dto) {
+    /*
+     * =========================================================
+     * VALIDATION
+     * =========================================================
+     */
+
+    private void validateExportLimit(
+            LedgerEnquiryRequest dto
+    ) {
 
         String countSql = """
                 SELECT COUNT(*)
@@ -197,23 +425,64 @@ public class LedgerExportService {
                     AND TO_DATE(?,'DD/MM/YYYY')
                 """;
 
-        Long count = jdbcTemplate.queryForObject(countSql, Long.class, dto.getCgl(), dto.getFromDate(), dto.getToDate());
+        Long count =
+                jdbcTemplate.queryForObject(
+                        countSql,
+                        Long.class,
+                        dto.getCgl(),
+                        dto.getFromDate(),
+                        dto.getToDate()
+                );
 
-        if (count != null && count > 1_000_000) {
+        if (
+                count != null
+                        && count > MAX_EXPORT_RECORDS
+        ) {
 
-            throw new RuntimeException("Excel export cannot be generated for more than 10 lakh records");
+            throw new RuntimeException(
+                    "Excel export cannot be generated for more than 10 lakh records"
+            );
         }
     }
 
-    private void createHeader(Workbook workbook, Sheet sheet) {
+    /*
+     * =========================================================
+     * HEADER
+     * =========================================================
+     */
 
-        Row header = sheet.createRow(0);
+    private void createHeader(
+            Workbook workbook,
+            Sheet sheet
+    ) {
 
-        String[] columns = {"TRANSACTION ID", "BATCH ID", "JOURNAL ID", "BRANCH CODE", "BRANCH NAME", "CIRCLE CODE", "CIRCLE NAME", "CURRENCY", "CURRENCY NAME", "CGL", "DESCRIPTION", "NARRATION", "DEBIT AMOUNT", "CREDIT AMOUNT", "TRANSACTION COUNT", "SOURCE NAME"};
+        Row header =
+                sheet.createRow(0);
 
-        CellStyle style = workbook.createCellStyle();
+        String[] columns = {
+                "TRANSACTION ID",
+                "BATCH ID",
+                "JOURNAL ID",
+                "BRANCH CODE",
+                "BRANCH NAME",
+                "CIRCLE CODE",
+                "CIRCLE NAME",
+                "CURRENCY",
+                "CURRENCY NAME",
+                "CGL",
+                "DESCRIPTION",
+                "NARRATION",
+                "DEBIT AMOUNT",
+                "CREDIT AMOUNT",
+                "TRANSACTION COUNT",
+                "SOURCE NAME"
+        };
 
-        Font font = workbook.createFont();
+        CellStyle style =
+                workbook.createCellStyle();
+
+        Font font =
+                workbook.createFont();
 
         font.setBold(true);
 
@@ -221,7 +490,8 @@ public class LedgerExportService {
 
         for (int i = 0; i < columns.length; i++) {
 
-            Cell cell = header.createCell(i);
+            Cell cell =
+                    header.createCell(i);
 
             cell.setCellValue(columns[i]);
 
@@ -229,7 +499,15 @@ public class LedgerExportService {
         }
     }
 
-    private void setColumnWidths(Sheet sheet) {
+    /*
+     * =========================================================
+     * WIDTHS
+     * =========================================================
+     */
+
+    private void setColumnWidths(
+            Sheet sheet
+    ) {
 
         sheet.setColumnWidth(0, 5000);
         sheet.setColumnWidth(1, 5000);
@@ -249,19 +527,41 @@ public class LedgerExportService {
         sheet.setColumnWidth(15, 10000);
     }
 
-    private void sendToMyDownloads(String userId, LedgerEnquiryRequest dto, byte[] content) {
+    /*
+     * =========================================================
+     * DOWNLOADS
+     * =========================================================
+     */
+
+    private void sendToMyDownloads(
+            String userId,
+            LedgerEnquiryRequest dto,
+            byte[] content
+    ) {
 
         try {
 
-            String json = new ObjectMapper().writeValueAsString(dto);
+            String json =
+                    new ObjectMapper()
+                            .writeValueAsString(dto);
 
-            MyDownloadsRequestDTO request = new MyDownloadsRequestDTO(userId, "LedgerWiseEnquiry.xlsx", 51, json, content);
+            MyDownloadsRequestDTO request =
+                    new MyDownloadsRequestDTO(
+                            userId,
+                            "LedgerWiseEnquiry.xlsx",
+                            51,
+                            json,
+                            content
+                    );
 
             myDownloadsService.insertRequest(request);
 
         } catch (Exception e) {
 
-            log.error("Download save failed", e);
+            log.error(
+                    "Download save failed",
+                    e
+            );
         }
     }
 }
