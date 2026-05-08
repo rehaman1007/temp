@@ -2,102 +2,93 @@ package com.fincore.enquiry_service.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fincore.enquiry_service.dto.*;
-import com.fincore.enquiry_service.model.LedgerTransaction;
-import com.fincore.enquiry_service.repository.GlTransactionsRepository;
-import com.fincore.enquiry_service.repository.LedgerWiseRepository;
-import com.fincore.enquiry_service.specification.LedgerSpecification;
-
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-
 import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.xssf.streaming.SXSSFSheet;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-
-import org.springframework.data.domain.*;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.List;
+import java.sql.ResultSet;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
+@Service
 @RequiredArgsConstructor
-@Service("LedgerEnquiryService")
-public class LedgerEnquiryServiceImpl
-        implements LedgerEnquiryService {
+public class LedgerExportService {
 
-    private final GlTransactionsRepository glTransactionsRepository;
-
-    private final LedgerWiseRepository ledgerTransactionRepository;
-
+    private final JdbcTemplate jdbcTemplate;
     private final MyDownloadsService myDownloadsService;
 
-    @Override
-    public Page<LedgerEnquiryResponse> search(
-            LedgerEnquiryRequest dto
-    ) {
-
-        Sort.Direction direction =
-                "asc".equalsIgnoreCase(dto.getSortOrder())
-                        ? Sort.Direction.ASC
-                        : Sort.Direction.DESC;
-
-        Pageable pageable =
-                PageRequest.of(
-                        dto.getPage(),
-                        dto.getSize(),
-                        Sort.by(
-                                direction,
-                                getSortField(dto.getSortField())
-                        )
-                );
-
-        Page<LedgerTransaction> page =
-                ledgerTransactionRepository.findAll(
-                        LedgerSpecification.build(dto),
-                        pageable
-                );
-
-        return page.map(this::mapToDto);
-    }
-
-    @Override
-    public byte[] excelExport(
+    public byte[] export(
             LedgerEnquiryRequest dto,
             String userId
     ) {
 
-        /*
-         * EXPORT LIMIT CHECK
-         */
-        long count =
-                ledgerTransactionRepository.count(
-                        LedgerSpecification.build(dto)
-                );
+        validateExportLimit(dto);
 
-        if (count > 1_000_000) {
+        String sql = """
+                SELECT
+                    g.TRANSACTION_ID,
+                    g.BATCH_ID,
+                    g.JOURNAL_ID,
+                    g.TRANSACTION_DATE,
+                    g.POST_DATE,
 
-            throw new RuntimeException(
-                    "Excel export limit exceeded. Maximum allowed records: 10,00,000"
-            );
-        }
+                    b.CODE as BRANCH_CODE,
+                    b.NAME as BRANCH_NAME,
 
-        /*
-         * FETCH DATA
-         */
-        List<LedgerEnquiryResponse> mappedContent =
-                ledgerTransactionRepository
-                        .findAll(
-                                LedgerSpecification.build(dto)
-                        )
-                        .stream()
-                        .map(this::mapToDto)
-                        .toList();
+                    c.CIRCLE_CODE,
+                    c.CIRCLE_NAME,
+
+                    g.CURRENCY,
+                    cu.CURRENCY_NAME,
+
+                    g.CGL,
+                    cg.DESCRIPTION,
+
+                    g.NARRATION,
+
+                    g.DEBIT_AMOUNT,
+                    g.CREDIT_AMOUNT,
+
+                    NVL(g.TRANSACTION_COUNT,0) as TRANSACTION_COUNT,
+
+                    sf.FLAG_NAME as SOURCE_NAME
+
+                FROM GL_TRANSACTIONS g
+
+                JOIN BRANCH_MASTER b
+                    ON g.BRANCH_CODE = b.CODE
+
+                LEFT JOIN CIRCLE_MASTER c
+                    ON b.CIRCLE_CODE = c.CIRCLE_CODE
+
+                LEFT JOIN CURRENCY_MASTER cu
+                    ON g.CURRENCY = cu.CURRENCY_CODE
+
+                LEFT JOIN CGL_MASTER cg
+                    ON g.CGL = cg.CGL_NUMBER
+
+                LEFT JOIN SOURCE_FLAG_MASTER sf
+                    ON g.SOURCE_FLAG = sf.FLAG_CODE
+
+                WHERE g.CGL = ?
+
+                AND (? IS NULL OR g.CURRENCY = ?)
+
+                AND g.TRANSACTION_DATE BETWEEN
+                    TO_DATE(?,'DD/MM/YYYY')
+                    AND TO_DATE(?,'DD/MM/YYYY')
+
+                ORDER BY g.TRANSACTION_DATE
+                """;
 
         try (
                 SXSSFWorkbook workbook =
-                        new SXSSFWorkbook(500);
+                        new SXSSFWorkbook(1000);
 
                 ByteArrayOutputStream out =
                         new ByteArrayOutputStream()
@@ -105,640 +96,345 @@ public class LedgerEnquiryServiceImpl
 
             workbook.setCompressTempFiles(true);
 
-            Sheet sheet =
-                    workbook.createSheet(
-                            "TransactionsData"
-                    );
+            SXSSFSheet sheet =
+                    workbook.createSheet("Ledger");
 
-            /*
-             * TITLE STYLE
-             */
-            CellStyle titleStyle =
-                    workbook.createCellStyle();
+            createHeader(workbook, sheet);
 
-            Font titleFont =
-                    workbook.createFont();
+            AtomicInteger rowNum =
+                    new AtomicInteger(1);
 
-            titleFont.setBold(true);
+            jdbcTemplate.setFetchSize(10000);
 
-            titleFont.setFontHeightInPoints(
-                    (short) 14
+            jdbcTemplate.query(
+                    connection -> {
+
+                        var ps =
+                                connection.prepareStatement(sql);
+
+                        ps.setFetchSize(10000);
+
+                        ps.setString(1, dto.getCgl());
+
+                        String currency =
+                                dto.getCurrencies()
+                                        .equalsIgnoreCase("ALL")
+                                        ? null
+                                        : dto.getCurrencies();
+
+                        ps.setString(2, currency);
+                        ps.setString(3, currency);
+
+                        ps.setString(4, dto.getFromDate());
+                        ps.setString(5, dto.getToDate());
+
+                        return ps;
+                    },
+
+                    (ResultSet rs) -> {
+
+                        while (rs.next()) {
+
+                            Row row =
+                                    sheet.createRow(
+                                            rowNum.getAndIncrement()
+                                    );
+
+                            int col = 0;
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("TRANSACTION_ID")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("BATCH_ID")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("JOURNAL_ID")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("BRANCH_CODE")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("BRANCH_NAME")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("CIRCLE_CODE")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("CIRCLE_NAME")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("CURRENCY")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("CURRENCY_NAME")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("CGL")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("DESCRIPTION")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("NARRATION")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getBigDecimal("DEBIT_AMOUNT")
+                                                    != null
+                                                    ? rs.getBigDecimal("DEBIT_AMOUNT").doubleValue()
+                                                    : 0
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getBigDecimal("CREDIT_AMOUNT")
+                                                    != null
+                                                    ? rs.getBigDecimal("CREDIT_AMOUNT").doubleValue()
+                                                    : 0
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getLong("TRANSACTION_COUNT")
+                                    );
+
+                            row.createCell(col++)
+                                    .setCellValue(
+                                            rs.getString("SOURCE_NAME")
+                                    );
+
+                            if (rowNum.get() % 1000 == 0) {
+
+                                sheet.flushRows(1000);
+
+                                log.info(
+                                        "Processed rows : {}",
+                                        rowNum.get()
+                                );
+                            }
+                        }
+                    }
             );
 
-            titleStyle.setFont(titleFont);
-
-            titleStyle.setAlignment(
-                    HorizontalAlignment.CENTER
-            );
-
-            /*
-             * SUBTITLE STYLE
-             */
-            CellStyle subTitleStyle =
-                    workbook.createCellStyle();
-
-            Font subTitleFont =
-                    workbook.createFont();
-
-            subTitleFont.setBold(true);
-
-            subTitleFont.setFontHeightInPoints(
-                    (short) 11
-            );
-
-            subTitleStyle.setFont(subTitleFont);
-
-            subTitleStyle.setAlignment(
-                    HorizontalAlignment.CENTER
-            );
-
-            /*
-             * HEADER STYLE
-             */
-            Font headerFont =
-                    workbook.createFont();
-
-            headerFont.setBold(true);
-
-            CellStyle headerStyle =
-                    workbook.createCellStyle();
-
-            headerStyle.setFont(headerFont);
-
-            headerStyle.setAlignment(
-                    HorizontalAlignment.CENTER
-            );
-
-            /*
-             * ALIGNMENT STYLES
-             */
-            CellStyle leftAlignStyle =
-                    workbook.createCellStyle();
-
-            leftAlignStyle.setAlignment(
-                    HorizontalAlignment.LEFT
-            );
-
-            CellStyle rightAlignStyle =
-                    workbook.createCellStyle();
-
-            rightAlignStyle.setAlignment(
-                    HorizontalAlignment.RIGHT
-            );
-
-            CellStyle centerAlignStyle =
-                    workbook.createCellStyle();
-
-            centerAlignStyle.setAlignment(
-                    HorizontalAlignment.CENTER
-            );
-
-            /*
-             * DATE STYLE
-             */
-            CellStyle dateStyle =
-                    workbook.createCellStyle();
-
-            CreationHelper creationHelper =
-                    workbook.getCreationHelper();
-
-            dateStyle.setDataFormat(
-                    creationHelper
-                            .createDataFormat()
-                            .getFormat("dd/MM/yyyy")
-            );
-
-            /*
-             * TITLE ROWS
-             */
-            Row title1 =
-                    sheet.createRow(0);
-
-            Cell titleCell1 =
-                    title1.createCell(0);
-
-            titleCell1.setCellValue(
-                    "Ledger-Wise Enquiry"
-            );
-
-            titleCell1.setCellStyle(
-                    titleStyle
-            );
-
-            sheet.addMergedRegion(
-                    new CellRangeAddress(
-                            0,
-                            0,
-                            0,
-                            17
-                    )
-            );
-
-            Row title2 =
-                    sheet.createRow(1);
-
-            Cell titleCell2 =
-                    title2.createCell(0);
-
-            titleCell2.setCellValue(
-                    "CGL: "
-                            + dto.getCgl()
-                            + " - "
-                            + dto.getCglName()
-            );
-
-            titleCell2.setCellStyle(
-                    titleStyle
-            );
-
-            sheet.addMergedRegion(
-                    new CellRangeAddress(
-                            1,
-                            1,
-                            0,
-                            17
-                    )
-            );
-
-            Row subTitle =
-                    sheet.createRow(2);
-
-            Cell subTitleCell =
-                    subTitle.createCell(0);
-
-            subTitleCell.setCellValue(
-                    "From "
-                            + dto.getFromDate()
-                            + " To "
-                            + dto.getToDate()
-            );
-
-            subTitleCell.setCellStyle(
-                    subTitleStyle
-            );
-
-            sheet.addMergedRegion(
-                    new CellRangeAddress(
-                            2,
-                            2,
-                            0,
-                            17
-                    )
-            );
-
-            /*
-             * HEADER
-             */
-            Row header =
-                    sheet.createRow(3);
-
-            String[] headers = {
-                    "TRANSACTION ID",
-                    "BATCH ID",
-                    "JOURNAL ID",
-                    "TRANSACTION DATE",
-                    "POST DATE",
-                    "BRANCH CODE",
-                    "BRANCH NAME",
-                    "CIRCLE CODE",
-                    "CIRCLE NAME",
-                    "CURRENCY",
-                    "CURRENCY NAME",
-                    "CGL",
-                    "CGL DESCRIPTION",
-                    "NARRATION",
-                    "DEBIT AMOUNT",
-                    "CREDIT AMOUNT",
-                    "TRANSACTION COUNT",
-                    "SOURCE NAME"
-            };
-
-            for (int i = 0; i < headers.length; i++) {
-
-                Cell cell =
-                        header.createCell(i);
-
-                cell.setCellValue(headers[i]);
-
-                cell.setCellStyle(headerStyle);
-            }
-
-            /*
-             * DATA
-             */
-            int rowNum = 4;
-
-            for (
-                    LedgerEnquiryResponse dtoList
-                            : mappedContent
-            ) {
-
-                Row row =
-                        sheet.createRow(rowNum++);
-
-                createCell(
-                        row,
-                        0,
-                        dtoList.getTransactionId(),
-                        rightAlignStyle
-                );
-
-                createCell(
-                        row,
-                        1,
-                        dtoList.getBatchId(),
-                        leftAlignStyle
-                );
-
-                createCell(
-                        row,
-                        2,
-                        dtoList.getJournalId(),
-                        leftAlignStyle
-                );
-
-                Cell c4 =
-                        row.createCell(3);
-
-                if (
-                        dtoList.getTransactionDate()
-                                != null
-                ) {
-
-                    c4.setCellValue(
-                            dtoList.getTransactionDate()
-                    );
-                }
-
-                c4.setCellStyle(dateStyle);
-
-                Cell c5 =
-                        row.createCell(4);
-
-                if (
-                        dtoList.getPostDate()
-                                != null
-                ) {
-
-                    c5.setCellValue(
-                            dtoList.getPostDate()
-                    );
-                }
-
-                c5.setCellStyle(dateStyle);
-
-                createCell(
-                        row,
-                        5,
-                        dtoList.getBranchCode(),
-                        rightAlignStyle
-                );
-
-                createCell(
-                        row,
-                        6,
-                        dtoList.getBranchName(),
-                        leftAlignStyle
-                );
-
-                createCell(
-                        row,
-                        7,
-                        dtoList.getCircleCode(),
-                        rightAlignStyle
-                );
-
-                createCell(
-                        row,
-                        8,
-                        dtoList.getCircleName(),
-                        leftAlignStyle
-                );
-
-                createCell(
-                        row,
-                        9,
-                        dtoList.getCurrency(),
-                        centerAlignStyle
-                );
-
-                createCell(
-                        row,
-                        10,
-                        dtoList.getCurrencyName(),
-                        leftAlignStyle
-                );
-
-                createCell(
-                        row,
-                        11,
-                        dtoList.getCgl(),
-                        rightAlignStyle
-                );
-
-                createCell(
-                        row,
-                        12,
-                        dtoList.getDescription(),
-                        leftAlignStyle
-                );
-
-                createCell(
-                        row,
-                        13,
-                        dtoList.getNarration(),
-                        leftAlignStyle
-                );
-
-                createCell(
-                        row,
-                        14,
-                        dtoList.getDebitAmount(),
-                        rightAlignStyle
-                );
-
-                createCell(
-                        row,
-                        15,
-                        dtoList.getCreditAmount(),
-                        rightAlignStyle
-                );
-
-                createCell(
-                        row,
-                        16,
-                        dtoList.getTransactionCount(),
-                        rightAlignStyle
-                );
-
-                createCell(
-                        row,
-                        17,
-                        dtoList.getSourceName(),
-                        leftAlignStyle
-                );
-            }
-
-            /*
-             * FIXED COLUMN WIDTHS
-             */
-            sheet.setColumnWidth(0, 5000);
-            sheet.setColumnWidth(1, 5000);
-            sheet.setColumnWidth(2, 5000);
-            sheet.setColumnWidth(3, 6000);
-            sheet.setColumnWidth(4, 6000);
-            sheet.setColumnWidth(5, 4500);
-            sheet.setColumnWidth(6, 9000);
-            sheet.setColumnWidth(7, 4500);
-            sheet.setColumnWidth(8, 9000);
-            sheet.setColumnWidth(9, 4000);
-            sheet.setColumnWidth(10, 7000);
-            sheet.setColumnWidth(11, 5000);
-            sheet.setColumnWidth(12, 10000);
-            sheet.setColumnWidth(13, 12000);
-            sheet.setColumnWidth(14, 5000);
-            sheet.setColumnWidth(15, 5000);
-            sheet.setColumnWidth(16, 5000);
-            sheet.setColumnWidth(17, 8000);
+            setColumnWidths(sheet);
 
             workbook.write(out);
 
-            byte[] byteArrayContent =
+            byte[] bytes =
                     out.toByteArray();
-
-            workbook.dispose();
-
-            String json =
-                    new ObjectMapper()
-                            .writeValueAsString(dto);
 
             sendToMyDownloads(
                     userId,
-                    json,
-                    byteArrayContent
+                    dto,
+                    bytes
             );
 
-            return byteArrayContent;
+            return bytes;
 
-        } catch (IOException e) {
+        } catch (Exception e) {
 
             throw new RuntimeException(
-                    "Failed to generate excel",
+                    "Export failed",
                     e
             );
         }
     }
 
-    private void createCell(
-            Row row,
-            int column,
-            Object value,
-            CellStyle style
+    private void validateExportLimit(
+            LedgerEnquiryRequest dto
     ) {
 
-        Cell cell =
-                row.createCell(column);
+        String countSql = """
+                SELECT COUNT(*)
+                FROM GL_TRANSACTIONS
+                WHERE CGL = ?
+                AND TRANSACTION_DATE BETWEEN
+                    TO_DATE(?,'DD/MM/YYYY')
+                    AND TO_DATE(?,'DD/MM/YYYY')
+                """;
 
-        if (value != null) {
+        Long count =
+                jdbcTemplate.queryForObject(
+                        countSql,
+                        Long.class,
+                        dto.getCgl(),
+                        dto.getFromDate(),
+                        dto.getToDate()
+                );
 
-            cell.setCellValue(
-                    value.toString()
+        if (count != null && count > 1_000_000) {
+
+            throw new RuntimeException(
+                    "Excel export cannot be generated for more than 10 lakh records"
             );
         }
+    }
 
-        cell.setCellStyle(style);
+    private void createHeader(
+            Workbook workbook,
+            Sheet sheet
+    ) {
+
+        Row header =
+                sheet.createRow(0);
+
+        String[] columns = {
+                "TRANSACTION ID",
+                "BATCH ID",
+                "JOURNAL ID",
+                "BRANCH CODE",
+                "BRANCH NAME",
+                "CIRCLE CODE",
+                "CIRCLE NAME",
+                "CURRENCY",
+                "CURRENCY NAME",
+                "CGL",
+                "DESCRIPTION",
+                "NARRATION",
+                "DEBIT AMOUNT",
+                "CREDIT AMOUNT",
+                "TRANSACTION COUNT",
+                "SOURCE NAME"
+        };
+
+        CellStyle style =
+                workbook.createCellStyle();
+
+        Font font =
+                workbook.createFont();
+
+        font.setBold(true);
+
+        style.setFont(font);
+
+        for (int i = 0; i < columns.length; i++) {
+
+            Cell cell =
+                    header.createCell(i);
+
+            cell.setCellValue(columns[i]);
+
+            cell.setCellStyle(style);
+        }
+    }
+
+    private void setColumnWidths(
+            Sheet sheet
+    ) {
+
+        sheet.setColumnWidth(0, 5000);
+        sheet.setColumnWidth(1, 5000);
+        sheet.setColumnWidth(2, 5000);
+        sheet.setColumnWidth(3, 5000);
+        sheet.setColumnWidth(4, 10000);
+        sheet.setColumnWidth(5, 5000);
+        sheet.setColumnWidth(6, 10000);
+        sheet.setColumnWidth(7, 4000);
+        sheet.setColumnWidth(8, 7000);
+        sheet.setColumnWidth(9, 5000);
+        sheet.setColumnWidth(10, 10000);
+        sheet.setColumnWidth(11, 15000);
+        sheet.setColumnWidth(12, 5000);
+        sheet.setColumnWidth(13, 5000);
+        sheet.setColumnWidth(14, 5000);
+        sheet.setColumnWidth(15, 10000);
     }
 
     private void sendToMyDownloads(
             String userId,
-            String searchCriteria,
-            byte[] byteArrayContent
+            LedgerEnquiryRequest dto,
+            byte[] content
     ) {
 
         try {
+
+            String json =
+                    new ObjectMapper()
+                            .writeValueAsString(dto);
 
             MyDownloadsRequestDTO request =
                     new MyDownloadsRequestDTO(
                             userId,
                             "LedgerWiseEnquiry.xlsx",
                             51,
-                            searchCriteria,
-                            byteArrayContent
+                            json,
+                            content
                     );
 
-            myDownloadsService.insertRequest(
-                    request
-            );
+            myDownloadsService.insertRequest(request);
 
         } catch (Exception e) {
 
             log.error(
-                    "Error sending download data",
+                    "Download save failed",
                     e
             );
         }
     }
+}
 
-    private LedgerEnquiryResponse mapToDto(
-            LedgerTransaction entity
-    ) {
 
-        String branchCode = null;
-        String branchName = null;
-        String circleCode = null;
-        String circleName = null;
+package com.fincore.enquiry_service.dto;
 
-        try {
+import lombok.Data;
 
-            if (entity.getBranch() != null) {
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.util.Date;
 
-                branchCode =
-                        entity.getBranch().getCode();
+@Data
+public class LedgerExportRowDTO {
 
-                branchName =
-                        entity.getBranch().getName();
+    private String transactionId;
+    private String batchId;
+    private String journalId;
 
-                if (
-                        entity.getBranch().getCircle()
-                                != null
-                ) {
+    private Date transactionDate;
+    private Timestamp postDate;
 
-                    circleCode =
-                            entity.getBranch()
-                                    .getCircle()
-                                    .getCircleCode();
+    private String branchCode;
+    private String branchName;
 
-                    circleName =
-                            entity.getBranch()
-                                    .getCircle()
-                                    .getCircleName();
-                }
-            }
+    private String circleCode;
+    private String circleName;
 
-        } catch (Exception e) {
+    private String currency;
+    private String currencyName;
 
-            log.warn(
-                    "Circle mapping failed for transaction : {}",
-                    entity.getTransactionId()
-            );
-        }
+    private String cgl;
+    private String description;
 
-        return new LedgerEnquiryResponse(
+    private String narration;
 
-                entity.getTransactionId(),
-                entity.getBatchId(),
-                entity.getJournalId(),
-                entity.getTransactionDate(),
-                entity.getPostDate(),
+    private BigDecimal debitAmount;
+    private BigDecimal creditAmount;
 
-                branchCode,
-                branchName,
+    private Long transactionCount;
 
-                circleCode,
-                circleName,
-
-                entity.getCurrencyMaster() != null
-                        ? entity.getCurrencyMaster()
-                        .getCurrencyCode()
-                        : null,
-
-                entity.getCurrencyMaster() != null
-                        ? entity.getCurrencyMaster()
-                        .getCurrencyName()
-                        : null,
-
-                entity.getCglMaster() != null
-                        ? entity.getCglMaster()
-                        .getCglNumber()
-                        : null,
-
-                entity.getCglMaster() != null
-                        ? entity.getCglMaster()
-                        .getDescription()
-                        : null,
-
-                entity.getNarration(),
-
-                entity.getDebitAmount(),
-
-                entity.getCreditAmount(),
-
-                entity.getTransactionCount(),
-
-                entity.getSourceFlag(),
-
-                entity.getSourceFlagMaster() != null
-                        ? entity.getSourceFlagMaster()
-                        .getFlagName()
-                        : null
-        );
-    }
-
-    private String getSortField(
-            String field
-    ) {
-
-        return switch (field) {
-
-            case "transactionId" ->
-                    "transactionId";
-
-            case "batchId" ->
-                    "batchId";
-
-            case "journalId" ->
-                    "journalId";
-
-            case "transactionDate" ->
-                    "transactionDate";
-
-            case "postDate" ->
-                    "postDate";
-
-            case "narration" ->
-                    "narration";
-
-            case "debitAmount" ->
-                    "debitAmount";
-
-            case "creditAmount" ->
-                    "creditAmount";
-
-            case "transactionCount" ->
-                    "transactionCount";
-
-            case "sourceFlag" ->
-                    "sourceFlag";
-
-            case "sourceName" ->
-                    "sourceFlagMaster.flagName";
-
-            case "branchCode" ->
-                    "branch.code";
-
-            case "branchName" ->
-                    "branch.name";
-
-            case "circleCode" ->
-                    "branch.circle.circleCode";
-
-            case "circleName" ->
-                    "branch.circle.circleName";
-
-            case "currency" ->
-                    "currencyMaster.currencyCode";
-
-            case "currencyName" ->
-                    "currencyMaster.currencyName";
-
-            case "cgl" ->
-                    "cglMaster.cglNumber";
-
-            case "description" ->
-                    "cglMaster.description";
-
-            default ->
-                    "transactionDate";
-        };
-    }
+    private String sourceName;
 }
