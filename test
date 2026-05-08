@@ -1,420 +1,744 @@
-package com.fincore.enquiry_service.specification;
+package com.fincore.enquiry_service.service;
 
-import com.fincore.enquiry_service.dto.GridFilter;
-import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fincore.enquiry_service.dto.*;
 import com.fincore.enquiry_service.model.LedgerTransaction;
+import com.fincore.enquiry_service.repository.GlTransactionsRepository;
+import com.fincore.enquiry_service.repository.LedgerWiseRepository;
+import com.fincore.enquiry_service.specification.LedgerSpecification;
 
-import jakarta.persistence.criteria.*;
-import org.springframework.data.jpa.domain.Specification;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
-import java.sql.Timestamp;
-import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Date;
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+
+import org.springframework.data.domain.*;
+import org.springframework.stereotype.Service;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.List;
 
-public class LedgerSpecification {
+@Slf4j
+@RequiredArgsConstructor
+@Service("LedgerEnquiryService")
+public class LedgerEnquiryServiceImpl
+        implements LedgerEnquiryService {
 
-    public static Specification<LedgerTransaction> build(
+    private final GlTransactionsRepository glTransactionsRepository;
+
+    private final LedgerWiseRepository ledgerTransactionRepository;
+
+    private final MyDownloadsService myDownloadsService;
+
+    @Override
+    public Page<LedgerEnquiryResponse> search(
             LedgerEnquiryRequest dto
     ) {
 
-        return (root, query, cb) -> {
+        Sort.Direction direction =
+                "asc".equalsIgnoreCase(dto.getSortOrder())
+                        ? Sort.Direction.ASC
+                        : Sort.Direction.DESC;
 
-            List<Predicate> predicates =
-                    new ArrayList<>();
+        Pageable pageable =
+                PageRequest.of(
+                        dto.getPage(),
+                        dto.getSize(),
+                        Sort.by(
+                                direction,
+                                getSortField(dto.getSortField())
+                        )
+                );
+
+        Page<LedgerTransaction> page =
+                ledgerTransactionRepository.findAll(
+                        LedgerSpecification.build(dto),
+                        pageable
+                );
+
+        return page.map(this::mapToDto);
+    }
+
+    @Override
+    public byte[] excelExport(
+            LedgerEnquiryRequest dto,
+            String userId
+    ) {
+
+        /*
+         * EXPORT LIMIT CHECK
+         */
+        long count =
+                ledgerTransactionRepository.count(
+                        LedgerSpecification.build(dto)
+                );
+
+        if (count > 1_000_000) {
+
+            throw new RuntimeException(
+                    "Excel export limit exceeded. Maximum allowed records: 10,00,000"
+            );
+        }
+
+        /*
+         * FETCH DATA
+         */
+        List<LedgerEnquiryResponse> mappedContent =
+                ledgerTransactionRepository
+                        .findAll(
+                                LedgerSpecification.build(dto)
+                        )
+                        .stream()
+                        .map(this::mapToDto)
+                        .toList();
+
+        try (
+                SXSSFWorkbook workbook =
+                        new SXSSFWorkbook(500);
+
+                ByteArrayOutputStream out =
+                        new ByteArrayOutputStream()
+        ) {
+
+            workbook.setCompressTempFiles(true);
+
+            Sheet sheet =
+                    workbook.createSheet(
+                            "TransactionsData"
+                    );
 
             /*
-             * CGL
+             * TITLE STYLE
              */
-            predicates.add(
-                    cb.equal(
-                            root.get("cgl"),
-                            dto.getCgl()
+            CellStyle titleStyle =
+                    workbook.createCellStyle();
+
+            Font titleFont =
+                    workbook.createFont();
+
+            titleFont.setBold(true);
+
+            titleFont.setFontHeightInPoints(
+                    (short) 14
+            );
+
+            titleStyle.setFont(titleFont);
+
+            titleStyle.setAlignment(
+                    HorizontalAlignment.CENTER
+            );
+
+            /*
+             * SUBTITLE STYLE
+             */
+            CellStyle subTitleStyle =
+                    workbook.createCellStyle();
+
+            Font subTitleFont =
+                    workbook.createFont();
+
+            subTitleFont.setBold(true);
+
+            subTitleFont.setFontHeightInPoints(
+                    (short) 11
+            );
+
+            subTitleStyle.setFont(subTitleFont);
+
+            subTitleStyle.setAlignment(
+                    HorizontalAlignment.CENTER
+            );
+
+            /*
+             * HEADER STYLE
+             */
+            Font headerFont =
+                    workbook.createFont();
+
+            headerFont.setBold(true);
+
+            CellStyle headerStyle =
+                    workbook.createCellStyle();
+
+            headerStyle.setFont(headerFont);
+
+            headerStyle.setAlignment(
+                    HorizontalAlignment.CENTER
+            );
+
+            /*
+             * ALIGNMENT STYLES
+             */
+            CellStyle leftAlignStyle =
+                    workbook.createCellStyle();
+
+            leftAlignStyle.setAlignment(
+                    HorizontalAlignment.LEFT
+            );
+
+            CellStyle rightAlignStyle =
+                    workbook.createCellStyle();
+
+            rightAlignStyle.setAlignment(
+                    HorizontalAlignment.RIGHT
+            );
+
+            CellStyle centerAlignStyle =
+                    workbook.createCellStyle();
+
+            centerAlignStyle.setAlignment(
+                    HorizontalAlignment.CENTER
+            );
+
+            /*
+             * DATE STYLE
+             */
+            CellStyle dateStyle =
+                    workbook.createCellStyle();
+
+            CreationHelper creationHelper =
+                    workbook.getCreationHelper();
+
+            dateStyle.setDataFormat(
+                    creationHelper
+                            .createDataFormat()
+                            .getFormat("dd/MM/yyyy")
+            );
+
+            /*
+             * TITLE ROWS
+             */
+            Row title1 =
+                    sheet.createRow(0);
+
+            Cell titleCell1 =
+                    title1.createCell(0);
+
+            titleCell1.setCellValue(
+                    "Ledger-Wise Enquiry"
+            );
+
+            titleCell1.setCellStyle(
+                    titleStyle
+            );
+
+            sheet.addMergedRegion(
+                    new CellRangeAddress(
+                            0,
+                            0,
+                            0,
+                            17
+                    )
+            );
+
+            Row title2 =
+                    sheet.createRow(1);
+
+            Cell titleCell2 =
+                    title2.createCell(0);
+
+            titleCell2.setCellValue(
+                    "CGL: "
+                            + dto.getCgl()
+                            + " - "
+                            + dto.getCglName()
+            );
+
+            titleCell2.setCellStyle(
+                    titleStyle
+            );
+
+            sheet.addMergedRegion(
+                    new CellRangeAddress(
+                            1,
+                            1,
+                            0,
+                            17
+                    )
+            );
+
+            Row subTitle =
+                    sheet.createRow(2);
+
+            Cell subTitleCell =
+                    subTitle.createCell(0);
+
+            subTitleCell.setCellValue(
+                    "From "
+                            + dto.getFromDate()
+                            + " To "
+                            + dto.getToDate()
+            );
+
+            subTitleCell.setCellStyle(
+                    subTitleStyle
+            );
+
+            sheet.addMergedRegion(
+                    new CellRangeAddress(
+                            2,
+                            2,
+                            0,
+                            17
                     )
             );
 
             /*
-             * DATE RANGE
+             * HEADER
              */
-            predicates.add(
-                    cb.between(
-                            root.get("transactionDate"),
-                            parseTimestamp(
-                                    dto.getFromDate(),
-                                    false
-                            ),
-                            parseTimestamp(
-                                    dto.getToDate(),
-                                    true
-                            )
-                    )
-            );
+            Row header =
+                    sheet.createRow(3);
 
-            /*
-             * CURRENCY
-             */
-            if (
-                    dto.getCurrencies() != null &&
-                            !"ALL".equalsIgnoreCase(
-                                    dto.getCurrencies()
-                            )
-            ) {
+            String[] headers = {
+                    "TRANSACTION ID",
+                    "BATCH ID",
+                    "JOURNAL ID",
+                    "TRANSACTION DATE",
+                    "POST DATE",
+                    "BRANCH CODE",
+                    "BRANCH NAME",
+                    "CIRCLE CODE",
+                    "CIRCLE NAME",
+                    "CURRENCY",
+                    "CURRENCY NAME",
+                    "CGL",
+                    "CGL DESCRIPTION",
+                    "NARRATION",
+                    "DEBIT AMOUNT",
+                    "CREDIT AMOUNT",
+                    "TRANSACTION COUNT",
+                    "SOURCE NAME"
+            };
 
-                predicates.add(
-                        cb.equal(
-                                root.get("currency"),
-                                dto.getCurrencies()
-                        )
-                );
+            for (int i = 0; i < headers.length; i++) {
+
+                Cell cell =
+                        header.createCell(i);
+
+                cell.setCellValue(headers[i]);
+
+                cell.setCellStyle(headerStyle);
             }
 
             /*
-             * SOURCE FLAGS
+             * DATA
              */
-            if (
-                    dto.getSourceFlags() != null &&
-                            !dto.getSourceFlags().isEmpty() &&
-                            !dto.getSourceFlags().contains("ALL")
+            int rowNum = 4;
+
+            for (
+                    LedgerEnquiryResponse dtoList
+                            : mappedContent
             ) {
 
-                predicates.add(
-                        root.get("sourceFlag")
-                                .in(dto.getSourceFlags())
+                Row row =
+                        sheet.createRow(rowNum++);
+
+                createCell(
+                        row,
+                        0,
+                        dtoList.getTransactionId(),
+                        rightAlignStyle
                 );
-            }
 
-            /*
-             * CIRCLE
-             */
-            if (
-                    dto.getCircle() != null &&
-                            !"ALL".equalsIgnoreCase(
-                                    dto.getCircle()
-                            )
-            ) {
-
-                predicates.add(
-                        cb.equal(
-                                root.get("branch")
-                                        .get("circle")
-                                        .get("circleCode"),
-                                dto.getCircle()
-                        )
+                createCell(
+                        row,
+                        1,
+                        dtoList.getBatchId(),
+                        leftAlignStyle
                 );
-            }
 
-            /*
-             * BRANCHES
-             */
-            if (
-                    dto.getBranches() != null &&
-                            !dto.getBranches().isEmpty() &&
-                            !dto.getBranches().contains("ALL")
-            ) {
-
-                predicates.add(
-                        root.get("branch")
-                                .get("code")
-                                .in(dto.getBranches())
+                createCell(
+                        row,
+                        2,
+                        dtoList.getJournalId(),
+                        leftAlignStyle
                 );
-            }
 
-            /*
-             * GRID FILTERS
-             */
-            if (
-                    dto.getGridFilters() != null &&
-                            !dto.getGridFilters().isEmpty()
-            ) {
+                Cell c4 =
+                        row.createCell(3);
 
-                for (
-                        GridFilter filter
-                                : dto.getGridFilters()
+                if (
+                        dtoList.getTransactionDate()
+                                != null
                 ) {
 
-                    if (
-                            filter.getField() == null ||
-                                    filter.getOperator() == null ||
-                                    filter.getValue() == null
-                    ) {
-                        continue;
-                    }
+                    c4.setCellValue(
+                            dtoList.getTransactionDate()
+                    );
+                }
 
-                    String field =
-                            filter.getField();
+                c4.setCellStyle(dateStyle);
 
-                    String operator =
-                            filter.getOperator();
+                Cell c5 =
+                        row.createCell(4);
 
-                    Path<?> path =
-                            getPath(root, field);
+                if (
+                        dtoList.getPostDate()
+                                != null
+                ) {
 
-                    /*
-                     * DATE FILTERS
-                     */
-                    if (
-                            path.getJavaType()
-                                    .equals(Date.class) ||
-                                    path.getJavaType()
-                                            .equals(Timestamp.class)
-                    ) {
+                    c5.setCellValue(
+                            dtoList.getPostDate()
+                    );
+                }
 
-                        Expression<Date> truncDate =
-                                cb.function(
-                                        "TRUNC",
-                                        Date.class,
-                                        path
-                                );
+                c5.setCellStyle(dateStyle);
 
-                        Date filterDate =
-                                parseDate(
-                                        filter.getValue()
-                                                .toString()
-                                );
+                createCell(
+                        row,
+                        5,
+                        dtoList.getBranchCode(),
+                        rightAlignStyle
+                );
 
-                        switch (operator) {
+                createCell(
+                        row,
+                        6,
+                        dtoList.getBranchName(),
+                        leftAlignStyle
+                );
 
-                            case "equals" -> predicates.add(
-                                    cb.equal(
-                                            truncDate,
-                                            filterDate
-                                    )
-                            );
+                createCell(
+                        row,
+                        7,
+                        dtoList.getCircleCode(),
+                        rightAlignStyle
+                );
 
-                            case "after" -> predicates.add(
-                                    cb.greaterThan(
-                                            truncDate,
-                                            filterDate
-                                    )
-                            );
+                createCell(
+                        row,
+                        8,
+                        dtoList.getCircleName(),
+                        leftAlignStyle
+                );
 
-                            case "onOrAfter" -> predicates.add(
-                                    cb.greaterThanOrEqualTo(
-                                            truncDate,
-                                            filterDate
-                                    )
-                            );
+                createCell(
+                        row,
+                        9,
+                        dtoList.getCurrency(),
+                        centerAlignStyle
+                );
 
-                            case "before" -> predicates.add(
-                                    cb.lessThan(
-                                            truncDate,
-                                            filterDate
-                                    )
-                            );
+                createCell(
+                        row,
+                        10,
+                        dtoList.getCurrencyName(),
+                        leftAlignStyle
+                );
 
-                            case "onOrBefore" -> predicates.add(
-                                    cb.lessThanOrEqualTo(
-                                            truncDate,
-                                            filterDate
-                                    )
-                            );
-                        }
+                createCell(
+                        row,
+                        11,
+                        dtoList.getCgl(),
+                        rightAlignStyle
+                );
 
-                        continue;
-                    }
+                createCell(
+                        row,
+                        12,
+                        dtoList.getDescription(),
+                        leftAlignStyle
+                );
 
-                    /*
-                     * STRING FILTERS
-                     */
-                    Expression<String> expression =
-                            cb.lower(
-                                    path.as(String.class)
-                            );
+                createCell(
+                        row,
+                        13,
+                        dtoList.getNarration(),
+                        leftAlignStyle
+                );
 
-                    String value =
-                            filter.getValue()
-                                    .toString()
-                                    .toLowerCase();
+                createCell(
+                        row,
+                        14,
+                        dtoList.getDebitAmount(),
+                        rightAlignStyle
+                );
 
-                    switch (operator) {
+                createCell(
+                        row,
+                        15,
+                        dtoList.getCreditAmount(),
+                        rightAlignStyle
+                );
 
-                        case "contains" -> predicates.add(
-                                cb.like(
-                                        expression,
-                                        "%" + value + "%"
-                                )
-                        );
+                createCell(
+                        row,
+                        16,
+                        dtoList.getTransactionCount(),
+                        rightAlignStyle
+                );
 
-                        case "startsWith" -> predicates.add(
-                                cb.like(
-                                        expression,
-                                        value + "%"
-                                )
-                        );
+                createCell(
+                        row,
+                        17,
+                        dtoList.getSourceName(),
+                        leftAlignStyle
+                );
+            }
 
-                        case "endsWith" -> predicates.add(
-                                cb.like(
-                                        expression,
-                                        "%" + value
-                                )
-                        );
+            /*
+             * FIXED COLUMN WIDTHS
+             */
+            sheet.setColumnWidth(0, 5000);
+            sheet.setColumnWidth(1, 5000);
+            sheet.setColumnWidth(2, 5000);
+            sheet.setColumnWidth(3, 6000);
+            sheet.setColumnWidth(4, 6000);
+            sheet.setColumnWidth(5, 4500);
+            sheet.setColumnWidth(6, 9000);
+            sheet.setColumnWidth(7, 4500);
+            sheet.setColumnWidth(8, 9000);
+            sheet.setColumnWidth(9, 4000);
+            sheet.setColumnWidth(10, 7000);
+            sheet.setColumnWidth(11, 5000);
+            sheet.setColumnWidth(12, 10000);
+            sheet.setColumnWidth(13, 12000);
+            sheet.setColumnWidth(14, 5000);
+            sheet.setColumnWidth(15, 5000);
+            sheet.setColumnWidth(16, 5000);
+            sheet.setColumnWidth(17, 8000);
 
-                        case "equals" -> predicates.add(
-                                cb.equal(
-                                        expression,
-                                        value
-                                )
-                        );
+            workbook.write(out);
 
-                        case "not" -> predicates.add(
-                                cb.notEqual(
-                                        expression,
-                                        value
-                                )
-                        );
+            byte[] byteArrayContent =
+                    out.toByteArray();
 
-                        case "isAnyOf" -> {
+            workbook.dispose();
 
-                            if (
-                                    filter.getValue()
-                                            instanceof List<?>
-                            ) {
+            String json =
+                    new ObjectMapper()
+                            .writeValueAsString(dto);
 
-                                List<String> values =
-                                        ((List<?>) filter.getValue())
-                                                .stream()
-                                                .map(Object::toString)
-                                                .map(String::toLowerCase)
-                                                .toList();
+            sendToMyDownloads(
+                    userId,
+                    json,
+                    byteArrayContent
+            );
 
-                                predicates.add(
-                                        expression.in(values)
-                                );
-                            }
-                        }
-                    }
+            return byteArrayContent;
+
+        } catch (IOException e) {
+
+            throw new RuntimeException(
+                    "Failed to generate excel",
+                    e
+            );
+        }
+    }
+
+    private void createCell(
+            Row row,
+            int column,
+            Object value,
+            CellStyle style
+    ) {
+
+        Cell cell =
+                row.createCell(column);
+
+        if (value != null) {
+
+            cell.setCellValue(
+                    value.toString()
+            );
+        }
+
+        cell.setCellStyle(style);
+    }
+
+    private void sendToMyDownloads(
+            String userId,
+            String searchCriteria,
+            byte[] byteArrayContent
+    ) {
+
+        try {
+
+            MyDownloadsRequestDTO request =
+                    new MyDownloadsRequestDTO(
+                            userId,
+                            "LedgerWiseEnquiry.xlsx",
+                            51,
+                            searchCriteria,
+                            byteArrayContent
+                    );
+
+            myDownloadsService.insertRequest(
+                    request
+            );
+
+        } catch (Exception e) {
+
+            log.error(
+                    "Error sending download data",
+                    e
+            );
+        }
+    }
+
+    private LedgerEnquiryResponse mapToDto(
+            LedgerTransaction entity
+    ) {
+
+        String branchCode = null;
+        String branchName = null;
+        String circleCode = null;
+        String circleName = null;
+
+        try {
+
+            if (entity.getBranch() != null) {
+
+                branchCode =
+                        entity.getBranch().getCode();
+
+                branchName =
+                        entity.getBranch().getName();
+
+                if (
+                        entity.getBranch().getCircle()
+                                != null
+                ) {
+
+                    circleCode =
+                            entity.getBranch()
+                                    .getCircle()
+                                    .getCircleCode();
+
+                    circleName =
+                            entity.getBranch()
+                                    .getCircle()
+                                    .getCircleName();
                 }
             }
 
-            return cb.and(
-                    predicates.toArray(
-                            new Predicate[0]
-                    )
+        } catch (Exception e) {
+
+            log.warn(
+                    "Circle mapping failed for transaction : {}",
+                    entity.getTransactionId()
             );
-        };
+        }
+
+        return new LedgerEnquiryResponse(
+
+                entity.getTransactionId(),
+                entity.getBatchId(),
+                entity.getJournalId(),
+                entity.getTransactionDate(),
+                entity.getPostDate(),
+
+                branchCode,
+                branchName,
+
+                circleCode,
+                circleName,
+
+                entity.getCurrencyMaster() != null
+                        ? entity.getCurrencyMaster()
+                        .getCurrencyCode()
+                        : null,
+
+                entity.getCurrencyMaster() != null
+                        ? entity.getCurrencyMaster()
+                        .getCurrencyName()
+                        : null,
+
+                entity.getCglMaster() != null
+                        ? entity.getCglMaster()
+                        .getCglNumber()
+                        : null,
+
+                entity.getCglMaster() != null
+                        ? entity.getCglMaster()
+                        .getDescription()
+                        : null,
+
+                entity.getNarration(),
+
+                entity.getDebitAmount(),
+
+                entity.getCreditAmount(),
+
+                entity.getTransactionCount(),
+
+                entity.getSourceFlag(),
+
+                entity.getSourceFlagMaster() != null
+                        ? entity.getSourceFlagMaster()
+                        .getFlagName()
+                        : null
+        );
     }
 
-    private static Path<?> getPath(
-            Root<LedgerTransaction> root,
+    private String getSortField(
             String field
     ) {
 
         return switch (field) {
 
-            /*
-             * BRANCH
-             */
+            case "transactionId" ->
+                    "transactionId";
+
+            case "batchId" ->
+                    "batchId";
+
+            case "journalId" ->
+                    "journalId";
+
+            case "transactionDate" ->
+                    "transactionDate";
+
+            case "postDate" ->
+                    "postDate";
+
+            case "narration" ->
+                    "narration";
+
+            case "debitAmount" ->
+                    "debitAmount";
+
+            case "creditAmount" ->
+                    "creditAmount";
+
+            case "transactionCount" ->
+                    "transactionCount";
+
+            case "sourceFlag" ->
+                    "sourceFlag";
+
+            case "sourceName" ->
+                    "sourceFlagMaster.flagName";
+
             case "branchCode" ->
-                    root.get("branch")
-                            .get("code");
+                    "branch.code";
 
             case "branchName" ->
-                    root.get("branch")
-                            .get("name");
+                    "branch.name";
 
-            /*
-             * CIRCLE
-             */
             case "circleCode" ->
-                    root.get("branch")
-                            .get("circle")
-                            .get("circleCode");
+                    "branch.circle.circleCode";
 
             case "circleName" ->
-                    root.get("branch")
-                            .get("circle")
-                            .get("circleName");
+                    "branch.circle.circleName";
 
-            /*
-             * CURRENCY
-             */
             case "currency" ->
-                    root.get("currencyMaster")
-                            .get("currencyCode");
+                    "currencyMaster.currencyCode";
 
             case "currencyName" ->
-                    root.get("currencyMaster")
-                            .get("currencyName");
+                    "currencyMaster.currencyName";
 
-            /*
-             * CGL
-             */
             case "cgl" ->
-                    root.get("cglMaster")
-                            .get("cglNumber");
+                    "cglMaster.cglNumber";
 
             case "description" ->
-                    root.get("cglMaster")
-                            .get("description");
+                    "cglMaster.description";
 
-            /*
-             * SOURCE
-             */
-            case "sourceName" ->
-                    root.get("sourceFlagMaster")
-                            .get("flagName");
-
-            /*
-             * DEFAULT
-             */
             default ->
-                    root.get(field);
+                    "transactionDate";
         };
-    }
-
-    private static Timestamp parseTimestamp(
-            String date,
-            boolean endOfDay
-    ) {
-
-        try {
-
-            String value =
-                    endOfDay
-                            ? date + " 23:59:59"
-                            : date + " 00:00:00";
-
-            return new Timestamp(
-                    new SimpleDateFormat(
-                            "dd/MM/yyyy HH:mm:ss"
-                    ).parse(value).getTime()
-            );
-
-        } catch (Exception e) {
-
-            throw new RuntimeException(
-                    "Invalid timestamp format : "
-                            + date
-            );
-        }
-    }
-
-    private static Date parseDate(
-            String date
-    ) {
-
-        try {
-
-            return new SimpleDateFormat(
-                    "yyyy-MM-dd"
-            ).parse(date);
-
-        } catch (Exception e) {
-
-            try {
-
-                return new SimpleDateFormat(
-                        "dd/MM/yyyy"
-                ).parse(date);
-
-            } catch (Exception ex) {
-
-                throw new RuntimeException(
-                        "Invalid date format : "
-                                + date
-                );
-            }
-        }
     }
 }
