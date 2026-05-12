@@ -1,995 +1,171 @@
-import React, {
-  useState,
-  useMemo,
-  useEffect,
-} from "react";
-
-import {
-  Box,
-  Paper,
-  TextField,
-  Button,
-  Typography,
-  Divider,
-  IconButton,
-  Tooltip,
-  Stack,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Chip,
-  LinearProgress,
-  useTheme,
-  alpha,
-  Alert,
-  AlertTitle,
-  Tab,
-  Tabs,
-} from "@mui/material";
-
-import {
-  PlayArrow,
-  CleaningServices,
-  ContentCopy,
-  AssessmentOutlined,
-  CheckCircleOutline,
-  ErrorOutline,
-  ListAlt,
-  TableChart,
-  UploadFile,
-} from "@mui/icons-material";
-
-import {
-  DataGrid,
-  GridToolbar,
-} from "@mui/x-data-grid";
-
-import {
-  useMutation,
-} from "@tanstack/react-query";
-
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-
-const AdminSupport = () => {
-
-  const theme = useTheme();
-
-  const showSnackbar =
-    useCustomSnackbar();
-
-  const { callApi } = useApi();
-
-  /**
-   * SQL editor state
-   */
-  const [query, setQuery] =
-    useState(
-      "SELECT * FROM USERS"
-    );
-
-  /**
-   * Grid state
-   */
-  const [results, setResults] =
-    useState({
-      rows: [],
-      columns: [],
-      total: 0,
-    });
-
-  /**
-   * Pagination
-   */
-  const [
-    paginationModel,
-    setPaginationModel,
-  ] = useState({
-    page: 0,
-    pageSize: 5,
-  });
-
-  /**
-   * Confirm dialog
-   */
-  const [
-    confirmOpen,
-    setConfirmOpen,
-  ] = useState(false);
-
-  /**
-   * Logs
-   */
-  const [
-    lastResponse,
-    setLastResponse,
-  ] = useState(null);
-
-  /**
-   * Tabs
-   */
-  const [activeTab, setActiveTab] =
-    useState(0);
-
-  /**
-   * Upload job tracking
-   */
-  const [jobId, setJobId] =
-    useState(null);
-
-  const [
-    jobStatus,
-    setJobStatus,
-  ] = useState(null);
-
-  /**
-   * Select query checker
-   */
-  const isSelect = useMemo(() => {
-
-    const q =
-      query.trim().toUpperCase();
-
-    return (
-      q.startsWith("SELECT") ||
-      q.startsWith("WITH")
-    );
-
-  }, [query]);
-
-  /**
-   * Destructive query checker
-   */
-  const isDestructive =
-    useMemo(() => {
-
-      const q =
-        query.trim().toUpperCase();
-
-      return [
-        "UPDATE",
-        "DELETE",
-        "DROP",
-        "TRUNCATE",
-        "ALTER",
-      ].some((k) =>
-        q.startsWith(k)
-      );
-
-    }, [query]);
-
-  /**
-   * Execute command panel query
-   */
-  const {
-    mutate: executeSql,
-    isPending,
-  } = useMutation({
-
-    mutationFn: async ({
-      sql,
-      page,
-      size,
-    }) => {
-
-      return await callApi(
-        "/api/admin-support/admin-execute",
-        {
-          sql,
-          page,
-          size,
-        },
-        "POST"
-      );
-    },
-
-    onSuccess: (data) => {
-
-      setLastResponse(data);
-
-      if (data?.error) {
-
-        setResults({
-          rows: [],
-          columns: [],
-          total: 0,
-        });
-
-        setActiveTab(1);
-
-        return;
-      }
-
-      /**
-       * SELECT results
-       */
-      if (isSelect) {
-
-        const formattedCols =
-          (
-            data?.columns || []
-          ).map((col) => ({
-            field: col.name,
-            headerName: col.name,
-            flex: 1,
-            minWidth: 150,
-          }));
-
-        setResults({
-          rows:
-            data?.rows || [],
-          columns:
-            formattedCols,
-          total:
-            data?.total || 0,
-        });
-
-        setActiveTab(0);
-
-      } else {
-
-        /**
-         * DML logs
-         */
-        setResults({
-          rows: [],
-          columns: [],
-          total: 0,
-        });
-
-        setActiveTab(1);
-      }
-    },
-
-    onError: (err) => {
-
-      setLastResponse({
-        error: true,
-        message:
-          err?.message ||
-          "Internal Server Error",
-      });
-
-      setActiveTab(1);
-    },
-  });
-
-  /**
-   * Execute command panel
-   */
-  const handleRun = (
-    resetPage = false
-  ) => {
-
-    const trimmedQuery =
-      query.trim();
-
-    if (!trimmedQuery) {
-
-      showSnackbar(
-        "Please enter query",
-        "warning"
-      );
-
-      return;
-    }
-
-    setLastResponse(null);
-
-    const targetPage =
-      resetPage
-        ? 0
-        : paginationModel.page;
-
-    if (resetPage) {
-
-      setPaginationModel(
-        (p) => ({
-          ...p,
-          page: 0,
-        })
-      );
-    }
-
-    executeSql({
-      sql: query,
-      page: targetPage,
-      size:
-        paginationModel.pageSize,
-    });
-  };
-
-  /**
-   * Server pagination
-   */
-  useEffect(() => {
-
-    if (
-      results.columns.length >
-        0 &&
-      isSelect
-    ) {
-
-      handleRun();
-    }
-
-  }, [
-    paginationModel.page,
-    paginationModel.pageSize,
-  ]);
-
-  /**
-   * Upload huge SQL file
-   */
-  const handleFileUpload =
-    async (e) => {
-
-      try {
-
-        const file =
-          e.target.files[0];
-
-        if (!file) return;
-
-        if (
-          !file.name.endsWith(
-            ".sql"
-          )
-        ) {
-
-          showSnackbar(
-            "Only .sql files allowed",
-            "error"
-          );
-
-          return;
-        }
-
-        const formData =
-          new FormData();
-
-        formData.append(
-          "file",
-          file
-        );
-
-        const response =
-          await fetch(
-            "/api/admin-support/upload-script",
-            {
-              method: "POST",
-              body: formData,
-            }
-          );
-
-        const data =
-          await response.json();
-
-        if (data.error) {
-
-          showSnackbar(
-            data.message,
-            "error"
-          );
-
-          return;
-        }
-
-        setJobId(data.jobId);
-
-        showSnackbar(
-          "SQL upload started",
-          "success"
-        );
-
-        setActiveTab(1);
-
-      } catch (e) {
-
-        showSnackbar(
-          "Upload failed",
-          "error"
-        );
-      }
-    };
-
-  /**
-   * Poll execution status
-   */
-  useEffect(() => {
-
-    if (!jobId) return;
-
-    const interval =
-      setInterval(
-        async () => {
-
-          try {
-
-            const res =
-              await fetch(
-                `/api/admin-support/job-status/${jobId}`
-              );
-
-            const data =
-              await res.json();
-
-            setJobStatus(data);
-
-            if (
-              data.status ===
-                "COMPLETED" ||
-              data.status ===
-                "FAILED"
-            ) {
-
-              clearInterval(
-                interval
-              );
-            }
-
-          } catch (e) {
-
-            console.error(e);
-          }
-        },
-        2000
-      );
-
-    return () =>
-      clearInterval(interval);
-
-  }, [jobId]);
-
-  /**
-   * Keyboard shortcuts
-   */
-  const handleKeyDown = (
-    e
-  ) => {
-
-    /**
-     * CTRL + ENTER
-     */
-    if (
-      e.ctrlKey &&
-      e.key === "Enter"
-    ) {
-
-      e.preventDefault();
-
-      handleRun(true);
-    }
-  };
-
-  return (
-
-    <Box
-      sx={{
-        display: "flex",
-        flexDirection:
-          "column",
-        height: "100%",
-        overflow: "hidden",
-        p: 1,
-      }}
-    >
-
-      {/* HEADER */}
-      <Paper
-        elevation={0}
-        sx={{
-          px: 3,
-          py: 1,
-          borderRadius: 1,
-          display: "flex",
-          alignItems:
-            "center",
-          justifyContent:
-            "space-between",
-        }}
-      >
-
-        <Stack
-          direction="row"
-          spacing={2}
-          alignItems="center"
-        >
-
-          <AssessmentOutlined
-            color="primary"
-          />
-
-          <Box>
-
-            <Typography
-              variant="subtitle2"
-              fontWeight={800}
-            >
-              FINCORE ADMIN SUPPORT
-            </Typography>
-
-            <Typography
-              variant="caption"
-              color="text.secondary"
-            >
-              Connected and ready
-            </Typography>
-
-          </Box>
-
-        </Stack>
-
-        {/* ACTIONS */}
-        <Stack
-          direction="row"
-          spacing={1}
-        >
-
-          {/* FILE UPLOAD */}
-          <Button
-            component="label"
-            variant="outlined"
-            startIcon={
-              <UploadFile />
-            }
-          >
-            Upload SQL
-
-            <input
-              hidden
-              type="file"
-              accept=".sql"
-              onChange={
-                handleFileUpload
-              }
-            />
-          </Button>
-
-          {/* CLEAR */}
-          <Tooltip title="Clear">
-            <IconButton
-              onClick={() =>
-                setQuery("")
-              }
-            >
-              <CleaningServices />
-            </IconButton>
-          </Tooltip>
-
-          {/* COPY */}
-          <Tooltip title="Copy">
-            <IconButton
-              onClick={() =>
-                navigator.clipboard.writeText(
-                  query
-                )
-              }
-            >
-              <ContentCopy />
-            </IconButton>
-          </Tooltip>
-
-          {/* EXECUTE */}
-          <Button
-            variant="contained"
-            disableElevation
-            color={
-              isDestructive
-                ? "error"
-                : "primary"
-            }
-            startIcon={
-              <PlayArrow />
-            }
-            disabled={
-              isPending
-            }
-            onClick={() =>
-              isDestructive
-                ? setConfirmOpen(
-                    true
-                  )
-                : handleRun(
-                    true
-                  )
-            }
-          >
-            Execute
-          </Button>
-
-        </Stack>
-      </Paper>
-
-      {/* SQL EDITOR */}
-      <Box
-        sx={{
-          mt: 2,
-          border:
-            "1px solid #2d2d2d",
-          borderRadius: 1,
-          overflow: "hidden",
-          bgcolor: "#1e1e1e",
-        }}
-      >
-
-        {/* TERMINAL HEADER */}
-        <Box
-          sx={{
-            px: 2,
-            py: 1,
-            bgcolor: "#2d2d2d",
-            borderBottom:
-              "1px solid #444",
-            display: "flex",
-            justifyContent:
-              "space-between",
-            alignItems:
-              "center",
-          }}
-        >
-
-          <Typography
-            variant="caption"
-            sx={{
-              color: "#aaa",
-              fontFamily:
-                "monospace",
-            }}
-          >
-            SQL Worksheet
-          </Typography>
-
-          <Chip
-            label="CTRL + ENTER"
-            size="small"
-          />
-
-        </Box>
-
-        {/* SQL TEXT AREA */}
-        <TextField
-          multiline
-          minRows={10}
-          maxRows={20}
-          fullWidth
-          value={query}
-          onChange={(e) =>
-            setQuery(
-              e.target.value
-            )
-          }
-          onKeyDown={
-            handleKeyDown
-          }
-          variant="standard"
-          InputProps={{
-            disableUnderline: true,
-            sx: {
-              p: 2,
-              color: "#d4d4d4",
-              fontFamily:
-                "'Fira Code', monospace",
-              fontSize: 14,
-            },
-          }}
-          sx={{
-            "& textarea": {
-              overflow:
-                "auto !important",
-            },
-          }}
-        />
-
-      </Box>
-
-      {/* LOADER */}
-      {isPending && (
-        <LinearProgress
-          sx={{ mt: 1 }}
-        />
-      )}
-
-      {/* FILE EXECUTION STATUS */}
-      {jobStatus && (
-
-        <Paper
-          sx={{
-            mt: 1,
-            p: 2,
-          }}
-        >
-
-          <Typography
-            fontWeight={700}
-          >
-            Uploaded Script Status
-          </Typography>
-
-          <Typography
-            variant="body2"
-          >
-            Status:
-            {" "}
-            {
-              jobStatus.status
-            }
-          </Typography>
-
-          <Typography
-            variant="body2"
-          >
-            Executed Statements:
-            {" "}
-            {
-              jobStatus.executedCount ||
-              0
-            }
-          </Typography>
-
-          <LinearProgress
-            sx={{ mt: 1 }}
-          />
-
-        </Paper>
-      )}
-
-      {/* OUTPUT */}
-      <Box
-        sx={{
-          flex: 1,
-          mt: 1,
-          overflow: "hidden",
-          bgcolor:
-            theme.palette
-              .background.paper,
-        }}
-      >
-
-        {/* TABS */}
-        <Tabs
-          value={activeTab}
-          onChange={(
-            e,
-            v
-          ) =>
-            setActiveTab(v)
-          }
-        >
-
-          <Tab
-            icon={
-              <TableChart />
-            }
-            label="Data Grid"
-          />
-
-          <Tab
-            icon={<ListAlt />}
-            label="Messages"
-          />
-
-        </Tabs>
-
-        {/* GRID */}
-        {activeTab === 0 && (
-
-          <DataGrid
-            rows={results.rows}
-            columns={
-              results.columns
-            }
-            rowCount={
-              results.total
-            }
-            loading={isPending}
-            paginationMode="server"
-            paginationModel={
-              paginationModel
-            }
-            onPaginationModelChange={
-              setPaginationModel
-            }
-            disableRowSelectionOnClick
-            pageSizeOptions={[
-              5,
-              10,
-              25,
-              50,
-            ]}
-            slots={{
-              toolbar:
-                GridToolbar,
-            }}
-            getRowId={(
-              row
-            ) =>
-              row.ID ||
-              row.id ||
-              Math.random()
-            }
-            sx={{
-              height: 500,
-              border: "none",
-              "& .MuiDataGrid-columnHeaders":
-                {
-                  bgcolor:
-                    alpha(
-                      theme
-                        .palette
-                        .action
-                        .hover,
-                      0.4
-                    ),
-                },
-            }}
-          />
-
-        )}
-
-        {/* LOGS */}
-        {activeTab === 1 && (
-
-          <Box
-            sx={{ p: 2 }}
-          >
-
-            {!lastResponse &&
-              !jobStatus && (
-
-                <Typography
-                  color="text.secondary"
-                >
-                  Waiting for execution...
-                </Typography>
-
-              )}
-
-            {lastResponse
-              ?.error && (
-
-              <Alert severity="error">
-
-                <AlertTitle>
-                  Error
-                </AlertTitle>
-
-                {
-                  lastResponse.message
-                }
-
-              </Alert>
-
-            )}
-
-            {lastResponse &&
-              !lastResponse
-                ?.error && (
-
-                <Alert severity="success">
-
-                  <AlertTitle>
-                    Execution Log
-                  </AlertTitle>
-
-                  {lastResponse
-                    ?.rows?.[0]
-                    ?.RESULT ||
-                    "Completed successfully"}
-
-                </Alert>
-
-              )}
-
-            {jobStatus
-              ?.status ===
-              "FAILED" && (
-
-              <Alert
-                severity="error"
-                sx={{ mt: 2 }}
-              >
-
-                <AlertTitle>
-                  Upload Failed
-                </AlertTitle>
-
-                {
-                  jobStatus.message
-                }
-
-              </Alert>
-
-            )}
-
-            {jobStatus
-              ?.status ===
-              "COMPLETED" && (
-
-              <Alert
-                severity="success"
-                sx={{ mt: 2 }}
-              >
-
-                <AlertTitle>
-                  Upload Completed
-                </AlertTitle>
-
-                Total Executed:
-                {" "}
-                {
-                  jobStatus.executedCount
-                }
-
-              </Alert>
-
-            )}
-
-          </Box>
-
-        )}
-
-      </Box>
-
-      {/* CONFIRM DIALOG */}
-      <Dialog
-        open={confirmOpen}
-        onClose={() =>
-          setConfirmOpen(
-            false
-          )
-        }
-      >
-
-        <DialogTitle>
-          Confirm Execution
-        </DialogTitle>
-
-        <DialogContent>
-
-          <Typography>
-            Are you sure you
-            want to execute
-            this destructive
-            query?
-          </Typography>
-
-        </DialogContent>
-
-        <DialogActions>
-
-          <Button
-            onClick={() =>
-              setConfirmOpen(
-                false
-              )
-            }
-          >
-            Cancel
-          </Button>
-
-          <Button
-            variant="contained"
-            color="error"
-            onClick={() => {
-
-              setConfirmOpen(
-                false
-              );
-
-              handleRun(true);
-            }}
-          >
-            Execute
-          </Button>
-
-        </DialogActions>
-
-      </Dialog>
-
-    </Box>
-  );
-};
-
-export default AdminSupport;
+2026-05-12 15:13:09.931 INFO  [http-nio-4000-exec-1] c.f.t.c.AdminSupportController: Admin SQL request received 
+{"@timestamp":"2026-05-12T15:13:09.9315891+05:30","level":"INFO","service":"TransactionsService","traceId":"7a234847-2c0e-44b7-bfed-cf41c97ca172","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/admin-execute","class":"c.f.t.controller.AdminSupportController","message":"Admin SQL request received","stack_trace":""}
+2026-05-12 15:13:10.062 ERROR [http-nio-4000-exec-1] c.f.t.e.GlobalException: An unexpected error occurred: Type definition error: [simple type, class java.io.ByteArrayInputStream] 
+org.springframework.http.converter.HttpMessageConversionException: Type definition error: [simple type, class java.io.ByteArrayInputStream]
+	at org.springframework.http.converter.json.AbstractJackson2HttpMessageConverter.writeInternal(AbstractJackson2HttpMessageConverter.java:489)
+	at org.springframework.http.converter.AbstractGenericHttpMessageConverter.write(AbstractGenericHttpMessageConverter.java:114)
+	at org.springframework.web.servlet.mvc.method.annotation.AbstractMessageConverterMethodProcessor.writeWithMessageConverters(AbstractMessageConverterMethodProcessor.java:297)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestResponseBodyMethodProcessor.handleReturnValue(RequestResponseBodyMethodProcessor.java:192)
+	at org.springframework.web.method.support.HandlerMethodReturnValueHandlerComposite.handleReturnValue(HandlerMethodReturnValueHandlerComposite.java:78)
+	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:136)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
+	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
+	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
+	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
+	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
+	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
+	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
+	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
+	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
+	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
+	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
+	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
+	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
+	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
+	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
+	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
+	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
+	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
+	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
+	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
+	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
+	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
+	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
+	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
+	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
+	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
+	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
+	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
+	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
+	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
+	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
+	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
+	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
+	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
+	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
+	at java.base/java.lang.Thread.run(Thread.java:1570)
+Caused by: com.fasterxml.jackson.databind.exc.InvalidDefinitionException: No serializer found for class java.io.ByteArrayInputStream and no properties discovered to create BeanSerializer (to avoid exception, disable SerializationFeature.FAIL_ON_EMPTY_BEANS) (through reference chain: java.util.ImmutableCollections$MapN["rows"]->java.util.ArrayList[0]->java.util.HashMap["CREATED_AT"]->oracle.sql.TIMESTAMP["stream"])
+	at com.fasterxml.jackson.databind.exc.InvalidDefinitionException.from(InvalidDefinitionException.java:77)
+	at com.fasterxml.jackson.databind.SerializerProvider.reportBadDefinition(SerializerProvider.java:1330)
+	at com.fasterxml.jackson.databind.DatabindContext.reportBadDefinition(DatabindContext.java:414)
+	at com.fasterxml.jackson.databind.ser.impl.UnknownSerializer.failForEmpty(UnknownSerializer.java:53)
+	at com.fasterxml.jackson.databind.ser.impl.UnknownSerializer.serialize(UnknownSerializer.java:30)
+	at com.fasterxml.jackson.databind.ser.BeanPropertyWriter.serializeAsField(BeanPropertyWriter.java:732)
+	at com.fasterxml.jackson.databind.ser.std.BeanSerializerBase.serializeFields(BeanSerializerBase.java:770)
+	at com.fasterxml.jackson.databind.ser.BeanSerializer.serialize(BeanSerializer.java:183)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serializeFields(MapSerializer.java:808)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serializeWithoutTypeInfo(MapSerializer.java:764)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serialize(MapSerializer.java:720)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serialize(MapSerializer.java:35)
+	at com.fasterxml.jackson.databind.ser.impl.IndexedListSerializer.serializeContents(IndexedListSerializer.java:119)
+	at com.fasterxml.jackson.databind.ser.impl.IndexedListSerializer.serialize(IndexedListSerializer.java:79)
+	at com.fasterxml.jackson.databind.ser.impl.IndexedListSerializer.serialize(IndexedListSerializer.java:18)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serializeFields(MapSerializer.java:808)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serializeWithoutTypeInfo(MapSerializer.java:764)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serialize(MapSerializer.java:720)
+	at com.fasterxml.jackson.databind.ser.std.MapSerializer.serialize(MapSerializer.java:35)
+	at com.fasterxml.jackson.databind.ser.DefaultSerializerProvider._serialize(DefaultSerializerProvider.java:502)
+	at com.fasterxml.jackson.databind.ser.DefaultSerializerProvider.serializeValue(DefaultSerializerProvider.java:422)
+	at com.fasterxml.jackson.databind.ObjectWriter$Prefetch.serialize(ObjectWriter.java:1570)
+	at com.fasterxml.jackson.databind.ObjectWriter.writeValue(ObjectWriter.java:1061)
+	at org.springframework.http.converter.json.AbstractJackson2HttpMessageConverter.writeInternal(AbstractJackson2HttpMessageConverter.java:483)
+	... 137 common frames omitted
+{"@timestamp":"2026-05-12T15:13:10.0627979+05:30","level":"ERROR","service":"TransactionsService","traceId":"7a234847-2c0e-44b7-bfed-cf41c97ca172","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/admin-execute","class":"c.f.t.exception.GlobalException","message":"An unexpected error occurred: Type definition error: [simple type, class java.io.ByteArrayInputStream]","stack_trace":"org.springframework.http.converter.HttpMessageConversionException: Type definition error: [simple type, class java.io.ByteArrayInputStream]\r\n\tat org.springframework.http.converter.json.AbstractJackson2HttpMessageConverter.writeInternal(AbstractJackson2HttpMessageConverter.java:489)\r\n\tat org.springframework.http.converter.AbstractGenericHttpMessageConverter.write(AbstractGenericHttpMessageConverter.java:114)\r\n\tat org.springframework.web.servlet.mvc.method.annotation.AbstractMessageConverterMethodProcessor.writeWithMessageConverters(AbstractMessageConverterMethodProcessor.java:297)\r\n\tat org.springframework.web.servlet.mvc.method.annotation.RequestResponseBodyMethodProcessor.handleReturnValue(RequestResponseBodyMethodProcessor.java:192)\r\n\tat org.springframework.web.method.support.HandlerMethodReturnValueHandlerComposite.handleReturnValue(HandlerMethodReturnValueHandlerComposite.java:78)\r\n\tat org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:136)\r\n\tat org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)\r\n\tat org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)\r\n\tat org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)\r\n\tat org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)\r\nCaused by: com.fasterxml.jackson.databind.exc.InvalidDefinitionException: No serializer found for class java.io.ByteArrayInputStream and no properties discovered to create BeanSerializer (to avoid exception, disable SerializationFeature.FAIL_ON_EMPTY_BEANS) (through reference chain: java.util.ImmutableCollections$MapN[\"rows\"]->java.util.ArrayList[0]->java.util.HashMap[\"CREATED_AT\"]->oracle.sql.TIMESTAMP[\"stream\"])\r\n\tat com.fasterxml.jackson.databind.exc.InvalidDefinitionException.from(InvalidDefinitionException.java:77)\r\n\tat com.fasterxml.jackson.databind.SerializerProvider.reportBadDefinition(SerializerProvider.java:1330)\r\n\tat com.fasterxml.jackson.databind.DatabindContext.reportBadDefinition(DatabindContext.java:414)\r\n\tat com.fasterxml.jackson.databind.ser.impl.UnknownSerializer.failForEmpty(UnknownSerializer.java:53)\r\n\tat com.fasterxml.jackson.databind.ser.impl.UnknownSerializer.serialize(UnknownSerializer.java:30)\r\n\tat com.fasterxml.jackson.databind.ser.BeanPropertyWriter.serializeAsField(BeanPropertyWriter.java:732)\r\n\tat com.fasterxml.jackson.databind.ser.std.BeanSerializerBase.serializeFields(BeanSerializerBase.java:770)\r\n\tat com.fasterxml.jackson.databind.ser.BeanSerializer.serialize(BeanSerializer.java:183)\r\n\tat com.fasterxml.jackson.databind.ser.std.MapSerializer.serializeFields(MapSerializer.java:808)\r\n\tat com.fasterxml.jackson.databind.ser.std.MapSerializer.serializeWithoutTypeInfo(MapSerializer.java:764)\r\n"}
+2026-05-12 15:13:10.077 WARN  [http-nio-4000-exec-1] o.s.w.s.h.AbstractHandlerExceptionResolver: Resolved [org.springframework.http.converter.HttpMessageConversionException: Type definition error: [simple type, class java.io.ByteArrayInputStream]] 
+{"@timestamp":"2026-05-12T15:13:10.0772285+05:30","level":"WARN","service":"TransactionsService","traceId":"7a234847-2c0e-44b7-bfed-cf41c97ca172","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/admin-execute","class":"o.s.w.s.m.m.a.ExceptionHandlerExceptionResolver","message":"Resolved [org.springframework.http.converter.HttpMessageConversionException: Type definition error: [simple type, class java.io.ByteArrayInputStream]]","stack_trace":""}
