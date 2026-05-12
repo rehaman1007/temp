@@ -1,843 +1,995 @@
-package com.fincore.transactions_service.controller;
+import React, {
+  useState,
+  useMemo,
+  useEffect,
+} from "react";
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import com.fincore.transactions_service.service.AdminSupportExecutor;
-import com.fincore.transactions_service.service.AdminSupportService;
+import {
+  Box,
+  Paper,
+  TextField,
+  Button,
+  Typography,
+  Divider,
+  IconButton,
+  Tooltip,
+  Stack,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Chip,
+  LinearProgress,
+  useTheme,
+  alpha,
+  Alert,
+  AlertTitle,
+  Tab,
+  Tabs,
+} from "@mui/material";
 
-import jakarta.validation.Valid;
+import {
+  PlayArrow,
+  CleaningServices,
+  ContentCopy,
+  AssessmentOutlined,
+  CheckCircleOutline,
+  ErrorOutline,
+  ListAlt,
+  TableChart,
+  UploadFile,
+} from "@mui/icons-material";
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import {
+  DataGrid,
+  GridToolbar,
+} from "@mui/x-data-grid";
 
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
+import {
+  useMutation,
+} from "@tanstack/react-query";
 
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.multipart.MultipartFile;
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
+const AdminSupport = () => {
 
-import java.util.Map;
-import java.util.UUID;
+  const theme = useTheme();
 
-@Slf4j
-@RestController
-@RequiredArgsConstructor
-@RequestMapping("/api/admin-support")
-public class AdminSupportController {
+  const showSnackbar =
+    useCustomSnackbar();
 
-    private final AdminSupportService adminSupportService;
+  const { callApi } = useApi();
 
-    private final AdminSupportExecutor adminSupportExecutor;
+  /**
+   * SQL editor state
+   */
+  const [query, setQuery] =
+    useState(
+      "SELECT * FROM USERS"
+    );
 
-    /**
-     * Execute query directly from command panel
-     */
-    @PostMapping("/admin-execute")
-    public Map<String, Object> executeAdminSql(
-            @RequestBody
-            @Valid
-            AdminSupportDTO adminSupportDTO
-    ) {
+  /**
+   * Grid state
+   */
+  const [results, setResults] =
+    useState({
+      rows: [],
+      columns: [],
+      total: 0,
+    });
 
-        log.info("Admin SQL request received");
+  /**
+   * Pagination
+   */
+  const [
+    paginationModel,
+    setPaginationModel,
+  ] = useState({
+    page: 0,
+    pageSize: 5,
+  });
 
-        return adminSupportService.executeAdminSql(
-                adminSupportDTO
-        );
+  /**
+   * Confirm dialog
+   */
+  const [
+    confirmOpen,
+    setConfirmOpen,
+  ] = useState(false);
+
+  /**
+   * Logs
+   */
+  const [
+    lastResponse,
+    setLastResponse,
+  ] = useState(null);
+
+  /**
+   * Tabs
+   */
+  const [activeTab, setActiveTab] =
+    useState(0);
+
+  /**
+   * Upload job tracking
+   */
+  const [jobId, setJobId] =
+    useState(null);
+
+  const [
+    jobStatus,
+    setJobStatus,
+  ] = useState(null);
+
+  /**
+   * Select query checker
+   */
+  const isSelect = useMemo(() => {
+
+    const q =
+      query.trim().toUpperCase();
+
+    return (
+      q.startsWith("SELECT") ||
+      q.startsWith("WITH")
+    );
+
+  }, [query]);
+
+  /**
+   * Destructive query checker
+   */
+  const isDestructive =
+    useMemo(() => {
+
+      const q =
+        query.trim().toUpperCase();
+
+      return [
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "TRUNCATE",
+        "ALTER",
+      ].some((k) =>
+        q.startsWith(k)
+      );
+
+    }, [query]);
+
+  /**
+   * Execute command panel query
+   */
+  const {
+    mutate: executeSql,
+    isPending,
+  } = useMutation({
+
+    mutationFn: async ({
+      sql,
+      page,
+      size,
+    }) => {
+
+      return await callApi(
+        "/api/admin-support/admin-execute",
+        {
+          sql,
+          page,
+          size,
+        },
+        "POST"
+      );
+    },
+
+    onSuccess: (data) => {
+
+      setLastResponse(data);
+
+      if (data?.error) {
+
+        setResults({
+          rows: [],
+          columns: [],
+          total: 0,
+        });
+
+        setActiveTab(1);
+
+        return;
+      }
+
+      /**
+       * SELECT results
+       */
+      if (isSelect) {
+
+        const formattedCols =
+          (
+            data?.columns || []
+          ).map((col) => ({
+            field: col.name,
+            headerName: col.name,
+            flex: 1,
+            minWidth: 150,
+          }));
+
+        setResults({
+          rows:
+            data?.rows || [],
+          columns:
+            formattedCols,
+          total:
+            data?.total || 0,
+        });
+
+        setActiveTab(0);
+
+      } else {
+
+        /**
+         * DML logs
+         */
+        setResults({
+          rows: [],
+          columns: [],
+          total: 0,
+        });
+
+        setActiveTab(1);
+      }
+    },
+
+    onError: (err) => {
+
+      setLastResponse({
+        error: true,
+        message:
+          err?.message ||
+          "Internal Server Error",
+      });
+
+      setActiveTab(1);
+    },
+  });
+
+  /**
+   * Execute command panel
+   */
+  const handleRun = (
+    resetPage = false
+  ) => {
+
+    const trimmedQuery =
+      query.trim();
+
+    if (!trimmedQuery) {
+
+      showSnackbar(
+        "Please enter query",
+        "warning"
+      );
+
+      return;
     }
 
-    /**
-     * Upload huge SQL script
-     */
-    @PostMapping(
-            value = "/upload-script",
-            consumes = MediaType.MULTIPART_FORM_DATA_VALUE
-    )
-    public ResponseEntity<?> uploadScript(
-            @RequestParam("file")
-            MultipartFile file
+    setLastResponse(null);
+
+    const targetPage =
+      resetPage
+        ? 0
+        : paginationModel.page;
+
+    if (resetPage) {
+
+      setPaginationModel(
+        (p) => ({
+          ...p,
+          page: 0,
+        })
+      );
+    }
+
+    executeSql({
+      sql: query,
+      page: targetPage,
+      size:
+        paginationModel.pageSize,
+    });
+  };
+
+  /**
+   * Server pagination
+   */
+  useEffect(() => {
+
+    if (
+      results.columns.length >
+        0 &&
+      isSelect
     ) {
 
-        try {
+      handleRun();
+    }
 
-            if (file.isEmpty()) {
+  }, [
+    paginationModel.page,
+    paginationModel.pageSize,
+  ]);
 
-                return ResponseEntity.badRequest()
-                        .body(
-                                Map.of(
-                                        "error",
-                                        true,
-                                        "message",
-                                        "File is empty"
-                                )
-                        );
+  /**
+   * Upload huge SQL file
+   */
+  const handleFileUpload =
+    async (e) => {
+
+      try {
+
+        const file =
+          e.target.files[0];
+
+        if (!file) return;
+
+        if (
+          !file.name.endsWith(
+            ".sql"
+          )
+        ) {
+
+          showSnackbar(
+            "Only .sql files allowed",
+            "error"
+          );
+
+          return;
+        }
+
+        const formData =
+          new FormData();
+
+        formData.append(
+          "file",
+          file
+        );
+
+        const response =
+          await fetch(
+            "/api/admin-support/upload-script",
+            {
+              method: "POST",
+              body: formData,
             }
+          );
+
+        const data =
+          await response.json();
+
+        if (data.error) {
+
+          showSnackbar(
+            data.message,
+            "error"
+          );
+
+          return;
+        }
+
+        setJobId(data.jobId);
+
+        showSnackbar(
+          "SQL upload started",
+          "success"
+        );
+
+        setActiveTab(1);
+
+      } catch (e) {
+
+        showSnackbar(
+          "Upload failed",
+          "error"
+        );
+      }
+    };
+
+  /**
+   * Poll execution status
+   */
+  useEffect(() => {
+
+    if (!jobId) return;
+
+    const interval =
+      setInterval(
+        async () => {
+
+          try {
+
+            const res =
+              await fetch(
+                `/api/admin-support/job-status/${jobId}`
+              );
+
+            const data =
+              await res.json();
+
+            setJobStatus(data);
 
             if (
-                    !file.getOriginalFilename()
-                            .toLowerCase()
-                            .endsWith(".sql")
+              data.status ===
+                "COMPLETED" ||
+              data.status ===
+                "FAILED"
             ) {
 
-                return ResponseEntity.badRequest()
-                        .body(
-                                Map.of(
-                                        "error",
-                                        true,
-                                        "message",
-                                        "Only .sql files allowed"
-                                )
-                        );
+              clearInterval(
+                interval
+              );
             }
 
-            Path uploadDir =
-                    Paths.get("sql-uploads");
+          } catch (e) {
 
-            Files.createDirectories(uploadDir);
+            console.error(e);
+          }
+        },
+        2000
+      );
 
-            String fileName =
-                    UUID.randomUUID() + ".sql";
+    return () =>
+      clearInterval(interval);
 
-            Path uploadPath =
-                    uploadDir.resolve(fileName);
+  }, [jobId]);
 
-            Files.copy(
-                    file.getInputStream(),
-                    uploadPath,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
-
-            String jobId =
-                    UUID.randomUUID().toString();
-
-            adminSupportExecutor.executeScriptAsync(
-                    uploadPath,
-                    jobId
-            );
-
-            return ResponseEntity.ok(
-                    Map.of(
-                            "error",
-                            false,
-                            "jobId",
-                            jobId,
-                            "message",
-                            "SQL upload successful"
-                    )
-            );
-
-        } catch (Exception e) {
-
-            log.error(
-                    "Upload failed",
-                    e
-            );
-
-            return ResponseEntity.internalServerError()
-                    .body(
-                            Map.of(
-                                    "error",
-                                    true,
-                                    "message",
-                                    e.getMessage()
-                            )
-                    );
-        }
-    }
+  /**
+   * Keyboard shortcuts
+   */
+  const handleKeyDown = (
+    e
+  ) => {
 
     /**
-     * Track script execution
+     * CTRL + ENTER
      */
-    @GetMapping("/job-status/{jobId}")
-    public ResponseEntity<?> getJobStatus(
-            @PathVariable String jobId
+    if (
+      e.ctrlKey &&
+      e.key === "Enter"
     ) {
 
-        return ResponseEntity.ok(
-                adminSupportExecutor.getJobStatus(
-                        jobId
+      e.preventDefault();
+
+      handleRun(true);
+    }
+  };
+
+  return (
+
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection:
+          "column",
+        height: "100%",
+        overflow: "hidden",
+        p: 1,
+      }}
+    >
+
+      {/* HEADER */}
+      <Paper
+        elevation={0}
+        sx={{
+          px: 3,
+          py: 1,
+          borderRadius: 1,
+          display: "flex",
+          alignItems:
+            "center",
+          justifyContent:
+            "space-between",
+        }}
+      >
+
+        <Stack
+          direction="row"
+          spacing={2}
+          alignItems="center"
+        >
+
+          <AssessmentOutlined
+            color="primary"
+          />
+
+          <Box>
+
+            <Typography
+              variant="subtitle2"
+              fontWeight={800}
+            >
+              FINCORE ADMIN SUPPORT
+            </Typography>
+
+            <Typography
+              variant="caption"
+              color="text.secondary"
+            >
+              Connected and ready
+            </Typography>
+
+          </Box>
+
+        </Stack>
+
+        {/* ACTIONS */}
+        <Stack
+          direction="row"
+          spacing={1}
+        >
+
+          {/* FILE UPLOAD */}
+          <Button
+            component="label"
+            variant="outlined"
+            startIcon={
+              <UploadFile />
+            }
+          >
+            Upload SQL
+
+            <input
+              hidden
+              type="file"
+              accept=".sql"
+              onChange={
+                handleFileUpload
+              }
+            />
+          </Button>
+
+          {/* CLEAR */}
+          <Tooltip title="Clear">
+            <IconButton
+              onClick={() =>
+                setQuery("")
+              }
+            >
+              <CleaningServices />
+            </IconButton>
+          </Tooltip>
+
+          {/* COPY */}
+          <Tooltip title="Copy">
+            <IconButton
+              onClick={() =>
+                navigator.clipboard.writeText(
+                  query
                 )
-        );
-    }
-}
+              }
+            >
+              <ContentCopy />
+            </IconButton>
+          </Tooltip>
 
-
-
-package com.fincore.transactions_service.dto;
-
-import jakarta.validation.constraints.NotBlank;
-
-import lombok.Data;
-
-@Data
-public class AdminSupportDTO {
-
-    /**
-     * SQL query
-     */
-    @NotBlank(
-            message = "SQL cannot be empty"
-    )
-    private String sql;
-
-    /**
-     * Pagination page
-     */
-    private Integer page;
-
-    /**
-     * Pagination size
-     */
-    private Integer size;
-}
-
-package com.fincore.transactions_service.service;
-
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-
-import jakarta.validation.Valid;
-
-import java.util.Map;
-
-public interface AdminSupportService {
-
-    Map<String, Object> executeAdminSql(
-            @Valid
-            AdminSupportDTO adminSupportDTO
-    );
-}
-
-package com.fincore.transactions_service.service;
-
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.JdbcTemplate;
-
-import org.springframework.stereotype.Service;
-
-import java.sql.ResultSetMetaData;
-
-import java.util.*;
-
-@Slf4j
-@Service("AdminSupportService")
-@RequiredArgsConstructor
-public class AdminSupportServiceImpl
-        implements AdminSupportService {
-
-    private final JdbcTemplate jdbcTemplate;
-
-    @Override
-    public Map<String, Object> executeAdminSql(
-            AdminSupportDTO dto
-    ) {
-
-        try {
-
-            String sql =
-                    dto.getSql().trim();
-
-            if (sql.isBlank()) {
-
-                return Map.of(
-                        "error",
-                        true,
-                        "message",
-                        "SQL cannot be empty"
-                );
+          {/* EXECUTE */}
+          <Button
+            variant="contained"
+            disableElevation
+            color={
+              isDestructive
+                ? "error"
+                : "primary"
             }
-
-            validateDangerousSql(sql);
-
-            boolean isSelect =
-                    isSelectQuery(sql);
-
-            int page =
-                    dto.getPage() != null
-                            ? dto.getPage()
-                            : 0;
-
-            int size =
-                    dto.getSize() != null
-                            ? dto.getSize()
-                            : 5;
-
-            if (isSelect) {
-
-                return executeSelect(
-                        sql,
-                        page,
-                        size
-                );
+            startIcon={
+              <PlayArrow />
             }
+            disabled={
+              isPending
+            }
+            onClick={() =>
+              isDestructive
+                ? setConfirmOpen(
+                    true
+                  )
+                : handleRun(
+                    true
+                  )
+            }
+          >
+            Execute
+          </Button>
 
-            return executeDml(sql);
+        </Stack>
+      </Paper>
 
-        } catch (Exception e) {
+      {/* SQL EDITOR */}
+      <Box
+        sx={{
+          mt: 2,
+          border:
+            "1px solid #2d2d2d",
+          borderRadius: 1,
+          overflow: "hidden",
+          bgcolor: "#1e1e1e",
+        }}
+      >
 
-            log.error(
-                    "Execution failed",
-                    e
-            );
+        {/* TERMINAL HEADER */}
+        <Box
+          sx={{
+            px: 2,
+            py: 1,
+            bgcolor: "#2d2d2d",
+            borderBottom:
+              "1px solid #444",
+            display: "flex",
+            justifyContent:
+              "space-between",
+            alignItems:
+              "center",
+          }}
+        >
 
-            return Map.of(
-                    "error",
-                    true,
-                    "message",
-                    e.getMessage()
-            );
-        }
-    }
+          <Typography
+            variant="caption"
+            sx={{
+              color: "#aaa",
+              fontFamily:
+                "monospace",
+            }}
+          >
+            SQL Worksheet
+          </Typography>
 
-    /**
-     * Execute SELECT query
-     */
-    private Map<String, Object> executeSelect(
-            String sql,
-            int page,
-            int size
-    ) {
+          <Chip
+            label="CTRL + ENTER"
+            size="small"
+          />
 
-        try {
+        </Box>
 
-            jdbcTemplate.execute(
-                    "EXPLAIN PLAN FOR " + sql
-            );
+        {/* SQL TEXT AREA */}
+        <TextField
+          multiline
+          minRows={10}
+          maxRows={20}
+          fullWidth
+          value={query}
+          onChange={(e) =>
+            setQuery(
+              e.target.value
+            )
+          }
+          onKeyDown={
+            handleKeyDown
+          }
+          variant="standard"
+          InputProps={{
+            disableUnderline: true,
+            sx: {
+              p: 2,
+              color: "#d4d4d4",
+              fontFamily:
+                "'Fira Code', monospace",
+              fontSize: 14,
+            },
+          }}
+          sx={{
+            "& textarea": {
+              overflow:
+                "auto !important",
+            },
+          }}
+        />
 
-        } catch (Exception e) {
+      </Box>
 
-            return Map.of(
-                    "error",
-                    true,
-                    "message",
-                    "Syntax Error: " +
-                            e.getMessage()
-            );
-        }
+      {/* LOADER */}
+      {isPending && (
+        <LinearProgress
+          sx={{ mt: 1 }}
+        />
+      )}
 
-        String countSql =
-                "SELECT COUNT(*) FROM (" +
-                        sql +
-                        ")";
+      {/* FILE EXECUTION STATUS */}
+      {jobStatus && (
 
-        Integer total =
-                jdbcTemplate.queryForObject(
-                        countSql,
-                        Integer.class
-                );
+        <Paper
+          sx={{
+            mt: 1,
+            p: 2,
+          }}
+        >
 
-        String paginatedSql =
-                sql +
-                        " OFFSET " +
-                        (page * size) +
-                        " ROWS FETCH NEXT " +
-                        size +
-                        " ROWS ONLY";
+          <Typography
+            fontWeight={700}
+          >
+            Uploaded Script Status
+          </Typography>
 
-        return jdbcTemplate.query(
-                paginatedSql,
-                rs -> {
+          <Typography
+            variant="body2"
+          >
+            Status:
+            {" "}
+            {
+              jobStatus.status
+            }
+          </Typography>
 
-                    ResultSetMetaData meta =
-                            rs.getMetaData();
+          <Typography
+            variant="body2"
+          >
+            Executed Statements:
+            {" "}
+            {
+              jobStatus.executedCount ||
+              0
+            }
+          </Typography>
 
-                    int columnCount =
-                            meta.getColumnCount();
+          <LinearProgress
+            sx={{ mt: 1 }}
+          />
 
-                    List<Map<String, String>>
-                            columns =
-                            new ArrayList<>();
+        </Paper>
+      )}
 
-                    for (
-                            int i = 1;
-                            i <= columnCount;
-                            i++
-                    ) {
+      {/* OUTPUT */}
+      <Box
+        sx={{
+          flex: 1,
+          mt: 1,
+          overflow: "hidden",
+          bgcolor:
+            theme.palette
+              .background.paper,
+        }}
+      >
 
-                        columns.add(
-                                Map.of(
-                                        "name",
-                                        meta.getColumnLabel(i)
-                                )
-                        );
-                    }
+        {/* TABS */}
+        <Tabs
+          value={activeTab}
+          onChange={(
+            e,
+            v
+          ) =>
+            setActiveTab(v)
+          }
+        >
 
-                    List<Map<String, Object>>
-                            rows =
-                            new ArrayList<>();
+          <Tab
+            icon={
+              <TableChart />
+            }
+            label="Data Grid"
+          />
 
-                    while (rs.next()) {
+          <Tab
+            icon={<ListAlt />}
+            label="Messages"
+          />
 
-                        Map<String, Object>
-                                row =
-                                new HashMap<>();
+        </Tabs>
 
-                        for (
-                                int i = 1;
-                                i <= columnCount;
-                                i++
-                        ) {
+        {/* GRID */}
+        {activeTab === 0 && (
 
-                            Object value =
-                                    rs.getObject(i);
-
-                            if (
-                                    value instanceof java.io.InputStream
-                            ) {
-
-                                value =
-                                        "[BLOB DATA]";
-                            }
-
-                            row.put(
-                                    meta.getColumnLabel(i),
-                                    value
-                            );
-                        }
-
-                        rows.add(row);
-                    }
-
-                    return Map.of(
-                            "error",
-                            false,
-                            "columns",
-                            columns,
-                            "rows",
-                            rows,
-                            "total",
-                            total,
-                            "page",
-                            page,
-                            "size",
-                            size
-                    );
-                }
-        );
-    }
-
-    /**
-     * Execute DML/DDL
-     */
-    private Map<String, Object> executeDml(
-            String sql
-    ) {
-
-        try {
-
-            jdbcTemplate.execute(sql);
-
-            return Map.of(
-                    "error",
-                    false,
-                    "columns",
-                    List.of(
-                            Map.of(
-                                    "name",
-                                    "RESULT"
-                            )
+          <DataGrid
+            rows={results.rows}
+            columns={
+              results.columns
+            }
+            rowCount={
+              results.total
+            }
+            loading={isPending}
+            paginationMode="server"
+            paginationModel={
+              paginationModel
+            }
+            onPaginationModelChange={
+              setPaginationModel
+            }
+            disableRowSelectionOnClick
+            pageSizeOptions={[
+              5,
+              10,
+              25,
+              50,
+            ]}
+            slots={{
+              toolbar:
+                GridToolbar,
+            }}
+            getRowId={(
+              row
+            ) =>
+              row.ID ||
+              row.id ||
+              Math.random()
+            }
+            sx={{
+              height: 500,
+              border: "none",
+              "& .MuiDataGrid-columnHeaders":
+                {
+                  bgcolor:
+                    alpha(
+                      theme
+                        .palette
+                        .action
+                        .hover,
+                      0.4
                     ),
-                    "rows",
-                    List.of(
-                            Map.of(
-                                    "RESULT",
-                                    "Execution completed successfully"
-                            )
-                    ),
-                    "total",
-                    1
-            );
+                },
+            }}
+          />
 
-        } catch (DataAccessException e) {
+        )}
 
-            return Map.of(
-                    "error",
-                    true,
-                    "message",
-                    e.getMostSpecificCause()
-                            .getMessage()
-            );
+        {/* LOGS */}
+        {activeTab === 1 && (
+
+          <Box
+            sx={{ p: 2 }}
+          >
+
+            {!lastResponse &&
+              !jobStatus && (
+
+                <Typography
+                  color="text.secondary"
+                >
+                  Waiting for execution...
+                </Typography>
+
+              )}
+
+            {lastResponse
+              ?.error && (
+
+              <Alert severity="error">
+
+                <AlertTitle>
+                  Error
+                </AlertTitle>
+
+                {
+                  lastResponse.message
+                }
+
+              </Alert>
+
+            )}
+
+            {lastResponse &&
+              !lastResponse
+                ?.error && (
+
+                <Alert severity="success">
+
+                  <AlertTitle>
+                    Execution Log
+                  </AlertTitle>
+
+                  {lastResponse
+                    ?.rows?.[0]
+                    ?.RESULT ||
+                    "Completed successfully"}
+
+                </Alert>
+
+              )}
+
+            {jobStatus
+              ?.status ===
+              "FAILED" && (
+
+              <Alert
+                severity="error"
+                sx={{ mt: 2 }}
+              >
+
+                <AlertTitle>
+                  Upload Failed
+                </AlertTitle>
+
+                {
+                  jobStatus.message
+                }
+
+              </Alert>
+
+            )}
+
+            {jobStatus
+              ?.status ===
+              "COMPLETED" && (
+
+              <Alert
+                severity="success"
+                sx={{ mt: 2 }}
+              >
+
+                <AlertTitle>
+                  Upload Completed
+                </AlertTitle>
+
+                Total Executed:
+                {" "}
+                {
+                  jobStatus.executedCount
+                }
+
+              </Alert>
+
+            )}
+
+          </Box>
+
+        )}
+
+      </Box>
+
+      {/* CONFIRM DIALOG */}
+      <Dialog
+        open={confirmOpen}
+        onClose={() =>
+          setConfirmOpen(
+            false
+          )
         }
-    }
+      >
 
-    /**
-     * SELECT / WITH checker
-     */
-    private boolean isSelectQuery(
-            String sql
-    ) {
+        <DialogTitle>
+          Confirm Execution
+        </DialogTitle>
 
-        String clean =
-                sql.trim().toUpperCase();
+        <DialogContent>
 
-        return clean.startsWith("SELECT")
-                || clean.startsWith("WITH");
-    }
+          <Typography>
+            Are you sure you
+            want to execute
+            this destructive
+            query?
+          </Typography>
 
-    /**
-     * Dangerous query blocker
-     */
-    private void validateDangerousSql(
-            String sql
-    ) {
+        </DialogContent>
 
-        String upper =
-                sql.toUpperCase();
+        <DialogActions>
 
-        if (
-                upper.contains("DROP DATABASE")
-                        || upper.contains("ALTER SYSTEM")
-                        || upper.contains("SHUTDOWN")
-                        || upper.contains("CREATE USER")
-                        || upper.contains("DROP USER")
-        ) {
-
-            throw new RuntimeException(
-                    "Dangerous SQL blocked"
-            );
-        }
-    }
-}
-
-package com.fincore.transactions_service.service;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.beans.factory.annotation.Autowired;
-
-import org.springframework.scheduling.annotation.Async;
-
-import org.springframework.stereotype.Service;
-
-import javax.sql.DataSource;
-
-import java.io.BufferedReader;
-
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-import java.sql.Connection;
-import java.sql.Statement;
-
-import java.util.Map;
-
-import java.util.concurrent.ConcurrentHashMap;
-
-@Slf4j
-@Service
-@RequiredArgsConstructor
-public class AdminSupportExecutor {
-
-    @Autowired
-    private DataSource dataSource;
-
-    /**
-     * Job tracker
-     */
-    private final Map<String, Map<String, Object>>
-            jobStatusMap =
-            new ConcurrentHashMap<>();
-
-    /**
-     * Execute uploaded SQL asynchronously
-     */
-    @Async("sqlExecutor")
-    public void executeScriptAsync(
-            Path path,
-            String jobId
-    ) {
-
-        jobStatusMap.put(
-                jobId,
-                Map.of(
-                        "status",
-                        "RUNNING",
-                        "executedCount",
-                        0
-                )
-        );
-
-        Connection connection = null;
-
-        BufferedReader reader = null;
-
-        try {
-
-            connection =
-                    dataSource.getConnection();
-
-            /**
-             * Manual transaction
-             */
-            connection.setAutoCommit(false);
-
-            Statement statementExecutor =
-                    connection.createStatement();
-
-            reader =
-                    Files.newBufferedReader(path);
-
-            StringBuilder sqlBuilder =
-                    new StringBuilder();
-
-            String line;
-
-            int count = 0;
-
-            while ((line = reader.readLine()) != null) {
-
-                String trimmed =
-                        line.trim();
-
-                /**
-                 * Ignore empty
-                 */
-                if (trimmed.isBlank()) {
-                    continue;
-                }
-
-                /**
-                 * Ignore comments
-                 */
-                if (
-                        trimmed.startsWith("--")
-                ) {
-                    continue;
-                }
-
-                sqlBuilder
-                        .append(line)
-                        .append("\n");
-
-                /**
-                 * Statement completed
-                 */
-                if (
-                        trimmed.endsWith(";")
-                ) {
-
-                    String sql =
-                            sqlBuilder.toString();
-
-                    sql =
-                            sql.substring(
-                                    0,
-                                    sql.lastIndexOf(";")
-                            );
-
-                    validateDangerousSql(sql);
-
-                    statementExecutor.execute(sql);
-
-                    count++;
-
-                    jobStatusMap.put(
-                            jobId,
-                            Map.of(
-                                    "status",
-                                    "RUNNING",
-                                    "executedCount",
-                                    count
-                            )
-                    );
-
-                    sqlBuilder.setLength(0);
-
-                    /**
-                     * Batch commit
-                     */
-                    if (count % 1000 == 0) {
-
-                        connection.commit();
-
-                        log.info(
-                                "Committed batch {}",
-                                count
-                        );
-                    }
-
-                    log.info(
-                            "Executed statement {}",
-                            count
-                    );
-                }
+          <Button
+            onClick={() =>
+              setConfirmOpen(
+                false
+              )
             }
+          >
+            Cancel
+          </Button>
 
-            /**
-             * Final commit
-             */
-            connection.commit();
+          <Button
+            variant="contained"
+            color="error"
+            onClick={() => {
 
-            jobStatusMap.put(
-                    jobId,
-                    Map.of(
-                            "status",
-                            "COMPLETED",
-                            "executedCount",
-                            count
-                    )
-            );
+              setConfirmOpen(
+                false
+              );
 
-            log.info(
-                    "SQL execution completed"
-            );
+              handleRun(true);
+            }}
+          >
+            Execute
+          </Button>
 
-        } catch (Exception e) {
+        </DialogActions>
 
-            log.error(
-                    "SQL execution failed",
-                    e
-            );
+      </Dialog>
 
-            /**
-             * Rollback everything
-             */
-            try {
+    </Box>
+  );
+};
 
-                if (connection != null) {
-
-                    connection.rollback();
-
-                    log.error(
-                            "Transaction rolled back"
-                    );
-                }
-
-            } catch (Exception rollbackEx) {
-
-                log.error(
-                        "Rollback failed",
-                        rollbackEx
-                );
-            }
-
-            jobStatusMap.put(
-                    jobId,
-                    Map.of(
-                            "status",
-                            "FAILED",
-                            "message",
-                            e.getMessage()
-                    )
-            );
-
-        } finally {
-
-            try {
-
-                if (reader != null) {
-                    reader.close();
-                }
-
-                if (connection != null) {
-                    connection.close();
-                }
-
-            } catch (Exception e) {
-
-                log.error(
-                        "Cleanup failed",
-                        e
-                );
-            }
-        }
-    }
-
-    /**
-     * Prevent dangerous statements
-     */
-    private void validateDangerousSql(
-            String sql
-    ) {
-
-        String upper =
-                sql.toUpperCase();
-
-        if (
-                upper.contains("DROP DATABASE")
-                        || upper.contains("ALTER SYSTEM")
-                        || upper.contains("SHUTDOWN")
-                        || upper.contains("CREATE USER")
-                        || upper.contains("DROP USER")
-        ) {
-
-            throw new RuntimeException(
-                    "Dangerous SQL blocked"
-            );
-        }
-    }
-
-    /**
-     * Get execution status
-     */
-    public Map<String, Object> getJobStatus(
-            String jobId
-    ) {
-
-        return jobStatusMap.getOrDefault(
-                jobId,
-                Map.of(
-                        "status",
-                        "NOT_FOUND"
-                )
-        );
-    }
-}
-
-package com.fincore.transactions_service.config;
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-import org.springframework.scheduling.annotation.EnableAsync;
-
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-
-import java.util.concurrent.Executor;
-
-@Configuration
-@EnableAsync
-public class AsyncConfig {
-
-    @Bean(name = "sqlExecutor")
-    public Executor sqlExecutor() {
-
-        ThreadPoolTaskExecutor executor =
-                new ThreadPoolTaskExecutor();
-
-        executor.setCorePoolSize(2);
-
-        executor.setMaxPoolSize(5);
-
-        executor.setQueueCapacity(10);
-
-        executor.setThreadNamePrefix(
-                "SQL-EXECUTOR-"
-        );
-
-        executor.initialize();
-
-        return executor;
-    }
-}
-
-# Huge upload support
-spring.servlet.multipart.max-file-size=10GB
-spring.servlet.multipart.max-request-size=10GB
-
-# Prevent upload swallowing
-server.tomcat.max-swallow-size=-1
-
-# Hikari
-spring.datasource.hikari.maximum-pool-size=20
-spring.datasource.hikari.connection-timeout=600000
-
+export default AdminSupport;
