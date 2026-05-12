@@ -1,684 +1,119 @@
-import React, { useState, useMemo, useEffect } from "react";
-import {
-  Box,
-  Paper,
-  TextField,
-  Button,
-  Typography,
-  Divider,
-  IconButton,
-  Tooltip,
-  Stack,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Chip,
-  LinearProgress,
-  useTheme,
-  alpha,
-  Alert,
-  AlertTitle,
-  Tab,
-  Tabs,
-} from "@mui/material";
-import {
-  PlayArrow,
-  CleaningServices,
-  ContentCopy,
-  AssessmentOutlined,
-  CheckCircleOutline,
-  ErrorOutline,
-  ListAlt,
-  TableChart,
-} from "@mui/icons-material";
-import { DataGrid, GridToolbar } from "@mui/x-data-grid";
-import { useMutation } from "@tanstack/react-query";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
+package com.fincore.transactions_service.service;
 
-const AdminSupport = () => {
-  const theme = useTheme();
-  const showSnackbar = useCustomSnackbar();
-  const { callApi } = useApi();
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
 
-  // State
-  const [query, setQuery] = useState("SELECT * FROM USERS");
-  const [results, setResults] = useState({ rows: [], columns: [], total: 0 });
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 5,
-  });
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [lastResponse, setLastResponse] = useState(null);
-  const [activeTab, setActiveTab] = useState(0); // 0: Results, 1: Log
+import java.sql.ResultSetMetaData;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
-  const isSelect = useMemo(
-    () => query.trim().toUpperCase().startsWith("SELECT"),
-    [query],
-  );
-  const isDestructive = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    return ["UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"].some((k) =>
-      q.startsWith(k),
-    );
-  }, [query]);
+@Slf4j
+@Service("AdminSupportService")
+@RequiredArgsConstructor
+public class AdminSupportServiceImpl implements AdminSupportService {
 
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      return await callApi(
-        "/TS/admin-support/admin-execute",
-        { sql, page, size },
-        "POST",
-      );
-    },
-    onSuccess: (data) => {
-      setLastResponse(data);
-      if (data?.error) {
-        setResults({ rows: [], columns: [], total: 0 });
-        setActiveTab(1); // Switch to Log on error
-        return;
-      }
+    private final JdbcTemplate jdbcTemplate;
 
-      if (isSelect) {
-        const formattedCols = (data?.columns || []).map((col) => ({
-          field: col.name,
-          headerName: col.name,
-          flex: 1,
-          minWidth: 150,
-        }));
-        setResults({
-          rows: data?.rows || [],
-          columns: formattedCols,
-          total: data?.total || 0,
-        });
-        setActiveTab(0); // Switch to Data Table
-      } else {
-        setResults({ rows: [], columns: [], total: 0 });
-        setActiveTab(1); // Switch to Log for DML success
-      }
-    },
-    onError: (err) => {
-      setLastResponse({
-        error: true,
-        message: err?.message || "Internal Server Error",
-      });
-      setActiveTab(1);
-    },
-  });
+    @Override
+    public Map<String, Object> executeAdminSql(AdminSupportDTO adminSupportDTO) {
+        String rawSql = adminSupportDTO.getSql().trim();
 
-  const handleRun = (resetPage = false) => {
-    // 1. Basic empty check
-    const trimmedQuery = query.trim();
-    if (!trimmedQuery) {
-      showSnackbar("Please enter a query to execute", "warning");
-      return;
-    }
+        // 1. Split script by semicolon
+        String[] statements = rawSql.split(";");
 
-    // 2. Strip comments to see if actual SQL exists
-    // This regex removes all lines starting with --
-    const sqlWithoutComments = trimmedQuery
-      .replace(/^--.*$/gm, "") // Remove single line comments
-      .replace(/\/\*[\s\S]*?\*\//g, "") // Remove multi-line comments
-      .trim();
-
-    if (!sqlWithoutComments) {
-      showSnackbar("Cannot execute a script containing only comments", "info");
-      return;
-    }
-
-    // 3. Basic Syntax/Keyword Validation
-    const validKeywords = [
-      "SELECT",
-      "INSERT",
-      "UPDATE",
-      "DELETE",
-      "MERGE",
-      "DROP",
-      "CREATE",
-      "ALTER",
-      "TRUNCATE",
-      "DESC",
-    ];
-    const firstWord = sqlWithoutComments.split(/\s+/)[0].toUpperCase();
-
-    if (!validKeywords.includes(firstWord)) {
-      showSnackbar(
-        `Invalid SQL start: "${firstWord}". Please check your syntax.`,
-        "error",
-      );
-      return;
-    }
-
-    // 4. Execution Logic
-    setLastResponse(null); // Clear old logs/errors
-    const targetPage = resetPage ? 0 : paginationModel.page;
-
-    if (resetPage) {
-      setPaginationModel((p) => ({ ...p, page: 0 }));
-    }
-
-    // Send the query to the backend
-    executeSql({
-      sql: query, // We send the full query (with comments) so logs show everything
-      page: targetPage,
-      size: paginationModel.pageSize,
-    });
-  };
-
-  useEffect(() => {
-    if (results.columns.length > 0 && isSelect) handleRun();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paginationModel.page, paginationModel.pageSize]);
-
-  // Helper to handle the Ctrl + / logic
-  const handleKeyDown = (e) => {
-    // 1. Run Query (Ctrl + Enter)
-    if (e.ctrlKey && e.key === "Enter") {
-      e.preventDefault();
-      handleRun(true);
-    }
-
-    // 2. Toggle Comment (Ctrl + /)
-    if (e.ctrlKey && e.key === "/") {
-      e.preventDefault(); // Stop browser from opening search
-
-      const { selectionStart, value } = e.target;
-      const lines = value.split("\n");
-
-      // Find which line the cursor is on
-      let characterCount = 0;
-      let currentLineIndex = 0;
-      for (let i = 0; i < lines.length; i++) {
-        characterCount += lines[i].length + 1; // +1 for the \n
-        if (selectionStart < characterCount) {
-          currentLineIndex = i;
-          break;
+        // Filter out empty lines/comments to get "Real" statements
+        List<String> cleanStatements = new ArrayList<>();
+        for (String s : statements) {
+            String clean = s.replaceAll("(?m)^--.*", "").trim();
+            if (!clean.isEmpty()) cleanStatements.add(clean);
         }
-      }
 
-      const lineText = lines[currentLineIndex];
-      if (lineText.trim().startsWith("--")) {
-        // Uncomment
-        lines[currentLineIndex] = lineText.replace(/^(\s*)--\s?/, "$1");
-      } else {
-        // Comment
-        lines[currentLineIndex] = "-- " + lineText;
-      }
+        // 2. LOGIC: Is this a single SELECT query?
+        boolean isSingleSelect = cleanStatements.size() == 1 &&
+                cleanStatements.get(0).toUpperCase().startsWith("SELECT");
 
-      const updatedQuery = lines.join("\n");
-      setQuery(updatedQuery);
+        log.info("Admin SQL Request - Mode: {}", isSingleSelect ? "SELECT_GRID" : "SCRIPT_EXECUTION");
 
-      // Optional: Maintain cursor position
-      setTimeout(() => {
-        e.target.setSelectionRange(selectionStart, selectionStart);
-      }, 0);
-    }
-  };
+        int page = (adminSupportDTO.getPage() != null) ? adminSupportDTO.getPage() : 0;
+        int size = (adminSupportDTO.getSize() != null) ? adminSupportDTO.getSize() : 5;
 
-  // Syntax highlighting for the background layer
-  const renderHighlightedCode = (text) => {
-    return text.split("\n").map((line, i) => (
-      <div
-        key={i}
-        style={{
-          height: "1.7rem",
-          color: line.trim().startsWith("--") ? "#6a9955" : "#d4d4d4",
-          fontStyle: line.trim().startsWith("--") ? "italic" : "normal",
-        }}
-      >
-        {line || " "}
-      </div>
-    ));
-  };
+        if (isSingleSelect) {
+            String executableSelect = cleanStatements.get(0);
+            try {
+                // A. Syntax Validation (EXPLAIN PLAN)
+                try {
+                    jdbcTemplate.execute("EXPLAIN PLAN FOR " + executableSelect);
+                } catch (DataAccessException e) {
+                    return Map.of("error", true, "message", "Oracle Syntax Error: " + e.getMostSpecificCause().getMessage());
+                }
 
-  return (
-    <Box
-      sx={{
-        display: "flex",
-        flexDirection: "column",
-        bgcolor: theme.palette.background.default,
-        overflow: "hidden",
-        p: 1,
-      }}
-    >
-      {/* 1. CORPORATE HEADER */}
-      <Paper
-        elevation={0}
-        sx={{
-          px: 3,
-          py: 1,
-          borderBottom: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          borderRadius: 1,
-          bgcolor: theme.palette.background.paper,
-        }}
-      >
-        <Stack direction="row" spacing={2} alignItems="center">
-          <AssessmentOutlined color="primary" />
-          <Box>
-            <Typography
-              variant="subtitle2"
-              fontWeight={800}
-              sx={{ letterSpacing: 0.5 }}
-            >
-              FINCORE ADMIN SUPPORT
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              Connected and ready for excecution
-            </Typography>
-          </Box>
-        </Stack>
+                // B. Count records for Pagination
+                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
+                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+                final Integer finalTotal = (total == null) ? 0 : total;
 
-        <Stack direction="row" spacing={1}>
-          <Tooltip title="Clear Content">
-            <IconButton size="small" onClick={() => setQuery("")}>
-              <CleaningServices fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Copy SQL">
-            <IconButton
-              size="small"
-              onClick={() => navigator.clipboard.writeText(query)}
-            >
-              <ContentCopy fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
-          <Button
-            variant="contained"
-            disableElevation
-            color={isDestructive ? "error" : "primary"}
-            startIcon={<PlayArrow />}
-            onClick={() =>
-              isDestructive ? setConfirmOpen(true) : handleRun(true)
+                // C. Paginated Query (Oracle 12c+)
+                String paginatedSql = String.format("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", executableSelect, (page * size), size);
+
+                return jdbcTemplate.query(paginatedSql, rs -> {
+                    ResultSetMetaData metaData = rs.getMetaData();
+                    int columnCount = metaData.getColumnCount();
+
+                    List<Map<String, String>> columns = new ArrayList<>();
+                    for (int i = 1; i <= columnCount; i++) {
+                        columns.add(Map.of("name", metaData.getColumnLabel(i)));
+                    }
+
+                    List<Map<String, Object>> rows = new ArrayList<>();
+                    while (rs.next()) {
+                        Map<String, Object> row = new HashMap<>();
+                        for (int i = 1; i <= columnCount; i++) {
+                            Object value = rs.getObject(i);
+                            if (value instanceof java.io.InputStream) value = "[BLOB DATA]";
+                            else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) value = value.toString();
+                            row.put(metaData.getColumnLabel(i), value);
+                        }
+                        rows.add(row);
+                    }
+
+                    return Map.of(
+                            "columns", columns, "rows", rows, "total", finalTotal,
+                            "page", page, "size", size, "error", false
+                    );
+                });
+
+            } catch (Exception e) {
+                log.error("Execution Error", e);
+                return Map.of("error", true, "message", "Execution failed: " + e.getMessage());
             }
-            disabled={isPending}
-            sx={{
-              px: 4,
-              borderRadius: 1,
-              fontWeight: "bold",
-              textTransform: "none",
-            }}
-          >
-            Execute
-          </Button>
-        </Stack>
-      </Paper>
-
-      <Box
-        sx={{
-          mt: 3, // Added top margin as requested
-          flex: "0 0 45%", // Increased height slightly for better visibility
-          display: "flex",
-          flexDirection: "column",
-          borderRadius: "8px",
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-          background: "#1e1e1e", // Deep terminal black
-          boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
-        }}
-      >
-        {/* CONSOLE HEADER (Window Bar) */}
-        <Box
-          sx={{
-            px: 2,
-            py: 1.2,
-            bgcolor: "#2d2d2d",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            borderBottom: "1px solid #3d3d3d",
-          }}
-        >
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Box sx={{ display: "flex", gap: 0.8 }}>
-              <Box
-                sx={{
-                  width: 11,
-                  height: 11,
-                  bgcolor: "#ff5f56",
-                  borderRadius: "50%",
-                }}
-              />
-              <Box
-                sx={{
-                  width: 11,
-                  height: 11,
-                  bgcolor: "#ffbd2e",
-                  borderRadius: "50%",
-                }}
-              />
-              <Box
-                sx={{
-                  width: 11,
-                  height: 11,
-                  bgcolor: "#27c93f",
-                  borderRadius: "50%",
-                }}
-              />
-            </Box>
-            <Divider
-              orientation="vertical"
-              flexItem
-              sx={{ bgcolor: "#444", mx: 1 }}
-            />
-            <Typography
-              variant="caption"
-              sx={{
-                color: "#888",
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: "11px",
-                textTransform: "uppercase",
-                letterSpacing: 1.5,
-              }}
-            >
-              SQL Worksheet
-            </Typography>
-          </Stack>
-
-          <Stack direction="row" spacing={1}>
-            <Chip
-              label="-- comments enabled"
-              size="small"
-              sx={{
-                height: 18,
-                fontSize: 10,
-                color: "#6a9955",
-                bgcolor: "transparent",
-                border: "1px solid #6a9955",
-              }}
-            />
-          </Stack>
-        </Box>
-
-        {/* CUSTOMIZED EDITOR AREA */}
-        <Box sx={{ position: "relative", flex: 1, display: "flex" }}>
-          <Box
-            sx={{
-              width: 40,
-              bgcolor: "#1e1e1e",
-              borderRight: "1px solid #333",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              pt: 2.2, // Match the padding of your TextField
-              color: "#555",
-              fontFamily: "monospace",
-              fontSize: "12px",
-              userSelect: "none",
-            }}
-          >
-            {query.split("\n").map((_, index) => (
-              <Box
-                key={index}
-                sx={{
-                  height: "1.7rem", // MUST match the line-height (1.7) of your TextField
-                  display: "flex",
-                  alignItems: "center",
-                }}
-              >
-                {index + 1}
-              </Box>
-            ))}
-          </Box>
-
-          <Box sx={{ flex: 1, position: "relative" }}>
-            {/* LAYER 1: HIGHLIGHTED TEXT (Visual Only) */}
-            <Box
-              sx={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                p: 2,
-                fontFamily: "'Fira Code', monospace",
-                fontSize: "14px",
-                lineHeight: 1.7,
-                pointerEvents: "none",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {renderHighlightedCode(query)}
-            </Box>
-
-            <TextField
-              multiline
-              fullWidth
-              rows={5} // Or remove rows and use flex
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={handleKeyDown}
-              variant="standard"
-              InputProps={{
-                disableUnderline: true,
-                sx: {
-                  fontFamily: "'Fira Code', monospace",
-                  fontSize: "14px",
-                  p: 2,
-                  lineHeight: 1.7,
-                  color: "transparent",
-                  caretColor: "#38bdf8",
-                  /* --- KEY FIX FOR SCROLLING --- */
-                  "& textarea": {
-                    overflowY: "auto !important", // Enables vertical scroll
-                    overflowX: "auto !important", // Enables horizontal scroll for long lines
-                    whiteSpace: "pre", // Prevents auto-wrapping to allow horiz-scroll
-                    height: "100% !important", // Fills the container
-                    WebkitTextFillColor: "transparent",
-                  },
-                },
-              }}
-              sx={{
-                flex: 1,
-                height: "100%",
-                overflow: "hidden", // Parent stays still
-                "& .MuiInputBase-root": {
-                  height: "100%",
-                  alignItems: "flex-start",
-                },
-              }}
-            />
-          </Box>
-        </Box>
-
-        {/* PROGRESS BAR AT BOTTOM OF CONSOLE */}
-        {isPending && (
-          <LinearProgress color="info" sx={{ height: 2, bgcolor: "#333" }} />
-        )}
-      </Box>
-
-      {/* 3. OUTPUT AREA (TABS) */}
-      <Box
-        sx={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          mt: 1,
-          bgcolor: theme.palette.background.paper,
-        }}
-      >
-        <Box sx={{ borderBottom: 1, borderColor: "divider", px: 2 }}>
-          <Tabs
-            value={activeTab}
-            onChange={(e, v) => setActiveTab(v)}
-            variant="standard"
-            textColor="primary"
-            indicatorColor="primary"
-          >
-            <Tab
-              icon={<TableChart fontSize="small" />}
-              iconPosition="start"
-              label="Data Grid"
-              sx={{ minHeight: 40, textTransform: "none", fontWeight: "bold" }}
-            />
-            <Tab
-              icon={<ListAlt fontSize="small" />}
-              iconPosition="start"
-              label="Messages"
-              sx={{ minHeight: 40, textTransform: "none", fontWeight: "bold" }}
-            />
-          </Tabs>
-        </Box>
-
-        <Box sx={{ flex: 1, overflow: "hidden" }}>
-          {/* Tab 0: Data Table */}
-          {activeTab === 0 && (
-            // <DataGrid
-            //   rows={results.rows}
-            //   columns={results.columns}
-            //   getRowId={(row) => row.ID || row.id || Math.random()}
-            //   loading={isPending}
-            //   paginationMode="server"
-            //   rowCount={results.total}
-            //   paginationModel={paginationModel}
-            //   onPaginationModelChange={setPaginationModel}
-            //   slots={{ toolbar: GridToolbar }}
-            //   disableRowSelectionOnClick
-            //   localeText={{
-            //     noRowsLabel: "No data/rows found",
-            //   }}
-            //   sx={{
-            //     p: 3,
-            //     "& .MuiDataGrid-overlay": {
-            //       backgroundColor: "transparent",
-            //     },
-            //     border: "none",
-            //     "& .MuiDataGrid-columnHeaders": {
-            //       bgcolor: alpha(theme.palette.action.hover, 0.4),
-            //     },
-            //   }}
-            // />
-            <DataGrid
-              rows={results.rows}
-              columns={results.columns}
-              getRowId={(row) => row.ID || row.id || Math.random()}
-              loading={isPending}
-              paginationMode="server"
-              rowCount={results.total}
-              // 1. Force the page size to 5
-              paginationModel={paginationModel}
-              onPaginationModelChange={setPaginationModel}
-              pageSizeOptions={[5, 10, 25, 50]}
-              slots={{ toolbar: GridToolbar }}
-              disableRowSelectionOnClick
-              localeText={{ noRowsLabel: "No data/rows found" }}
-              // 2. Fix the Height & Scroll issue
-              sx={{
-                // Override your global 570px if needed for this specific screen
-                height: results.rows.length > 0 ? "auto" : 400,
-                minHeight: 300,
-                maxHeight: "100%", // Allows it to fill the support screen space
-                width: "100%",
-
-                // Internal Scroll Fix
-                "& .MuiDataGrid-main": {
-                  overflow: "auto",
-                },
-                "& .MuiDataGrid-virtualScroller": {
-                  overflow: "auto !important", // Forces the scrollbar to appear
-                  minHeight: "200px",
-                },
-
-                // UI Tweaks
-                p: 0, // Removed p: 3 as it often breaks DataGrid internal calculations
-                border: "none",
-                "& .MuiDataGrid-columnHeaders": {
-                  bgcolor: alpha(theme.palette.action.hover, 0.4),
-                  // Ensure the sticky header from your global style doesn't float weirdly
-                  position: "static",
-                },
-                "& .MuiDataGrid-overlay": {
-                  backgroundColor: "transparent",
-                },
-              }}
-            />
-          )}
-
-          {/* Tab 1: Output Logs */}
-          {activeTab === 1 && (
-            <Box sx={{ p: 3 }}>
-              {!lastResponse && (
-                <Typography color="text.disabled" variant="body2">
-                  Waiting for execution...
-                </Typography>
-              )}
-              {lastResponse?.error && (
-                <Alert
-                  severity="error"
-                  icon={<ErrorOutline />}
-                  sx={{ borderRadius: 1 }}
-                >
-                  <AlertTitle sx={{ fontWeight: "bold" }}>
-                    Database Error
-                  </AlertTitle>
-                  {lastResponse.message}
-                </Alert>
-              )}
-              {lastResponse && !lastResponse.error && (
-                <Alert
-                  severity="success"
-                  icon={<CheckCircleOutline />}
-                  sx={{ borderRadius: 1 }}
-                >
-                  <AlertTitle sx={{ fontWeight: "bold" }}>
-                    Execution Log
-                  </AlertTitle>
-                  {lastResponse?.rows?.[0]?.RESULT ||
-                    "Query completed successfully."}
-                  <Typography
-                    variant="caption"
-                    display="block"
-                    sx={{ mt: 1, color: "text.secondary" }}
-                  >
-                    Affected Rows: {lastResponse?.total || 0} | Time:{" "}
-                    {new Date().toLocaleTimeString()}
-                  </Typography>
-                </Alert>
-              )}
-            </Box>
-          )}
-        </Box>
-      </Box>
-
-      {/* DESTRUCTIVE DIALOG */}
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
-        <DialogTitle
-          sx={{
-            fontWeight: "bold",
-            bgcolor: theme.palette.error.main,
-            color: "white",
-          }}
-        >
-          System Authorization
-        </DialogTitle>
-        <DialogContent sx={{ mt: 2 }}>
-          <Typography>
-            User privilege check passed. Confirm direct modification to
-            database?
-          </Typography>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setConfirmOpen(false)} color="inherit">
-            Abort
-          </Button>
-          <Button
-            onClick={() => {
-              setConfirmOpen(false);
-              handleRun(true);
-            }}
-            variant="contained"
-            color="error"
-            disableElevation
-          >
-            Confirm Push
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
-  );
-};
-
-export default AdminSupport;
+        } else {
+            // 3. SCRIPT EXECUTION (DDL or Multiple Statements)
+            try {
+                int successfulStatements = 0;
+                for (String execSql : cleanStatements) {
+                    try {
+                        jdbcTemplate.execute(execSql);
+                        successfulStatements++;
+                    } catch (DataAccessException e) {
+                        throw new RuntimeException("Error in statement " + (successfulStatements + 1) + ": " + e.getMostSpecificCause().getMessage());
+                    }
+                }
+                return Map.of(
+                        "error", false,
+                        "columns", List.of(Map.of("name", "RESULT")),
+                        "rows", List.of(Map.of("RESULT", "Script completed successfully. " + successfulStatements + " statements processed.")),
+                        "total", successfulStatements
+                );
+            } catch (Exception e) {
+                log.error("Script Error", e);
+                return Map.of("error", true, "message", e.getMessage());
+            }
+        }
+    }
+}
