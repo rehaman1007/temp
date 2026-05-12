@@ -1,119 +1,848 @@
+import React, { useState, useMemo, useEffect } from "react";
+import {
+  Box,
+  Paper,
+  TextField,
+  Button,
+  Typography,
+  Divider,
+  IconButton,
+  Tooltip,
+  Stack,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Chip,
+  LinearProgress,
+  useTheme,
+  alpha,
+  Alert,
+  AlertTitle,
+  Tab,
+  Tabs,
+} from "@mui/material";
+
+import {
+  PlayArrow,
+  CleaningServices,
+  ContentCopy,
+  AssessmentOutlined,
+  CheckCircleOutline,
+  ErrorOutline,
+  ListAlt,
+  TableChart,
+  UploadFile,
+} from "@mui/icons-material";
+
+import { DataGrid, GridToolbar } from "@mui/x-data-grid";
+import { useMutation } from "@tanstack/react-query";
+
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+
+const AdminSupport = () => {
+  const theme = useTheme();
+  const showSnackbar = useCustomSnackbar();
+  const { callApi } = useApi();
+
+  const [query, setQuery] = useState("SELECT * FROM USERS");
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 5,
+  });
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const [lastResponse, setLastResponse] = useState(null);
+
+  const [activeTab, setActiveTab] = useState(0);
+
+  const [jobId, setJobId] = useState(null);
+
+  const [jobStatus, setJobStatus] = useState(null);
+
+  const isSelect = useMemo(
+    () =>
+      query.trim().toUpperCase().startsWith("SELECT") ||
+      query.trim().toUpperCase().startsWith("WITH"),
+    [query],
+  );
+
+  const isDestructive = useMemo(() => {
+    const q = query.trim().toUpperCase();
+
+    return [
+      "UPDATE",
+      "DELETE",
+      "DROP",
+      "TRUNCATE",
+      "ALTER",
+    ].some((k) => q.startsWith(k));
+  }, [query]);
+
+  const { mutate: executeSql, isPending } = useMutation({
+    mutationFn: async ({ sql, page, size }) => {
+      return await callApi(
+        "/TS/admin-support/admin-execute",
+        { sql, page, size },
+        "POST",
+      );
+    },
+
+    onSuccess: (data) => {
+      setLastResponse(data);
+
+      if (data?.error) {
+        setResults({
+          rows: [],
+          columns: [],
+          total: 0,
+        });
+
+        setActiveTab(1);
+
+        return;
+      }
+
+      if (isSelect) {
+        const formattedCols = (data?.columns || []).map((col) => ({
+          field: col.name,
+          headerName: col.name,
+          flex: 1,
+          minWidth: 150,
+        }));
+
+        setResults({
+          rows: data?.rows || [],
+          columns: formattedCols,
+          total: data?.total || 0,
+        });
+
+        setActiveTab(0);
+      } else {
+        setResults({
+          rows: [],
+          columns: [],
+          total: 0,
+        });
+
+        setActiveTab(1);
+      }
+    },
+
+    onError: (err) => {
+      setLastResponse({
+        error: true,
+        message: err?.message || "Internal Server Error",
+      });
+
+      setActiveTab(1);
+    },
+  });
+
+  const handleRun = (resetPage = false) => {
+    const trimmedQuery = query.trim();
+
+    if (!trimmedQuery) {
+      showSnackbar("Please enter query", "warning");
+      return;
+    }
+
+    setLastResponse(null);
+
+    const targetPage = resetPage ? 0 : paginationModel.page;
+
+    if (resetPage) {
+      setPaginationModel((p) => ({
+        ...p,
+        page: 0,
+      }));
+    }
+
+    executeSql({
+      sql: query,
+      page: targetPage,
+      size: paginationModel.pageSize,
+    });
+  };
+
+  useEffect(() => {
+    if (results.columns.length > 0 && isSelect) {
+      handleRun();
+    }
+  }, [paginationModel.page, paginationModel.pageSize]);
+
+  const handleFileUpload = async (e) => {
+    try {
+      const file = e.target.files[0];
+
+      if (!file) return;
+
+      if (!file.name.endsWith(".sql")) {
+        showSnackbar("Only .sql files allowed", "error");
+        return;
+      }
+
+      const formData = new FormData();
+
+      formData.append("file", file);
+
+      const response = await fetch(
+        "/TS/admin-support/upload-script",
+        {
+          method: "POST",
+          body: formData,
+        },
+      );
+
+      const data = await response.json();
+
+      if (data.error) {
+        showSnackbar(data.message, "error");
+        return;
+      }
+
+      setJobId(data.jobId);
+
+      showSnackbar("Upload successful. Execution started.", "success");
+
+      setActiveTab(1);
+    } catch (e) {
+      showSnackbar("Upload failed", "error");
+    }
+  };
+
+  useEffect(() => {
+    if (!jobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(
+          `/TS/admin-support/job-status/${jobId}`,
+        );
+
+        const data = await res.json();
+
+        setJobStatus(data);
+
+        if (
+          data.status === "COMPLETED" ||
+          data.status === "FAILED"
+        ) {
+          clearInterval(interval);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [jobId]);
+
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        p: 1,
+        height: "100%",
+      }}
+    >
+      <Paper
+        elevation={0}
+        sx={{
+          px: 3,
+          py: 1,
+          borderRadius: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <Stack direction="row" spacing={2} alignItems="center">
+          <AssessmentOutlined color="primary" />
+
+          <Box>
+            <Typography variant="subtitle2" fontWeight={700}>
+              FINCORE ADMIN SUPPORT
+            </Typography>
+
+            <Typography variant="caption">
+              Connected and ready
+            </Typography>
+          </Box>
+        </Stack>
+
+        <Stack direction="row" spacing={1}>
+          <Button
+            component="label"
+            variant="outlined"
+            startIcon={<UploadFile />}
+          >
+            Upload SQL
+            <input
+              hidden
+              type="file"
+              accept=".sql"
+              onChange={handleFileUpload}
+            />
+          </Button>
+
+          <Tooltip title="Clear">
+            <IconButton onClick={() => setQuery("")}>
+              <CleaningServices />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title="Copy">
+            <IconButton
+              onClick={() =>
+                navigator.clipboard.writeText(query)
+              }
+            >
+              <ContentCopy />
+            </IconButton>
+          </Tooltip>
+
+          <Button
+            variant="contained"
+            color={isDestructive ? "error" : "primary"}
+            startIcon={<PlayArrow />}
+            disabled={isPending}
+            onClick={() =>
+              isDestructive
+                ? setConfirmOpen(true)
+                : handleRun(true)
+            }
+          >
+            Execute
+          </Button>
+        </Stack>
+      </Paper>
+
+      {isPending && (
+        <LinearProgress sx={{ mt: 1 }} />
+      )}
+
+      {jobStatus && (
+        <Paper sx={{ p: 2, mt: 1 }}>
+          <Typography fontWeight={700}>
+            Script Execution Status
+          </Typography>
+
+          <Typography variant="body2">
+            Status: {jobStatus.status}
+          </Typography>
+
+          <Typography variant="body2">
+            Executed:
+            {" "}
+            {jobStatus.executedCount}
+            {" / "}
+            {jobStatus.totalCount}
+          </Typography>
+
+          <LinearProgress
+            variant="determinate"
+            value={
+              jobStatus.totalCount
+                ? (jobStatus.executedCount /
+                    jobStatus.totalCount) *
+                  100
+                : 0
+            }
+            sx={{ mt: 1 }}
+          />
+        </Paper>
+      )}
+
+      <Box sx={{ flex: 1, mt: 1 }}>
+        <Tabs
+          value={activeTab}
+          onChange={(e, v) => setActiveTab(v)}
+        >
+          <Tab
+            icon={<TableChart />}
+            label="Data Grid"
+          />
+
+          <Tab
+            icon={<ListAlt />}
+            label="Messages"
+          />
+        </Tabs>
+
+        {activeTab === 0 && (
+          <DataGrid
+            rows={results.rows}
+            columns={results.columns}
+            rowCount={results.total}
+            paginationMode="server"
+            paginationModel={paginationModel}
+            onPaginationModelChange={setPaginationModel}
+            loading={isPending}
+            disableRowSelectionOnClick
+            pageSizeOptions={[5, 10, 25, 50]}
+            getRowId={(row) =>
+              row.ID || row.id || Math.random()
+            }
+            slots={{
+              toolbar: GridToolbar,
+            }}
+            sx={{
+              border: "none",
+              height: 500,
+              "& .MuiDataGrid-columnHeaders": {
+                bgcolor: alpha(
+                  theme.palette.action.hover,
+                  0.4,
+                ),
+              },
+            }}
+          />
+        )}
+
+        {activeTab === 1 && (
+          <Box sx={{ p: 2 }}>
+            {!lastResponse && (
+              <Typography color="text.secondary">
+                Waiting for execution...
+              </Typography>
+            )}
+
+            {lastResponse?.error && (
+              <Alert severity="error">
+                <AlertTitle>Error</AlertTitle>
+                {lastResponse.message}
+              </Alert>
+            )}
+
+            {lastResponse &&
+              !lastResponse.error && (
+                <Alert severity="success">
+                  <AlertTitle>Execution Log</AlertTitle>
+
+                  {lastResponse?.rows?.[0]?.RESULT ||
+                    "Completed successfully"}
+                </Alert>
+              )}
+          </Box>
+        )}
+      </Box>
+
+      <Dialog
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+      >
+        <DialogTitle>
+          Confirm Query Execution
+        </DialogTitle>
+
+        <DialogContent>
+          <Typography>
+            Are you sure you want to execute this
+            destructive query?
+          </Typography>
+        </DialogContent>
+
+        <DialogActions>
+          <Button
+            onClick={() => setConfirmOpen(false)}
+          >
+            Cancel
+          </Button>
+
+          <Button
+            variant="contained"
+            color="error"
+            onClick={() => {
+              setConfirmOpen(false);
+              handleRun(true);
+            }}
+          >
+            Confirm
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default AdminSupport;
+
+
 package com.fincore.transactions_service.service;
 
 import com.fincore.transactions_service.dto.AdminSupportDTO;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.sql.ResultSetMetaData;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @Slf4j
 @Service("AdminSupportService")
 @RequiredArgsConstructor
-public class AdminSupportServiceImpl implements AdminSupportService {
+public class AdminSupportServiceImpl
+        implements AdminSupportService {
 
     private final JdbcTemplate jdbcTemplate;
 
     @Override
-    public Map<String, Object> executeAdminSql(AdminSupportDTO adminSupportDTO) {
-        String rawSql = adminSupportDTO.getSql().trim();
+    public Map<String, Object> executeAdminSql(
+            AdminSupportDTO dto
+    ) {
 
-        // 1. Split script by semicolon
-        String[] statements = rawSql.split(";");
+        try {
 
-        // Filter out empty lines/comments to get "Real" statements
-        List<String> cleanStatements = new ArrayList<>();
-        for (String s : statements) {
-            String clean = s.replaceAll("(?m)^--.*", "").trim();
-            if (!clean.isEmpty()) cleanStatements.add(clean);
-        }
+            String sql = dto.getSql().trim();
 
-        // 2. LOGIC: Is this a single SELECT query?
-        boolean isSingleSelect = cleanStatements.size() == 1 &&
-                cleanStatements.get(0).toUpperCase().startsWith("SELECT");
+            if (isBlocked(sql)) {
+                return Map.of(
+                        "error",
+                        true,
+                        "message",
+                        "Blocked dangerous SQL"
+                );
+            }
 
-        log.info("Admin SQL Request - Mode: {}", isSingleSelect ? "SELECT_GRID" : "SCRIPT_EXECUTION");
+            boolean isSelect = isSelectQuery(sql);
 
-        int page = (adminSupportDTO.getPage() != null) ? adminSupportDTO.getPage() : 0;
-        int size = (adminSupportDTO.getSize() != null) ? adminSupportDTO.getSize() : 5;
+            int page =
+                    dto.getPage() != null
+                            ? dto.getPage()
+                            : 0;
 
-        if (isSingleSelect) {
-            String executableSelect = cleanStatements.get(0);
-            try {
-                // A. Syntax Validation (EXPLAIN PLAN)
+            int size =
+                    dto.getSize() != null
+                            ? dto.getSize()
+                            : 5;
+
+            if (isSelect) {
+
                 try {
-                    jdbcTemplate.execute("EXPLAIN PLAN FOR " + executableSelect);
-                } catch (DataAccessException e) {
-                    return Map.of("error", true, "message", "Oracle Syntax Error: " + e.getMostSpecificCause().getMessage());
-                }
 
-                // B. Count records for Pagination
-                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
-                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
-                final Integer finalTotal = (total == null) ? 0 : total;
+                    jdbcTemplate.execute(
+                            "EXPLAIN PLAN FOR " + sql
+                    );
 
-                // C. Paginated Query (Oracle 12c+)
-                String paginatedSql = String.format("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", executableSelect, (page * size), size);
-
-                return jdbcTemplate.query(paginatedSql, rs -> {
-                    ResultSetMetaData metaData = rs.getMetaData();
-                    int columnCount = metaData.getColumnCount();
-
-                    List<Map<String, String>> columns = new ArrayList<>();
-                    for (int i = 1; i <= columnCount; i++) {
-                        columns.add(Map.of("name", metaData.getColumnLabel(i)));
-                    }
-
-                    List<Map<String, Object>> rows = new ArrayList<>();
-                    while (rs.next()) {
-                        Map<String, Object> row = new HashMap<>();
-                        for (int i = 1; i <= columnCount; i++) {
-                            Object value = rs.getObject(i);
-                            if (value instanceof java.io.InputStream) value = "[BLOB DATA]";
-                            else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) value = value.toString();
-                            row.put(metaData.getColumnLabel(i), value);
-                        }
-                        rows.add(row);
-                    }
+                } catch (Exception e) {
 
                     return Map.of(
-                            "columns", columns, "rows", rows, "total", finalTotal,
-                            "page", page, "size", size, "error", false
+                            "error",
+                            true,
+                            "message",
+                            e.getMessage()
                     );
-                });
-
-            } catch (Exception e) {
-                log.error("Execution Error", e);
-                return Map.of("error", true, "message", "Execution failed: " + e.getMessage());
-            }
-        } else {
-            // 3. SCRIPT EXECUTION (DDL or Multiple Statements)
-            try {
-                int successfulStatements = 0;
-                for (String execSql : cleanStatements) {
-                    try {
-                        jdbcTemplate.execute(execSql);
-                        successfulStatements++;
-                    } catch (DataAccessException e) {
-                        throw new RuntimeException("Error in statement " + (successfulStatements + 1) + ": " + e.getMostSpecificCause().getMessage());
-                    }
                 }
-                return Map.of(
-                        "error", false,
-                        "columns", List.of(Map.of("name", "RESULT")),
-                        "rows", List.of(Map.of("RESULT", "Script completed successfully. " + successfulStatements + " statements processed.")),
-                        "total", successfulStatements
+
+                String countSql =
+                        "SELECT COUNT(*) FROM (" +
+                                sql +
+                                ")";
+
+                Integer total =
+                        jdbcTemplate.queryForObject(
+                                countSql,
+                                Integer.class
+                        );
+
+                String paginatedSql =
+                        sql +
+                                " OFFSET " +
+                                (page * size) +
+                                " ROWS FETCH NEXT " +
+                                size +
+                                " ROWS ONLY";
+
+                return jdbcTemplate.query(
+                        paginatedSql,
+                        rs -> {
+
+                            ResultSetMetaData meta =
+                                    rs.getMetaData();
+
+                            int columnCount =
+                                    meta.getColumnCount();
+
+                            List<Map<String, String>>
+                                    columns =
+                                    new ArrayList<>();
+
+                            for (
+                                    int i = 1;
+                                    i <= columnCount;
+                                    i++
+                            ) {
+
+                                columns.add(
+                                        Map.of(
+                                                "name",
+                                                meta.getColumnLabel(i)
+                                        )
+                                );
+                            }
+
+                            List<Map<String, Object>>
+                                    rows =
+                                    new ArrayList<>();
+
+                            while (rs.next()) {
+
+                                Map<String, Object>
+                                        row =
+                                        new HashMap<>();
+
+                                for (
+                                        int i = 1;
+                                        i <= columnCount;
+                                        i++
+                                ) {
+
+                                    Object value =
+                                            rs.getObject(i);
+
+                                    row.put(
+                                            meta.getColumnLabel(i),
+                                            value
+                                    );
+                                }
+
+                                rows.add(row);
+                            }
+
+                            return Map.of(
+                                    "error",
+                                    false,
+                                    "columns",
+                                    columns,
+                                    "rows",
+                                    rows,
+                                    "total",
+                                    total,
+                                    "page",
+                                    page,
+                                    "size",
+                                    size
+                            );
+                        }
                 );
-            } catch (Exception e) {
-                log.error("Script Error", e);
-                return Map.of("error", true, "message", e.getMessage());
             }
+
+            jdbcTemplate.execute(sql);
+
+            return Map.of(
+                    "error",
+                    false,
+                    "columns",
+                    List.of(
+                            Map.of(
+                                    "name",
+                                    "RESULT"
+                            )
+                    ),
+                    "rows",
+                    List.of(
+                            Map.of(
+                                    "RESULT",
+                                    "Query executed successfully"
+                            )
+                    ),
+                    "total",
+                    1
+            );
+
+        } catch (DataAccessException e) {
+
+            log.error("SQL Execution Error", e);
+
+            return Map.of(
+                    "error",
+                    true,
+                    "message",
+                    e.getMostSpecificCause().getMessage()
+            );
+        } catch (Exception e) {
+
+            log.error("Execution Error", e);
+
+            return Map.of(
+                    "error",
+                    true,
+                    "message",
+                    e.getMessage()
+            );
         }
+    }
+
+    private boolean isSelectQuery(String sql) {
+
+        String clean =
+                sql.trim().toUpperCase();
+
+        return clean.startsWith("SELECT")
+                || clean.startsWith("WITH");
+    }
+
+    private boolean isBlocked(String sql) {
+
+        String upper =
+                sql.toUpperCase();
+
+        List<String> blocked =
+                List.of(
+                        "ALTER SYSTEM",
+                        "DROP DATABASE",
+                        "SHUTDOWN",
+                        "CREATE USER"
+                );
+
+        return blocked.stream()
+                .anyMatch(upper::contains);
+    }
+}
+
+
+package com.fincore.transactions_service.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+
+import java.io.BufferedReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class AdminSupportExecutor {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    @Async("sqlExecutor")
+    public void executeScriptAsync(
+            Path path,
+            String jobId
+    ) {
+
+        try (
+                BufferedReader reader =
+                        Files.newBufferedReader(path)
+        ) {
+
+            StringBuilder statement =
+                    new StringBuilder();
+
+            String line;
+
+            int count = 0;
+
+            while ((line = reader.readLine()) != null) {
+
+                String trimmed =
+                        line.trim();
+
+                if (
+                        trimmed.startsWith("--")
+                ) {
+                    continue;
+                }
+
+                statement
+                        .append(line)
+                        .append("\n");
+
+                if (
+                        trimmed.endsWith(";")
+                ) {
+
+                    String sql =
+                            statement.toString();
+
+                    sql =
+                            sql.substring(
+                                    0,
+                                    sql.lastIndexOf(";")
+                            );
+
+                    jdbcTemplate.execute(sql);
+
+                    statement.setLength(0);
+
+                    count++;
+
+                    log.info(
+                            "Processed {} statements",
+                            count
+                    );
+                }
+            }
+
+            log.info(
+                    "Script completed"
+            );
+
+        } catch (Exception e) {
+
+            log.error(
+                    "Script execution failed",
+                    e
+            );
+        }
+    }
+}
+
+
+
+package com.fincore.transactions_service.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import org.springframework.scheduling.annotation.EnableAsync;
+
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.util.concurrent.Executor;
+
+@Configuration
+@EnableAsync
+public class AsyncConfig {
+
+    @Bean(name = "sqlExecutor")
+    public Executor sqlExecutor() {
+
+        ThreadPoolTaskExecutor executor =
+                new ThreadPoolTaskExecutor();
+
+        executor.setCorePoolSize(2);
+
+        executor.setMaxPoolSize(5);
+
+        executor.setQueueCapacity(10);
+
+        executor.setThreadNamePrefix(
+                "SQL-EXECUTOR-"
+        );
+
+        executor.initialize();
+
+        return executor;
     }
 }
