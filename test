@@ -1,196 +1,296 @@
 package com.fincore.transactions_service.service;
 
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+
+import jakarta.servlet.http.HttpServletRequest;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import javax.sql.DataSource;
-
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-
-import java.sql.Connection;
-import java.sql.Statement;
+import java.sql.ResultSetMetaData;
+import java.sql.Types;
 
 import java.time.Duration;
 import java.time.Instant;
 
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
 
 @Slf4j
-@Service
+@Service("AdminSupportService")
 @RequiredArgsConstructor
-public class AdminSupportExecutor {
-
-    private final DataSource dataSource;
+public class AdminSupportServiceImpl implements AdminSupportService {
 
     private final JdbcTemplate jdbcTemplate;
 
-    /**
-     * CHANGE THIS FOR PERFORMANCE
-     */
-    private static final int COMMIT_BATCH_SIZE = 1000;
+    private final AdminSupportExecutor adminSupportExecutor;
+
+    private final HttpServletRequest request;
 
     /**
-     * JOB STATUS STORE
+     * SQL EXECUTION
      */
-    private final Map<String, Map<String, Object>> jobStatusMap =
-            new ConcurrentHashMap<>();
-
-    /**
-     * ASYNC SQL EXECUTION
-     */
-    @Async("sqlExecutor")
-    public void executeScriptAsync(
-            byte[] fileBytes,
-            String fileName,
-            String jobId,
-            String userId,
-            String clientIp
-    ) {
+    @Override
+    public Map<String, Object> executeAdminSql(AdminSupportDTO dto) {
 
         Instant start = Instant.now();
 
-        Connection connection = null;
+        String userId = request.getHeader("userId");
 
-        BufferedReader reader = null;
+        String clientIp = getClientIp();
 
-        int executed = 0;
+        String jobId = UUID.randomUUID().toString();
 
-        int insertCount = 0;
-        int updateCount = 0;
-        int deleteCount = 0;
-        int otherCount = 0;
+        String rawSql = dto.getSql().trim();
 
-        int totalStatements = 0;
-
-        int failedStatementNumber = 0;
-
-        double executionSpeed = 0;
-
-        String failedSql = null;
+        log.info("""
+                
+                ADMIN SQL EXECUTION STARTED
+                | jobId={}
+                | userId={}
+                | ip={}
+                | page={}
+                | size={}
+                | sql={}
+                """,
+                jobId,
+                userId,
+                clientIp,
+                dto.getPage(),
+                dto.getSize(),
+                rawSql
+        );
 
         try {
 
-            log.info("""
-                    SQL EXECUTION STARTED
-                    | jobId={}
-                    | file={}
-                    | user={}
-                    | ip={}
-                    | batchCommit={}
-                    """,
-                    jobId,
-                    fileName,
-                    userId,
-                    clientIp,
-                    COMMIT_BATCH_SIZE
-            );
-
             /**
-             * INITIAL STATUS
+             * CLEAN STATEMENTS
              */
-            jobStatusMap.put(jobId, new ConcurrentHashMap<>());
+            String[] statements = rawSql.split(";");
 
-            jobStatusMap.get(jobId).put("status", "RUNNING");
-            jobStatusMap.get(jobId).put("executedCount", 0);
-            jobStatusMap.get(jobId).put("insertCount", 0);
-            jobStatusMap.get(jobId).put("updateCount", 0);
-            jobStatusMap.get(jobId).put("deleteCount", 0);
-            jobStatusMap.get(jobId).put("otherCount", 0);
-            jobStatusMap.get(jobId).put("progress", 0);
+            List<String> cleanStatements = new ArrayList<>();
 
-            connection = dataSource.getConnection();
+            for (String s : statements) {
 
-            connection.setAutoCommit(false);
+                String clean =
+                        s.replaceAll("(?m)^--.*", "")
+                                .trim();
 
-            Statement statement = connection.createStatement();
+                if (!clean.isEmpty()) {
 
-            reader = new BufferedReader(
-                    new InputStreamReader(
-                            new java.io.ByteArrayInputStream(fileBytes)
-                    )
-            );
-
-            /**
-             * PRECOUNT TOTAL STATEMENTS
-             */
-            BufferedReader counterReader = new BufferedReader(
-                    new InputStreamReader(
-                            new java.io.ByteArrayInputStream(fileBytes)
-                    )
-            );
-
-            String counterLine;
-
-            while ((counterLine = counterReader.readLine()) != null) {
-
-                if (counterLine.trim().endsWith(";")) {
-                    totalStatements++;
+                    cleanStatements.add(clean);
                 }
             }
 
-            log.info(
-                    "TOTAL STATEMENTS DETECTED | jobId={} | total={}",
-                    jobId,
-                    totalStatements
-            );
+            boolean isSingleSelect =
+                    cleanStatements.size() == 1
+                            &&
+                            (
+                                    cleanStatements.get(0)
+                                            .toUpperCase()
+                                            .startsWith("SELECT")
 
-            StringBuilder sqlBuilder = new StringBuilder();
+                                            ||
 
-            String line;
+                                            cleanStatements.get(0)
+                                                    .toUpperCase()
+                                                    .startsWith("WITH")
+                            );
 
-            int currentLine = 0;
+            int page = dto.getPage() != null
+                    ? dto.getPage()
+                    : 0;
 
-            while ((line = reader.readLine()) != null) {
+            int size = dto.getSize() != null
+                    ? dto.getSize()
+                    : 10;
 
-                currentLine++;
+            /**
+             * SELECT
+             */
+            if (isSingleSelect) {
 
-                String trimmed = line.trim();
+                String sql = cleanStatements.get(0);
 
-                /**
-                 * IGNORE COMMENTS
-                 */
-                if (trimmed.startsWith("--")
-                        || trimmed.isBlank()) {
-                    continue;
+                String countSql =
+                        "SELECT COUNT(*) FROM (" + sql + ")";
+
+                Integer total =
+                        jdbcTemplate.queryForObject(
+                                countSql,
+                                Integer.class
+                        );
+
+                String paginatedSql =
+                        sql
+                                + " OFFSET "
+                                + (page * size)
+                                + " ROWS FETCH NEXT "
+                                + size
+                                + " ROWS ONLY";
+
+                List<Map<String, Object>> rows =
+                        jdbcTemplate.query(
+                                paginatedSql,
+                                (rs, rowNum) -> {
+
+                                    ResultSetMetaData meta =
+                                            rs.getMetaData();
+
+                                    int columnCount =
+                                            meta.getColumnCount();
+
+                                    Map<String, Object> row =
+                                            new LinkedHashMap<>();
+
+                                    for (int i = 1;
+                                         i <= columnCount;
+                                         i++) {
+
+                                        String column =
+                                                meta.getColumnLabel(i);
+
+                                        int type =
+                                                meta.getColumnType(i);
+
+                                        Object value;
+
+                                        switch (type) {
+
+                                            case Types.CLOB:
+
+                                                value =
+                                                        rs.getClob(i) != null
+                                                                ?
+                                                                rs.getClob(i)
+                                                                        .getSubString(
+                                                                                1,
+                                                                                (int)
+                                                                                        rs.getClob(i)
+                                                                                                .length()
+                                                                        )
+                                                                :
+                                                                null;
+
+                                                break;
+
+                                            default:
+
+                                                value =
+                                                        rs.getObject(i);
+                                        }
+
+                                        row.put(column, value);
+                                    }
+
+                                    return row;
+                                }
+                        );
+
+                List<Map<String, String>> columns =
+                        new ArrayList<>();
+
+                if (!rows.isEmpty()) {
+
+                    rows.get(0)
+                            .keySet()
+                            .forEach(col -> {
+
+                                columns.add(
+                                        Map.of(
+                                                "name",
+                                                col
+                                        )
+                                );
+                            });
                 }
 
-                sqlBuilder.append(line).append("\n");
+                long timeMs =
+                        Duration.between(start, Instant.now())
+                                .toMillis();
 
                 /**
-                 * END OF SQL
+                 * INSERT LOG
                  */
-                if (trimmed.endsWith(";")) {
+                insertExecutionLog(
+                        jobId,
+                        userId,
+                        clientIp,
+                        null,
+                        "SELECT",
+                        "SUCCESS",
+                        1,
+                        rows.size(),
+                        0,
+                        0,
+                        0,
+                        1,
+                        null,
+                        null,
+                        null,
+                        null,
+                        calculateSpeed(rows.size(), timeMs),
+                        timeMs / 1000,
+                        sql
+                );
 
-                    String sql = sqlBuilder.toString().trim();
+                log.info("""
+                        
+                        SELECT EXECUTED
+                        | jobId={}
+                        | rows={}
+                        | total={}
+                        | page={}
+                        | size={}
+                        | timeMs={}
+                        """,
+                        jobId,
+                        rows.size(),
+                        total,
+                        page,
+                        size,
+                        timeMs
+                );
 
-                    sql = sql.substring(0, sql.lastIndexOf(";"));
+                return Map.of(
+                        "error", false,
+                        "rows", rows,
+                        "columns", columns,
+                        "total", total,
+                        "page", page,
+                        "size", size
+                );
+            }
 
-                    failedSql = sql;
+            /**
+             * SCRIPT EXECUTION
+             */
+            else {
 
-                    failedStatementNumber = executed + 1;
+                int insertCount = 0;
+                int updateCount = 0;
+                int deleteCount = 0;
+                int otherCount = 0;
 
-                    /**
-                     * SQL TYPE COUNTER
-                     */
-                    String upperSql = sql.toUpperCase();
+                int executed = 0;
 
-                    if (upperSql.startsWith("INSERT")) {
+                for (String sql : cleanStatements) {
+
+                    String upper =
+                            sql.trim().toUpperCase();
+
+                    if (upper.startsWith("INSERT")) {
 
                         insertCount++;
 
-                    } else if (upperSql.startsWith("UPDATE")) {
+                    } else if (upper.startsWith("UPDATE")) {
 
                         updateCount++;
 
-                    } else if (upperSql.startsWith("DELETE")) {
+                    } else if (upper.startsWith("DELETE")) {
 
                         deleteCount++;
 
@@ -199,313 +299,199 @@ public class AdminSupportExecutor {
                         otherCount++;
                     }
 
-                    /**
-                     * EXECUTE
-                     */
-                    statement.execute(sql);
+                    jdbcTemplate.execute(sql);
 
                     executed++;
-
-                    /**
-                     * EXECUTION SPEED
-                     */
-                    long elapsedSeconds =
-                            Duration.between(start, Instant.now())
-                                    .toSeconds();
-
-                    if (elapsedSeconds > 0) {
-
-                        executionSpeed =
-                                (double) executed / elapsedSeconds;
-                    }
-
-                    /**
-                     * PROGRESS %
-                     */
-                    double progress = totalStatements == 0
-                            ? 0
-                            : ((double) executed / totalStatements) * 100;
-
-                    /**
-                     * ETA
-                     */
-                    long etaSeconds = 0;
-
-                    if (executionSpeed > 0) {
-
-                        etaSeconds =
-                                (long) ((totalStatements - executed)
-                                        / executionSpeed);
-                    }
-
-                    /**
-                     * UPDATE UI STATUS
-                     */
-                    jobStatusMap.get(jobId).put(
-                            "status",
-                            "RUNNING"
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "executedCount",
-                            executed
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "insertCount",
-                            insertCount
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "updateCount",
-                            updateCount
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "deleteCount",
-                            deleteCount
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "otherCount",
-                            otherCount
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "progress",
-                            progress
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "totalStatements",
-                            totalStatements
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "executionSpeed",
-                            String.format("%.2f", executionSpeed)
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "etaSeconds",
-                            etaSeconds
-                    );
-
-                    jobStatusMap.get(jobId).put(
-                            "currentStatement",
-                            failedStatementNumber
-                    );
-
-                    /**
-                     * COMMIT BATCH
-                     */
-                    if (executed % COMMIT_BATCH_SIZE == 0) {
-
-                        connection.commit();
-
-                        log.info("""
-                                BATCH COMMIT
-                                | jobId={}
-                                | committed={}
-                                | progress={}%
-                                | speed={} stmt/sec
-                                """,
-                                jobId,
-                                executed,
-                                String.format("%.2f", progress),
-                                String.format("%.2f", executionSpeed)
-                        );
-                    }
-
-                    /**
-                     * CLEAR
-                     */
-                    sqlBuilder.setLength(0);
                 }
+
+                long timeMs =
+                        Duration.between(start, Instant.now())
+                                .toMillis();
+
+                /**
+                 * LOG
+                 */
+                insertExecutionLog(
+                        jobId,
+                        userId,
+                        clientIp,
+                        null,
+                        "MULTI_SQL",
+                        "SUCCESS",
+                        cleanStatements.size(),
+                        executed,
+                        insertCount,
+                        updateCount,
+                        deleteCount,
+                        otherCount,
+                        null,
+                        null,
+                        null,
+                        null,
+                        calculateSpeed(executed, timeMs),
+                        timeMs / 1000,
+                        rawSql
+                );
+
+                log.info("""
+                        
+                        MULTI SQL EXECUTED
+                        | jobId={}
+                        | total={}
+                        | inserts={}
+                        | updates={}
+                        | deletes={}
+                        | others={}
+                        | timeMs={}
+                        """,
+                        jobId,
+                        executed,
+                        insertCount,
+                        updateCount,
+                        deleteCount,
+                        otherCount,
+                        timeMs
+                );
+
+                return Map.of(
+                        "error", false,
+                        "message", "Execution completed",
+                        "executed", executed,
+                        "insertCount", insertCount,
+                        "updateCount", updateCount,
+                        "deleteCount", deleteCount,
+                        "otherCount", otherCount
+                );
             }
 
-            /**
-             * FINAL COMMIT
-             */
-            connection.commit();
+        } catch (Exception e) {
 
-            long totalSeconds =
+            long timeMs =
                     Duration.between(start, Instant.now())
-                            .toSeconds();
+                            .toMillis();
 
-            /**
-             * FINAL STATUS
-             */
-            jobStatusMap.get(jobId).put(
-                    "status",
-                    "COMPLETED"
+            log.error("""
+                    
+                    ADMIN SQL EXECUTION FAILED
+                    | jobId={}
+                    | userId={}
+                    | sql={}
+                    """,
+                    jobId,
+                    userId,
+                    rawSql,
+                    e
             );
 
-            jobStatusMap.get(jobId).put(
-                    "completedAt",
-                    Instant.now().toString()
-            );
-
-            jobStatusMap.get(jobId).put(
-                    "elapsedSeconds",
-                    totalSeconds
-            );
-
-            /**
-             * INSERT FINAL LOG
-             */
             insertExecutionLog(
                     jobId,
                     userId,
                     clientIp,
-                    fileName,
-                    "UPLOAD_SCRIPT",
-                    "COMPLETED",
-                    totalStatements,
-                    executed,
-                    insertCount,
-                    updateCount,
-                    deleteCount,
-                    otherCount,
                     null,
-                    null,
-                    null,
-                    null,
-                    executionSpeed,
-                    totalSeconds,
-                    "SCRIPT EXECUTION COMPLETED"
+                    "SQL_EXECUTION",
+                    "FAILED",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                    rawSql,
+                    e.getClass().getSimpleName(),
+                    e.getMessage(),
+                    0,
+                    timeMs / 1000,
+                    rawSql
             );
 
+            return Map.of(
+                    "error", true,
+                    "message", e.getMessage()
+            );
+        }
+    }
+
+    /**
+     * FILE UPLOAD
+     */
+    @Override
+    public Map<String, Object> uploadSqlFile(
+            MultipartFile file
+    ) {
+
+        try {
+
+            String jobId =
+                    UUID.randomUUID().toString();
+
+            String userId =
+                    request.getHeader("userId");
+
+            String clientIp =
+                    getClientIp();
+
             log.info("""
-                    SQL EXECUTION COMPLETED
+                    
+                    SQL UPLOAD RECEIVED
                     | jobId={}
-                    | total={}
-                    | inserts={}
-                    | updates={}
-                    | deletes={}
-                    | others={}
-                    | time={} sec
-                    | speed={} stmt/sec
+                    | file={}
+                    | size={} MB
+                    | user={}
+                    | ip={}
                     """,
                     jobId,
-                    executed,
-                    insertCount,
-                    updateCount,
-                    deleteCount,
-                    otherCount,
-                    totalSeconds,
-                    String.format("%.2f", executionSpeed)
+                    file.getOriginalFilename(),
+                    String.format(
+                            "%.2f",
+                            file.getSize() / 1024.0 / 1024.0
+                    ),
+                    userId,
+                    clientIp
+            );
+
+            /**
+             * COPY FILE INTO MEMORY
+             */
+            byte[] bytes = file.getBytes();
+
+            /**
+             * EXECUTE ASYNC
+             */
+            adminSupportExecutor.executeScriptAsync(
+                    bytes,
+                    file.getOriginalFilename(),
+                    jobId,
+                    userId,
+                    clientIp
+            );
+
+            return Map.of(
+                    "error", false,
+                    "jobId", jobId,
+                    "message", "Execution started"
             );
 
         } catch (Exception e) {
 
-            log.error("""
-                    SQL EXECUTION FAILED
-                    | jobId={}
-                    | failedStatement={}
-                    | executed={}
-                    | failedSql={}
-                    """,
-                    jobId,
-                    failedStatementNumber,
-                    executed,
-                    failedSql,
-                    e
+            log.error("UPLOAD FAILED", e);
+
+            return Map.of(
+                    "error", true,
+                    "message", e.getMessage()
             );
-
-            try {
-
-                if (connection != null) {
-
-                    connection.rollback();
-
-                    log.error(
-                            "ROLLBACK COMPLETED | jobId={}",
-                            jobId
-                    );
-                }
-
-            } catch (Exception rollbackEx) {
-
-                log.error(
-                        "ROLLBACK FAILED | jobId={}",
-                        jobId,
-                        rollbackEx
-                );
-            }
-
-            long totalSeconds =
-                    Duration.between(start, Instant.now())
-                            .toSeconds();
-
-            /**
-             * UPDATE STATUS
-             */
-            if (jobStatusMap.containsKey(jobId)) {
-
-                jobStatusMap.get(jobId).put(
-                        "status",
-                        "FAILED"
-                );
-
-                jobStatusMap.get(jobId).put(
-                        "message",
-                        e.getMessage()
-                );
-
-                jobStatusMap.get(jobId).put(
-                        "failedStatement",
-                        failedStatementNumber
-                );
-
-                jobStatusMap.get(jobId).put(
-                        "failedSql",
-                        failedSql
-                );
-            }
-
-            /**
-             * INSERT FAILURE LOG
-             */
-            insertExecutionLog(
-                    jobId,
-                    userId,
-                    clientIp,
-                    fileName,
-                    "UPLOAD_SCRIPT",
-                    "FAILED",
-                    totalStatements,
-                    executed,
-                    insertCount,
-                    updateCount,
-                    deleteCount,
-                    otherCount,
-                    failedStatementNumber,
-                    failedSql,
-                    e.getClass().getSimpleName(),
-                    e.getMessage(),
-                    executionSpeed,
-                    totalSeconds,
-                    failedSql
-            );
-
-        } finally {
-
-            try {
-
-                if (reader != null) {
-                    reader.close();
-                }
-
-                if (connection != null) {
-                    connection.close();
-                }
-
-            } catch (Exception ex) {
-
-                log.error("RESOURCE CLEANUP FAILED", ex);
-            }
         }
+    }
+
+    /**
+     * JOB STATUS
+     */
+    @Override
+    public Map<String, Object> getJobStatus(
+            String jobId
+    ) {
+
+        return adminSupportExecutor.getJobStatus(jobId);
     }
 
     /**
@@ -612,21 +598,38 @@ public class AdminSupportExecutor {
 
         } catch (Exception e) {
 
-            log.error("FAILED TO INSERT EXECUTION LOG", e);
+            log.error("FAILED TO INSERT LOG", e);
         }
     }
 
     /**
-     * STATUS API
+     * CALCULATE SPEED
      */
-    public Map<String, Object> getJobStatus(String jobId) {
+    private double calculateSpeed(
+            int count,
+            long timeMs
+    ) {
 
-        return jobStatusMap.getOrDefault(
-                jobId,
-                Map.of(
-                        "status",
-                        "NOT_FOUND"
-                )
-        );
+        if (timeMs <= 0) {
+            return 0;
+        }
+
+        return (count * 1000.0) / timeMs;
+    }
+
+    /**
+     * CLIENT IP
+     */
+    private String getClientIp() {
+
+        String xfHeader =
+                request.getHeader("X-Forwarded-For");
+
+        if (xfHeader == null) {
+
+            return request.getRemoteAddr();
+        }
+
+        return xfHeader.split(",")[0];
     }
 }
