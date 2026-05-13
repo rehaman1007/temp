@@ -1,913 +1,1579 @@
-package com.fincore.transactions_service.controller;
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import com.fincore.transactions_service.service.AdminSupportService;
-import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.MediaType;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.multipart.MultipartFile;
+import {
+  Box,
+  Paper,
+  Typography,
+  Button,
+  Stack,
+  Tabs,
+  Tab,
+  TextField,
+  IconButton,
+  Tooltip,
+  Divider,
+  LinearProgress,
+  Alert,
+  AlertTitle,
+  Chip,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  useTheme,
+  alpha,
+  Grid,
+  Card,
+  CardContent,
+} from "@mui/material";
 
-import java.security.Principal;
-import java.util.Map;
+import {
+  UploadFile,
+  PlayArrow,
+  CleaningServices,
+  ContentCopy,
+  CloudUpload,
+  TableChart,
+  ListAlt,
+  Terminal,
+  QueryStats,
+  AccessTime,
+  Storage,
+  CheckCircle,
+  Error,
+  Update,
+  Delete,
+  Add,
+  Speed,
+  WarningAmber,
+} from "@mui/icons-material";
 
-@Slf4j
-@RestController
-@RequestMapping("/api/admin-support")
-@RequiredArgsConstructor
-public class AdminSupportController {
+import {
+  DataGrid,
+  GridToolbar,
+} from "@mui/x-data-grid";
 
-    private final AdminSupportService adminSupportService;
+import {
+  useMutation,
+} from "@tanstack/react-query";
 
-    /**
-     * COMMAND EXECUTION
-     */
-    @PostMapping("/admin-execute")
-    public Map<String, Object> executeAdminSql(
-            @RequestBody AdminSupportDTO dto,
-            Principal principal,
-            HttpServletRequest request
-    ) {
+import useApi from "../../hooks/useApi";
 
-        String userId =
-                principal != null
-                        ? principal.getName()
-                        : "UNKNOWN";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-        log.info(
-                "ADMIN SQL EXECUTE REQUEST | userId={} | page={} | size={}",
-                userId,
-                dto.getPage(),
-                dto.getSize()
-        );
+const AdminSupport = () => {
 
-        return adminSupportService.executeAdminSql(
-                dto,
-                userId,
-                request
-        );
-    }
+  const theme = useTheme();
 
-    /**
-     * FILE UPLOAD
-     */
-    @PostMapping(
-            value = "/upload-script",
-            consumes = MediaType.MULTIPART_FORM_DATA_VALUE
-    )
-    public Map<String, Object> uploadScript(
-            @RequestParam("file") MultipartFile file,
-            Principal principal,
-            HttpServletRequest request
-    ) {
+  const { callApi } = useApi();
 
-        String userId =
-                principal != null
-                        ? principal.getName()
-                        : "UNKNOWN";
+  const showSnackbar = useCustomSnackbar();
 
-        log.info(
-                "UPLOAD SCRIPT REQUEST RECEIVED | userId={}",
-                userId
-        );
+  /**
+   * MAIN TAB
+   */
+  const [mainTab, setMainTab] = useState(0);
 
-        return adminSupportService.uploadSqlFile(
-                file,
-                userId,
-                request
-        );
-    }
+  /**
+   * OUTPUT TAB
+   */
+  const [outputTab, setOutputTab] = useState(0);
 
-    /**
-     * JOB STATUS
-     */
-    @GetMapping("/job-status/{jobId}")
-    public Map<String, Object> getJobStatus(
-            @PathVariable String jobId
-    ) {
+  /**
+   * SQL
+   */
+  const [query, setQuery] = useState("SELECT * FROM USERS");
 
-        return adminSupportService.getJobStatus(jobId);
-    }
-}
+  /**
+   * FILE
+   */
+  const [selectedFile, setSelectedFile] = useState(null);
 
+  const [dragging, setDragging] = useState(false);
 
-package com.fincore.transactions_service.service;
+  /**
+   * RESULTS
+   */
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.web.multipart.MultipartFile;
+  /**
+   * PAGINATION
+   */
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 10,
+  });
 
-import java.util.Map;
+  /**
+   * LOGS
+   */
+  const [lastResponse, setLastResponse] = useState(null);
 
-public interface AdminSupportService {
+  /**
+   * JOB
+   */
+  const [jobId, setJobId] = useState(null);
 
-    Map<String, Object> executeAdminSql(
-            AdminSupportDTO dto,
-            String userId,
-            HttpServletRequest request
+  const [jobStatus, setJobStatus] = useState(null);
+
+  /**
+   * CONFIRM
+   */
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  /**
+   * EXECUTION TIMER
+   */
+  const [executionSeconds, setExecutionSeconds] = useState(0);
+
+  const executionTimerRef = useRef(null);
+
+  /**
+   * QUERY TYPE
+   */
+  const isSelect = useMemo(() => {
+
+    const q = query.trim().toUpperCase();
+
+    return q.startsWith("SELECT")
+      || q.startsWith("WITH");
+
+  }, [query]);
+
+  /**
+   * DANGEROUS
+   */
+  const isDestructive = useMemo(() => {
+
+    const q = query.trim().toUpperCase();
+
+    return [
+      "UPDATE",
+      "DELETE",
+      "DROP",
+      "TRUNCATE",
+      "ALTER",
+    ].some((k) => q.startsWith(k));
+
+  }, [query]);
+
+  /**
+   * PAGE LEAVE WARNING
+   */
+  useEffect(() => {
+
+    const handler = (e) => {
+
+      if (
+        jobStatus?.status === "RUNNING"
+      ) {
+
+        e.preventDefault();
+
+        e.returnValue =
+          "SQL execution is still running.";
+
+      }
+    };
+
+    window.addEventListener(
+      "beforeunload",
+      handler,
     );
 
-    Map<String, Object> uploadSqlFile(
-            MultipartFile file,
-            String userId,
-            HttpServletRequest request
+    return () =>
+      window.removeEventListener(
+        "beforeunload",
+        handler,
+      );
+
+  }, [jobStatus]);
+
+  /**
+   * TIMER
+   */
+  useEffect(() => {
+
+    if (
+      jobStatus?.status === "RUNNING"
+    ) {
+
+      executionTimerRef.current =
+        setInterval(() => {
+
+          setExecutionSeconds(
+            (prev) => prev + 1,
+          );
+
+        }, 1000);
+
+    } else {
+
+      clearInterval(
+        executionTimerRef.current,
+      );
+    }
+
+    return () =>
+      clearInterval(
+        executionTimerRef.current,
+      );
+
+  }, [jobStatus?.status]);
+
+  /**
+   * EXECUTE SQL
+   */
+  const {
+    mutate: executeSql,
+    isPending,
+  } = useMutation({
+
+    mutationFn: async ({
+      sql,
+      page,
+      size,
+    }) => {
+
+      return await callApi(
+        "/TS/admin-support/admin-execute",
+        {
+          sql,
+          page,
+          size,
+        },
+        "POST",
+      );
+    },
+
+    onSuccess: (data) => {
+
+      setLastResponse(data);
+
+      if (data?.error) {
+
+        setOutputTab(1);
+
+        return;
+      }
+
+      /**
+       * SELECT
+       */
+      if (isSelect) {
+
+        const formattedCols =
+          (data?.columns || []).map(
+            (col) => ({
+              field: col.name,
+              headerName: col.name,
+              flex: 1,
+              minWidth: 180,
+            }),
+          );
+
+        setResults({
+          rows: data?.rows || [],
+          columns: formattedCols,
+          total: data?.total || 0,
+        });
+
+        setOutputTab(0);
+
+      } else {
+
+        setResults({
+          rows: [],
+          columns: [],
+          total: 0,
+        });
+
+        setOutputTab(1);
+      }
+    },
+
+    onError: (err) => {
+
+      setLastResponse({
+        error: true,
+        message:
+          err?.message
+          || "Execution failed",
+      });
+
+      setOutputTab(1);
+    },
+  });
+
+  /**
+   * RUN
+   */
+  const handleRun = (
+    resetPage = false,
+  ) => {
+
+    if (!query.trim()) {
+
+      showSnackbar(
+        "Enter query",
+        "warning",
+      );
+
+      return;
+    }
+
+    const targetPage =
+      resetPage
+        ? 0
+        : paginationModel.page;
+
+    if (resetPage) {
+
+      setPaginationModel((p) => ({
+        ...p,
+        page: 0,
+      }));
+    }
+
+    executeSql({
+      sql: query,
+      page: targetPage,
+      size:
+        paginationModel.pageSize,
+    });
+  };
+
+  /**
+   * PAGINATION
+   */
+  useEffect(() => {
+
+    if (
+      results.columns.length > 0
+      && isSelect
+    ) {
+
+      handleRun();
+    }
+
+  }, [
+    paginationModel.page,
+    paginationModel.pageSize,
+  ]);
+
+  /**
+   * FILE VALIDATE
+   */
+  const validateFile = (
+    file,
+  ) => {
+
+    if (!file) return;
+
+    if (
+      !file.name.endsWith(".sql")
+    ) {
+
+      showSnackbar(
+        "Only .sql allowed",
+        "error",
+      );
+
+      return;
+    }
+
+    setSelectedFile(file);
+  };
+
+  /**
+   * DROP
+   */
+  const handleDrop = (e) => {
+
+    e.preventDefault();
+
+    setDragging(false);
+
+    validateFile(
+      e.dataTransfer.files[0],
+    );
+  };
+
+  /**
+   * UPLOAD
+   */
+  const handleUpload =
+    async () => {
+
+      try {
+
+        if (!selectedFile) {
+
+          showSnackbar(
+            "Select SQL file",
+            "warning",
+          );
+
+          return;
+        }
+
+        setExecutionSeconds(0);
+
+        const formData =
+          new FormData();
+
+        formData.append(
+          "file",
+          selectedFile,
+        );
+
+        const data =
+          await callApi(
+            "/TS/admin-support/upload-script",
+            formData,
+            "POST",
+            "json",
+            "multipart/form-data",
+          );
+
+        if (data.error) {
+
+          showSnackbar(
+            data.message,
+            "error",
+          );
+
+          return;
+        }
+
+        setJobId(data.jobId);
+
+        setOutputTab(1);
+
+        showSnackbar(
+          "Execution started",
+          "success",
+        );
+
+      } catch (e) {
+
+        showSnackbar(
+          e.message
+          || "Upload failed",
+          "error",
+        );
+      }
+    };
+
+  /**
+   * POLLING
+   */
+  useEffect(() => {
+
+    if (!jobId) return;
+
+    const interval =
+      setInterval(async () => {
+
+        try {
+
+          const data =
+            await callApi(
+              `/TS/admin-support/job-status/${jobId}`,
+              {},
+              "GET",
+            );
+
+          setJobStatus(data);
+
+          if (
+            data.status
+            === "COMPLETED"
+
+            ||
+
+            data.status
+            === "FAILED"
+          ) {
+
+            clearInterval(
+              interval,
+            );
+          }
+
+        } catch (e) {
+
+          console.error(e);
+        }
+
+      }, 2000);
+
+    return () =>
+      clearInterval(interval);
+
+  }, [jobId]);
+
+  /**
+   * SHORTCUT
+   */
+  const handleKeyDown = (
+    e,
+  ) => {
+
+    if (
+      e.ctrlKey
+      && e.key === "Enter"
+    ) {
+
+      e.preventDefault();
+
+      handleRun(true);
+    }
+  };
+
+  /**
+   * FORMAT TIME
+   */
+  const formatSeconds = (
+    sec,
+  ) => {
+
+    if (!sec && sec !== 0)
+      return "-";
+
+    const mins = Math.floor(
+      sec / 60,
     );
 
-    Map<String, Object> getJobStatus(
-            String jobId
-    );
-}
+    const secs = sec % 60;
 
-package com.fincore.transactions_service.service;
+    return `${mins}m ${secs}s`;
+  };
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-import org.springframework.web.multipart.MultipartFile;
+  /**
+   * STATS CARD
+   */
+  const StatCard = ({
+    title,
+    value,
+    icon,
+    color,
+  }) => (
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.sql.Timestamp;
-import java.time.LocalDateTime;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+    <Card
+      elevation={0}
+      sx={{
+        borderRadius: 2,
+        border:
+          "1px solid rgba(255,255,255,0.08)",
+        background:
+          alpha(color, 0.08),
+      }}
+    >
+      <CardContent>
 
-@Slf4j
-@Service
-@RequiredArgsConstructor
-public class AdminSupportServiceImpl
-        implements AdminSupportService {
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+        >
 
-    private final JdbcTemplate jdbcTemplate;
+          <Box>
 
-    private final AdminSupportExecutor adminSupportExecutor;
+            <Typography
+              variant="caption"
+              color="text.secondary"
+            >
+              {title}
+            </Typography>
 
-    /**
-     * CHANGEABLE
-     */
-    private static final int COMMIT_BATCH_SIZE = 1000;
+            <Typography
+              variant="h5"
+              fontWeight={800}
+            >
+              {value}
+            </Typography>
 
-    /**
-     * JOB STORE
-     */
-    private final Map<String, Map<String, Object>> jobStore =
-            new ConcurrentHashMap<>();
+          </Box>
 
-    /**
-     * ADMIN EXECUTE
-     */
-    @Override
-    public Map<String, Object> executeAdminSql(
-            AdminSupportDTO dto,
-            String userId,
-            HttpServletRequest request
-    ) {
+          <Box
+            sx={{
+              color,
+            }}
+          >
+            {icon}
+          </Box>
 
-        long start = System.currentTimeMillis();
+        </Stack>
 
-        String ip = getClientIp(request);
+      </CardContent>
+    </Card>
+  );
 
-        String rawSql = dto.getSql().trim();
+  return (
 
-        int page =
-                dto.getPage() != null
-                        ? dto.getPage()
-                        : 0;
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        overflow: "hidden",
+        p: {
+          xs: 1,
+          md: 2,
+        },
+        gap: 1,
+      }}
+    >
 
-        int size =
-                dto.getSize() != null
-                        ? dto.getSize()
-                        : 5;
+      {/* HEADER */}
+      <Paper
+        elevation={0}
+        sx={{
+          p: 2,
+          borderRadius: 3,
+          background:
+            "linear-gradient(135deg,#111827,#1f2937)",
+          color: "white",
+        }}
+      >
 
-        log.info(
-                "ADMIN SQL START | user={} | ip={} | page={} | size={}",
-                userId,
-                ip,
-                page,
-                size
-        );
+        <Stack
+          direction={{
+            xs: "column",
+            md: "row",
+          }}
+          spacing={2}
+          justifyContent="space-between"
+          alignItems={{
+            xs: "flex-start",
+            md: "center",
+          }}
+        >
 
-        try {
+          <Box>
 
-            String[] statements =
-                    rawSql.split(";");
+            <Typography
+              variant="h5"
+              fontWeight={900}
+            >
+              FINCORE ADMIN SUPPORT
+            </Typography>
 
-            List<String> cleanStatements =
-                    new ArrayList<>();
+            <Typography
+              variant="body2"
+              sx={{
+                opacity: 0.8,
+              }}
+            >
+              Advanced SQL Execution Console
+            </Typography>
 
-            for (String s : statements) {
+          </Box>
 
-                String clean =
-                        s.replaceAll(
-                                "(?m)^--.*",
-                                ""
-                        ).trim();
+          <Stack
+            direction="row"
+            spacing={1}
+            flexWrap="wrap"
+          >
 
-                if (!clean.isEmpty()) {
-                    cleanStatements.add(clean);
-                }
-            }
+            <Chip
+              label="CTRL + ENTER"
+              color="primary"
+            />
 
-            boolean isSelect =
-                    cleanStatements.size() == 1
-                            &&
-                            (
-                                    cleanStatements.get(0)
-                                            .toUpperCase()
-                                            .startsWith("SELECT")
+            <Chip
+              label={
+                isDestructive
+                  ? "DESTRUCTIVE"
+                  : "SAFE"
+              }
+              color={
+                isDestructive
+                  ? "error"
+                  : "success"
+              }
+            />
 
-                                            ||
+          </Stack>
 
-                                            cleanStatements.get(0)
-                                                    .toUpperCase()
-                                                    .startsWith("WITH")
-                            );
+        </Stack>
 
-            /**
-             * SELECT
-             */
-            if (isSelect) {
+      </Paper>
 
-                String sql =
-                        cleanStatements.get(0);
+      {/* MAIN TABS */}
+      <Paper
+        sx={{
+          borderRadius: 3,
+        }}
+      >
 
-                String countSql =
-                        "SELECT COUNT(*) FROM (" + sql + ")";
+        <Tabs
+          value={mainTab}
+          onChange={(
+            e,
+            v,
+          ) => setMainTab(v)}
+        >
 
-                Integer total =
-                        jdbcTemplate.queryForObject(
-                                countSql,
-                                Integer.class
-                        );
+          <Tab
+            icon={<Terminal />}
+            label="SQL Command"
+          />
 
-                String paginatedSql =
-                        sql
-                                + " OFFSET "
-                                + (page * size)
-                                + " ROWS FETCH NEXT "
-                                + size
-                                + " ROWS ONLY";
+          <Tab
+            icon={<UploadFile />}
+            label="SQL Upload"
+          />
 
-                List<Map<String, Object>> rows =
-                        jdbcTemplate.queryForList(
-                                paginatedSql
-                        );
+        </Tabs>
 
-                List<Map<String, String>> columns =
-                        new ArrayList<>();
+      </Paper>
 
-                if (!rows.isEmpty()) {
+      {/* SQL COMMAND */}
+      {mainTab === 0 && (
 
-                    rows.get(0)
-                            .keySet()
-                            .forEach(col -> {
+        <Paper
+          sx={{
+            borderRadius: 3,
+            overflow: "hidden",
+          }}
+        >
 
-                                columns.add(
-                                        Map.of(
-                                                "name",
-                                                col
-                                        )
-                                );
-                            });
-                }
+          {/* TOOLBAR */}
+          <Box
+            sx={{
+              px: 2,
+              py: 1,
+              bgcolor: "#111827",
+              display: "flex",
+              justifyContent:
+                "space-between",
+              alignItems: "center",
+            }}
+          >
 
-                long executionMs =
-                        System.currentTimeMillis() - start;
+            <Typography
+              variant="caption"
+              sx={{
+                color: "#9ca3af",
+              }}
+            >
+              SQL Worksheet
+            </Typography>
 
-                insertExecutionLog(
-                        userId,
-                        ip,
-                        "SELECT",
-                        sql,
-                        "SUCCESS",
-                        rows.size(),
-                        executionMs,
-                        null
-                );
+            <Stack
+              direction="row"
+              spacing={1}
+            >
 
-                log.info(
-                        "SELECT EXECUTED | rows={} | total={} | timeMs={}",
-                        rows.size(),
-                        total,
-                        executionMs
-                );
+              <Tooltip title="Clear">
 
-                return Map.of(
-                        "error", false,
-                        "rows", rows,
-                        "columns", columns,
-                        "total", total,
-                        "page", page,
-                        "size", size
-                );
-            }
+                <IconButton
+                  size="small"
+                  onClick={() =>
+                    setQuery("")
+                  }
+                >
 
-            /**
-             * DML
-             */
-            int success = 0;
+                  <CleaningServices
+                    sx={{
+                      color:
+                        "white",
+                    }}
+                  />
 
-            for (String sql : cleanStatements) {
+                </IconButton>
 
-                jdbcTemplate.execute(sql);
+              </Tooltip>
 
-                success++;
-            }
+              <Tooltip title="Copy">
 
-            long executionMs =
-                    System.currentTimeMillis() - start;
-
-            insertExecutionLog(
-                    userId,
-                    ip,
-                    "SCRIPT",
-                    rawSql,
-                    "SUCCESS",
-                    success,
-                    executionMs,
-                    null
-            );
-
-            return Map.of(
-                    "error", false,
-                    "rows",
-                    List.of(
-                            Map.of(
-                                    "RESULT",
-                                    "Executed Successfully : "
-                                            + success
-                            )
+                <IconButton
+                  size="small"
+                  onClick={() =>
+                    navigator.clipboard.writeText(
+                      query,
                     )
-            );
+                  }
+                >
 
-        } catch (Exception e) {
+                  <ContentCopy
+                    sx={{
+                      color:
+                        "white",
+                    }}
+                  />
 
-            log.error(
-                    "ADMIN SQL FAILED",
-                    e
-            );
+                </IconButton>
 
-            insertExecutionLog(
-                    userId,
-                    ip,
-                    "FAILED",
-                    rawSql,
-                    "FAILED",
-                    0,
-                    System.currentTimeMillis() - start,
-                    e.getMessage()
-            );
+              </Tooltip>
 
-            return Map.of(
-                    "error", true,
-                    "message", e.getMessage()
-            );
-        }
-    }
+              <Divider
+                orientation="vertical"
+                flexItem
+              />
 
-    /**
-     * FILE UPLOAD
-     */
-    @Override
-    public Map<String, Object> uploadSqlFile(
-            MultipartFile file,
-            String userId,
-            HttpServletRequest request
-    ) {
-
-        try {
-
-            String jobId =
-                    UUID.randomUUID().toString();
-
-            String ip =
-                    getClientIp(request);
-
-            Path tempFile =
-                    Files.createTempFile(
-                            "admin_sql_",
-                            ".sql"
-                    );
-
-            Files.copy(
-                    file.getInputStream(),
-                    tempFile,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
-
-            Map<String, Object> status =
-                    new ConcurrentHashMap<>();
-
-            status.put("status", "STARTING");
-            status.put("executedCount", 0);
-            status.put("progress", 0);
-            status.put("insertCount", 0);
-            status.put("updateCount", 0);
-            status.put("deleteCount", 0);
-            status.put("otherCount", 0);
-            status.put("startTime", LocalDateTime.now().toString());
-
-            jobStore.put(jobId, status);
-
-            log.info(
-                    "SQL FILE RECEIVED | jobId={} | file={} | size={}MB",
-                    jobId,
-                    file.getOriginalFilename(),
-                    String.format(
-                            "%.2f",
-                            file.getSize()
-                                    / 1024.0
-                                    / 1024.0
-                    )
-            );
-
-            adminSupportExecutor.executeScriptAsync(
-                    tempFile,
-                    file.getOriginalFilename(),
-                    jobId,
-                    userId,
-                    ip,
-                    COMMIT_BATCH_SIZE,
-                    jobStore
-            );
-
-            return Map.of(
-                    "error", false,
-                    "jobId", jobId
-            );
-
-        } catch (Exception e) {
-
-            log.error(
-                    "UPLOAD FAILED",
-                    e
-            );
-
-            return Map.of(
-                    "error", true,
-                    "message", e.getMessage()
-            );
-        }
-    }
-
-    /**
-     * JOB STATUS
-     */
-    @Override
-    public Map<String, Object> getJobStatus(
-            String jobId
-    ) {
-
-        return jobStore.getOrDefault(
-                jobId,
-                Map.of(
-                        "status",
-                        "NOT_FOUND"
-                )
-        );
-    }
-
-    /**
-     * LOG INSERT
-     */
-    private void insertExecutionLog(
-            String userId,
-            String ip,
-            String type,
-            String sql,
-            String status,
-            int affectedRows,
-            long executionMs,
-            String errorMessage
-    ) {
-
-        try {
-
-            jdbcTemplate.update(
-                    """
-                    INSERT INTO ADMIN_SUPPORT_LOG
-                    (
-                        ID,
-                        USER_ID,
-                        CLIENT_IP,
-                        EXECUTION_TYPE,
-                        SQL_TEXT,
-                        EXECUTION_STATUS,
-                        AFFECTED_ROWS,
-                        EXECUTION_TIME_MS,
-                        ERROR_MESSAGE,
-                        CREATED_AT
-                    )
-                    VALUES
-                    (
-                        ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
-                        ?, ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
-                    )
-                    """,
-                    userId,
-                    ip,
-                    type,
-                    sql,
-                    status,
-                    affectedRows,
-                    executionMs,
-                    errorMessage
-            );
-
-        } catch (Exception e) {
-
-            log.error(
-                    "FAILED TO INSERT LOG",
-                    e
-            );
-        }
-    }
-
-    private String getClientIp(
-            HttpServletRequest request
-    ) {
-
-        String xf =
-                request.getHeader(
-                        "X-Forwarded-For"
-                );
-
-        if (
-                xf != null
-                        && !xf.isBlank()
-        ) {
-            return xf.split(",")[0];
-        }
-
-        return request.getRemoteAddr();
-    }
-}
-
-
-package com.fincore.transactions_service.service;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.stereotype.Service;
-
-import javax.sql.DataSource;
-import java.io.BufferedReader;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.Statement;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Map;
-
-@Slf4j
-@Service
-@RequiredArgsConstructor
-public class AdminSupportExecutor {
-
-    private final DataSource dataSource;
-
-    private final JdbcTemplate jdbcTemplate;
-
-    @Async("sqlExecutor")
-    public void executeScriptAsync(
-            Path filePath,
-            String fileName,
-            String jobId,
-            String userId,
-            String clientIp,
-            int commitBatchSize,
-            Map<String, Map<String, Object>> jobStore
-    ) {
-
-        Instant start = Instant.now();
-
-        int executed = 0;
-
-        int inserts = 0;
-
-        int updates = 0;
-
-        int deletes = 0;
-
-        int others = 0;
-
-        int failedLine = 0;
-
-        String failedSql = "";
-
-        try {
-
-            Map<String, Object> status =
-                    jobStore.get(jobId);
-
-            status.put("status", "RUNNING");
-
-            int totalStatements = 0;
-
-            try (
-                    BufferedReader counter =
-                            Files.newBufferedReader(filePath)
-            ) {
-
-                String line;
-
-                while ((line = counter.readLine()) != null) {
-
-                    if (line.trim().endsWith(";")) {
-                        totalStatements++;
-                    }
+              <Button
+                size="small"
+                variant="contained"
+                color={
+                  isDestructive
+                    ? "error"
+                    : "primary"
                 }
+                startIcon={
+                  <PlayArrow />
+                }
+                onClick={() =>
+                  isDestructive
+                    ? setConfirmOpen(
+                        true,
+                      )
+                    : handleRun(
+                        true,
+                      )
+                }
+              >
+                Execute
+              </Button>
+
+            </Stack>
+
+          </Box>
+
+          {/* SQL AREA */}
+          <TextField
+            multiline
+            minRows={14}
+            fullWidth
+            value={query}
+            onChange={(e) =>
+              setQuery(
+                e.target.value,
+              )
             }
+            onKeyDown={
+              handleKeyDown
+            }
+            variant="standard"
+            InputProps={{
+              disableUnderline: true,
+              sx: {
+                p: 2,
+                bgcolor:
+                  "#0f172a",
+                color:
+                  "#d1d5db",
+                fontFamily:
+                  "'Fira Code', monospace",
+              },
+            }}
+          />
 
-            status.put(
-                    "totalStatements",
-                    totalStatements
-            );
+        </Paper>
+      )}
 
-            log.info(
-                    "SCRIPT STARTED | jobId={} | totalStatements={}",
-                    jobId,
-                    totalStatements
-            );
+      {/* FILE */}
+      {mainTab === 1 && (
 
-            try (
-                    Connection connection =
-                            dataSource.getConnection();
+        <Paper
+          sx={{
+            p: 3,
+            borderRadius: 3,
+          }}
+        >
 
-                    Statement statement =
-                            connection.createStatement();
+          <Box
+            onDragOver={(e) => {
 
-                    BufferedReader reader =
-                            Files.newBufferedReader(filePath)
-            ) {
+              e.preventDefault();
 
-                connection.setAutoCommit(false);
+              setDragging(true);
+            }}
+            onDragLeave={() =>
+              setDragging(false)
+            }
+            onDrop={handleDrop}
+            sx={{
+              border: dragging
+                ? `2px dashed ${theme.palette.primary.main}`
+                : `2px dashed ${theme.palette.divider}`,
+              borderRadius: 3,
+              p: 6,
+              textAlign:
+                "center",
+              bgcolor: dragging
+                ? alpha(
+                    theme
+                      .palette
+                      .primary
+                      .main,
+                    0.08,
+                  )
+                : "transparent",
+            }}
+          >
 
-                StringBuilder sqlBuilder =
-                        new StringBuilder();
+            <CloudUpload
+              sx={{
+                fontSize: 70,
+                color:
+                  theme
+                    .palette
+                    .primary
+                    .main,
+              }}
+            />
 
-                String line;
+            <Typography
+              mt={2}
+              variant="h6"
+              fontWeight={800}
+            >
+              Upload SQL Script
+            </Typography>
 
-                int lineNo = 0;
+            <Typography
+              variant="body2"
+              color="text.secondary"
+            >
+              Supports very large SQL files
+            </Typography>
 
-                while ((line = reader.readLine()) != null) {
+            <Button
+              component="label"
+              variant="contained"
+              sx={{
+                mt: 3,
+              }}
+            >
 
-                    lineNo++;
+              Browse File
 
-                    String trimmed =
-                            line.trim();
+              <input
+                hidden
+                type="file"
+                accept=".sql"
+                onChange={(e) =>
+                  validateFile(
+                    e.target
+                      .files[0],
+                  )
+                }
+              />
 
-                    if (
-                            trimmed.isBlank()
-                                    || trimmed.startsWith("--")
-                    ) {
-                        continue;
-                    }
+            </Button>
 
-                    sqlBuilder
-                            .append(line)
-                            .append("\n");
+          </Box>
 
-                    if (trimmed.endsWith(";")) {
+          {selectedFile && (
 
-                        String sql =
-                                sqlBuilder.toString().trim();
+            <Alert
+              severity="info"
+              sx={{
+                mt: 2,
+              }}
+            >
 
-                        sql =
-                                sql.substring(
-                                        0,
-                                        sql.lastIndexOf(";")
-                                );
+              <AlertTitle>
+                Selected File
+              </AlertTitle>
 
-                        failedLine = lineNo;
+              {selectedFile.name}
 
-                        failedSql = sql;
+              <br />
 
-                        statement.execute(sql);
+              Size :
+              {" "}
+              {(
+                selectedFile.size
+                / 1024
+                / 1024
+              ).toFixed(2)}
+              {" "}
+              MB
 
-                        executed++;
+            </Alert>
+          )}
 
-                        String upper =
-                                sql.toUpperCase();
+          <Stack
+            direction="row"
+            justifyContent="flex-end"
+            mt={2}
+          >
 
-                        if (upper.startsWith("INSERT")) {
-                            inserts++;
-                        }
-                        else if (upper.startsWith("UPDATE")) {
-                            updates++;
-                        }
-                        else if (upper.startsWith("DELETE")) {
-                            deletes++;
-                        }
-                        else {
-                            others++;
-                        }
+            <Button
+              variant="contained"
+              startIcon={
+                <UploadFile />
+              }
+              onClick={
+                handleUpload
+              }
+            >
+              Execute Script
+            </Button>
 
-                        if (executed % commitBatchSize == 0) {
+          </Stack>
 
-                            connection.commit();
+        </Paper>
+      )}
 
-                            log.info(
-                                    "COMMIT SUCCESS | jobId={} | executed={}",
-                                    jobId,
-                                    executed
-                            );
-                        }
+      {/* PROGRESS */}
+      {jobStatus && (
 
-                        long elapsed =
-                                Duration.between(
-                                        start,
-                                        Instant.now()
-                                ).toSeconds();
+        <Grid
+          container
+          spacing={1}
+        >
 
-                        long eta = 0;
+          <Grid
+            item
+            xs={12}
+            md={2}
+          >
 
-                        if (
-                                executed > 0
-                                        && elapsed > 0
-                        ) {
+            <StatCard
+              title="Executed"
+              value={
+                jobStatus.executedCount
+                || 0
+              }
+              icon={
+                <CheckCircle />
+              }
+              color="#10b981"
+            />
 
-                            double avg =
-                                    (double) elapsed
-                                            / executed;
+          </Grid>
 
-                            eta =
-                                    (long) (
-                                            (totalStatements - executed)
-                                                    * avg
-                                    );
-                        }
+          <Grid
+            item
+            xs={12}
+            md={2}
+          >
 
-                        double progress =
-                                totalStatements > 0
-                                        ? (
-                                        (double) executed
-                                                / totalStatements
-                                ) * 100
-                                        : 0;
+            <StatCard
+              title="Insert"
+              value={
+                jobStatus.insertCount
+                || 0
+              }
+              icon={<Add />}
+              color="#3b82f6"
+            />
 
-                        status.put("executedCount", executed);
-                        status.put("insertCount", inserts);
-                        status.put("updateCount", updates);
-                        status.put("deleteCount", deletes);
-                        status.put("otherCount", others);
-                        status.put("elapsedSeconds", elapsed);
-                        status.put("estimatedRemainingSeconds", eta);
-                        status.put("progress", progress);
+          </Grid>
 
-                        sqlBuilder.setLength(0);
-                    }
+          <Grid
+            item
+            xs={12}
+            md={2}
+          >
+
+            <StatCard
+              title="Update"
+              value={
+                jobStatus.updateCount
+                || 0
+              }
+              icon={
+                <Update />
+              }
+              color="#f59e0b"
+            />
+
+          </Grid>
+
+          <Grid
+            item
+            xs={12}
+            md={2}
+          >
+
+            <StatCard
+              title="Delete"
+              value={
+                jobStatus.deleteCount
+                || 0
+              }
+              icon={
+                <Delete />
+              }
+              color="#ef4444"
+            />
+
+          </Grid>
+
+          <Grid
+            item
+            xs={12}
+            md={2}
+          >
+
+            <StatCard
+              title="Elapsed"
+              value={formatSeconds(
+                executionSeconds,
+              )}
+              icon={
+                <AccessTime />
+              }
+              color="#8b5cf6"
+            />
+
+          </Grid>
+
+          <Grid
+            item
+            xs={12}
+            md={2}
+          >
+
+            <StatCard
+              title="ETA"
+              value={formatSeconds(
+                jobStatus.estimatedRemainingSeconds,
+              )}
+              icon={<Speed />}
+              color="#06b6d4"
+            />
+
+          </Grid>
+
+        </Grid>
+      )}
+
+      {/* STATUS PANEL */}
+      {jobStatus && (
+
+        <Paper
+          sx={{
+            p: 2,
+            borderRadius: 3,
+          }}
+        >
+
+          <Stack
+            direction={{
+              xs: "column",
+              md: "row",
+            }}
+            justifyContent="space-between"
+            spacing={2}
+          >
+
+            <Box>
+
+              <Typography
+                fontWeight={800}
+              >
+                SQL Script Execution
+              </Typography>
+
+              <Typography
+                variant="body2"
+                color="text.secondary"
+              >
+                Job ID :
+                {" "}
+                {jobId}
+              </Typography>
+
+            </Box>
+
+            <Stack
+              direction="row"
+              spacing={1}
+              alignItems="center"
+            >
+
+              <Chip
+                label={
+                  jobStatus.status
+                }
+                color={
+                  jobStatus.status
+                  ===
+                  "COMPLETED"
+                    ? "success"
+                    : jobStatus.status
+                        ===
+                        "FAILED"
+                      ? "error"
+                      : "warning"
+                }
+              />
+
+              {jobStatus.status ===
+                "RUNNING" && (
+
+                <Chip
+                  icon={
+                    <WarningAmber />
+                  }
+                  label="Stay on screen"
+                  color="warning"
+                />
+              )}
+
+            </Stack>
+
+          </Stack>
+
+          <Box mt={2}>
+
+            <LinearProgress
+              variant="determinate"
+              value={
+                jobStatus.progress
+                || 0
+              }
+              sx={{
+                height: 12,
+                borderRadius: 10,
+              }}
+            />
+
+            <Typography
+              mt={1}
+              variant="body2"
+            >
+              Progress :
+              {" "}
+              {(
+                jobStatus.progress
+                || 0
+              ).toFixed(2)}
+              %
+            </Typography>
+
+          </Box>
+
+        </Paper>
+      )}
+
+      {/* OUTPUT */}
+      <Paper
+        sx={{
+          flex: 1,
+          overflow: "hidden",
+          borderRadius: 3,
+        }}
+      >
+
+        <Tabs
+          value={outputTab}
+          onChange={(
+            e,
+            v,
+          ) => setOutputTab(v)}
+        >
+
+          <Tab
+            icon={
+              <TableChart />
+            }
+            label="Data Grid"
+          />
+
+          <Tab
+            icon={<ListAlt />}
+            label="Logs"
+          />
+
+        </Tabs>
+
+        {/* GRID */}
+        {outputTab === 0 && (
+
+          <DataGrid
+            rows={results.rows}
+            columns={
+              results.columns
+            }
+            rowCount={
+              results.total
+            }
+            paginationMode="server"
+            paginationModel={
+              paginationModel
+            }
+            onPaginationModelChange={
+              setPaginationModel
+            }
+            loading={isPending}
+            pageSizeOptions={[
+              5,
+              10,
+              25,
+              50,
+              100,
+            ]}
+            disableRowSelectionOnClick
+            slots={{
+              toolbar:
+                GridToolbar,
+            }}
+            getRowId={(row) =>
+              row.ID
+              || row.id
+              || Math.random()
+            }
+            sx={{
+              border: "none",
+              height: "100%",
+              "& .MuiDataGrid-columnHeaders":
+                {
+                  bgcolor:
+                    alpha(
+                      theme
+                        .palette
+                        .primary
+                        .main,
+                      0.08,
+                    ),
+                },
+            }}
+          />
+        )}
+
+        {/* LOGS */}
+        {outputTab === 1 && (
+
+          <Box
+            sx={{
+              p: 2,
+            }}
+          >
+
+            {!lastResponse
+              && !jobStatus && (
+
+              <Typography
+                color="text.secondary"
+              >
+                Waiting for execution...
+              </Typography>
+            )}
+
+            {lastResponse?.error && (
+
+              <Alert severity="error">
+
+                <AlertTitle>
+                  Error
+                </AlertTitle>
+
+                {lastResponse.message}
+
+              </Alert>
+            )}
+
+            {lastResponse
+              && !lastResponse?.error && (
+
+              <Alert severity="success">
+
+                <AlertTitle>
+                  Success
+                </AlertTitle>
+
+                {lastResponse
+                  ?.rows?.[0]
+                  ?.RESULT
+                  || "Completed"}
+
+              </Alert>
+            )}
+
+            {jobStatus?.status
+              === "FAILED" && (
+
+              <Alert
+                severity="error"
+                sx={{
+                  mt: 2,
+                }}
+              >
+
+                <AlertTitle>
+                  Script Failed
+                </AlertTitle>
+
+                Failed Line :
+                {" "}
+                {
+                  jobStatus.failedLine
                 }
 
-                connection.commit();
+                <br />
 
-                status.put("status", "COMPLETED");
+                Error :
+                {" "}
+                {
+                  jobStatus.message
+                }
 
-                insertExecutionLog(
-                        userId,
-                        clientIp,
-                        "UPLOAD_SCRIPT",
-                        fileName,
-                        "SUCCESS",
-                        executed,
-                        Duration.between(
-                                start,
-                                Instant.now()
-                        ).toMillis(),
-                        null
-                );
+                <br />
 
-                log.info(
-                        "SCRIPT COMPLETED | jobId={} | executed={}",
-                        jobId,
-                        executed
-                );
-            }
+                SQL :
+                <br />
 
-            Files.deleteIfExists(filePath);
+                <Box
+                  sx={{
+                    mt: 1,
+                    p: 1,
+                    borderRadius: 1,
+                    bgcolor:
+                      "#111827",
+                    fontFamily:
+                      "monospace",
+                    overflow:
+                      "auto",
+                  }}
+                >
 
-        } catch (Exception e) {
+                  {
+                    jobStatus.failedSql
+                  }
 
-            log.error(
-                    "SCRIPT FAILED | line={}",
-                    failedLine,
-                    e
-            );
+                </Box>
 
-            Map<String, Object> status =
-                    jobStore.get(jobId);
+              </Alert>
+            )}
 
-            if (status != null) {
+            {jobStatus?.status
+              ===
+              "COMPLETED" && (
 
-                status.put("status", "FAILED");
-                status.put("failedLine", failedLine);
-                status.put("failedSql", failedSql);
-                status.put("message", e.getMessage());
-            }
+              <Alert
+                severity="success"
+                sx={{
+                  mt: 2,
+                }}
+              >
 
-            insertExecutionLog(
-                    userId,
-                    clientIp,
-                    "UPLOAD_SCRIPT",
-                    failedSql,
-                    "FAILED",
-                    executed,
-                    Duration.between(
-                            start,
-                            Instant.now()
-                    ).toMillis(),
-                    e.getMessage()
-            );
+                <AlertTitle>
+                  Script Completed
+                </AlertTitle>
+
+                Executed :
+                {" "}
+                {
+                  jobStatus.executedCount
+                }
+
+                <br />
+
+                Inserts :
+                {" "}
+                {
+                  jobStatus.insertCount
+                }
+
+                <br />
+
+                Updates :
+                {" "}
+                {
+                  jobStatus.updateCount
+                }
+
+                <br />
+
+                Deletes :
+                {" "}
+                {
+                  jobStatus.deleteCount
+                }
+
+                <br />
+
+                Time :
+                {" "}
+                {formatSeconds(
+                  executionSeconds,
+                )}
+
+              </Alert>
+            )}
+
+          </Box>
+        )}
+
+      </Paper>
+
+      {/* LOADER */}
+      {isPending && (
+        <LinearProgress />
+      )}
+
+      {/* CONFIRM */}
+      <Dialog
+        open={confirmOpen}
+        onClose={() =>
+          setConfirmOpen(false)
         }
-    }
+      >
 
-    private void insertExecutionLog(
-            String userId,
-            String ip,
-            String type,
-            String sql,
-            String status,
-            int affectedRows,
-            long executionMs,
-            String errorMessage
-    ) {
+        <DialogTitle>
+          Confirm Execution
+        </DialogTitle>
 
-        jdbcTemplate.update(
-                """
-                INSERT INTO ADMIN_SUPPORT_LOG
-                (
-                    ID,
-                    USER_ID,
-                    CLIENT_IP,
-                    EXECUTION_TYPE,
-                    SQL_TEXT,
-                    EXECUTION_STATUS,
-                    AFFECTED_ROWS,
-                    EXECUTION_TIME_MS,
-                    ERROR_MESSAGE,
-                    CREATED_AT
-                )
-                VALUES
-                (
-                    ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
-                    ?, ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
-                )
-                """,
-                userId,
-                ip,
-                type,
-                sql,
-                status,
-                affectedRows,
-                executionMs,
-                errorMessage
-        );
-    }
-}
+        <DialogContent>
 
+          <Typography>
+            This query may
+            modify database
+            data.
+          </Typography>
 
-package com.fincore.transactions_service.config;
+        </DialogContent>
 
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.scheduling.annotation.EnableAsync;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+        <DialogActions>
 
-import java.util.concurrent.Executor;
+          <Button
+            onClick={() =>
+              setConfirmOpen(
+                false,
+              )
+            }
+          >
+            Cancel
+          </Button>
 
-@Slf4j
-@Configuration
-@EnableAsync
-public class AsyncConfig {
+          <Button
+            variant="contained"
+            color="error"
+            onClick={() => {
 
-    @Bean(name = "sqlExecutor")
-    public Executor sqlExecutor() {
+              setConfirmOpen(
+                false,
+              );
 
-        ThreadPoolTaskExecutor executor =
-                new ThreadPoolTaskExecutor();
+              handleRun(true);
+            }}
+          >
+            Execute
+          </Button>
 
-        executor.setCorePoolSize(2);
+        </DialogActions>
 
-        executor.setMaxPoolSize(5);
+      </Dialog>
 
-        executor.setQueueCapacity(20);
+    </Box>
+  );
+};
 
-        executor.setThreadNamePrefix("SQL-EXECUTOR-");
-
-        executor.initialize();
-
-        log.info("SQL EXECUTOR INITIALIZED");
-
-        return executor;
-    }
-}
-
+export default AdminSupport;
