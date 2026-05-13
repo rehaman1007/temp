@@ -1,2 +1,536 @@
-spring.servlet.multipart.max-file-size=10737418240B
-spring.servlet.multipart.max-request-size=10737418240B
+package com.fincore.transactions_service.service;
+
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.sql.*;
+import java.sql.Date;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Slf4j
+@Service("AdminSupportService")
+@RequiredArgsConstructor
+public class AdminSupportServiceImpl implements AdminSupportService {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    /**
+     * JOB STORE
+     */
+    private final Map<String, Map<String, Object>> jobStore = new ConcurrentHashMap<>();
+
+    /**
+     * COMMAND PANEL EXECUTION
+     */
+    @Override
+    public Map<String, Object> executeAdminSql(AdminSupportDTO dto) {
+
+        String rawSql = dto.getSql().trim();
+
+        String[] statements = rawSql.split(";");
+
+        List<String> cleanStatements = new ArrayList<>();
+
+        for (String s : statements) {
+
+            String clean = s.replaceAll("(?m)^--.*", "").trim();
+
+            if (!clean.isEmpty()) {
+
+                cleanStatements.add(clean);
+            }
+        }
+
+        boolean isSingleSelect = cleanStatements.size() == 1 && (cleanStatements.get(0).toUpperCase().startsWith("SELECT") || cleanStatements.get(0).toUpperCase().startsWith("WITH"));
+
+        int page = dto.getPage() != null ? dto.getPage() : 0;
+
+        int size = dto.getSize() != null ? dto.getSize() : 5;
+
+        /**
+         * SELECT
+         */
+        if (isSingleSelect) {
+
+            String sql = cleanStatements.get(0);
+
+            try {
+
+                String countSql = "SELECT COUNT(*) FROM (" + sql + ")";
+
+                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+
+                String paginatedSql = sql + " OFFSET " + (page * size) + " ROWS FETCH NEXT " + size + " ROWS ONLY";
+
+                return jdbcTemplate.query(paginatedSql, rs -> {
+
+                    ResultSetMetaData meta = rs.getMetaData();
+
+                    int columnCount = meta.getColumnCount();
+
+                    List<Map<String, String>> columns = new ArrayList<>();
+
+                    for (int i = 1; i <= columnCount; i++) {
+
+                        columns.add(Map.of("name", meta.getColumnLabel(i)));
+                    }
+
+                    List<Map<String, Object>> rows = new ArrayList<>();
+
+                    while (rs.next()) {
+
+                        Map<String, Object> row = new HashMap<>();
+
+                        for (int i = 1; i <= columnCount; i++) {
+
+                            String columnName = meta.getColumnLabel(i);
+
+                            int columnType = meta.getColumnType(i);
+
+                            Object value = null;
+
+                            switch (columnType) {
+
+                                case Types.VARCHAR:
+
+                                case Types.CHAR:
+
+                                case Types.LONGVARCHAR:
+
+                                case Types.NVARCHAR:
+
+                                case Types.NCHAR:
+
+                                    value = rs.getString(i);
+
+                                    break;
+
+                                case Types.INTEGER:
+
+                                case Types.SMALLINT:
+
+                                case Types.TINYINT:
+
+                                    int intVal = rs.getInt(i);
+
+                                    value = rs.wasNull() ? null : intVal;
+
+                                    break;
+
+                                case Types.BIGINT:
+
+                                    long longVal = rs.getLong(i);
+
+                                    value = rs.wasNull() ? null : longVal;
+
+                                    break;
+
+                                case Types.NUMERIC:
+
+                                case Types.DECIMAL:
+
+                                    value = rs.getBigDecimal(i);
+
+                                    break;
+
+                                case Types.FLOAT:
+
+                                case Types.DOUBLE:
+
+                                case Types.REAL:
+
+                                    double dbl = rs.getDouble(i);
+
+                                    value = rs.wasNull() ? null : dbl;
+
+                                    break;
+
+                                case Types.DATE:
+
+                                    Date date = rs.getDate(i);
+
+                                    value = date != null ? date.toLocalDate().toString() : null;
+
+                                    break;
+
+                                case Types.TIME:
+
+                                    Time time = rs.getTime(i);
+
+                                    value = time != null ? time.toLocalTime().toString() : null;
+
+                                    break;
+
+                                case Types.TIMESTAMP:
+
+                                case -101:
+
+                                    Timestamp ts = rs.getTimestamp(i);
+
+                                    value = ts != null ? ts.toLocalDateTime().format(java.time.format.DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm:ss")) : null;
+
+                                    break;
+
+                                case Types.CLOB:
+
+                                case Types.NCLOB:
+
+                                    Clob clob = rs.getClob(i);
+
+                                    value = clob != null ? clob.getSubString(1, (int) clob.length()) : null;
+
+                                    break;
+
+                                case Types.BLOB:
+
+                                case Types.BINARY:
+
+                                case Types.VARBINARY:
+
+                                case Types.LONGVARBINARY:
+
+                                    value = "[BLOB DATA]";
+
+                                    break;
+
+                                default:
+
+                                    Object obj = rs.getObject(i);
+
+                                    value = obj != null ? obj.toString() : null;
+                            }
+
+                            row.put(columnName, value);
+                        }
+
+                        rows.add(row);
+                    }
+
+                    return Map.of("columns", columns, "rows", rows, "total", total, "page", page, "size", size, "error", false);
+                });
+
+            } catch (Exception e) {
+
+                log.error("Execution Error", e);
+
+                return Map.of("error", true, "message", e.getMessage());
+            }
+        }
+
+        /**
+         * SCRIPT EXECUTION
+         */
+        else {
+
+            try {
+
+                int successful = 0;
+
+                for (String sql : cleanStatements) {
+
+                    jdbcTemplate.execute(sql);
+
+                    successful++;
+                }
+
+                return Map.of("error", false, "columns", List.of(Map.of("name", "RESULT")), "rows", List.of(Map.of("RESULT", "Script executed successfully. Statements : " + successful)), "total", successful);
+
+            } catch (Exception e) {
+
+                log.error("Script Error", e);
+
+                return Map.of("error", true, "message", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * HUGE SQL FILE EXECUTION
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> uploadSqlFile(MultipartFile file) {
+
+        String jobId = UUID.randomUUID().toString();
+
+        Map<String, Object> status = new ConcurrentHashMap<>();
+
+        status.put("status", "RUNNING");
+
+        status.put("executedCount", 0);
+
+        jobStore.put(jobId, status);
+
+        try {
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream()));
+
+            StringBuilder sqlBuilder = new StringBuilder();
+
+            String line;
+
+            int executedCount = 0;
+
+            while ((line = reader.readLine()) != null) {
+
+                /**
+                 * SKIP COMMENTS
+                 */
+                if (line.trim().startsWith("--")) {
+
+                    continue;
+                }
+
+                sqlBuilder.append(line).append("\n");
+
+                /**
+                 * EXECUTE SQL
+                 */
+                if (line.trim().endsWith(";")) {
+
+                    String sql = sqlBuilder.toString().trim();
+
+                    sql = sql.substring(0, sql.length() - 1);
+
+                    jdbcTemplate.execute(sql);
+
+                    executedCount++;
+
+                    status.put("executedCount", executedCount);
+
+                    sqlBuilder.setLength(0);
+                }
+            }
+
+            status.put("status", "COMPLETED");
+
+            status.put("message", "Script execution completed");
+
+        } catch (Exception e) {
+
+            log.error("SQL Upload Execution Failed", e);
+
+            status.put("status", "FAILED");
+
+            status.put("message", e.getMessage());
+
+            throw new RuntimeException(e.getMessage());
+        }
+
+        return Map.of("error", false, "jobId", jobId);
+    }
+
+    /**
+     * JOB STATUS
+     */
+    @Override
+    public Map<String, Object> getJobStatus(String jobId) {
+
+        return jobStore.getOrDefault(jobId, Map.of("status", "NOT_FOUND"));
+    }
+}
+
+
+
+
+package com.fincore.transactions_service.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
+import org.springframework.scheduling.annotation.Async;
+
+import org.springframework.stereotype.Service;
+
+import javax.sql.DataSource;
+
+import java.io.BufferedReader;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import java.sql.Connection;
+import java.sql.Statement;
+
+import java.util.Map;
+
+import java.util.concurrent.ConcurrentHashMap;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class AdminSupportExecutor {
+
+    /**
+     * Job tracker
+     */
+    private final Map<String, Map<String, Object>> jobStatusMap = new ConcurrentHashMap<>();
+    @Autowired
+    private DataSource dataSource;
+
+    /**
+     * Execute uploaded SQL asynchronously
+     */
+    @Async("sqlExecutor")
+    public void executeScriptAsync(Path path, String jobId) {
+
+        jobStatusMap.put(jobId, Map.of("status", "RUNNING", "executedCount", 0));
+
+        Connection connection = null;
+
+        BufferedReader reader = null;
+
+        try {
+
+            connection = dataSource.getConnection();
+
+            /**
+             * Manual transaction
+             */
+            connection.setAutoCommit(false);
+
+            Statement statementExecutor = connection.createStatement();
+
+            reader = Files.newBufferedReader(path);
+
+            StringBuilder sqlBuilder = new StringBuilder();
+
+            String line;
+
+            int count = 0;
+
+            while ((line = reader.readLine()) != null) {
+
+                String trimmed = line.trim();
+
+                /**
+                 * Ignore empty
+                 */
+                if (trimmed.isBlank()) {
+                    continue;
+                }
+
+                /**
+                 * Ignore comments
+                 */
+                if (trimmed.startsWith("--")) {
+                    continue;
+                }
+
+                sqlBuilder.append(line).append("\n");
+
+                /**
+                 * Statement completed
+                 */
+                if (trimmed.endsWith(";")) {
+
+                    String sql = sqlBuilder.toString();
+
+                    sql = sql.substring(0, sql.lastIndexOf(";"));
+
+                    validateDangerousSql(sql);
+
+                    statementExecutor.execute(sql);
+
+                    count++;
+
+                    jobStatusMap.put(jobId, Map.of("status", "RUNNING", "executedCount", count));
+
+                    sqlBuilder.setLength(0);
+
+                    /**
+                     * Batch commit
+                     */
+                    if (count % 1000 == 0) {
+
+                        connection.commit();
+
+                        log.info("Committed batch {}", count);
+                    }
+
+                    log.info("Executed statement {}", count);
+                }
+            }
+
+            /**
+             * Final commit
+             */
+            connection.commit();
+
+            jobStatusMap.put(jobId, Map.of("status", "COMPLETED", "executedCount", count));
+
+            log.info("SQL execution completed");
+
+        } catch (Exception e) {
+
+            log.error("SQL execution failed", e);
+
+            /**
+             * Rollback everything
+             */
+            try {
+
+                if (connection != null) {
+
+                    connection.rollback();
+
+                    log.error("Transaction rolled back");
+                }
+
+            } catch (Exception rollbackEx) {
+
+                log.error("Rollback failed", rollbackEx);
+            }
+
+            jobStatusMap.put(jobId, Map.of("status", "FAILED", "message", e.getMessage()));
+
+        } finally {
+
+            try {
+
+                if (reader != null) {
+                    reader.close();
+                }
+
+                if (connection != null) {
+                    connection.close();
+                }
+
+            } catch (Exception e) {
+
+                log.error("Cleanup failed", e);
+            }
+        }
+    }
+
+    /**
+     * Prevent dangerous statements
+     */
+    private void validateDangerousSql(String sql) {
+
+        String upper = sql.toUpperCase();
+
+        if (upper.contains("DROP DATABASE") || upper.contains("ALTER SYSTEM") || upper.contains("SHUTDOWN") || upper.contains("CREATE USER") || upper.contains("DROP USER")) {
+
+            throw new RuntimeException("Dangerous SQL blocked");
+        }
+    }
+
+    /**
+     * Get execution status
+     */
+    public Map<String, Object> getJobStatus(String jobId) {
+
+        return jobStatusMap.getOrDefault(jobId, Map.of("status", "NOT_FOUND"));
+    }
+}
