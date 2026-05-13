@@ -1,530 +1,1121 @@
-package com.fincore.transactions_service.service;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.stereotype.Service;
-
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.sql.Connection;
-import java.sql.Statement;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class AdminSupportExecutor {
-
-    private final JdbcTemplate jdbcTemplate;
-
-    /**
-     * LIVE JOB STATUS CACHE
-     */
-    public static final Map<String, Map<String, Object>> JOB_STATUS =
-            new ConcurrentHashMap<>();
-
-    /**
-     * COMMIT BATCH SIZE
-     */
-    private static final int COMMIT_BATCH_SIZE = 1000;
-
-    /**
-     * ============================================
-     * EXECUTE SQL SCRIPT ASYNC
-     * ============================================
-     */
-    @Async("sqlTaskExecutor")
-    public void executeScriptAsync(
-            File sqlFile,
-            String jobId,
-            String userId,
-            String clientIp
-    ) {
-
-        Instant start = Instant.now();
-
-        long startedAt = System.currentTimeMillis();
-
-        int totalStatements = 0;
-
-        int executedCount = 0;
-
-        int insertCount = 0;
-
-        int updateCount = 0;
-
-        int deleteCount = 0;
-
-        int otherCount = 0;
-
-        int failedLine = 0;
-
-        String failedSql = null;
-
-        try {
-
-            log.info("""
-
-                    ==================================================
-                    SQL SCRIPT EXECUTION STARTED
-                    ==================================================
-                    jobId={}
-                    userId={}
-                    clientIp={}
-                    file={}
-                    batchCommitSize={}
-                    ==================================================
-                    """,
-                    jobId,
-                    userId,
-                    clientIp,
-                    sqlFile.getAbsolutePath(),
-                    COMMIT_BATCH_SIZE
-            );
-
-            /**
-             * INITIAL JOB STATUS
-             */
-            Map<String, Object> status =
-                    new ConcurrentHashMap<>();
-
-            status.put("jobId", jobId);
-            status.put("status", "RUNNING");
-            status.put("progress", 0);
-            status.put("executedCount", 0);
-            status.put("insertCount", 0);
-            status.put("updateCount", 0);
-            status.put("deleteCount", 0);
-            status.put("otherCount", 0);
-            status.put("startedAt", startedAt);
-            status.put("message", "Execution started");
-
-            JOB_STATUS.put(jobId, status);
-
-            /**
-             * ============================================
-             * COUNT STATEMENTS
-             * ============================================
-             */
-            try (
-                    BufferedReader counterReader =
-                            new BufferedReader(
-                                    new FileReader(sqlFile)
-                            )
-            ) {
-
-                String line;
-
-                while ((line = counterReader.readLine()) != null) {
-
-                    line = line.trim();
-
-                    if (line.isEmpty()
-                            || line.startsWith("--")) {
-
-                        continue;
-                    }
-
-                    if (line.endsWith(";")) {
-
-                        totalStatements++;
-                    }
-                }
-            }
-
-            status.put("totalStatements", totalStatements);
-
-            log.info("""
-
-                    ==================================================
-                    SQL STATEMENT COUNT COMPLETED
-                    ==================================================
-                    jobId={}
-                    totalStatements={}
-                    ==================================================
-                    """,
-                    jobId,
-                    totalStatements
-            );
-
-            /**
-             * ============================================
-             * EXECUTION
-             * ============================================
-             */
-            try (
-                    Connection connection =
-                            jdbcTemplate
-                                    .getDataSource()
-                                    .getConnection();
-
-                    BufferedReader reader =
-                            new BufferedReader(
-                                    new FileReader(sqlFile)
-                            )
-            ) {
-
-                connection.setAutoCommit(false);
-
-                Statement statement =
-                        connection.createStatement();
-
-                StringBuilder sqlBuilder =
-                        new StringBuilder();
-
-                String line;
-
-                int lineNumber = 0;
-
-                while ((line = reader.readLine()) != null) {
-
-                    lineNumber++;
-
-                    line = line.trim();
-
-                    /**
-                     * SKIP EMPTY/COMMENT
-                     */
-                    if (line.isEmpty()
-                            || line.startsWith("--")) {
-
-                        continue;
-                    }
-
-                    sqlBuilder.append(line).append(" ");
-
-                    /**
-                     * SQL END
-                     */
-                    if (line.trim().endsWith(";")) {
-
-                        String sql =
-                                sqlBuilder.toString().trim();
-
-                        /**
-                         * REMOVE TRAILING ;
-                         * JDBC DOES NOT SUPPORT IT
-                         */
-                        while (sql.endsWith(";")) {
-
-                            sql =
-                                    sql.substring(
-                                            0,
-                                            sql.length() - 1
-                                    ).trim();
-                        }
-
-                        sqlBuilder.setLength(0);
-
-                        failedSql = sql;
-
-                        failedLine = lineNumber;
-
-                        long queryStart =
-                                System.currentTimeMillis();
-
-                        /**
-                         * EXECUTE
-                         */
-                        statement.execute(sql);
-
-                        long queryEnd =
-                                System.currentTimeMillis();
-
-                        executedCount++;
-
-                        /**
-                         * QUERY TYPE COUNTS
-                         */
-                        String upperSql =
-                                sql.toUpperCase();
-
-                        if (upperSql.startsWith("INSERT")) {
-
-                            insertCount++;
-
-                        } else if (upperSql.startsWith("UPDATE")) {
-
-                            updateCount++;
-
-                        } else if (upperSql.startsWith("DELETE")) {
-
-                            deleteCount++;
-
-                        } else {
-
-                            otherCount++;
-                        }
-
-                        /**
-                         * COMMIT BATCH
-                         */
-                        if (executedCount % COMMIT_BATCH_SIZE == 0) {
-
-                            connection.commit();
-
-                            log.info("""
-
-                                    ==================================================
-                                    BATCH COMMIT SUCCESS
-                                    ==================================================
-                                    jobId={}
-                                    executed={}
-                                    elapsed={} sec
-                                    ==================================================
-                                    """,
-                                    jobId,
-                                    executedCount,
-                                    Duration.between(
-                                            start,
-                                            Instant.now()
-                                    ).toSeconds()
-                            );
-                        }
-
-                        /**
-                         * ETA CALCULATION
-                         */
-                        long elapsedSeconds =
-                                Duration.between(
-                                        start,
-                                        Instant.now()
-                                ).toSeconds();
-
-                        long avgPerStatement =
-                                executedCount == 0
-                                        ? 0
-                                        : Math.max(
-                                                1,
-                                                elapsedSeconds
-                                                        / executedCount
-                                        );
-
-                        long remaining =
-                                totalStatements
-                                        - executedCount;
-
-                        long etaSeconds =
-                                avgPerStatement
-                                        * remaining;
-
-                        int progress =
-                                totalStatements == 0
-                                        ? 0
-                                        : (executedCount * 100)
-                                        / totalStatements;
-
-                        /**
-                         * UPDATE LIVE STATUS
-                         */
-                        status.put("status", "RUNNING");
-                        status.put("progress", progress);
-                        status.put("executedCount", executedCount);
-                        status.put("insertCount", insertCount);
-                        status.put("updateCount", updateCount);
-                        status.put("deleteCount", deleteCount);
-                        status.put("otherCount", otherCount);
-                        status.put("elapsedSeconds", elapsedSeconds);
-                        status.put("etaSeconds", etaSeconds);
-                        status.put("currentLine", lineNumber);
-
-                        /**
-                         * DEBUG LOG
-                         */
-                        if (executedCount % 100 == 0) {
-
-                            log.info("""
-
-                                    ==================================================
-                                    LIVE EXECUTION STATUS
-                                    ==================================================
-                                    jobId={}
-                                    progress={}%
-                                    executed={}
-                                    inserts={}
-                                    updates={}
-                                    deletes={}
-                                    others={}
-                                    currentLine={}
-                                    eta={} sec
-                                    queryTime={} ms
-                                    ==================================================
-                                    """,
-                                    jobId,
-                                    progress,
-                                    executedCount,
-                                    insertCount,
-                                    updateCount,
-                                    deleteCount,
-                                    otherCount,
-                                    lineNumber,
-                                    etaSeconds,
-                                    (queryEnd - queryStart)
-                            );
-                        }
-                    }
-                }
-
-                /**
-                 * FINAL COMMIT
-                 */
-                connection.commit();
-
-                long totalElapsedSeconds =
-                        Duration.between(
-                                start,
-                                Instant.now()
-                        ).toSeconds();
-
-                long executionSpeed =
-                        totalElapsedSeconds == 0
-                                ? executedCount
-                                : executedCount
-                                / totalElapsedSeconds;
-
-                /**
-                 * FINAL STATUS
-                 */
-                status.put("status", "COMPLETED");
-                status.put("progress", 100);
-                status.put("executedCount", executedCount);
-                status.put("insertCount", insertCount);
-                status.put("updateCount", updateCount);
-                status.put("deleteCount", deleteCount);
-                status.put("otherCount", otherCount);
-                status.put("elapsedSeconds",
-                        totalElapsedSeconds);
-                status.put("executionSpeed",
-                        executionSpeed);
-                status.put("completed", true);
-                status.put("message",
-                        "Execution completed");
-
-                log.info("""
-
-                        ==================================================
-                        SQL SCRIPT EXECUTION COMPLETED
-                        ==================================================
-                        jobId={}
-                        totalStatements={}
-                        executed={}
-                        inserts={}
-                        updates={}
-                        deletes={}
-                        others={}
-                        elapsed={} sec
-                        executionSpeed={} stmt/sec
-                        ==================================================
-                        """,
-                        jobId,
-                        totalStatements,
-                        executedCount,
-                        insertCount,
-                        updateCount,
-                        deleteCount,
-                        otherCount,
-                        totalElapsedSeconds,
-                        executionSpeed
-                );
-            }
-
-        } catch (Exception e) {
-
-            long elapsedSeconds =
-                    Duration.between(
-                            start,
-                            Instant.now()
-                    ).toSeconds();
-
-            Map<String, Object> failedStatus =
-                    JOB_STATUS.get(jobId);
-
-            if (failedStatus != null) {
-
-                failedStatus.put("status", "FAILED");
-                failedStatus.put("message",
-                        e.getMessage());
-                failedStatus.put("failedLine",
-                        failedLine);
-                failedStatus.put("failedSql",
-                        failedSql);
-                failedStatus.put("executedCount",
-                        executedCount);
-                failedStatus.put("insertCount",
-                        insertCount);
-                failedStatus.put("updateCount",
-                        updateCount);
-                failedStatus.put("deleteCount",
-                        deleteCount);
-                failedStatus.put("otherCount",
-                        otherCount);
-                failedStatus.put("elapsedSeconds",
-                        elapsedSeconds);
-            }
-
-            log.error("""
-
-                    ==================================================
-                    SQL EXECUTION FAILED
-                    ==================================================
-                    jobId={}
-                    failedLine={}
-                    failedSql={}
-                    executedCount={}
-                    elapsed={} sec
-                    exception={}
-                    ==================================================
-                    """,
-                    jobId,
-                    failedLine,
-                    failedSql,
-                    executedCount,
-                    elapsedSeconds,
-                    e.getMessage(),
-                    e
-            );
-
-        } finally {
-
-            /**
-             * DELETE TEMP FILE
-             */
-            try {
-
-                if (sqlFile != null
-                        && sqlFile.exists()) {
-
-                    boolean deleted =
-                            sqlFile.delete();
-
-                    log.info("""
-
-                            ==================================================
-                            TEMP FILE CLEANUP
-                            ==================================================
-                            file={}
-                            deleted={}
-                            ==================================================
-                            """,
-                            sqlFile.getAbsolutePath(),
-                            deleted
-                    );
-                }
-
-            } catch (Exception ex) {
-
-                log.error(
-                        "FAILED TO DELETE TEMP FILE",
-                        ex
-                );
-            }
-        }
+import React, { useEffect, useMemo, useState } from "react";
+
+import {
+  Alert,
+  AlertTitle,
+  alpha,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  Fade,
+  Grid,
+  IconButton,
+  LinearProgress,
+  Paper,
+  Stack,
+  Tab,
+  Tabs,
+  TextField,
+  Tooltip,
+  Typography,
+  useTheme,
+} from "@mui/material";
+
+import {
+  AutoAwesome,
+  CleaningServices,
+  CloudUpload,
+  Code,
+  ContentCopy,
+  DeleteSweep,
+  FilePresent,
+  Info,
+  PlayArrow,
+  Refresh,
+  Terminal,
+  Timer,
+  UploadFile,
+  WarningAmber,
+} from "@mui/icons-material";
+
+import { DataGrid, GridToolbar } from "@mui/x-data-grid";
+
+import { useMutation } from "@tanstack/react-query";
+
+import useApi from "../../hooks/useApi";
+
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+
+const AdminSupport = () => {
+  const theme = useTheme();
+
+  const { callApi } = useApi();
+
+  const showSnackbar = useCustomSnackbar();
+
+  /**
+   * =========================================
+   * STATES
+   * =========================================
+   */
+  const [mainTab, setMainTab] = useState(0);
+
+  const [outputTab, setOutputTab] = useState(0);
+
+  const [query, setQuery] = useState("SELECT * FROM USERS");
+
+  const [selectedFile, setSelectedFile] = useState(null);
+
+  const [dragging, setDragging] = useState(false);
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const [jobId, setJobId] = useState(null);
+
+  const [jobStatus, setJobStatus] = useState(null);
+
+  const [lastResponse, setLastResponse] = useState(null);
+
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 10,
+  });
+
+  /**
+   * =========================================
+   * QUERY TYPES
+   * =========================================
+   */
+  const isSelect = useMemo(() => {
+    const q = query.trim().toUpperCase();
+
+    return q.startsWith("SELECT") || q.startsWith("WITH");
+  }, [query]);
+
+  const isDangerous = useMemo(() => {
+    const q = query.trim().toUpperCase();
+
+    return ["DELETE", "DROP", "TRUNCATE", "ALTER"].some((x) =>
+      q.startsWith(x),
+    );
+  }, [query]);
+
+  /**
+   * =========================================
+   * RESET SCREEN
+   * =========================================
+   */
+  const resetScreen = () => {
+    setQuery("");
+
+    setSelectedFile(null);
+
+    setDragging(false);
+
+    setJobId(null);
+
+    setJobStatus(null);
+
+    setLastResponse(null);
+
+    setResults({
+      rows: [],
+      columns: [],
+      total: 0,
+    });
+
+    setPaginationModel({
+      page: 0,
+      pageSize: 10,
+    });
+
+    setOutputTab(0);
+
+    showSnackbar("Workspace reset completed", "success");
+  };
+
+  /**
+   * =========================================
+   * EXECUTE SQL
+   * =========================================
+   */
+  const { mutate: executeSql, isPending } = useMutation({
+    mutationFn: async ({ sql, page, size }) => {
+      return await callApi(
+        "/TS/admin-support/admin-execute",
+        {
+          sql,
+          page,
+          size,
+        },
+        "POST",
+      );
+    },
+
+    onSuccess: (data) => {
+      setLastResponse(data);
+
+      if (data?.error) {
+        setOutputTab(1);
+
+        return;
+      }
+
+      if (isSelect) {
+        const columns = (data?.columns || []).map((col) => ({
+          field: col.name,
+          headerName: col.name,
+          flex: 1,
+          minWidth: 180,
+        }));
+
+        setResults({
+          rows: data?.rows || [],
+          columns,
+          total: data?.total || 0,
+        });
+
+        setOutputTab(0);
+      } else {
+        setOutputTab(1);
+      }
+    },
+
+    onError: (e) => {
+      setLastResponse({
+        error: true,
+        message: e?.message || "Execution failed",
+      });
+
+      setOutputTab(1);
+    },
+  });
+
+  /**
+   * =========================================
+   * EXECUTE QUERY
+   * =========================================
+   */
+  const handleExecute = (reset = false) => {
+    if (!query.trim()) {
+      showSnackbar("Enter SQL query", "warning");
+
+      return;
     }
-}
+
+    const page = reset ? 0 : paginationModel.page;
+
+    if (reset) {
+      setPaginationModel((p) => ({
+        ...p,
+        page: 0,
+      }));
+    }
+
+    executeSql({
+      sql: query,
+      page,
+      size: paginationModel.pageSize,
+    });
+  };
+
+  /**
+   * =========================================
+   * PAGINATION
+   * =========================================
+   */
+  useEffect(() => {
+    if (results.columns.length > 0 && isSelect) {
+      handleExecute();
+    }
+  }, [paginationModel.page, paginationModel.pageSize]);
+
+  /**
+   * =========================================
+   * FILE VALIDATION
+   * =========================================
+   */
+  const validateFile = (file) => {
+    if (!file) return;
+
+    if (!file.name.endsWith(".sql")) {
+      showSnackbar("Only .sql file supported", "error");
+
+      return;
+    }
+
+    setSelectedFile(file);
+  };
+
+  /**
+   * =========================================
+   * FILE UPLOAD
+   * =========================================
+   */
+  const handleUpload = async () => {
+    try {
+      if (!selectedFile) {
+        showSnackbar("Choose SQL file", "warning");
+
+        return;
+      }
+
+      const formData = new FormData();
+
+      formData.append("file", selectedFile);
+
+      const data = await callApi(
+        "/TS/admin-support/upload-script",
+        formData,
+        "POST",
+        "json",
+        "multipart/form-data",
+      );
+
+      if (data?.error) {
+        showSnackbar(data.message, "error");
+
+        return;
+      }
+
+      setJobId(data.jobId);
+
+      setOutputTab(1);
+
+      showSnackbar("Execution started", "success");
+    } catch (e) {
+      showSnackbar(e.message || "Upload failed", "error");
+    }
+  };
+
+  /**
+   * =========================================
+   * JOB POLLING
+   * =========================================
+   */
+  useEffect(() => {
+    if (!jobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const data = await callApi(
+          `/TS/admin-support/job-status/${jobId}`,
+          {},
+          "GET",
+        );
+
+        setJobStatus(data);
+
+        if (
+          data.status === "COMPLETED" ||
+          data.status === "FAILED"
+        ) {
+          clearInterval(interval);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [jobId]);
+
+  /**
+   * =========================================
+   * SHORTCUT
+   * =========================================
+   */
+  const handleKeyDown = (e) => {
+    if (e.ctrlKey && e.key === "Enter") {
+      e.preventDefault();
+
+      handleExecute(true);
+    }
+  };
+
+  /**
+   * =========================================
+   * PAGE LEAVE WARNING
+   * =========================================
+   */
+  useEffect(() => {
+    const active =
+      jobStatus?.status === "RUNNING";
+
+    const beforeUnload = (e) => {
+      if (!active) return;
+
+      e.preventDefault();
+
+      e.returnValue =
+        "SQL execution is still running.";
+    };
+
+    window.addEventListener(
+      "beforeunload",
+      beforeUnload,
+    );
+
+    return () =>
+      window.removeEventListener(
+        "beforeunload",
+        beforeUnload,
+      );
+  }, [jobStatus]);
+
+  /**
+   * =========================================
+   * UI
+   * =========================================
+   */
+  return (
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        p: 2,
+        gap: 1.5,
+        bgcolor:
+          theme.palette.mode === "dark"
+            ? "#0f1115"
+            : "#f5f7fb",
+      }}
+    >
+      {/* ================================================= */}
+      {/* HEADER */}
+      {/* ================================================= */}
+
+      <Paper
+        elevation={0}
+        sx={{
+          borderRadius: 4,
+          p: 2,
+          background:
+            "linear-gradient(135deg,#111827,#1f2937)",
+          color: "white",
+          border: `1px solid ${alpha(
+            "#ffffff",
+            0.08,
+          )}`,
+        }}
+      >
+        <Stack
+          direction={{
+            xs: "column",
+            md: "row",
+          }}
+          spacing={2}
+          justifyContent="space-between"
+          alignItems={{
+            xs: "flex-start",
+            md: "center",
+          }}
+        >
+          <Box>
+            <Stack
+              direction="row"
+              spacing={1}
+              alignItems="center"
+            >
+              <AutoAwesome />
+
+              <Typography
+                variant="h5"
+                fontWeight={800}
+              >
+                FINCORE ADMIN SUPPORT
+              </Typography>
+            </Stack>
+
+            <Typography
+              variant="body2"
+              sx={{
+                opacity: 0.7,
+                mt: 0.5,
+              }}
+            >
+              Advanced SQL Console & Script
+              Executor
+            </Typography>
+          </Box>
+
+          <Stack
+            direction="row"
+            spacing={1}
+            flexWrap="wrap"
+          >
+            <Chip
+              icon={<Code />}
+              label="CTRL + ENTER"
+              sx={{
+                bgcolor: alpha("#fff", 0.1),
+                color: "white",
+              }}
+            />
+
+            <Button
+              variant="outlined"
+              color="inherit"
+              startIcon={<Refresh />}
+              onClick={resetScreen}
+              sx={{
+                borderColor: alpha(
+                  "#fff",
+                  0.2,
+                ),
+              }}
+            >
+              Reset Workspace
+            </Button>
+          </Stack>
+        </Stack>
+      </Paper>
+
+      {/* ================================================= */}
+      {/* TABS */}
+      {/* ================================================= */}
+
+      <Paper
+        elevation={0}
+        sx={{
+          borderRadius: 4,
+          overflow: "hidden",
+        }}
+      >
+        <Tabs
+          value={mainTab}
+          onChange={(e, v) => setMainTab(v)}
+          variant="fullWidth"
+        >
+          <Tab
+            icon={<Terminal />}
+            label="SQL Console"
+          />
+
+          <Tab
+            icon={<UploadFile />}
+            label="Script Upload"
+          />
+        </Tabs>
+      </Paper>
+
+      {/* ================================================= */}
+      {/* SQL CONSOLE */}
+      {/* ================================================= */}
+
+      {mainTab === 0 && (
+        <Fade in>
+          <Paper
+            elevation={0}
+            sx={{
+              borderRadius: 4,
+              overflow: "hidden",
+              border: `1px solid ${theme.palette.divider}`,
+            }}
+          >
+            {/* TOP BAR */}
+
+            <Box
+              sx={{
+                px: 2,
+                py: 1.2,
+                bgcolor: "#111827",
+                color: "white",
+              }}
+            >
+              <Stack
+                direction="row"
+                justifyContent="space-between"
+                alignItems="center"
+              >
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  alignItems="center"
+                >
+                  <Terminal fontSize="small" />
+
+                  <Typography fontWeight={700}>
+                    SQL Worksheet
+                  </Typography>
+                </Stack>
+
+                <Stack direction="row" spacing={1}>
+                  <Tooltip title="Copy SQL">
+                    <IconButton
+                      size="small"
+                      onClick={() =>
+                        navigator.clipboard.writeText(
+                          query,
+                        )
+                      }
+                    >
+                      <ContentCopy
+                        sx={{
+                          color: "white",
+                        }}
+                      />
+                    </IconButton>
+                  </Tooltip>
+
+                  <Tooltip title="Clear">
+                    <IconButton
+                      size="small"
+                      onClick={() => setQuery("")}
+                    >
+                      <CleaningServices
+                        sx={{
+                          color: "white",
+                        }}
+                      />
+                    </IconButton>
+                  </Tooltip>
+
+                  <Button
+                    variant="contained"
+                    color={
+                      isDangerous
+                        ? "error"
+                        : "primary"
+                    }
+                    startIcon={<PlayArrow />}
+                    onClick={() =>
+                      isDangerous
+                        ? setConfirmOpen(true)
+                        : handleExecute(true)
+                    }
+                  >
+                    Execute
+                  </Button>
+                </Stack>
+              </Stack>
+            </Box>
+
+            {/* SQL AREA */}
+
+            <TextField
+              multiline
+              fullWidth
+              minRows={14}
+              value={query}
+              onKeyDown={handleKeyDown}
+              onChange={(e) =>
+                setQuery(e.target.value)
+              }
+              variant="standard"
+              InputProps={{
+                disableUnderline: true,
+                sx: {
+                  p: 3,
+                  bgcolor: "#0d1117",
+                  color: "#d4d4d4",
+                  fontFamily:
+                    "'Fira Code', monospace",
+                  fontSize: 14,
+                },
+              }}
+            />
+          </Paper>
+        </Fade>
+      )}
+
+      {/* ================================================= */}
+      {/* FILE UPLOAD */}
+      {/* ================================================= */}
+
+      {mainTab === 1 && (
+        <Paper
+          elevation={0}
+          sx={{
+            borderRadius: 4,
+            p: 3,
+          }}
+        >
+          <Box
+            onDragOver={(e) => {
+              e.preventDefault();
+
+              setDragging(true);
+            }}
+            onDragLeave={() =>
+              setDragging(false)
+            }
+            onDrop={(e) => {
+              e.preventDefault();
+
+              setDragging(false);
+
+              validateFile(
+                e.dataTransfer.files[0],
+              );
+            }}
+            sx={{
+              border: `2px dashed ${
+                dragging
+                  ? theme.palette.primary.main
+                  : theme.palette.divider
+              }`,
+              borderRadius: 4,
+              p: 6,
+              textAlign: "center",
+              transition: "0.3s",
+              bgcolor: dragging
+                ? alpha(
+                    theme.palette.primary.main,
+                    0.08,
+                  )
+                : "transparent",
+            }}
+          >
+            <CloudUpload
+              sx={{
+                fontSize: 80,
+                color:
+                  theme.palette.primary.main,
+              }}
+            />
+
+            <Typography
+              variant="h6"
+              fontWeight={700}
+              mt={2}
+            >
+              Drag & Drop SQL Script
+            </Typography>
+
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              mt={1}
+            >
+              Handles huge SQL files with live
+              tracking
+            </Typography>
+
+            <Button
+              component="label"
+              variant="contained"
+              sx={{
+                mt: 3,
+                borderRadius: 3,
+              }}
+            >
+              Browse File
+
+              <input
+                hidden
+                type="file"
+                accept=".sql"
+                onChange={(e) =>
+                  validateFile(
+                    e.target.files[0],
+                  )
+                }
+              />
+            </Button>
+          </Box>
+
+          {selectedFile && (
+            <Alert
+              severity="info"
+              sx={{
+                mt: 2,
+                borderRadius: 3,
+              }}
+              icon={<FilePresent />}
+            >
+              <AlertTitle>
+                Selected File
+              </AlertTitle>
+
+              {selectedFile.name}
+
+              <br />
+
+              Size :{" "}
+              {(
+                selectedFile.size /
+                1024 /
+                1024
+              ).toFixed(2)}{" "}
+              MB
+            </Alert>
+          )}
+
+          <Stack
+            direction="row"
+            justifyContent="flex-end"
+            mt={2}
+          >
+            <Button
+              size="large"
+              variant="contained"
+              startIcon={<UploadFile />}
+              onClick={handleUpload}
+              sx={{
+                borderRadius: 3,
+                px: 4,
+              }}
+            >
+              Start Execution
+            </Button>
+          </Stack>
+        </Paper>
+      )}
+
+      {/* ================================================= */}
+      {/* PREMIUM EXECUTION DASHBOARD */}
+      {/* ================================================= */}
+
+      {jobStatus && (
+        <Paper
+          elevation={0}
+          sx={{
+            borderRadius: 4,
+            p: 2.5,
+            border: `1px solid ${theme.palette.divider}`,
+          }}
+        >
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            alignItems="center"
+            mb={2}
+          >
+            <Box>
+              <Typography
+                variant="h6"
+                fontWeight={800}
+              >
+                Live Execution Monitor
+              </Typography>
+
+              <Typography
+                variant="body2"
+                color="text.secondary"
+              >
+                Job ID : {jobStatus.jobId}
+              </Typography>
+            </Box>
+
+            <Chip
+              color={
+                jobStatus.status ===
+                "COMPLETED"
+                  ? "success"
+                  : jobStatus.status ===
+                      "FAILED"
+                    ? "error"
+                    : "warning"
+              }
+              label={jobStatus.status}
+            />
+          </Stack>
+
+          <LinearProgress
+            variant="determinate"
+            value={jobStatus.progress || 0}
+            sx={{
+              height: 12,
+              borderRadius: 10,
+              mb: 2,
+            }}
+          />
+
+          <Grid container spacing={2}>
+            {[
+              {
+                label: "Executed",
+                value:
+                  jobStatus.executedCount || 0,
+              },
+              {
+                label: "Insert",
+                value:
+                  jobStatus.insertCount || 0,
+              },
+              {
+                label: "Update",
+                value:
+                  jobStatus.updateCount || 0,
+              },
+              {
+                label: "Delete",
+                value:
+                  jobStatus.deleteCount || 0,
+              },
+              {
+                label: "Others",
+                value:
+                  jobStatus.otherCount || 0,
+              },
+              {
+                label: "Total",
+                value:
+                  jobStatus.totalStatements ||
+                  0,
+              },
+              {
+                label: "Elapsed",
+                value: `${
+                  jobStatus.elapsedSeconds ||
+                  0
+                } sec`,
+              },
+              {
+                label: "ETA",
+                value: `${
+                  jobStatus.etaSeconds || 0
+                } sec`,
+              },
+            ].map((item) => (
+              <Grid
+                item
+                xs={6}
+                md={3}
+                key={item.label}
+              >
+                <Paper
+                  elevation={0}
+                  sx={{
+                    borderRadius: 3,
+                    p: 2,
+                    textAlign: "center",
+                    bgcolor: alpha(
+                      theme.palette.primary.main,
+                      0.04,
+                    ),
+                  }}
+                >
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                  >
+                    {item.label}
+                  </Typography>
+
+                  <Typography
+                    variant="h5"
+                    fontWeight={800}
+                  >
+                    {item.value}
+                  </Typography>
+                </Paper>
+              </Grid>
+            ))}
+          </Grid>
+
+          {jobStatus.status === "RUNNING" && (
+            <Alert
+              severity="warning"
+              sx={{
+                mt: 2,
+                borderRadius: 3,
+              }}
+              icon={<WarningAmber />}
+            >
+              Please stay on this screen until
+              execution completes.
+            </Alert>
+          )}
+
+          {jobStatus.status === "FAILED" && (
+            <Alert
+              severity="error"
+              sx={{
+                mt: 2,
+                borderRadius: 3,
+              }}
+            >
+              <AlertTitle>
+                Execution Failed
+              </AlertTitle>
+
+              {jobStatus.message}
+
+              <br />
+
+              Failed Line :
+              {" "}
+              {jobStatus.failedLine}
+            </Alert>
+          )}
+        </Paper>
+      )}
+
+      {/* ================================================= */}
+      {/* OUTPUT */}
+      {/* ================================================= */}
+
+      <Paper
+        elevation={0}
+        sx={{
+          flex: 1,
+          borderRadius: 4,
+          overflow: "hidden",
+        }}
+      >
+        <Tabs
+          value={outputTab}
+          onChange={(e, v) => setOutputTab(v)}
+        >
+          <Tab label="Data Grid" />
+
+          <Tab label="Logs" />
+        </Tabs>
+
+        {/* GRID */}
+
+        {outputTab === 0 && (
+          <DataGrid
+            rows={results.rows}
+            columns={results.columns}
+            rowCount={results.total}
+            paginationMode="server"
+            paginationModel={paginationModel}
+            onPaginationModelChange={
+              setPaginationModel
+            }
+            disableRowSelectionOnClick
+            pageSizeOptions={[
+              10,
+              25,
+              50,
+              100,
+            ]}
+            loading={isPending}
+            slots={{
+              toolbar: GridToolbar,
+              loadingOverlay: CircularProgress,
+            }}
+            getRowId={(row) =>
+              row.ID ||
+              row.id ||
+              Math.random()
+            }
+            sx={{
+              border: "none",
+              height: "100%",
+              "& .MuiDataGrid-columnHeaders":
+                {
+                  bgcolor: alpha(
+                    theme.palette.primary.main,
+                    0.06,
+                  ),
+                },
+            }}
+          />
+        )}
+
+        {/* LOGS */}
+
+        {outputTab === 1 && (
+          <Box p={2}>
+            {!lastResponse && !jobStatus && (
+              <Alert
+                severity="info"
+                sx={{
+                  borderRadius: 3,
+                }}
+                icon={<Info />}
+              >
+                Waiting for execution...
+              </Alert>
+            )}
+
+            {lastResponse?.error && (
+              <Alert
+                severity="error"
+                sx={{
+                  borderRadius: 3,
+                }}
+              >
+                <AlertTitle>Error</AlertTitle>
+
+                {lastResponse.message}
+              </Alert>
+            )}
+
+            {lastResponse &&
+              !lastResponse?.error && (
+                <Alert
+                  severity="success"
+                  sx={{
+                    borderRadius: 3,
+                  }}
+                >
+                  <AlertTitle>
+                    Execution Completed
+                  </AlertTitle>
+
+                  {lastResponse?.rows?.[0]
+                    ?.RESULT ||
+                    "SQL executed successfully"}
+                </Alert>
+              )}
+          </Box>
+        )}
+      </Paper>
+
+      {/* ================================================= */}
+      {/* CONFIRM DIALOG */}
+      {/* ================================================= */}
+
+      <Dialog
+        open={confirmOpen}
+        onClose={() =>
+          setConfirmOpen(false)
+        }
+      >
+        <DialogTitle>
+          Confirm Dangerous Query
+        </DialogTitle>
+
+        <DialogContent>
+          <Typography>
+            This query can modify/delete data.
+            Continue?
+          </Typography>
+        </DialogContent>
+
+        <DialogActions>
+          <Button
+            onClick={() =>
+              setConfirmOpen(false)
+            }
+          >
+            Cancel
+          </Button>
+
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => {
+              setConfirmOpen(false);
+
+              handleExecute(true);
+            }}
+          >
+            Execute Anyway
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default AdminSupport;
