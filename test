@@ -1,531 +1,137 @@
-package com.fincore.transactions_service.service;
+-- =========================================================
+-- FINCORE ADMIN SUPPORT LOGGING SETUP
+-- =========================================================
+
+-- =========================================================
+-- DROP OLD OBJECTS
+-- =========================================================
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE ADMIN_SUPPORT_LOG CASCADE CONSTRAINTS';
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP SEQUENCE ADMIN_SUPPORT_LOG_SEQ';
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TRIGGER TRG_ADMIN_SUPPORT_LOG_ID';
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+/
+
+-- =========================================================
+-- CREATE SEQUENCE
+-- =========================================================
+
+CREATE SEQUENCE ADMIN_SUPPORT_LOG_SEQ
+START WITH 1
+INCREMENT BY 1
+NOCACHE
+NOCYCLE;
+
+-- =========================================================
+-- CREATE TABLE
+-- =========================================================
+CREATE TABLE admin_support_log (
+    id                      NUMBER(20) PRIMARY KEY DEFAULT admin_support_log_seq.NEXTVAL,
+    job_id                  VARCHAR2(200),
+    user_id                 VARCHAR2(100),
+    client_ip               VARCHAR2(200),
+    file_name               VARCHAR2(1000),
+    execution_type          VARCHAR2(100),
+    status                  VARCHAR2(50),
+    total_statements        NUMBER(20) DEFAULT 0,
+    executed_count          NUMBER(20) DEFAULT 0,
+    insert_count            NUMBER(20) DEFAULT 0,
+    update_count            NUMBER(20) DEFAULT 0,
+    delete_count            NUMBER(20) DEFAULT 0,
+    other_count             NUMBER(20) DEFAULT 0,
+    failed_statement_number NUMBER(20),
+    failed_sql              CLOB,
+    exception_type          VARCHAR2(1000),
+    exception_message       CLOB,
+    execution_speed         NUMBER(20, 2),
+    elapsed_seconds         NUMBER(20),
+    sql_text                CLOB,
+    started_at              TIMESTAMP DEFAULT systimestamp,
+    completed_at            TIMESTAMP,
+    created_at              TIMESTAMP DEFAULT systimestamp
+);
+
+-- =========================================================
+-- INDEXES
+-- =========================================================
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_JOB
+ON ADMIN_SUPPORT_LOG(JOB_ID);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_USER
+ON ADMIN_SUPPORT_LOG(USER_ID);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_STATUS
+ON ADMIN_SUPPORT_LOG(STATUS);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_CREATED
+ON ADMIN_SUPPORT_LOG(CREATED_AT);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_EXEC_TYPE
+ON ADMIN_SUPPORT_LOG(EXECUTION_TYPE);
+
+-- =========================================================
+-- COMMENTS
+-- =========================================================
+
+COMMENT ON TABLE ADMIN_SUPPORT_LOG IS
+'Stores all admin SQL execution logs including uploads, selects, updates, deletes and failures';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.JOB_ID IS
+'Unique execution job id';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.USER_ID IS
+'Logged in user id';
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.CLIENT_IP IS
+'Client machine IP address';
 
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-import org.springframework.web.multipart.MultipartFile;
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.FILE_NAME IS
+'Uploaded SQL file name';
 
-import java.io.File;
-import java.sql.ResultSetMetaData;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.*;
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.EXECUTION_TYPE IS
+'SELECT / INSERT / UPDATE / DELETE / SCRIPT / UPLOAD_SCRIPT';
 
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class AdminSupportServiceImpl implements AdminSupportService {
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.STATUS IS
+'Execution status';
 
-    private final JdbcTemplate jdbcTemplate;
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.EXECUTION_SPEED IS
+'Statements executed per second';
 
-    private final AdminSupportExecutor adminSupportExecutor;
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.FAILED_SQL IS
+'SQL statement which failed';
 
-    /**
-     * ============================================
-     * EXECUTE ADMIN SQL
-     * ============================================
-     */
-    @Override
-    public Map<String, Object> executeAdminSql(
-            AdminSupportDTO dto,
-            String userId,
-            HttpServletRequest request
-    ) {
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.EXCEPTION_MESSAGE IS
+'Complete exception stack or message';
 
-        Instant start = Instant.now();
+-- =========================================================
+-- SAMPLE QUERY
+-- =========================================================
 
-        Map<String, Object> response = new HashMap<>();
+-- SELECT * FROM ADMIN_SUPPORT_LOG
+-- ORDER BY CREATED_AT DESC;
 
-        String sql = dto.getSql().trim();
+-- =========================================================
+-- SCRIPT COMPLETED
+-- =========================================================
 
-        int page = dto.getPage();
-
-        int size = dto.getSize();
-
-        String clientIp = getClientIp(request);
-
-        log.info("""
-
-                ==================================================
-                ADMIN SQL EXECUTION STARTED
-                ==================================================
-                userId={}
-                clientIp={}
-                page={}
-                size={}
-                sql={}
-                ==================================================
-                """,
-                userId,
-                clientIp,
-                page,
-                size,
-                sql
-        );
-
-        try {
-
-            /**
-             * ============================================
-             * SELECT QUERY
-             * ============================================
-             */
-            if (sql.toUpperCase().startsWith("SELECT")
-                    || sql.toUpperCase().startsWith("WITH")) {
-
-                int offset = page * size;
-
-                String paginatedSql =
-                        """
-                        SELECT * FROM
-                        (
-                            SELECT A.*, ROWNUM RN FROM
-                            (
-                        """
-                                + sql +
-                                """
-                                   
-                            ) A
-                            WHERE ROWNUM <= ?
-                        )
-                        WHERE RN > ?
-                        """;
-
-                List<Map<String, Object>> rows =
-                        jdbcTemplate.query(
-                                paginatedSql,
-                                ps -> {
-                                    ps.setInt(1, offset + size);
-                                    ps.setInt(2, offset);
-                                },
-                                (rs, rowNum) -> {
-
-                                    Map<String, Object> row =
-                                            new LinkedHashMap<>();
-
-                                    ResultSetMetaData meta =
-                                            rs.getMetaData();
-
-                                    int columnCount =
-                                            meta.getColumnCount();
-
-                                    for (int i = 1; i <= columnCount; i++) {
-
-                                        row.put(
-                                                meta.getColumnLabel(i),
-                                                rs.getObject(i)
-                                        );
-                                    }
-
-                                    return row;
-                                }
-                        );
-
-                String countSql =
-                        "SELECT COUNT(*) FROM (" + sql + ")";
-
-                Integer total =
-                        jdbcTemplate.queryForObject(
-                                countSql,
-                                Integer.class
-                        );
-
-                List<Map<String, Object>> columns =
-                        new ArrayList<>();
-
-                if (!rows.isEmpty()) {
-
-                    rows.get(0).keySet().forEach(col -> {
-
-                        Map<String, Object> column =
-                                new HashMap<>();
-
-                        column.put("name", col);
-
-                        columns.add(column);
-                    });
-                }
-
-                long executionMs =
-                        Duration.between(start, Instant.now())
-                                .toMillis();
-
-                /**
-                 * INSERT LOG
-                 */
-                insertExecutionLog(
-                        UUID.randomUUID().toString(),
-                        userId,
-                        clientIp,
-                        null,
-                        "SELECT",
-                        "SUCCESS",
-                        total,
-                        rows.size(),
-                        0,
-                        0,
-                        0,
-                        1,
-                        null,
-                        null,
-                        null,
-                        null,
-                        0,
-                        executionMs,
-                        sql
-                );
-
-                response.put("rows", rows);
-                response.put("columns", columns);
-                response.put("total", total);
-
-                log.info("""
-
-                        SELECT EXECUTED
-                        | rows={}
-                        | total={}
-                        | executionTime={} ms
-                        """,
-                        rows.size(),
-                        total,
-                        executionMs
-                );
-
-                return response;
-            }
-
-            /**
-             * ============================================
-             * DML / DDL
-             * ============================================
-             */
-            int affectedRows =
-                    jdbcTemplate.update(sql);
-
-            long executionMs =
-                    Duration.between(start, Instant.now())
-                            .toMillis();
-
-            int insertCount = 0;
-            int updateCount = 0;
-            int deleteCount = 0;
-            int otherCount = 0;
-
-            String upperSql = sql.toUpperCase();
-
-            if (upperSql.startsWith("INSERT")) {
-
-                insertCount = affectedRows;
-
-            } else if (upperSql.startsWith("UPDATE")) {
-
-                updateCount = affectedRows;
-
-            } else if (upperSql.startsWith("DELETE")) {
-
-                deleteCount = affectedRows;
-
-            } else {
-
-                otherCount = 1;
-            }
-
-            /**
-             * INSERT LOG
-             */
-            insertExecutionLog(
-                    UUID.randomUUID().toString(),
-                    userId,
-                    clientIp,
-                    null,
-                    "DML",
-                    "SUCCESS",
-                    1,
-                    affectedRows,
-                    insertCount,
-                    updateCount,
-                    deleteCount,
-                    otherCount,
-                    null,
-                    null,
-                    null,
-                    null,
-                    0,
-                    executionMs,
-                    sql
-            );
-
-            response.put(
-                    "rows",
-                    List.of(
-                            Map.of(
-                                    "RESULT",
-                                    affectedRows + " row(s) affected"
-                            )
-                    )
-            );
-
-            log.info("""
-
-                    DML EXECUTED
-                    | affectedRows={}
-                    | executionTime={} ms
-                    """,
-                    affectedRows,
-                    executionMs
-            );
-
-            return response;
-
-        } catch (Exception e) {
-
-            long executionMs =
-                    Duration.between(start, Instant.now())
-                            .toMillis();
-
-            log.error("ADMIN SQL EXECUTION FAILED", e);
-
-            insertExecutionLog(
-                    UUID.randomUUID().toString(),
-                    userId,
-                    clientIp,
-                    null,
-                    "ERROR",
-                    "FAILED",
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    null,
-                    sql,
-                    e.getClass().getName(),
-                    e.getMessage(),
-                    0,
-                    executionMs,
-                    sql
-            );
-
-            response.put("error", true);
-            response.put("message", e.getMessage());
-
-            return response;
-        }
-    }
-
-    /**
-     * ============================================
-     * UPLOAD SQL FILE
-     * ============================================
-     */
-    @Override
-    public Map<String, Object> uploadSqlFile(
-            MultipartFile file,
-            String userId,
-            HttpServletRequest request
-    ) {
-
-        Map<String, Object> response =
-                new HashMap<>();
-
-        String clientIp = getClientIp(request);
-
-        try {
-
-            String jobId =
-                    UUID.randomUUID().toString();
-
-            /**
-             * CREATE TEMP FILE
-             */
-            File tempFile =
-                    File.createTempFile(
-                            "admin_support_",
-                            ".sql"
-                    );
-
-            /**
-             * COPY UPLOAD TO TEMP FILE
-             */
-            file.transferTo(tempFile);
-
-            log.info("""
-
-                    ==================================================
-                    SQL FILE UPLOAD RECEIVED
-                    ==================================================
-                    userId={}
-                    clientIp={}
-                    fileName={}
-                    tempFile={}
-                    jobId={}
-                    ==================================================
-                    """,
-                    userId,
-                    clientIp,
-                    file.getOriginalFilename(),
-                    tempFile.getAbsolutePath(),
-                    jobId
-            );
-
-            /**
-             * EXECUTE ASYNC
-             */
-            adminSupportExecutor.executeScriptAsync(
-                    tempFile,
-                    jobId,
-                    userId,
-                    clientIp
-            );
-
-            response.put("jobId", jobId);
-            response.put("status", "STARTED");
-
-            return response;
-
-        } catch (Exception e) {
-
-            log.error("UPLOAD FAILED", e);
-
-            response.put("error", true);
-            response.put("message", e.getMessage());
-
-            return response;
-        }
-    }
-
-    /**
-     * ============================================
-     * JOB STATUS
-     * ============================================
-     */
-    @Override
-    public Map<String, Object> getJobStatus(
-            String jobId
-    ) {
-
-        return AdminSupportExecutor.JOB_STATUS.getOrDefault(
-                jobId,
-                Map.of(
-                        "status",
-                        "NOT_FOUND"
-                )
-        );
-    }
-
-    /**
-     * ============================================
-     * INSERT EXECUTION LOG
-     * ============================================
-     */
-    private void insertExecutionLog(
-            String jobId,
-            String userId,
-            String clientIp,
-            String fileName,
-            String executionType,
-            String status,
-            int totalStatements,
-            int executedCount,
-            int insertCount,
-            int updateCount,
-            int deleteCount,
-            int otherCount,
-            Integer failedStatementNumber,
-            String failedSql,
-            String exceptionType,
-            String exceptionMessage,
-            long executionSpeed,
-            long elapsedSeconds,
-            String sqlText
-    ) {
-
-        try {
-
-            jdbcTemplate.update(
-                    """
-                    INSERT INTO ADMIN_SUPPORT_LOG
-                    (
-                        ID,
-                        JOB_ID,
-                        USER_ID,
-                        CLIENT_IP,
-                        FILE_NAME,
-                        EXECUTION_TYPE,
-                        STATUS,
-                        TOTAL_STATEMENTS,
-                        EXECUTED_COUNT,
-                        INSERT_COUNT,
-                        UPDATE_COUNT,
-                        DELETE_COUNT,
-                        OTHER_COUNT,
-                        FAILED_STATEMENT_NUMBER,
-                        FAILED_SQL,
-                        EXCEPTION_TYPE,
-                        EXCEPTION_MESSAGE,
-                        EXECUTION_SPEED,
-                        ELAPSED_SECONDS,
-                        SQL_TEXT,
-                        CREATED_AT
-                    )
-                    VALUES
-                    (
-                        ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
-                    )
-                    """,
-                    jobId,
-                    userId == null ? "UNKNOWN" : userId,
-                    clientIp,
-                    fileName,
-                    executionType,
-                    status,
-                    totalStatements,
-                    executedCount,
-                    insertCount,
-                    updateCount,
-                    deleteCount,
-                    otherCount,
-                    failedStatementNumber,
-                    failedSql,
-                    exceptionType,
-                    exceptionMessage,
-                    executionSpeed,
-                    elapsedSeconds,
-                    sqlText
-            );
-
-        } catch (Exception e) {
-
-            log.error("FAILED TO INSERT LOG", e);
-        }
-    }
-
-    /**
-     * ============================================
-     * CLIENT IP
-     * ============================================
-     */
-    private String getClientIp(
-            HttpServletRequest request
-    ) {
-
-        String xfHeader =
-                request.getHeader("X-Forwarded-For");
-
-        if (xfHeader == null
-                || xfHeader.isEmpty()
-                || "unknown".equalsIgnoreCase(xfHeader)) {
-
-            return request.getRemoteAddr();
-        }
-
-        return xfHeader.split(",")[0];
-    }
-}
+COMMIT;
+/
