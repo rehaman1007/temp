@@ -1,1579 +1,212 @@
-import React, {
-  useState,
-  useEffect,
-  useMemo,
-  useRef,
-} from "react";
-
-import {
-  Box,
-  Paper,
-  Typography,
-  Button,
-  Stack,
-  Tabs,
-  Tab,
-  TextField,
-  IconButton,
-  Tooltip,
-  Divider,
-  LinearProgress,
-  Alert,
-  AlertTitle,
-  Chip,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  useTheme,
-  alpha,
-  Grid,
-  Card,
-  CardContent,
-} from "@mui/material";
-
-import {
-  UploadFile,
-  PlayArrow,
-  CleaningServices,
-  ContentCopy,
-  CloudUpload,
-  TableChart,
-  ListAlt,
-  Terminal,
-  QueryStats,
-  AccessTime,
-  Storage,
-  CheckCircle,
-  Error,
-  Update,
-  Delete,
-  Add,
-  Speed,
-  WarningAmber,
-} from "@mui/icons-material";
-
-import {
-  DataGrid,
-  GridToolbar,
-} from "@mui/x-data-grid";
-
-import {
-  useMutation,
-} from "@tanstack/react-query";
-
-import useApi from "../../hooks/useApi";
-
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-
-const AdminSupport = () => {
-
-  const theme = useTheme();
-
-  const { callApi } = useApi();
-
-  const showSnackbar = useCustomSnackbar();
-
-  /**
-   * MAIN TAB
-   */
-  const [mainTab, setMainTab] = useState(0);
-
-  /**
-   * OUTPUT TAB
-   */
-  const [outputTab, setOutputTab] = useState(0);
-
-  /**
-   * SQL
-   */
-  const [query, setQuery] = useState("SELECT * FROM USERS");
-
-  /**
-   * FILE
-   */
-  const [selectedFile, setSelectedFile] = useState(null);
-
-  const [dragging, setDragging] = useState(false);
-
-  /**
-   * RESULTS
-   */
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
-
-  /**
-   * PAGINATION
-   */
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 10,
-  });
-
-  /**
-   * LOGS
-   */
-  const [lastResponse, setLastResponse] = useState(null);
+-- =========================================================
+-- FINCORE ADMIN SUPPORT LOGGING SETUP
+-- =========================================================
 
-  /**
-   * JOB
-   */
-  const [jobId, setJobId] = useState(null);
+-- =========================================================
+-- DROP OLD OBJECTS
+-- =========================================================
 
-  const [jobStatus, setJobStatus] = useState(null);
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE ADMIN_SUPPORT_LOG CASCADE CONSTRAINTS';
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+/
 
-  /**
-   * CONFIRM
-   */
-  const [confirmOpen, setConfirmOpen] = useState(false);
+BEGIN
+    EXECUTE IMMEDIATE 'DROP SEQUENCE ADMIN_SUPPORT_LOG_SEQ';
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+/
 
-  /**
-   * EXECUTION TIMER
-   */
-  const [executionSeconds, setExecutionSeconds] = useState(0);
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TRIGGER TRG_ADMIN_SUPPORT_LOG_ID';
+EXCEPTION
+    WHEN OTHERS THEN
+        NULL;
+END;
+/
 
-  const executionTimerRef = useRef(null);
-
-  /**
-   * QUERY TYPE
-   */
-  const isSelect = useMemo(() => {
-
-    const q = query.trim().toUpperCase();
-
-    return q.startsWith("SELECT")
-      || q.startsWith("WITH");
-
-  }, [query]);
-
-  /**
-   * DANGEROUS
-   */
-  const isDestructive = useMemo(() => {
-
-    const q = query.trim().toUpperCase();
-
-    return [
-      "UPDATE",
-      "DELETE",
-      "DROP",
-      "TRUNCATE",
-      "ALTER",
-    ].some((k) => q.startsWith(k));
-
-  }, [query]);
-
-  /**
-   * PAGE LEAVE WARNING
-   */
-  useEffect(() => {
-
-    const handler = (e) => {
-
-      if (
-        jobStatus?.status === "RUNNING"
-      ) {
-
-        e.preventDefault();
-
-        e.returnValue =
-          "SQL execution is still running.";
-
-      }
-    };
-
-    window.addEventListener(
-      "beforeunload",
-      handler,
-    );
-
-    return () =>
-      window.removeEventListener(
-        "beforeunload",
-        handler,
-      );
-
-  }, [jobStatus]);
-
-  /**
-   * TIMER
-   */
-  useEffect(() => {
-
-    if (
-      jobStatus?.status === "RUNNING"
-    ) {
-
-      executionTimerRef.current =
-        setInterval(() => {
-
-          setExecutionSeconds(
-            (prev) => prev + 1,
-          );
-
-        }, 1000);
-
-    } else {
-
-      clearInterval(
-        executionTimerRef.current,
-      );
-    }
-
-    return () =>
-      clearInterval(
-        executionTimerRef.current,
-      );
-
-  }, [jobStatus?.status]);
-
-  /**
-   * EXECUTE SQL
-   */
-  const {
-    mutate: executeSql,
-    isPending,
-  } = useMutation({
-
-    mutationFn: async ({
-      sql,
-      page,
-      size,
-    }) => {
-
-      return await callApi(
-        "/TS/admin-support/admin-execute",
-        {
-          sql,
-          page,
-          size,
-        },
-        "POST",
-      );
-    },
-
-    onSuccess: (data) => {
-
-      setLastResponse(data);
-
-      if (data?.error) {
-
-        setOutputTab(1);
-
-        return;
-      }
-
-      /**
-       * SELECT
-       */
-      if (isSelect) {
-
-        const formattedCols =
-          (data?.columns || []).map(
-            (col) => ({
-              field: col.name,
-              headerName: col.name,
-              flex: 1,
-              minWidth: 180,
-            }),
-          );
-
-        setResults({
-          rows: data?.rows || [],
-          columns: formattedCols,
-          total: data?.total || 0,
-        });
-
-        setOutputTab(0);
-
-      } else {
-
-        setResults({
-          rows: [],
-          columns: [],
-          total: 0,
-        });
-
-        setOutputTab(1);
-      }
-    },
-
-    onError: (err) => {
-
-      setLastResponse({
-        error: true,
-        message:
-          err?.message
-          || "Execution failed",
-      });
-
-      setOutputTab(1);
-    },
-  });
-
-  /**
-   * RUN
-   */
-  const handleRun = (
-    resetPage = false,
-  ) => {
-
-    if (!query.trim()) {
-
-      showSnackbar(
-        "Enter query",
-        "warning",
-      );
-
-      return;
-    }
-
-    const targetPage =
-      resetPage
-        ? 0
-        : paginationModel.page;
-
-    if (resetPage) {
-
-      setPaginationModel((p) => ({
-        ...p,
-        page: 0,
-      }));
-    }
-
-    executeSql({
-      sql: query,
-      page: targetPage,
-      size:
-        paginationModel.pageSize,
-    });
-  };
-
-  /**
-   * PAGINATION
-   */
-  useEffect(() => {
-
-    if (
-      results.columns.length > 0
-      && isSelect
-    ) {
-
-      handleRun();
-    }
-
-  }, [
-    paginationModel.page,
-    paginationModel.pageSize,
-  ]);
-
-  /**
-   * FILE VALIDATE
-   */
-  const validateFile = (
-    file,
-  ) => {
-
-    if (!file) return;
-
-    if (
-      !file.name.endsWith(".sql")
-    ) {
-
-      showSnackbar(
-        "Only .sql allowed",
-        "error",
-      );
-
-      return;
-    }
-
-    setSelectedFile(file);
-  };
-
-  /**
-   * DROP
-   */
-  const handleDrop = (e) => {
-
-    e.preventDefault();
-
-    setDragging(false);
-
-    validateFile(
-      e.dataTransfer.files[0],
-    );
-  };
-
-  /**
-   * UPLOAD
-   */
-  const handleUpload =
-    async () => {
-
-      try {
-
-        if (!selectedFile) {
-
-          showSnackbar(
-            "Select SQL file",
-            "warning",
-          );
+-- =========================================================
+-- CREATE SEQUENCE
+-- =========================================================
 
-          return;
-        }
-
-        setExecutionSeconds(0);
-
-        const formData =
-          new FormData();
-
-        formData.append(
-          "file",
-          selectedFile,
-        );
-
-        const data =
-          await callApi(
-            "/TS/admin-support/upload-script",
-            formData,
-            "POST",
-            "json",
-            "multipart/form-data",
-          );
-
-        if (data.error) {
-
-          showSnackbar(
-            data.message,
-            "error",
-          );
-
-          return;
-        }
-
-        setJobId(data.jobId);
-
-        setOutputTab(1);
-
-        showSnackbar(
-          "Execution started",
-          "success",
-        );
-
-      } catch (e) {
-
-        showSnackbar(
-          e.message
-          || "Upload failed",
-          "error",
-        );
-      }
-    };
-
-  /**
-   * POLLING
-   */
-  useEffect(() => {
-
-    if (!jobId) return;
-
-    const interval =
-      setInterval(async () => {
-
-        try {
-
-          const data =
-            await callApi(
-              `/TS/admin-support/job-status/${jobId}`,
-              {},
-              "GET",
-            );
-
-          setJobStatus(data);
-
-          if (
-            data.status
-            === "COMPLETED"
-
-            ||
-
-            data.status
-            === "FAILED"
-          ) {
-
-            clearInterval(
-              interval,
-            );
-          }
-
-        } catch (e) {
-
-          console.error(e);
-        }
-
-      }, 2000);
-
-    return () =>
-      clearInterval(interval);
-
-  }, [jobId]);
-
-  /**
-   * SHORTCUT
-   */
-  const handleKeyDown = (
-    e,
-  ) => {
-
-    if (
-      e.ctrlKey
-      && e.key === "Enter"
-    ) {
-
-      e.preventDefault();
-
-      handleRun(true);
-    }
-  };
-
-  /**
-   * FORMAT TIME
-   */
-  const formatSeconds = (
-    sec,
-  ) => {
-
-    if (!sec && sec !== 0)
-      return "-";
-
-    const mins = Math.floor(
-      sec / 60,
-    );
-
-    const secs = sec % 60;
-
-    return `${mins}m ${secs}s`;
-  };
-
-  /**
-   * STATS CARD
-   */
-  const StatCard = ({
-    title,
-    value,
-    icon,
-    color,
-  }) => (
-
-    <Card
-      elevation={0}
-      sx={{
-        borderRadius: 2,
-        border:
-          "1px solid rgba(255,255,255,0.08)",
-        background:
-          alpha(color, 0.08),
-      }}
-    >
-      <CardContent>
-
-        <Stack
-          direction="row"
-          justifyContent="space-between"
-          alignItems="center"
-        >
-
-          <Box>
-
-            <Typography
-              variant="caption"
-              color="text.secondary"
-            >
-              {title}
-            </Typography>
-
-            <Typography
-              variant="h5"
-              fontWeight={800}
-            >
-              {value}
-            </Typography>
-
-          </Box>
-
-          <Box
-            sx={{
-              color,
-            }}
-          >
-            {icon}
-          </Box>
-
-        </Stack>
-
-      </CardContent>
-    </Card>
-  );
-
-  return (
-
-    <Box
-      sx={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        overflow: "hidden",
-        p: {
-          xs: 1,
-          md: 2,
-        },
-        gap: 1,
-      }}
-    >
-
-      {/* HEADER */}
-      <Paper
-        elevation={0}
-        sx={{
-          p: 2,
-          borderRadius: 3,
-          background:
-            "linear-gradient(135deg,#111827,#1f2937)",
-          color: "white",
-        }}
-      >
-
-        <Stack
-          direction={{
-            xs: "column",
-            md: "row",
-          }}
-          spacing={2}
-          justifyContent="space-between"
-          alignItems={{
-            xs: "flex-start",
-            md: "center",
-          }}
-        >
-
-          <Box>
-
-            <Typography
-              variant="h5"
-              fontWeight={900}
-            >
-              FINCORE ADMIN SUPPORT
-            </Typography>
-
-            <Typography
-              variant="body2"
-              sx={{
-                opacity: 0.8,
-              }}
-            >
-              Advanced SQL Execution Console
-            </Typography>
-
-          </Box>
-
-          <Stack
-            direction="row"
-            spacing={1}
-            flexWrap="wrap"
-          >
-
-            <Chip
-              label="CTRL + ENTER"
-              color="primary"
-            />
-
-            <Chip
-              label={
-                isDestructive
-                  ? "DESTRUCTIVE"
-                  : "SAFE"
-              }
-              color={
-                isDestructive
-                  ? "error"
-                  : "success"
-              }
-            />
-
-          </Stack>
-
-        </Stack>
-
-      </Paper>
-
-      {/* MAIN TABS */}
-      <Paper
-        sx={{
-          borderRadius: 3,
-        }}
-      >
-
-        <Tabs
-          value={mainTab}
-          onChange={(
-            e,
-            v,
-          ) => setMainTab(v)}
-        >
-
-          <Tab
-            icon={<Terminal />}
-            label="SQL Command"
-          />
-
-          <Tab
-            icon={<UploadFile />}
-            label="SQL Upload"
-          />
-
-        </Tabs>
-
-      </Paper>
-
-      {/* SQL COMMAND */}
-      {mainTab === 0 && (
-
-        <Paper
-          sx={{
-            borderRadius: 3,
-            overflow: "hidden",
-          }}
-        >
-
-          {/* TOOLBAR */}
-          <Box
-            sx={{
-              px: 2,
-              py: 1,
-              bgcolor: "#111827",
-              display: "flex",
-              justifyContent:
-                "space-between",
-              alignItems: "center",
-            }}
-          >
-
-            <Typography
-              variant="caption"
-              sx={{
-                color: "#9ca3af",
-              }}
-            >
-              SQL Worksheet
-            </Typography>
-
-            <Stack
-              direction="row"
-              spacing={1}
-            >
-
-              <Tooltip title="Clear">
-
-                <IconButton
-                  size="small"
-                  onClick={() =>
-                    setQuery("")
-                  }
-                >
-
-                  <CleaningServices
-                    sx={{
-                      color:
-                        "white",
-                    }}
-                  />
-
-                </IconButton>
-
-              </Tooltip>
-
-              <Tooltip title="Copy">
-
-                <IconButton
-                  size="small"
-                  onClick={() =>
-                    navigator.clipboard.writeText(
-                      query,
-                    )
-                  }
-                >
-
-                  <ContentCopy
-                    sx={{
-                      color:
-                        "white",
-                    }}
-                  />
-
-                </IconButton>
-
-              </Tooltip>
-
-              <Divider
-                orientation="vertical"
-                flexItem
-              />
-
-              <Button
-                size="small"
-                variant="contained"
-                color={
-                  isDestructive
-                    ? "error"
-                    : "primary"
-                }
-                startIcon={
-                  <PlayArrow />
-                }
-                onClick={() =>
-                  isDestructive
-                    ? setConfirmOpen(
-                        true,
-                      )
-                    : handleRun(
-                        true,
-                      )
-                }
-              >
-                Execute
-              </Button>
-
-            </Stack>
-
-          </Box>
-
-          {/* SQL AREA */}
-          <TextField
-            multiline
-            minRows={14}
-            fullWidth
-            value={query}
-            onChange={(e) =>
-              setQuery(
-                e.target.value,
-              )
-            }
-            onKeyDown={
-              handleKeyDown
-            }
-            variant="standard"
-            InputProps={{
-              disableUnderline: true,
-              sx: {
-                p: 2,
-                bgcolor:
-                  "#0f172a",
-                color:
-                  "#d1d5db",
-                fontFamily:
-                  "'Fira Code', monospace",
-              },
-            }}
-          />
-
-        </Paper>
-      )}
-
-      {/* FILE */}
-      {mainTab === 1 && (
-
-        <Paper
-          sx={{
-            p: 3,
-            borderRadius: 3,
-          }}
-        >
-
-          <Box
-            onDragOver={(e) => {
-
-              e.preventDefault();
-
-              setDragging(true);
-            }}
-            onDragLeave={() =>
-              setDragging(false)
-            }
-            onDrop={handleDrop}
-            sx={{
-              border: dragging
-                ? `2px dashed ${theme.palette.primary.main}`
-                : `2px dashed ${theme.palette.divider}`,
-              borderRadius: 3,
-              p: 6,
-              textAlign:
-                "center",
-              bgcolor: dragging
-                ? alpha(
-                    theme
-                      .palette
-                      .primary
-                      .main,
-                    0.08,
-                  )
-                : "transparent",
-            }}
-          >
-
-            <CloudUpload
-              sx={{
-                fontSize: 70,
-                color:
-                  theme
-                    .palette
-                    .primary
-                    .main,
-              }}
-            />
-
-            <Typography
-              mt={2}
-              variant="h6"
-              fontWeight={800}
-            >
-              Upload SQL Script
-            </Typography>
-
-            <Typography
-              variant="body2"
-              color="text.secondary"
-            >
-              Supports very large SQL files
-            </Typography>
-
-            <Button
-              component="label"
-              variant="contained"
-              sx={{
-                mt: 3,
-              }}
-            >
-
-              Browse File
-
-              <input
-                hidden
-                type="file"
-                accept=".sql"
-                onChange={(e) =>
-                  validateFile(
-                    e.target
-                      .files[0],
-                  )
-                }
-              />
-
-            </Button>
-
-          </Box>
-
-          {selectedFile && (
-
-            <Alert
-              severity="info"
-              sx={{
-                mt: 2,
-              }}
-            >
-
-              <AlertTitle>
-                Selected File
-              </AlertTitle>
-
-              {selectedFile.name}
-
-              <br />
-
-              Size :
-              {" "}
-              {(
-                selectedFile.size
-                / 1024
-                / 1024
-              ).toFixed(2)}
-              {" "}
-              MB
-
-            </Alert>
-          )}
-
-          <Stack
-            direction="row"
-            justifyContent="flex-end"
-            mt={2}
-          >
-
-            <Button
-              variant="contained"
-              startIcon={
-                <UploadFile />
-              }
-              onClick={
-                handleUpload
-              }
-            >
-              Execute Script
-            </Button>
-
-          </Stack>
-
-        </Paper>
-      )}
-
-      {/* PROGRESS */}
-      {jobStatus && (
-
-        <Grid
-          container
-          spacing={1}
-        >
-
-          <Grid
-            item
-            xs={12}
-            md={2}
-          >
-
-            <StatCard
-              title="Executed"
-              value={
-                jobStatus.executedCount
-                || 0
-              }
-              icon={
-                <CheckCircle />
-              }
-              color="#10b981"
-            />
-
-          </Grid>
-
-          <Grid
-            item
-            xs={12}
-            md={2}
-          >
-
-            <StatCard
-              title="Insert"
-              value={
-                jobStatus.insertCount
-                || 0
-              }
-              icon={<Add />}
-              color="#3b82f6"
-            />
-
-          </Grid>
-
-          <Grid
-            item
-            xs={12}
-            md={2}
-          >
-
-            <StatCard
-              title="Update"
-              value={
-                jobStatus.updateCount
-                || 0
-              }
-              icon={
-                <Update />
-              }
-              color="#f59e0b"
-            />
-
-          </Grid>
-
-          <Grid
-            item
-            xs={12}
-            md={2}
-          >
-
-            <StatCard
-              title="Delete"
-              value={
-                jobStatus.deleteCount
-                || 0
-              }
-              icon={
-                <Delete />
-              }
-              color="#ef4444"
-            />
-
-          </Grid>
-
-          <Grid
-            item
-            xs={12}
-            md={2}
-          >
-
-            <StatCard
-              title="Elapsed"
-              value={formatSeconds(
-                executionSeconds,
-              )}
-              icon={
-                <AccessTime />
-              }
-              color="#8b5cf6"
-            />
-
-          </Grid>
-
-          <Grid
-            item
-            xs={12}
-            md={2}
-          >
-
-            <StatCard
-              title="ETA"
-              value={formatSeconds(
-                jobStatus.estimatedRemainingSeconds,
-              )}
-              icon={<Speed />}
-              color="#06b6d4"
-            />
-
-          </Grid>
-
-        </Grid>
-      )}
-
-      {/* STATUS PANEL */}
-      {jobStatus && (
-
-        <Paper
-          sx={{
-            p: 2,
-            borderRadius: 3,
-          }}
-        >
-
-          <Stack
-            direction={{
-              xs: "column",
-              md: "row",
-            }}
-            justifyContent="space-between"
-            spacing={2}
-          >
-
-            <Box>
-
-              <Typography
-                fontWeight={800}
-              >
-                SQL Script Execution
-              </Typography>
-
-              <Typography
-                variant="body2"
-                color="text.secondary"
-              >
-                Job ID :
-                {" "}
-                {jobId}
-              </Typography>
-
-            </Box>
-
-            <Stack
-              direction="row"
-              spacing={1}
-              alignItems="center"
-            >
-
-              <Chip
-                label={
-                  jobStatus.status
-                }
-                color={
-                  jobStatus.status
-                  ===
-                  "COMPLETED"
-                    ? "success"
-                    : jobStatus.status
-                        ===
-                        "FAILED"
-                      ? "error"
-                      : "warning"
-                }
-              />
-
-              {jobStatus.status ===
-                "RUNNING" && (
-
-                <Chip
-                  icon={
-                    <WarningAmber />
-                  }
-                  label="Stay on screen"
-                  color="warning"
-                />
-              )}
-
-            </Stack>
-
-          </Stack>
-
-          <Box mt={2}>
-
-            <LinearProgress
-              variant="determinate"
-              value={
-                jobStatus.progress
-                || 0
-              }
-              sx={{
-                height: 12,
-                borderRadius: 10,
-              }}
-            />
-
-            <Typography
-              mt={1}
-              variant="body2"
-            >
-              Progress :
-              {" "}
-              {(
-                jobStatus.progress
-                || 0
-              ).toFixed(2)}
-              %
-            </Typography>
-
-          </Box>
-
-        </Paper>
-      )}
-
-      {/* OUTPUT */}
-      <Paper
-        sx={{
-          flex: 1,
-          overflow: "hidden",
-          borderRadius: 3,
-        }}
-      >
-
-        <Tabs
-          value={outputTab}
-          onChange={(
-            e,
-            v,
-          ) => setOutputTab(v)}
-        >
-
-          <Tab
-            icon={
-              <TableChart />
-            }
-            label="Data Grid"
-          />
-
-          <Tab
-            icon={<ListAlt />}
-            label="Logs"
-          />
-
-        </Tabs>
-
-        {/* GRID */}
-        {outputTab === 0 && (
-
-          <DataGrid
-            rows={results.rows}
-            columns={
-              results.columns
-            }
-            rowCount={
-              results.total
-            }
-            paginationMode="server"
-            paginationModel={
-              paginationModel
-            }
-            onPaginationModelChange={
-              setPaginationModel
-            }
-            loading={isPending}
-            pageSizeOptions={[
-              5,
-              10,
-              25,
-              50,
-              100,
-            ]}
-            disableRowSelectionOnClick
-            slots={{
-              toolbar:
-                GridToolbar,
-            }}
-            getRowId={(row) =>
-              row.ID
-              || row.id
-              || Math.random()
-            }
-            sx={{
-              border: "none",
-              height: "100%",
-              "& .MuiDataGrid-columnHeaders":
-                {
-                  bgcolor:
-                    alpha(
-                      theme
-                        .palette
-                        .primary
-                        .main,
-                      0.08,
-                    ),
-                },
-            }}
-          />
-        )}
-
-        {/* LOGS */}
-        {outputTab === 1 && (
-
-          <Box
-            sx={{
-              p: 2,
-            }}
-          >
-
-            {!lastResponse
-              && !jobStatus && (
-
-              <Typography
-                color="text.secondary"
-              >
-                Waiting for execution...
-              </Typography>
-            )}
-
-            {lastResponse?.error && (
-
-              <Alert severity="error">
-
-                <AlertTitle>
-                  Error
-                </AlertTitle>
-
-                {lastResponse.message}
-
-              </Alert>
-            )}
-
-            {lastResponse
-              && !lastResponse?.error && (
-
-              <Alert severity="success">
-
-                <AlertTitle>
-                  Success
-                </AlertTitle>
-
-                {lastResponse
-                  ?.rows?.[0]
-                  ?.RESULT
-                  || "Completed"}
-
-              </Alert>
-            )}
-
-            {jobStatus?.status
-              === "FAILED" && (
-
-              <Alert
-                severity="error"
-                sx={{
-                  mt: 2,
-                }}
-              >
-
-                <AlertTitle>
-                  Script Failed
-                </AlertTitle>
-
-                Failed Line :
-                {" "}
-                {
-                  jobStatus.failedLine
-                }
-
-                <br />
-
-                Error :
-                {" "}
-                {
-                  jobStatus.message
-                }
-
-                <br />
-
-                SQL :
-                <br />
-
-                <Box
-                  sx={{
-                    mt: 1,
-                    p: 1,
-                    borderRadius: 1,
-                    bgcolor:
-                      "#111827",
-                    fontFamily:
-                      "monospace",
-                    overflow:
-                      "auto",
-                  }}
-                >
-
-                  {
-                    jobStatus.failedSql
-                  }
-
-                </Box>
-
-              </Alert>
-            )}
-
-            {jobStatus?.status
-              ===
-              "COMPLETED" && (
-
-              <Alert
-                severity="success"
-                sx={{
-                  mt: 2,
-                }}
-              >
-
-                <AlertTitle>
-                  Script Completed
-                </AlertTitle>
-
-                Executed :
-                {" "}
-                {
-                  jobStatus.executedCount
-                }
-
-                <br />
-
-                Inserts :
-                {" "}
-                {
-                  jobStatus.insertCount
-                }
-
-                <br />
-
-                Updates :
-                {" "}
-                {
-                  jobStatus.updateCount
-                }
-
-                <br />
-
-                Deletes :
-                {" "}
-                {
-                  jobStatus.deleteCount
-                }
-
-                <br />
-
-                Time :
-                {" "}
-                {formatSeconds(
-                  executionSeconds,
-                )}
-
-              </Alert>
-            )}
-
-          </Box>
-        )}
-
-      </Paper>
-
-      {/* LOADER */}
-      {isPending && (
-        <LinearProgress />
-      )}
-
-      {/* CONFIRM */}
-      <Dialog
-        open={confirmOpen}
-        onClose={() =>
-          setConfirmOpen(false)
-        }
-      >
-
-        <DialogTitle>
-          Confirm Execution
-        </DialogTitle>
-
-        <DialogContent>
-
-          <Typography>
-            This query may
-            modify database
-            data.
-          </Typography>
-
-        </DialogContent>
-
-        <DialogActions>
-
-          <Button
-            onClick={() =>
-              setConfirmOpen(
-                false,
-              )
-            }
-          >
-            Cancel
-          </Button>
-
-          <Button
-            variant="contained"
-            color="error"
-            onClick={() => {
-
-              setConfirmOpen(
-                false,
-              );
-
-              handleRun(true);
-            }}
-          >
-            Execute
-          </Button>
-
-        </DialogActions>
-
-      </Dialog>
-
-    </Box>
-  );
-};
-
-export default AdminSupport;
+CREATE SEQUENCE ADMIN_SUPPORT_LOG_SEQ
+START WITH 1
+INCREMENT BY 1
+NOCACHE
+NOCYCLE;
+
+-- =========================================================
+-- CREATE TABLE
+-- =========================================================
+
+CREATE TABLE ADMIN_SUPPORT_LOG
+(
+    ID                         NUMBER(20)
+                               PRIMARY KEY,
+
+    JOB_ID                     VARCHAR2(200),
+
+    USER_ID                    VARCHAR2(100)
+                               NOT NULL,
+
+    CLIENT_IP                  VARCHAR2(200),
+
+    FILE_NAME                  VARCHAR2(1000),
+
+    EXECUTION_TYPE             VARCHAR2(100)
+                               NOT NULL,
+
+    STATUS                     VARCHAR2(50)
+                               NOT NULL,
+
+    TOTAL_STATEMENTS           NUMBER(20)
+                               DEFAULT 0,
+
+    EXECUTED_COUNT             NUMBER(20)
+                               DEFAULT 0,
+
+    INSERT_COUNT               NUMBER(20)
+                               DEFAULT 0,
+
+    UPDATE_COUNT               NUMBER(20)
+                               DEFAULT 0,
+
+    DELETE_COUNT               NUMBER(20)
+                               DEFAULT 0,
+
+    OTHER_COUNT                NUMBER(20)
+                               DEFAULT 0,
+
+    FAILED_STATEMENT_NUMBER    NUMBER(20),
+
+    FAILED_SQL                 CLOB,
+
+    EXCEPTION_TYPE             VARCHAR2(1000),
+
+    EXCEPTION_MESSAGE          CLOB,
+
+    EXECUTION_SPEED            NUMBER(20,2),
+
+    ELAPSED_SECONDS            NUMBER(20),
+
+    SQL_TEXT                   CLOB,
+
+    STARTED_AT                 TIMESTAMP
+                               DEFAULT SYSTIMESTAMP,
+
+    COMPLETED_AT               TIMESTAMP,
+
+    CREATED_AT                 TIMESTAMP
+                               DEFAULT SYSTIMESTAMP
+);
+
+-- =========================================================
+-- STATUS CONSTRAINT
+-- =========================================================
+
+ALTER TABLE ADMIN_SUPPORT_LOG
+ADD CONSTRAINT CHK_ADMIN_SUPPORT_STATUS
+CHECK
+(
+    STATUS IN
+    (
+        'STARTED',
+        'RUNNING',
+        'COMPLETED',
+        'FAILED',
+        'PARTIAL_FAILED',
+        'CANCELLED'
+    )
+);
+
+-- =========================================================
+-- AUTO ID TRIGGER
+-- =========================================================
+
+CREATE OR REPLACE TRIGGER TRG_ADMIN_SUPPORT_LOG_ID
+BEFORE INSERT ON ADMIN_SUPPORT_LOG
+FOR EACH ROW
+BEGIN
+
+    IF :NEW.ID IS NULL THEN
+
+        SELECT ADMIN_SUPPORT_LOG_SEQ.NEXTVAL
+        INTO :NEW.ID
+        FROM DUAL;
+
+    END IF;
+
+END;
+/
+
+-- =========================================================
+-- INDEXES
+-- =========================================================
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_JOB
+ON ADMIN_SUPPORT_LOG(JOB_ID);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_USER
+ON ADMIN_SUPPORT_LOG(USER_ID);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_STATUS
+ON ADMIN_SUPPORT_LOG(STATUS);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_CREATED
+ON ADMIN_SUPPORT_LOG(CREATED_AT);
+
+CREATE INDEX IDX_ADMIN_SUPPORT_LOG_EXEC_TYPE
+ON ADMIN_SUPPORT_LOG(EXECUTION_TYPE);
+
+-- =========================================================
+-- COMMENTS
+-- =========================================================
+
+COMMENT ON TABLE ADMIN_SUPPORT_LOG IS
+'Stores all admin SQL execution logs including uploads, selects, updates, deletes and failures';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.JOB_ID IS
+'Unique execution job id';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.USER_ID IS
+'Logged in user id';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.CLIENT_IP IS
+'Client machine IP address';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.FILE_NAME IS
+'Uploaded SQL file name';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.EXECUTION_TYPE IS
+'SELECT / INSERT / UPDATE / DELETE / SCRIPT / UPLOAD_SCRIPT';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.STATUS IS
+'Execution status';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.EXECUTION_SPEED IS
+'Statements executed per second';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.FAILED_SQL IS
+'SQL statement which failed';
+
+COMMENT ON COLUMN ADMIN_SUPPORT_LOG.EXCEPTION_MESSAGE IS
+'Complete exception stack or message';
+
+-- =========================================================
+-- SAMPLE QUERY
+-- =========================================================
+
+-- SELECT * FROM ADMIN_SUPPORT_LOG
+-- ORDER BY CREATED_AT DESC;
+
+-- =========================================================
+-- SCRIPT COMPLETED
+-- =========================================================
+
+COMMIT;
+/
