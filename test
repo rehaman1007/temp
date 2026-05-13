@@ -1,354 +1,915 @@
-@Override
-public Map<String, Object> executeAdminSql(
-        AdminSupportDTO dto,
-        String userId,
-        HttpServletRequest request
-) {
-
-    Instant start = Instant.now();
-
-    String clientIp = getClientIp(request);
-
-    String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
-
-    Map<String, Object> response = new HashMap<>();
-
-    try {
-
-        log.info("""
-                
-                ==================================================
-                ADMIN SQL EXECUTION STARTED
-                ==================================================
-                userId={}
-                clientIp={}
-                page={}
-                size={}
-                sql={}
-                ==================================================
-                """,
-                userId,
-                clientIp,
-                dto.getPage(),
-                dto.getSize(),
-                rawSql
-        );
-
-        // --------------------------------------------------
-        // CLEAN SCRIPT
-        // --------------------------------------------------
-
-        rawSql = rawSql.replaceAll(";\\s*$", "").trim();
-
-        String[] statements = rawSql.split(";");
-
-        List<String> cleanStatements = new ArrayList<>();
-
-        for (String stmt : statements) {
-
-            String clean = stmt
-                    .replaceAll("(?m)^--.*", "")
-                    .trim();
-
-            if (!clean.isEmpty()) {
-                cleanStatements.add(clean);
-            }
-        }
-
-        if (cleanStatements.isEmpty()) {
-
-            response.put("error", true);
-            response.put("message", "SQL cannot be empty");
-
-            return response;
-        }
-
-        // --------------------------------------------------
-        // SINGLE SELECT
-        // --------------------------------------------------
-
-        boolean isSingleSelect =
-                cleanStatements.size() == 1
-                        &&
-                        cleanStatements.get(0)
-                                .trim()
-                                .toUpperCase()
-                                .startsWith("SELECT");
-
-        int page = dto.getPage() != null ? dto.getPage() : 0;
-        int size = dto.getSize() != null ? dto.getSize() : 10;
-
-        if (isSingleSelect) {
-
-            String executableSelect = cleanStatements.get(0);
-
-            // -------------------------------
-            // COUNT
-            // -------------------------------
-
-            String countSql =
-                    "SELECT COUNT(*) FROM (" + executableSelect + ")";
-
-            Integer total =
-                    jdbcTemplate.queryForObject(
-                            countSql,
-                            Integer.class
-                    );
-
-            if (total == null) {
-                total = 0;
-            }
-
-            // -------------------------------
-            // PAGINATION
-            // -------------------------------
-
-            int startRow = page * size;
-            int endRow = startRow + size;
-
-            String paginatedSql = """
-                    SELECT * FROM
-                    (
-                        SELECT A.*, ROWNUM RN FROM
-                        (
-                    """ + executableSelect + """
-                        ) A
-                        WHERE ROWNUM <= ?
-                    )
-                    WHERE RN > ?
-                    """;
-
-            List<Map<String, Object>> rawRows =
-                    jdbcTemplate.queryForList(
-                            paginatedSql,
-                            endRow,
-                            startRow
-                    );
-
-            // -------------------------------
-            // CLEAN ORACLE TYPES
-            // -------------------------------
-
-            List<Map<String, Object>> rows =
-                    new ArrayList<>();
-
-            for (Map<String, Object> rawRow : rawRows) {
-
-                Map<String, Object> cleanRow =
-                        new LinkedHashMap<>();
-
-                for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
-
-                    Object value = entry.getValue();
-
-                    if (value instanceof oracle.sql.TIMESTAMP ts) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                ts.timestampValue().toString()
-                        );
-                    }
-
-                    else if (value instanceof java.sql.Timestamp ts) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                ts.toLocalDateTime().toString()
-                        );
-                    }
-
-                    else if (value instanceof java.sql.Clob clob) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                clob.getSubString(
-                                        1,
-                                        (int) clob.length()
-                                )
-                        );
-                    }
-
-                    else if (value instanceof java.io.InputStream) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                "[BLOB DATA]"
-                        );
-                    }
-
-                    else if (
-                            value != null
-                                    &&
-                                    value.getClass()
-                                            .getName()
-                                            .startsWith("oracle.sql.")
-                    ) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                value.toString()
-                        );
-                    }
-
-                    else {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                value
-                        );
-                    }
-                }
-
-                rows.add(cleanRow);
-            }
-
-            // -------------------------------
-            // COLUMNS
-            // -------------------------------
-
-            List<Map<String, String>> columns =
-                    new ArrayList<>();
-
-            if (!rows.isEmpty()) {
-
-                for (String key : rows.get(0).keySet()) {
-
-                    columns.add(
-                            Map.of("name", key)
-                    );
-                }
-            }
-
-            response.put("error", false);
-            response.put("columns", columns);
-            response.put("rows", rows);
-            response.put("total", total);
-            response.put("page", page);
-            response.put("size", size);
-
-            log.info("""
-                    
-                    SELECT EXECUTED
-                    | rows={}
-                    | total={}
-                    | executionTime={} ms
-                    """,
-                    rows.size(),
-                    total,
-                    Duration.between(start, Instant.now()).toMillis()
-            );
-
-            return response;
-        }
-
-        // --------------------------------------------------
-        // SCRIPT EXECUTION
-        // --------------------------------------------------
-
-        int successCount = 0;
-
-        for (int i = 0; i < cleanStatements.size(); i++) {
-
-            String sql = cleanStatements.get(i);
-
-            try {
-
-                jdbcTemplate.execute(sql);
-
-                successCount++;
-
-                log.info("""
-                        
-                        STATEMENT EXECUTED
-                        | line={}
-                        | sql={}
-                        """,
-                        i + 1,
-                        sql
-                );
-
-            } catch (Exception e) {
-
-                log.error("""
-                        
-                        SCRIPT EXECUTION FAILED
-                        | line={}
-                        | sql={}
-                        | error={}
-                        """,
-                        i + 1,
-                        sql,
-                        e.getMessage(),
-                        e
-                );
-
-                response.put("error", true);
-                response.put(
-                        "message",
-                        "Error at statement "
-                                + (i + 1)
-                                + " : "
-                                + e.getMessage()
-                );
-
-                response.put("failedSql", sql);
-
-                return response;
-            }
-        }
-
-        response.put("error", false);
-        response.put(
-                "message",
-                "Script executed successfully"
-        );
-        response.put("executedStatements", successCount);
-
-        response.put(
-                "rows",
-                List.of(
-                        Map.of(
-                                "RESULT",
-                                successCount
-                                        + " statements executed successfully"
-                        )
-                )
-        );
-
-        response.put(
-                "columns",
-                List.of(
-                        Map.of("name", "RESULT")
-                )
-        );
-
-        response.put("total", 1);
-
-        log.info("""
-                
-                ==================================================
-                SCRIPT EXECUTION COMPLETED
-                ==================================================
-                executedStatements={}
-                executionTime={} ms
-                ==================================================
-                """,
-                successCount,
-                Duration.between(start, Instant.now()).toMillis()
-        );
-
-        return response;
-
-    } catch (Exception e) {
-
-        log.error(
-                "ADMIN SQL EXECUTION FAILED",
-                e
-        );
-
-        response.put("error", true);
-        response.put("message", e.getMessage());
-
-        return response;
+import React, { useEffect, useMemo, useState } from "react";
+
+import {
+  Alert,
+  AlertTitle,
+  alpha,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  Fade,
+  Grid,
+  IconButton,
+  LinearProgress,
+  Paper,
+  Stack,
+  Tab,
+  Tabs,
+  TextField,
+  Tooltip,
+  Typography,
+  useTheme,
+} from "@mui/material";
+
+import {
+  AutoAwesome,
+  CleaningServices,
+  CloudUpload,
+  Code,
+  ContentCopy,
+  DeleteSweep,
+  FilePresent,
+  Info,
+  PlayArrow,
+  Refresh,
+  Terminal,
+  Timer,
+  UploadFile,
+  WarningAmber,
+  Storage,
+} from "@mui/icons-material";
+
+import { DataGrid, GridToolbar } from "@mui/x-data-grid";
+
+import { useMutation } from "@tanstack/react-query";
+
+import useApi from "../../hooks/useApi";
+
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+
+const AdminSupport = () => {
+  const theme = useTheme();
+
+  const { callApi } = useApi();
+
+  const showSnackbar = useCustomSnackbar();
+
+  /**
+   * =========================================
+   * STATES
+   * =========================================
+   */
+  const [mainTab, setMainTab] = useState(0);
+  const [outputTab, setOutputTab] = useState(0);
+  const [query, setQuery] = useState("SELECT * FROM USERS");
+  const [selectedFile, setSelectedFile] = useState(null);
+
+  const [dragging, setDragging] = useState(false);
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const [jobId, setJobId] = useState(null);
+
+  const [jobStatus, setJobStatus] = useState(null);
+
+  const [lastResponse, setLastResponse] = useState(null);
+
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 10,
+  });
+
+  /**
+   * =========================================
+   * QUERY TYPES
+   * =========================================
+   */
+  const isSelect = useMemo(() => {
+    const q = query.trim().toUpperCase();
+
+    return q.startsWith("SELECT") || q.startsWith("WITH");
+  }, [query]);
+
+  const isDangerous = useMemo(() => {
+    const q = query.trim().toUpperCase();
+
+    return ["DELETE", "DROP", "TRUNCATE", "ALTER"].some((x) => q.startsWith(x));
+  }, [query]);
+
+  /**
+   * =========================================
+   * RESET SCREEN
+   * =========================================
+   */
+  const resetScreen = () => {
+    setQuery("");
+
+    setSelectedFile(null);
+
+    setDragging(false);
+
+    setJobId(null);
+
+    setJobStatus(null);
+
+    setLastResponse(null);
+
+    setResults({
+      rows: [],
+      columns: [],
+      total: 0,
+    });
+
+    setPaginationModel({
+      page: 0,
+      pageSize: 10,
+    });
+
+    setOutputTab(0);
+
+    showSnackbar("Workspace reset completed", "success");
+  };
+
+  /**
+   * =========================================
+   * EXECUTE SQL
+   * =========================================
+   */
+  const { mutate: executeSql, isPending } = useMutation({
+    mutationFn: async ({ sql, page, size }) => {
+      return await callApi(
+        "/TS/admin-support/admin-execute",
+        {
+          sql,
+          page,
+          size,
+        },
+        "POST",
+      );
+    },
+
+    onSuccess: (data) => {
+      setLastResponse(data);
+
+      if (data?.error) {
+        setOutputTab(1);
+
+        return;
+      }
+
+      if (isSelect) {
+        const columns = (data?.columns || []).map((col) => ({
+          field: col.name,
+          headerName: col.name,
+          flex: 1,
+          minWidth: 180,
+        }));
+
+        setResults({
+          rows: data?.rows || [],
+          columns,
+          total: data?.total || 0,
+        });
+
+        setOutputTab(0);
+      } else {
+        setOutputTab(1);
+      }
+    },
+
+    onError: (e) => {
+      setLastResponse({
+        error: true,
+        message: e?.message || "Execution failed",
+      });
+
+      setOutputTab(1);
+    },
+  });
+
+  /**
+   * =========================================
+   * EXECUTE QUERY
+   * =========================================
+   */
+  const handleExecute = (reset = false) => {
+    if (!query.trim()) {
+      showSnackbar("Enter SQL query", "warning");
+
+      return;
     }
-}
+
+    const page = reset ? 0 : paginationModel.page;
+
+    if (reset) {
+      setPaginationModel((p) => ({
+        ...p,
+        page: 0,
+      }));
+    }
+
+    executeSql({
+      sql: query,
+      page,
+      size: paginationModel.pageSize,
+    });
+  };
+
+  /**
+   * =========================================
+   * PAGINATION
+   * =========================================
+   */
+  useEffect(() => {
+    if (results.columns.length > 0 && isSelect) {
+      handleExecute();
+    }
+  }, [paginationModel.page, paginationModel.pageSize]);
+
+  /**
+   * =========================================
+   * FILE VALIDATION
+   * =========================================
+   */
+  const validateFile = (file) => {
+    if (!file) return;
+
+    if (!file.name.endsWith(".sql")) {
+      showSnackbar("Only .sql file supported", "error");
+
+      return;
+    }
+
+    setSelectedFile(file);
+  };
+
+  /**
+   * =========================================
+   * FILE UPLOAD
+   * =========================================
+   */
+  const handleUpload = async () => {
+    try {
+      if (!selectedFile) {
+        showSnackbar("Choose SQL file", "warning");
+
+        return;
+      }
+
+      const formData = new FormData();
+
+      formData.append("file", selectedFile);
+
+      const data = await callApi(
+        "/TS/admin-support/upload-script",
+        formData,
+        "POST",
+        "json",
+        "multipart/form-data",
+      );
+
+      if (data?.error) {
+        showSnackbar(data.message, "error");
+
+        return;
+      }
+
+      setJobId(data.jobId);
+
+      setOutputTab(1);
+
+      showSnackbar("Execution started", "success");
+    } catch (e) {
+      showSnackbar(e.message || "Upload failed", "error");
+    }
+  };
+
+  /**
+   * =========================================
+   * JOB POLLING
+   * =========================================
+   */
+  useEffect(() => {
+    if (!jobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const data = await callApi(
+          `/TS/admin-support/job-status/${jobId}`,
+          {},
+          "GET",
+        );
+
+        setJobStatus(data);
+
+        if (data.status === "COMPLETED" || data.status === "FAILED") {
+          clearInterval(interval);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [jobId]);
+
+  /**
+   * =========================================
+   * SHORTCUT
+   * =========================================
+   */
+  const handleKeyDown = (e) => {
+    if (e.ctrlKey && e.key === "Enter") {
+      e.preventDefault();
+
+      handleExecute(true);
+    }
+  };
+
+  /**
+   * =========================================
+   * PAGE LEAVE WARNING
+   * =========================================
+   */
+  useEffect(() => {
+    const active = jobStatus?.status === "RUNNING";
+
+    const beforeUnload = (e) => {
+      if (!active) return;
+
+      e.preventDefault();
+
+      e.returnValue = "SQL execution is still running.";
+    };
+
+    window.addEventListener("beforeunload", beforeUnload);
+
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [jobStatus]);
+
+  /**
+   * =========================================
+   * UI
+   * =========================================
+   */
+  return (
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        p: 2,
+        gap: 1.5,
+      }}
+    >
+      {/* ================================================= */}
+      {/* HEADER */}
+      {/* ================================================= */}
+
+      <Paper
+        elevation={0}
+        sx={{
+          px: 3,
+          py: 1,
+          borderBottom: `1px solid ${theme.palette.divider}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          borderRadius: 1,
+          bgcolor: theme.palette.background.paper,
+        }}
+      >
+        <Stack direction="row" spacing={2} alignItems="center">
+          <Storage color="primary" />
+          <Box>
+            <Typography
+              variant="subtitle2"
+              fontWeight={800}
+              sx={{ letterSpacing: 0.5 }}
+            >
+              FINCORE ADMIN SUPPORT
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Advanced SQL Console & Script Executor are Connected and ready for
+              excecution
+            </Typography>
+          </Box>
+        </Stack>
+
+        <Stack direction="row" spacing={2} flexWrap="wrap">
+          <Button
+            variant="outlined"
+            startIcon={<Refresh />}
+            onClick={resetScreen}
+          >
+            Reset Workspace
+          </Button>
+        </Stack>
+      </Paper>
+
+      {/* ================================================= */}
+      {/* TABS */}
+      {/* ================================================= */}
+
+      <Paper
+        elevation={0}
+        sx={{
+          borderRadius: 1,
+          overflow: "hidden",
+        }}
+      >
+        <Tabs
+          value={mainTab}
+          onChange={(e, v) => setMainTab(v)}
+          variant="fullWidth"
+        >
+          <Tab icon={<Terminal />} label="SQL Console" />
+
+          <Tab icon={<UploadFile />} label="Script Upload" />
+        </Tabs>
+      </Paper>
+
+      {/* ================================================= */}
+      {/* SQL CONSOLE */}
+      {/* ================================================= */}
+
+      {mainTab === 0 && (
+        <Fade in>
+          <Paper
+            elevation={0}
+            sx={{
+              borderRadius: 1,
+              overflow: "hidden",
+              border: `1px solid ${theme.palette.divider}`,
+            }}
+          >
+            {/* TOP BAR */}
+
+            <Box
+              sx={{
+                px: 2,
+                py: 1.2,
+                bgcolor: "#111827",
+                color: "white",
+              }}
+            >
+              <Stack
+                direction="row"
+                justifyContent="space-between"
+                alignItems="center"
+              >
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Terminal fontSize="small" />
+
+                  <Typography fontWeight={700}>SQL Worksheet</Typography>
+                </Stack>
+
+                <Stack direction="row" spacing={1}>
+                  <Typography variant="caption" sx={{ pt: 1 }}>
+                    Press Ctrl + Enter for exectution inside command panel
+                  </Typography>
+
+                  <Tooltip title="Copy SQL">
+                    <IconButton
+                      size="small"
+                      onClick={() => navigator.clipboard.writeText(query)}
+                    >
+                      <ContentCopy
+                        sx={{
+                          color: "white",
+                        }}
+                      />
+                    </IconButton>
+                  </Tooltip>
+
+                  <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
+
+                  <Tooltip title="Clear">
+                    <IconButton size="small" onClick={() => setQuery("")}>
+                      <CleaningServices
+                        sx={{
+                          color: "white",
+                        }}
+                      />
+                    </IconButton>
+                  </Tooltip>
+
+                  <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
+                  <Button
+                    variant="contained"
+                    color={isDangerous ? "error" : "primary"}
+                    startIcon={<PlayArrow />}
+                    onClick={() =>
+                      isDangerous ? setConfirmOpen(true) : handleExecute(true)
+                    }
+                  >
+                    Execute
+                  </Button>
+                </Stack>
+              </Stack>
+            </Box>
+
+            {/* SQL AREA */}
+
+            <TextField
+              multiline
+              fullWidth
+              minRows={14}
+              value={query}
+              onKeyDown={handleKeyDown}
+              onChange={(e) => setQuery(e.target.value)}
+              variant="standard"
+              InputProps={{
+                disableUnderline: true,
+                sx: {
+                  p: 3,
+                  bgcolor: "#0d1117",
+                  color: "#d4d4d4",
+                  fontFamily: "'Fira Code', monospace",
+                  fontSize: 14,
+                },
+              }}
+            />
+          </Paper>
+        </Fade>
+      )}
+
+      {/* ================================================= */}
+      {/* FILE UPLOAD */}
+      {/* ================================================= */}
+
+      {mainTab === 1 && (
+        <Paper
+          elevation={0}
+          sx={{
+            borderRadius: 1,
+            p: 3,
+          }}
+        >
+          <Box
+            onDragOver={(e) => {
+              e.preventDefault();
+
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+
+              setDragging(false);
+
+              validateFile(e.dataTransfer.files[0]);
+            }}
+            sx={{
+              border: `2px dashed ${
+                dragging ? theme.palette.primary.main : theme.palette.divider
+              }`,
+              borderRadius: 1,
+              p: 6,
+              textAlign: "center",
+              transition: "0.3s",
+              bgcolor: dragging
+                ? alpha(theme.palette.primary.main, 0.08)
+                : "transparent",
+            }}
+          >
+            <CloudUpload
+              sx={{
+                fontSize: 80,
+                color: theme.palette.primary.main,
+              }}
+            />
+
+            <Typography variant="h6" fontWeight={700} mt={2}>
+              Drag & Drop SQL Script
+            </Typography>
+
+            <Typography variant="body2" color="text.secondary" mt={1}>
+              Handles huge SQL files with live tracking
+            </Typography>
+
+            <Button
+              component="label"
+              variant="contained"
+              sx={{
+                mt: 3,
+                borderRadius: 3,
+              }}
+            >
+              Browse File
+              <input
+                hidden
+                type="file"
+                accept=".sql"
+                onChange={(e) => validateFile(e.target.files[0])}
+              />
+            </Button>
+          </Box>
+
+          {selectedFile && (
+            <Alert
+              severity="info"
+              sx={{
+                mt: 2,
+                borderRadius: 3,
+              }}
+              icon={<FilePresent />}
+            >
+              <AlertTitle>Selected File</AlertTitle>
+              {selectedFile.name}
+              <br />
+              Size : {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
+            </Alert>
+          )}
+
+          <Stack direction="row" justifyContent="flex-end" mt={2}>
+            <Button
+              size="large"
+              variant="contained"
+              startIcon={<UploadFile />}
+              onClick={handleUpload}
+              sx={{
+                borderRadius: 3,
+                px: 4,
+              }}
+            >
+              Start Execution
+            </Button>
+          </Stack>
+        </Paper>
+      )}
+
+      {/* ================================================= */}
+      {/* PREMIUM EXECUTION DASHBOARD */}
+      {/* ================================================= */}
+
+      {jobStatus && (
+        <Paper
+          elevation={0}
+          sx={{
+            borderRadius: 4,
+            p: 2.5,
+            border: `1px solid ${theme.palette.divider}`,
+          }}
+        >
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            alignItems="center"
+            mb={2}
+          >
+            <Box>
+              <Typography variant="h6" fontWeight={800}>
+                Live Execution Monitor
+              </Typography>
+
+              <Typography variant="body2" color="text.secondary">
+                Job ID : {jobStatus.jobId}
+              </Typography>
+            </Box>
+
+            <Chip
+              color={
+                jobStatus.status === "COMPLETED"
+                  ? "success"
+                  : jobStatus.status === "FAILED"
+                    ? "error"
+                    : "warning"
+              }
+              label={jobStatus.status}
+            />
+          </Stack>
+
+          <LinearProgress
+            variant="determinate"
+            value={jobStatus.progress || 0}
+            sx={{
+              height: 12,
+              borderRadius: 10,
+              mb: 2,
+            }}
+          />
+
+          <Grid container spacing={2}>
+            {[
+              {
+                label: "Executed",
+                value: jobStatus.executedCount || 0,
+              },
+              {
+                label: "Insert",
+                value: jobStatus.insertCount || 0,
+              },
+              {
+                label: "Update",
+                value: jobStatus.updateCount || 0,
+              },
+              {
+                label: "Delete",
+                value: jobStatus.deleteCount || 0,
+              },
+              {
+                label: "Others",
+                value: jobStatus.otherCount || 0,
+              },
+              {
+                label: "Total",
+                value: jobStatus.totalStatements || 0,
+              },
+              {
+                label: "Elapsed",
+                value: `${jobStatus.elapsedSeconds || 0} sec`,
+              },
+              {
+                label: "ETA",
+                value: `${jobStatus.etaSeconds || 0} sec`,
+              },
+            ].map((item) => (
+              <Grid size={{ xs: 6, md: 3 }} key={item.label}>
+                <Paper
+                  elevation={0}
+                  sx={{
+                    borderRadius: 3,
+                    p: 2,
+                    textAlign: "center",
+                    bgcolor: alpha(theme.palette.primary.main, 0.04),
+                  }}
+                >
+                  <Typography variant="body2" color="text.secondary">
+                    {item.label}
+                  </Typography>
+
+                  <Typography variant="h5" fontWeight={800}>
+                    {item.value}
+                  </Typography>
+                </Paper>
+              </Grid>
+            ))}
+          </Grid>
+
+          {jobStatus.status === "RUNNING" && (
+            <Alert
+              severity="warning"
+              sx={{
+                mt: 2,
+                borderRadius: 3,
+              }}
+              icon={<WarningAmber />}
+            >
+              Please stay on this screen until execution completes.
+            </Alert>
+          )}
+
+          {jobStatus.status === "FAILED" && (
+            <Alert
+              severity="error"
+              sx={{
+                mt: 2,
+                borderRadius: 3,
+              }}
+            >
+              <AlertTitle>Execution Failed</AlertTitle>
+              {jobStatus.message}
+              <br />
+              Failed Line : {jobStatus.failedLine}
+            </Alert>
+          )}
+        </Paper>
+      )}
+
+      {/* ================================================= */}
+      {/* OUTPUT */}
+      {/* ================================================= */}
+
+      <Paper
+        elevation={0}
+        sx={{
+          flex: 1,
+          borderRadius: 1,
+          overflow: "hidden",
+        }}
+      >
+        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
+          <Tab label="Data Grid" />
+
+          <Tab label="Logs" />
+        </Tabs>
+
+        {/* GRID */}
+
+        {outputTab === 0 && (
+          <DataGrid
+            rows={results.rows}
+            columns={results.columns}
+            rowCount={results.total}
+            paginationMode="server"
+            paginationModel={paginationModel}
+            onPaginationModelChange={setPaginationModel}
+            disableRowSelectionOnClick
+            pageSizeOptions={[10, 25, 50, 100]}
+            loading={isPending}
+            slots={{
+              toolbar: GridToolbar,
+              loadingOverlay: CircularProgress,
+            }}
+            getRowId={(row) => row.ID || row.id || Math.random()}
+            sx={{
+              border: "none",
+              height: "100%",
+              "& .MuiDataGrid-columnHeaders": {
+                bgcolor: alpha(theme.palette.primary.main, 0.06),
+              },
+            }}
+          />
+        )}
+
+        {/* LOGS */}
+
+        {outputTab === 1 && (
+          <Box p={2}>
+            {!lastResponse && !jobStatus && (
+              <Alert
+                severity="info"
+                sx={{
+                  borderRadius: 3,
+                }}
+                icon={<Info />}
+              >
+                Waiting for execution...
+              </Alert>
+            )}
+
+            {lastResponse?.error && (
+              <Alert
+                severity="error"
+                sx={{
+                  borderRadius: 3,
+                }}
+              >
+                <AlertTitle>Error</AlertTitle>
+
+                {lastResponse.message}
+              </Alert>
+            )}
+
+            {lastResponse && !lastResponse?.error && (
+              <Alert
+                severity="success"
+                sx={{
+                  borderRadius: 3,
+                }}
+              >
+                <AlertTitle>Execution Completed</AlertTitle>
+
+                {lastResponse?.rows?.[0]?.RESULT || "SQL executed successfully"}
+              </Alert>
+            )}
+          </Box>
+        )}
+      </Paper>
+
+      {/* ================================================= */}
+      {/* CONFIRM DIALOG */}
+      {/* ================================================= */}
+
+      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
+        <DialogTitle>Confirm Dangerous Query</DialogTitle>
+
+        <DialogContent>
+          <Typography>This query can modify/delete data. Continue?</Typography>
+        </DialogContent>
+
+        <DialogActions>
+          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
+
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => {
+              setConfirmOpen(false);
+
+              handleExecute(true);
+            }}
+          >
+            Execute Anyway
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default AdminSupport;
