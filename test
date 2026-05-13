@@ -1,355 +1,147 @@
-package com.fincore.transactions_service.service;
+package com.fincore.transactions_service.controller;
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
+import com.fincore.transactions_service.service.AdminSupportService;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.sql.*;
-import java.sql.Date;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
+
+@Slf4j
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/api/admin-support")
+public class AdminSupportController {
+
+    private final AdminSupportService adminSupportService;
+
+    @PostMapping(
+            value = "/upload-script",
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE
+    )
+    public ResponseEntity<?> uploadScript(
+            @RequestParam("file") MultipartFile file
+    ) {
+
+        log.info(
+                "SQL Upload Received : {} | Size : {} bytes",
+                file.getOriginalFilename(),
+                file.getSize()
+        );
+
+        return ResponseEntity.ok(
+                adminSupportService.uploadSqlFile(file)
+        );
+    }
+
+    @GetMapping("/job-status/{jobId}")
+    public ResponseEntity<?> getJobStatus(
+            @PathVariable String jobId
+    ) {
+
+        return ResponseEntity.ok(
+                adminSupportService.getJobStatus(jobId)
+        );
+    }
+}
+
+
+package com.fincore.transactions_service.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.stereotype.Service;
+
+import org.springframework.web.multipart.MultipartFile;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+
+import java.util.Map;
+import java.util.UUID;
 
 @Slf4j
 @Service("AdminSupportService")
 @RequiredArgsConstructor
 public class AdminSupportServiceImpl implements AdminSupportService {
 
-    private final JdbcTemplate jdbcTemplate;
+    private final AdminSupportExecutor adminSupportExecutor;
 
-    /**
-     * JOB STORE
-     */
-    private final Map<String, Map<String, Object>> jobStore = new ConcurrentHashMap<>();
-
-    /**
-     * COMMAND PANEL EXECUTION
-     */
     @Override
-    public Map<String, Object> executeAdminSql(AdminSupportDTO dto) {
-
-        String rawSql = dto.getSql().trim();
-
-        String[] statements = rawSql.split(";");
-
-        List<String> cleanStatements = new ArrayList<>();
-
-        for (String s : statements) {
-
-            String clean = s.replaceAll("(?m)^--.*", "").trim();
-
-            if (!clean.isEmpty()) {
-
-                cleanStatements.add(clean);
-            }
-        }
-
-        boolean isSingleSelect = cleanStatements.size() == 1 && (cleanStatements.get(0).toUpperCase().startsWith("SELECT") || cleanStatements.get(0).toUpperCase().startsWith("WITH"));
-
-        int page = dto.getPage() != null ? dto.getPage() : 0;
-
-        int size = dto.getSize() != null ? dto.getSize() : 5;
-
-        /**
-         * SELECT
-         */
-        if (isSingleSelect) {
-
-            String sql = cleanStatements.get(0);
-
-            try {
-
-                String countSql = "SELECT COUNT(*) FROM (" + sql + ")";
-
-                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
-
-                String paginatedSql = sql + " OFFSET " + (page * size) + " ROWS FETCH NEXT " + size + " ROWS ONLY";
-
-                return jdbcTemplate.query(paginatedSql, rs -> {
-
-                    ResultSetMetaData meta = rs.getMetaData();
-
-                    int columnCount = meta.getColumnCount();
-
-                    List<Map<String, String>> columns = new ArrayList<>();
-
-                    for (int i = 1; i <= columnCount; i++) {
-
-                        columns.add(Map.of("name", meta.getColumnLabel(i)));
-                    }
-
-                    List<Map<String, Object>> rows = new ArrayList<>();
-
-                    while (rs.next()) {
-
-                        Map<String, Object> row = new HashMap<>();
-
-                        for (int i = 1; i <= columnCount; i++) {
-
-                            String columnName = meta.getColumnLabel(i);
-
-                            int columnType = meta.getColumnType(i);
-
-                            Object value = null;
-
-                            switch (columnType) {
-
-                                case Types.VARCHAR:
-
-                                case Types.CHAR:
-
-                                case Types.LONGVARCHAR:
-
-                                case Types.NVARCHAR:
-
-                                case Types.NCHAR:
-
-                                    value = rs.getString(i);
-
-                                    break;
-
-                                case Types.INTEGER:
-
-                                case Types.SMALLINT:
-
-                                case Types.TINYINT:
-
-                                    int intVal = rs.getInt(i);
-
-                                    value = rs.wasNull() ? null : intVal;
-
-                                    break;
-
-                                case Types.BIGINT:
-
-                                    long longVal = rs.getLong(i);
-
-                                    value = rs.wasNull() ? null : longVal;
-
-                                    break;
-
-                                case Types.NUMERIC:
-
-                                case Types.DECIMAL:
-
-                                    value = rs.getBigDecimal(i);
-
-                                    break;
-
-                                case Types.FLOAT:
-
-                                case Types.DOUBLE:
-
-                                case Types.REAL:
-
-                                    double dbl = rs.getDouble(i);
-
-                                    value = rs.wasNull() ? null : dbl;
-
-                                    break;
-
-                                case Types.DATE:
-
-                                    Date date = rs.getDate(i);
-
-                                    value = date != null ? date.toLocalDate().toString() : null;
-
-                                    break;
-
-                                case Types.TIME:
-
-                                    Time time = rs.getTime(i);
-
-                                    value = time != null ? time.toLocalTime().toString() : null;
-
-                                    break;
-
-                                case Types.TIMESTAMP:
-
-                                case -101:
-
-                                    Timestamp ts = rs.getTimestamp(i);
-
-                                    value = ts != null ? ts.toLocalDateTime().format(java.time.format.DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm:ss")) : null;
-
-                                    break;
-
-                                case Types.CLOB:
-
-                                case Types.NCLOB:
-
-                                    Clob clob = rs.getClob(i);
-
-                                    value = clob != null ? clob.getSubString(1, (int) clob.length()) : null;
-
-                                    break;
-
-                                case Types.BLOB:
-
-                                case Types.BINARY:
-
-                                case Types.VARBINARY:
-
-                                case Types.LONGVARBINARY:
-
-                                    value = "[BLOB DATA]";
-
-                                    break;
-
-                                default:
-
-                                    Object obj = rs.getObject(i);
-
-                                    value = obj != null ? obj.toString() : null;
-                            }
-
-                            row.put(columnName, value);
-                        }
-
-                        rows.add(row);
-                    }
-
-                    return Map.of("columns", columns, "rows", rows, "total", total, "page", page, "size", size, "error", false);
-                });
-
-            } catch (Exception e) {
-
-                log.error("Execution Error", e);
-
-                return Map.of("error", true, "message", e.getMessage());
-            }
-        }
-
-        /**
-         * SCRIPT EXECUTION
-         */
-        else {
-
-            try {
-
-                int successful = 0;
-
-                for (String sql : cleanStatements) {
-
-                    jdbcTemplate.execute(sql);
-
-                    successful++;
-                }
-
-                return Map.of("error", false, "columns", List.of(Map.of("name", "RESULT")), "rows", List.of(Map.of("RESULT", "Script executed successfully. Statements : " + successful)), "total", successful);
-
-            } catch (Exception e) {
-
-                log.error("Script Error", e);
-
-                return Map.of("error", true, "message", e.getMessage());
-            }
-        }
-    }
-
-    /**
-     * HUGE SQL FILE EXECUTION
-     */
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public Map<String, Object> uploadSqlFile(MultipartFile file) {
-
-        String jobId = UUID.randomUUID().toString();
-
-        Map<String, Object> status = new ConcurrentHashMap<>();
-
-        status.put("status", "RUNNING");
-
-        status.put("executedCount", 0);
-
-        jobStore.put(jobId, status);
+    public Map<String, Object> uploadSqlFile(
+            MultipartFile file
+    ) {
 
         try {
 
-            BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream()));
+            String jobId = UUID.randomUUID().toString();
 
-            StringBuilder sqlBuilder = new StringBuilder();
+            Path tempFile = Files.createTempFile(
+                    "sql-upload-",
+                    ".sql"
+            );
 
-            String line;
+            Files.copy(
+                    file.getInputStream(),
+                    tempFile,
+                    StandardCopyOption.REPLACE_EXISTING
+            );
 
-            int executedCount = 0;
+            log.info(
+                    "Temporary SQL file created : {}",
+                    tempFile
+            );
 
-            while ((line = reader.readLine()) != null) {
+            adminSupportExecutor.executeScriptAsync(
+                    tempFile,
+                    jobId
+            );
 
-                /**
-                 * SKIP COMMENTS
-                 */
-                if (line.trim().startsWith("--")) {
-
-                    continue;
-                }
-
-                sqlBuilder.append(line).append("\n");
-
-                /**
-                 * EXECUTE SQL
-                 */
-                if (line.trim().endsWith(";")) {
-
-                    String sql = sqlBuilder.toString().trim();
-
-                    sql = sql.substring(0, sql.length() - 1);
-
-                    jdbcTemplate.execute(sql);
-
-                    executedCount++;
-
-                    status.put("executedCount", executedCount);
-
-                    sqlBuilder.setLength(0);
-                }
-            }
-
-            status.put("status", "COMPLETED");
-
-            status.put("message", "Script execution completed");
+            return Map.of(
+                    "error", false,
+                    "jobId", jobId,
+                    "message", "SQL execution started"
+            );
 
         } catch (Exception e) {
 
-            log.error("SQL Upload Execution Failed", e);
+            log.error(
+                    "Failed to start SQL execution",
+                    e
+            );
 
-            status.put("status", "FAILED");
-
-            status.put("message", e.getMessage());
-
-            throw new RuntimeException(e.getMessage());
+            return Map.of(
+                    "error", true,
+                    "message", e.getMessage()
+            );
         }
-
-        return Map.of("error", false, "jobId", jobId);
     }
 
-    /**
-     * JOB STATUS
-     */
     @Override
-    public Map<String, Object> getJobStatus(String jobId) {
+    public Map<String, Object> getJobStatus(
+            String jobId
+    ) {
 
-        return jobStore.getOrDefault(jobId, Map.of("status", "NOT_FOUND"));
+        return adminSupportExecutor.getJobStatus(
+                jobId
+        );
     }
 }
-
-
-
 
 package com.fincore.transactions_service.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
-import org.springframework.beans.factory.annotation.Autowired;
-
 import org.springframework.scheduling.annotation.Async;
-
 import org.springframework.stereotype.Service;
 
 import javax.sql.DataSource;
@@ -363,7 +155,6 @@ import java.sql.Connection;
 import java.sql.Statement;
 
 import java.util.Map;
-
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -371,130 +162,186 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class AdminSupportExecutor {
 
-    /**
-     * Job tracker
-     */
-    private final Map<String, Map<String, Object>> jobStatusMap = new ConcurrentHashMap<>();
-    @Autowired
-    private DataSource dataSource;
+    private final DataSource dataSource;
 
-    /**
-     * Execute uploaded SQL asynchronously
-     */
+    private final Map<String, Map<String, Object>>
+            jobStatusMap = new ConcurrentHashMap<>();
+
     @Async("sqlExecutor")
-    public void executeScriptAsync(Path path, String jobId) {
-
-        jobStatusMap.put(jobId, Map.of("status", "RUNNING", "executedCount", 0));
+    public void executeScriptAsync(
+            Path path,
+            String jobId
+    ) {
 
         Connection connection = null;
 
         BufferedReader reader = null;
 
+        int count = 0;
+
         try {
+
+            log.info(
+                    "SQL execution started | JobId : {}",
+                    jobId
+            );
+
+            jobStatusMap.put(
+                    jobId,
+                    Map.of(
+                            "status", "RUNNING",
+                            "executedCount", 0
+                    )
+            );
 
             connection = dataSource.getConnection();
 
-            /**
-             * Manual transaction
-             */
             connection.setAutoCommit(false);
 
-            Statement statementExecutor = connection.createStatement();
+            Statement statement =
+                    connection.createStatement();
+
+            /**
+             * VERY IMPORTANT
+             */
+            statement.setQueryTimeout(0);
 
             reader = Files.newBufferedReader(path);
 
-            StringBuilder sqlBuilder = new StringBuilder();
+            StringBuilder sqlBuilder =
+                    new StringBuilder();
 
             String line;
-
-            int count = 0;
 
             while ((line = reader.readLine()) != null) {
 
                 String trimmed = line.trim();
 
-                /**
-                 * Ignore empty
-                 */
                 if (trimmed.isBlank()) {
                     continue;
                 }
 
-                /**
-                 * Ignore comments
-                 */
                 if (trimmed.startsWith("--")) {
                     continue;
                 }
 
                 sqlBuilder.append(line).append("\n");
 
-                /**
-                 * Statement completed
-                 */
                 if (trimmed.endsWith(";")) {
 
-                    String sql = sqlBuilder.toString();
+                    String sql =
+                            sqlBuilder.toString();
 
-                    sql = sql.substring(0, sql.lastIndexOf(";"));
+                    sql = sql.substring(
+                            0,
+                            sql.lastIndexOf(";")
+                    );
 
                     validateDangerousSql(sql);
 
-                    statementExecutor.execute(sql);
+                    long start =
+                            System.currentTimeMillis();
+
+                    statement.execute(sql);
+
+                    long end =
+                            System.currentTimeMillis();
 
                     count++;
 
-                    jobStatusMap.put(jobId, Map.of("status", "RUNNING", "executedCount", count));
-
-                    sqlBuilder.setLength(0);
-
                     /**
-                     * Batch commit
+                     * COMMIT EVERY 500
                      */
-                    if (count % 1000 == 0) {
+                    if (count % 500 == 0) {
 
                         connection.commit();
 
-                        log.info("Committed batch {}", count);
+                        log.info(
+                                "Batch committed | Count : {}",
+                                count
+                        );
                     }
 
-                    log.info("Executed statement {}", count);
+                    if (count % 100 == 0) {
+
+                        log.info(
+                                "Executed : {} | Time : {} ms",
+                                count,
+                                (end - start)
+                        );
+                    }
+
+                    jobStatusMap.put(
+                            jobId,
+                            Map.of(
+                                    "status", "RUNNING",
+                                    "executedCount", count
+                            )
+                    );
+
+                    sqlBuilder.setLength(0);
                 }
             }
 
-            /**
-             * Final commit
-             */
             connection.commit();
 
-            jobStatusMap.put(jobId, Map.of("status", "COMPLETED", "executedCount", count));
+            log.info(
+                    "SQL execution completed | Total : {}",
+                    count
+            );
 
-            log.info("SQL execution completed");
+            jobStatusMap.put(
+                    jobId,
+                    Map.of(
+                            "status", "COMPLETED",
+                            "executedCount", count
+                    )
+            );
+
+            /**
+             * CLEANUP
+             */
+            Files.deleteIfExists(path);
 
         } catch (Exception e) {
 
-            log.error("SQL execution failed", e);
+            log.error(
+                    "SQL execution failed at count : {}",
+                    count,
+                    e
+            );
 
-            /**
-             * Rollback everything
-             */
             try {
 
-                if (connection != null) {
+                if (connection != null &&
+                        !connection.isClosed()) {
 
                     connection.rollback();
 
-                    log.error("Transaction rolled back");
+                    log.error(
+                            "Transaction rollback completed"
+                    );
                 }
 
             } catch (Exception rollbackEx) {
 
-                log.error("Rollback failed", rollbackEx);
+                log.error(
+                        "Rollback failed",
+                        rollbackEx
+                );
             }
 
-            jobStatusMap.put(jobId, Map.of("status", "FAILED", "message", e.getMessage()));
+            jobStatusMap.put(
+                    jobId,
+                    Map.of(
+                            "status", "FAILED",
+                            "executedCount", count,
+                            "message", e.getMessage()
+                    )
+            );
+        }
 
-        } finally {
+        finally {
 
             try {
 
@@ -502,807 +349,90 @@ public class AdminSupportExecutor {
                     reader.close();
                 }
 
-                if (connection != null) {
+                if (connection != null &&
+                        !connection.isClosed()) {
+
                     connection.close();
                 }
 
             } catch (Exception e) {
 
-                log.error("Cleanup failed", e);
+                log.error(
+                        "Cleanup failed",
+                        e
+                );
             }
         }
     }
 
-    /**
-     * Prevent dangerous statements
-     */
-    private void validateDangerousSql(String sql) {
+    private void validateDangerousSql(
+            String sql
+    ) {
 
-        String upper = sql.toUpperCase();
+        String upper =
+                sql.toUpperCase();
 
-        if (upper.contains("DROP DATABASE") || upper.contains("ALTER SYSTEM") || upper.contains("SHUTDOWN") || upper.contains("CREATE USER") || upper.contains("DROP USER")) {
+        if (
+                upper.contains("DROP DATABASE")
+                        || upper.contains("ALTER SYSTEM")
+                        || upper.contains("SHUTDOWN")
+                        || upper.contains("CREATE USER")
+                        || upper.contains("DROP USER")
+        ) {
 
-            throw new RuntimeException("Dangerous SQL blocked");
+            throw new RuntimeException(
+                    "Dangerous SQL blocked"
+            );
         }
     }
 
-    /**
-     * Get execution status
-     */
-    public Map<String, Object> getJobStatus(String jobId) {
+    public Map<String, Object> getJobStatus(
+            String jobId
+    ) {
 
-        return jobStatusMap.getOrDefault(jobId, Map.of("status", "NOT_FOUND"));
+        return jobStatusMap.getOrDefault(
+                jobId,
+                Map.of(
+                        "status",
+                        "NOT_FOUND"
+                )
+        );
     }
 }
 
+package com.fincore.transactions_service.config;
 
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
-2026-05-13 10:05:50.158 INFO  [http-nio-4000-exec-3] c.f.t.c.AdminSupportController: SQL Upload Received : test1lakh.sql 
-{"@timestamp":"2026-05-13T10:05:50.1584234+05:30","level":"INFO","service":"TransactionsService","traceId":"0c6cb73e-4014-4c30-ac69-4573dd643dda","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/upload-script","class":"c.f.t.controller.AdminSupportController","message":"SQL Upload Received : test1lakh.sql","stack_trace":""}
-2026-05-13 10:15:56.619 WARN  [http-nio-4000-exec-3] c.z.h.p.ProxyConnection: HikariPool-8 - Connection oracle.jdbc.driver.T4CConnection@167fe7d3 marked as broken because of SQLSTATE(08006), ErrorCode(17002) 
-java.sql.SQLRecoverableException: IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
-	at oracle.jdbc.driver.T4CStatement.executeForRows(T4CStatement.java:1209)
-	at oracle.jdbc.driver.OracleStatement.executeSQLStatement(OracleStatement.java:1819)
-	at oracle.jdbc.driver.OracleStatement.doExecuteWithTimeout(OracleStatement.java:1471)
-	at oracle.jdbc.driver.OracleStatement.executeInternal(OracleStatement.java:2504)
-	at oracle.jdbc.driver.OracleStatement.execute(OracleStatement.java:2459)
-	at oracle.jdbc.driver.OracleStatementWrapper.execute(OracleStatementWrapper.java:327)
-	at com.zaxxer.hikari.pool.ProxyStatement.execute(ProxyStatement.java:94)
-	at com.zaxxer.hikari.pool.HikariProxyStatement.execute(HikariProxyStatement.java)
-	at org.springframework.jdbc.core.JdbcTemplate$1ExecuteStatementCallback.doInStatement(JdbcTemplate.java:435)
-	at org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:393)
-	at org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:444)
-	at com.fincore.transactions_service.service.AdminSupportServiceImpl.uploadSqlFile(AdminSupportServiceImpl.java:303)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.transaction.interceptor.TransactionInterceptor$1.proceedWithInvocation(TransactionInterceptor.java:123)
-	at org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:392)
-	at org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
-	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
-	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
-	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:720)
-	at com.fincore.transactions_service.service.AdminSupportServiceImpl$$SpringCGLIB$$0.uploadSqlFile(<generated>)
-	at com.fincore.transactions_service.controller.AdminSupportController.uploadScript(AdminSupportController.java:44)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:255)
-	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:188)
-	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
-	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
-	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
-	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
-	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
-	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
-	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
-	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
-	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
-	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
-	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
-	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
-	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
-	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
-	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
-	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
-	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
-	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
-	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
-	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
-	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
-	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
-	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
-	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
-	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
-	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
-	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
-	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
-	at java.base/java.lang.Thread.run(Thread.java:1570)
-Caused by: java.io.IOException: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
-	at java.base/sun.nio.ch.SocketDispatcher.read0(Native Method)
-	at java.base/sun.nio.ch.SocketDispatcher.read(SocketDispatcher.java:46)
-	at java.base/sun.nio.ch.IOUtil.readIntoNativeBuffer(IOUtil.java:340)
-	at java.base/sun.nio.ch.IOUtil.read(IOUtil.java:306)
-	at java.base/sun.nio.ch.IOUtil.read(IOUtil.java:269)
-	at java.base/sun.nio.ch.SocketChannelImpl.implRead(SocketChannelImpl.java:426)
-	at java.base/sun.nio.ch.SocketChannelImpl.read(SocketChannelImpl.java:493)
-	at oracle.net.nt.TimeoutSocketChannel.read(TimeoutSocketChannel.java:415)
-	at oracle.net.ns.NSProtocolNIO.doSocketRead(NSProtocolNIO.java:1127)
-	at oracle.net.ns.NIOPacket.readHeader(NIOPacket.java:266)
-	at oracle.net.ns.NIOPacket.readPacketFromSocketChannel(NIOPacket.java:198)
-	at oracle.net.ns.NIOPacket.readFromSocketChannel(NIOPacket.java:140)
-	at oracle.net.ns.NIOPacket.readFromSocketChannel(NIOPacket.java:113)
-	at oracle.net.ns.NIONSDataChannel.readDataFromSocketChannel(NIONSDataChannel.java:97)
-	at oracle.jdbc.driver.T4CMAREngineNIO.prepareForUnmarshall(T4CMAREngineNIO.java:833)
-	at oracle.jdbc.driver.T4CMAREngineNIO.unmarshalUB1(T4CMAREngineNIO.java:486)
-	at oracle.jdbc.driver.T4CTTIfun.receive(T4CTTIfun.java:622)
-	at oracle.jdbc.driver.T4CTTIfun.doRPC(T4CTTIfun.java:298)
-	at oracle.jdbc.driver.T4C8Oall.doOALL(T4C8Oall.java:511)
-	at oracle.jdbc.driver.T4CStatement.doOall8(T4CStatement.java:122)
-	at oracle.jdbc.driver.T4CStatement.executeForRows(T4CStatement.java:1199)
-	... 177 common frames omitted
-{"@timestamp":"2026-05-13T10:15:56.6193133+05:30","level":"WARN","service":"TransactionsService","traceId":"0c6cb73e-4014-4c30-ac69-4573dd643dda","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/upload-script","class":"com.zaxxer.hikari.pool.ProxyConnection","message":"HikariPool-8 - Connection oracle.jdbc.driver.T4CConnection@167fe7d3 marked as broken because of SQLSTATE(08006), ErrorCode(17002)","stack_trace":"java.sql.SQLRecoverableException: IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond\r\n\tat oracle.jdbc.driver.T4CStatement.executeForRows(T4CStatement.java:1209)\r\n\tat oracle.jdbc.driver.OracleStatement.executeSQLStatement(OracleStatement.java:1819)\r\n\tat oracle.jdbc.driver.OracleStatement.doExecuteWithTimeout(OracleStatement.java:1471)\r\n\tat oracle.jdbc.driver.OracleStatement.executeInternal(OracleStatement.java:2504)\r\n\tat oracle.jdbc.driver.OracleStatement.execute(OracleStatement.java:2459)\r\n\tat oracle.jdbc.driver.OracleStatementWrapper.execute(OracleStatementWrapper.java:327)\r\n\tat com.zaxxer.hikari.pool.ProxyStatement.execute(ProxyStatement.java:94)\r\n\tat com.zaxxer.hikari.pool.HikariProxyStatement.execute(HikariProxyStatement.java)\r\n\tat org.springframework.jdbc.core.JdbcTemplate$1ExecuteStatementCallback.doInStatement(JdbcTemplate.java:435)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:393)\r\nCaused by: java.io.IOException: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond\r\n\tat java.base/sun.nio.ch.SocketDispatcher.read0(Native Method)\r\n\tat java.base/sun.nio.ch.SocketDispatcher.read(SocketDispatcher.java:46)\r\n\tat java.base/sun.nio.ch.IOUtil.readIntoNativeBuffer(IOUtil.java:340)\r\n\tat java.base/sun.nio.ch.IOUtil.read(IOUtil.java:306)\r\n\tat java.base/sun.nio.ch.IOUtil.read(IOUtil.java:269)\r\n\tat java.base/sun.nio.ch.SocketChannelImpl.implRead(SocketChannelImpl.java:426)\r\n\tat java.base/sun.nio.ch.SocketChannelImpl.read(SocketChannelImpl.java:493)\r\n\tat oracle.net.nt.TimeoutSocketChannel.read(TimeoutSocketChannel.java:415)\r\n\tat oracle.net.ns.NSProtocolNIO.doSocketRead(NSProtocolNIO.java:1127)\r\n\tat oracle.net.ns.NIOPacket.readHeader(NIOPacket.java:266)\r\n"}
-2026-05-13 10:15:56.650 ERROR [http-nio-4000-exec-3] c.f.t.s.AdminSupportServiceImpl: SQL Upload Execution Failed 
-org.springframework.dao.RecoverableDataAccessException: StatementCallback; SQL [Insert into gl_transactions (TRANSACTION_ID,BATCH_ID,JOURNAL_ID,TRANSACTION_DATE,POST_DATE,BRANCH_CODE,CURRENCY,CGL,NARRATION,DEBIT_AMOUNT,CREDIT_AMOUNT,TRANSACTION_COUNT,SOURCE_FLAG) values (GL_TRANSACTIONS_SEQ.NEXTVAL,'154677','154677-83',to_date('30042026','DD-MM-RR'),sysdate,'00288','INR','5051170801','PROV_REV_31032026','-84334.5','0','','J')]; IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
-	at org.springframework.jdbc.support.SQLExceptionSubclassTranslator.doTranslate(SQLExceptionSubclassTranslator.java:110)
-	at org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:107)
-	at org.springframework.jdbc.core.JdbcTemplate.translateException(JdbcTemplate.java:1548)
-	at org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:408)
-	at org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:444)
-	at com.fincore.transactions_service.service.AdminSupportServiceImpl.uploadSqlFile(AdminSupportServiceImpl.java:303)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.transaction.interceptor.TransactionInterceptor$1.proceedWithInvocation(TransactionInterceptor.java:123)
-	at org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:392)
-	at org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
-	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
-	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
-	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:720)
-	at com.fincore.transactions_service.service.AdminSupportServiceImpl$$SpringCGLIB$$0.uploadSqlFile(<generated>)
-	at com.fincore.transactions_service.controller.AdminSupportController.uploadScript(AdminSupportController.java:44)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:255)
-	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:188)
-	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
-	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
-	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
-	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
-	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
-	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
-	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
-	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
-	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
-	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
-	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
-	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
-	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
-	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
-	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
-	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
-	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
-	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
-	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
-	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
-	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
-	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
-	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
-	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
-	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
-	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
-	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
-	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
-	at java.base/java.lang.Thread.run(Thread.java:1570)
-Caused by: java.sql.SQLRecoverableException: IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
-	at oracle.jdbc.driver.T4CStatement.executeForRows(T4CStatement.java:1209)
-	at oracle.jdbc.driver.OracleStatement.executeSQLStatement(OracleStatement.java:1819)
-	at oracle.jdbc.driver.OracleStatement.doExecuteWithTimeout(OracleStatement.java:1471)
-	at oracle.jdbc.driver.OracleStatement.executeInternal(OracleStatement.java:2504)
-	at oracle.jdbc.driver.OracleStatement.execute(OracleStatement.java:2459)
-	at oracle.jdbc.driver.OracleStatementWrapper.execute(OracleStatementWrapper.java:327)
-	at com.zaxxer.hikari.pool.ProxyStatement.execute(ProxyStatement.java:94)
-	at com.zaxxer.hikari.pool.HikariProxyStatement.execute(HikariProxyStatement.java)
-	at org.springframework.jdbc.core.JdbcTemplate$1ExecuteStatementCallback.doInStatement(JdbcTemplate.java:435)
-	at org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:393)
-	... 168 common frames omitted
-Caused by: java.io.IOException: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
-	at java.base/sun.nio.ch.SocketDispatcher.read0(Native Method)
-	at java.base/sun.nio.ch.SocketDispatcher.read(SocketDispatcher.java:46)
-	at java.base/sun.nio.ch.IOUtil.readIntoNativeBuffer(IOUtil.java:340)
-	at java.base/sun.nio.ch.IOUtil.read(IOUtil.java:306)
-	at java.base/sun.nio.ch.IOUtil.read(IOUtil.java:269)
-	at java.base/sun.nio.ch.SocketChannelImpl.implRead(SocketChannelImpl.java:426)
-	at java.base/sun.nio.ch.SocketChannelImpl.read(SocketChannelImpl.java:493)
-	at oracle.net.nt.TimeoutSocketChannel.read(TimeoutSocketChannel.java:415)
-	at oracle.net.ns.NSProtocolNIO.doSocketRead(NSProtocolNIO.java:1127)
-	at oracle.net.ns.NIOPacket.readHeader(NIOPacket.java:266)
-	at oracle.net.ns.NIOPacket.readPacketFromSocketChannel(NIOPacket.java:198)
-	at oracle.net.ns.NIOPacket.readFromSocketChannel(NIOPacket.java:140)
-	at oracle.net.ns.NIOPacket.readFromSocketChannel(NIOPacket.java:113)
-	at oracle.net.ns.NIONSDataChannel.readDataFromSocketChannel(NIONSDataChannel.java:97)
-	at oracle.jdbc.driver.T4CMAREngineNIO.prepareForUnmarshall(T4CMAREngineNIO.java:833)
-	at oracle.jdbc.driver.T4CMAREngineNIO.unmarshalUB1(T4CMAREngineNIO.java:486)
-	at oracle.jdbc.driver.T4CTTIfun.receive(T4CTTIfun.java:622)
-	at oracle.jdbc.driver.T4CTTIfun.doRPC(T4CTTIfun.java:298)
-	at oracle.jdbc.driver.T4C8Oall.doOALL(T4C8Oall.java:511)
-	at oracle.jdbc.driver.T4CStatement.doOall8(T4CStatement.java:122)
-	at oracle.jdbc.driver.T4CStatement.executeForRows(T4CStatement.java:1199)
-	... 177 common frames omitted
-{"@timestamp":"2026-05-13T10:15:56.6508679+05:30","level":"ERROR","service":"TransactionsService","traceId":"0c6cb73e-4014-4c30-ac69-4573dd643dda","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/upload-script","class":"c.f.t.service.AdminSupportServiceImpl","message":"SQL Upload Execution Failed","stack_trace":"org.springframework.dao.RecoverableDataAccessException: StatementCallback; SQL [Insert into gl_transactions (TRANSACTION_ID,BATCH_ID,JOURNAL_ID,TRANSACTION_DATE,POST_DATE,BRANCH_CODE,CURRENCY,CGL,NARRATION,DEBIT_AMOUNT,CREDIT_AMOUNT,TRANSACTION_COUNT,SOURCE_FLAG) values (GL_TRANSACTIONS_SEQ.NEXTVAL,'154677','154677-83',to_date('30042026','DD-MM-RR'),sysdate,'00288','INR','5051170801','PROV_REV_31032026','-84334.5','0','','J')]; IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond\r\n\tat org.springframework.jdbc.support.SQLExceptionSubclassTranslator.doTranslate(SQLExceptionSubclassTranslator.java:110)\r\n\tat org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:107)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.translateException(JdbcTemplate.java:1548)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:408)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:444)\r\n\tat com.fincore.transactions_service.service.AdminSupportServiceImpl.uploadSqlFile(AdminSupportServiceImpl.java:303)\r\n\tat java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)\r\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\r\n\tat org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)\r\nCaused by: java.sql.SQLRecoverableException: IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond\r\n\tat oracle.jdbc.driver.T4CStatement.executeForRows(T4CStatement.java:1209)\r\n\tat oracle.jdbc.driver.OracleStatement.executeSQLStatement(OracleStatement.java:1819)\r\n\tat oracle.jdbc.driver.OracleStatement.doExecuteWithTimeout(OracleStatement.java:1471)\r\n\tat oracle.jdbc.driver.OracleStatement.executeInternal(OracleStatement.java:2504)\r\n\tat oracle.jdbc.driver.OracleStatement.execute(OracleStatement.java:2459)\r\n\tat oracle.jdbc.driver.OracleStatementWrapper.execute(OracleStatementWrapper.java:327)\r\n\tat com.zaxxer.hikari.pool.ProxyStatement.execute(ProxyStatement.java:94)\r\n\tat com.zaxxer.hikari.pool.HikariProxyStatement.execute(HikariProxyStatement.java)\r\n\tat org.springframework.jdbc.core.JdbcTemplate$1ExecuteStatementCallback.doInStatement(JdbcTemplate.java:435)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:393)\r\nCaused by: java.io.IOException: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond\r\n\tat java.base/sun.nio.ch.SocketDispatcher.read0(Native Method)\r\n\tat java.base/sun.nio.ch.SocketDispatcher.read(SocketDispatcher.java:46)\r\n\tat java.base/sun.nio.ch.IOUtil.readIntoNativeBuffer(IOUtil.java:340)\r\n\tat java.base/sun.nio.ch.IOUtil.read(IOUtil.java:306)\r\n\tat java.base/sun.nio.ch.IOUtil.read(IOUtil.java:269)\r\n\tat java.base/sun.nio.ch.SocketChannelImpl.implRead(SocketChannelImpl.java:426)\r\n\tat java.base/sun.nio.ch.SocketChannelImpl.read(SocketChannelImpl.java:493)\r\n\tat oracle.net.nt.TimeoutSocketChannel.read(TimeoutSocketChannel.java:415)\r\n\tat oracle.net.ns.NSProtocolNIO.doSocketRead(NSProtocolNIO.java:1127)\r\n\tat oracle.net.ns.NIOPacket.readHeader(NIOPacket.java:266)\r\n"}
-2026-05-13 10:15:56.670 ERROR [http-nio-4000-exec-3] o.s.t.i.TransactionAspectSupport: Application exception overridden by rollback exception 
-java.lang.RuntimeException: StatementCallback; SQL [Insert into gl_transactions (TRANSACTION_ID,BATCH_ID,JOURNAL_ID,TRANSACTION_DATE,POST_DATE,BRANCH_CODE,CURRENCY,CGL,NARRATION,DEBIT_AMOUNT,CREDIT_AMOUNT,TRANSACTION_COUNT,SOURCE_FLAG) values (GL_TRANSACTIONS_SEQ.NEXTVAL,'154677','154677-83',to_date('30042026','DD-MM-RR'),sysdate,'00288','INR','5051170801','PROV_REV_31032026','-84334.5','0','','J')]; IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
-	at com.fincore.transactions_service.service.AdminSupportServiceImpl.uploadSqlFile(AdminSupportServiceImpl.java:325)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.transaction.interceptor.TransactionInterceptor$1.proceedWithInvocation(TransactionInterceptor.java:123)
-	at org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:392)
-	at org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
-	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
-	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
-	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:720)
-	at com.fincore.transactions_service.service.AdminSupportServiceImpl$$SpringCGLIB$$0.uploadSqlFile(<generated>)
-	at com.fincore.transactions_service.controller.AdminSupportController.uploadScript(AdminSupportController.java:44)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:255)
-	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:188)
-	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
-	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
-	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
-	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
-	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
-	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
-	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
-	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
-	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
-	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
-	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
-	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
-	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
-	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
-	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
-	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
-	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
-	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
-	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
-	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
-	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
-	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
-	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
-	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
-	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
-	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
-	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
-	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
-	at java.base/java.lang.Thread.run(Thread.java:1570)
-{"@timestamp":"2026-05-13T10:15:56.6709092+05:30","level":"ERROR","service":"TransactionsService","traceId":"0c6cb73e-4014-4c30-ac69-4573dd643dda","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/upload-script","class":"o.s.t.interceptor.TransactionInterceptor","message":"Application exception overridden by rollback exception","stack_trace":"java.lang.RuntimeException: StatementCallback; SQL [Insert into gl_transactions (TRANSACTION_ID,BATCH_ID,JOURNAL_ID,TRANSACTION_DATE,POST_DATE,BRANCH_CODE,CURRENCY,CGL,NARRATION,DEBIT_AMOUNT,CREDIT_AMOUNT,TRANSACTION_COUNT,SOURCE_FLAG) values (GL_TRANSACTIONS_SEQ.NEXTVAL,'154677','154677-83',to_date('30042026','DD-MM-RR'),sysdate,'00288','INR','5051170801','PROV_REV_31032026','-84334.5','0','','J')]; IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond\r\n\tat com.fincore.transactions_service.service.AdminSupportServiceImpl.uploadSqlFile(AdminSupportServiceImpl.java:325)\r\n\tat java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)\r\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\r\n\tat org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)\r\n\tat org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)\r\n\tat org.springframework.transaction.interceptor.TransactionInterceptor$1.proceedWithInvocation(TransactionInterceptor.java:123)\r\n\tat org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:392)\r\n\tat org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)\r\n"}
-2026-05-13 10:15:56.683 ERROR [http-nio-4000-exec-3] c.f.t.e.GlobalException: An unexpected error occurred: Unable to rollback against JDBC Connection 
-org.springframework.orm.jpa.JpaSystemException: Unable to rollback against JDBC Connection
-	at org.springframework.orm.jpa.vendor.HibernateJpaDialect.convertHibernateAccessException(HibernateJpaDialect.java:341)
-	at org.springframework.orm.jpa.vendor.HibernateJpaDialect.translateExceptionIfPossible(HibernateJpaDialect.java:241)
-	at org.springframework.orm.jpa.JpaTransactionManager.doRollback(JpaTransactionManager.java:593)
-	at org.springframework.transaction.support.AbstractPlatformTransactionManager.processRollback(AbstractPlatformTransactionManager.java:897)
-	at org.springframework.transaction.support.AbstractPlatformTransactionManager.rollback(AbstractPlatformTransactionManager.java:866)
-	at org.springframework.transaction.interceptor.TransactionAspectSupport.completeTransactionAfterThrowing(TransactionAspectSupport.java:694)
-	at org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:396)
-	at org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
-	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
-	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
-	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
-	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
-	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
-	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
-	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
-	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:720)
-	at com.fincore.transactions_service.service.AdminSupportServiceImpl$$SpringCGLIB$$0.uploadSqlFile(<generated>)
-	at com.fincore.transactions_service.controller.AdminSupportController.uploadScript(AdminSupportController.java:44)
-	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
-	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
-	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:255)
-	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:188)
-	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
-	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
-	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
-	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
-	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
-	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
-	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
-	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
-	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
-	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
-	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
-	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
-	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
-	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
-	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
-	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
-	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
-	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
-	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
-	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
-	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
-	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
-	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
-	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
-	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
-	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
-	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
-	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
-	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
-	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
-	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
-	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
-	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
-	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
-	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
-	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
-	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
-	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
-	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
-	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
-	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
-	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
-	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
-	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
-	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
-	at java.base/java.lang.Thread.run(Thread.java:1570)
-Caused by: org.hibernate.TransactionException: Unable to rollback against JDBC Connection
-	at org.hibernate.resource.jdbc.internal.AbstractLogicalConnectionImplementor.rollback(AbstractLogicalConnectionImplementor.java:137)
-	at org.hibernate.resource.transaction.backend.jdbc.internal.JdbcResourceLocalTransactionCoordinatorImpl$TransactionDriverControlImpl.rollback(JdbcResourceLocalTransactionCoordinatorImpl.java:289)
-	at org.hibernate.engine.transaction.internal.TransactionImpl.rollback(TransactionImpl.java:142)
-	at org.springframework.orm.jpa.JpaTransactionManager.doRollback(JpaTransactionManager.java:589)
-	... 162 common frames omitted
-Caused by: java.sql.SQLException: Connection is closed
-	at com.zaxxer.hikari.pool.ProxyConnection$ClosedConnection.lambda$getClosedConnection$0(ProxyConnection.java:503)
-	at jdk.proxy3/jdk.proxy3.$Proxy110.rollback(Unknown Source)
-	at com.zaxxer.hikari.pool.ProxyConnection.rollback(ProxyConnection.java:386)
-	at com.zaxxer.hikari.pool.HikariProxyConnection.rollback(HikariProxyConnection.java)
-	at org.hibernate.resource.jdbc.internal.AbstractLogicalConnectionImplementor.rollback(AbstractLogicalConnectionImplementor.java:127)
-	... 165 common frames omitted
-{"@timestamp":"2026-05-13T10:15:56.6839468+05:30","level":"ERROR","service":"TransactionsService","traceId":"0c6cb73e-4014-4c30-ac69-4573dd643dda","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/upload-script","class":"c.f.t.exception.GlobalException","message":"An unexpected error occurred: Unable to rollback against JDBC Connection","stack_trace":"org.springframework.orm.jpa.JpaSystemException: Unable to rollback against JDBC Connection\r\n\tat org.springframework.orm.jpa.vendor.HibernateJpaDialect.convertHibernateAccessException(HibernateJpaDialect.java:341)\r\n\tat org.springframework.orm.jpa.vendor.HibernateJpaDialect.translateExceptionIfPossible(HibernateJpaDialect.java:241)\r\n\tat org.springframework.orm.jpa.JpaTransactionManager.doRollback(JpaTransactionManager.java:593)\r\n\tat org.springframework.transaction.support.AbstractPlatformTransactionManager.processRollback(AbstractPlatformTransactionManager.java:897)\r\n\tat org.springframework.transaction.support.AbstractPlatformTransactionManager.rollback(AbstractPlatformTransactionManager.java:866)\r\n\tat org.springframework.transaction.interceptor.TransactionAspectSupport.completeTransactionAfterThrowing(TransactionAspectSupport.java:694)\r\n\tat org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:396)\r\n\tat org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)\r\n\tat org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)\r\nCaused by: org.hibernate.TransactionException: Unable to rollback against JDBC Connection\r\n\tat org.hibernate.resource.jdbc.internal.AbstractLogicalConnectionImplementor.rollback(AbstractLogicalConnectionImplementor.java:137)\r\n\tat org.hibernate.resource.transaction.backend.jdbc.internal.JdbcResourceLocalTransactionCoordinatorImpl$TransactionDriverControlImpl.rollback(JdbcResourceLocalTransactionCoordinatorImpl.java:289)\r\n\tat org.hibernate.engine.transaction.internal.TransactionImpl.rollback(TransactionImpl.java:142)\r\n\tat org.springframework.orm.jpa.JpaTransactionManager.doRollback(JpaTransactionManager.java:589)\r\n\tat org.springframework.transaction.support.AbstractPlatformTransactionManager.processRollback(AbstractPlatformTransactionManager.java:897)\r\n\tat org.springframework.transaction.support.AbstractPlatformTransactionManager.rollback(AbstractPlatformTransactionManager.java:866)\r\n\tat org.springframework.transaction.interceptor.TransactionAspectSupport.completeTransactionAfterThrowing(TransactionAspectSupport.java:694)\r\n\tat org.springframework.transaction.interceptor.TransactionAspectSupport.invokeWithinTransaction(TransactionAspectSupport.java:396)\r\n\tat org.springframework.transaction.interceptor.TransactionInterceptor.invoke(TransactionInterceptor.java:119)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)\r\nCaused by: java.sql.SQLException: Connection is closed\r\n\tat com.zaxxer.hikari.pool.ProxyConnection$ClosedConnection.lambda$getClosedConnection$0(ProxyConnection.java:503)\r\n\tat jdk.proxy3/jdk.proxy3.$Proxy110.rollback(Unknown Source)\r\n\tat com.zaxxer.hikari.pool.ProxyConnection.rollback(ProxyConnection.java:386)\r\n\tat com.zaxxer.hikari.pool.HikariProxyConnection.rollback(HikariProxyConnection.java)\r\n\tat org.hibernate.resource.jdbc.internal.AbstractLogicalConnectionImplementor.rollback(AbstractLogicalConnectionImplementor.java:127)\r\n\tat org.hibernate.resource.transaction.backend.jdbc.internal.JdbcResourceLocalTransactionCoordinatorImpl$TransactionDriverControlImpl.rollback(JdbcResourceLocalTransactionCoordinatorImpl.java:289)\r\n\tat org.hibernate.engine.transaction.internal.TransactionImpl.rollback(TransactionImpl.java:142)\r\n\tat org.springframework.orm.jpa.JpaTransactionManager.doRollback(JpaTransactionManager.java:589)\r\n\tat org.springframework.transaction.support.AbstractPlatformTransactionManager.processRollback(AbstractPlatformTransactionManager.java:897)\r\n\tat org.springframework.transaction.support.AbstractPlatformTransactionManager.rollback(AbstractPlatformTransactionManager.java:866)\r\n"}
-2026-05-13 10:15:56.802 WARN  [http-nio-4000-exec-3] o.s.w.s.h.AbstractHandlerExceptionResolver: Resolved [org.springframework.orm.jpa.JpaSystemException: Unable to rollback against JDBC Connection] 
-{"@timestamp":"2026-05-13T10:15:56.8024297+05:30","level":"WARN","service":"TransactionsService","traceId":"0c6cb73e-4014-4c30-ac69-4573dd643dda","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/upload-script","class":"o.s.w.s.m.m.a.ExceptionHandlerExceptionResolver","message":"Resolved [org.springframework.orm.jpa.JpaSystemException: Unable to rollback against JDBC Connection]","stack_trace":""}
+import org.springframework.scheduling.annotation.EnableAsync;
+
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.util.concurrent.Executor;
+
+@Configuration
+@EnableAsync
+public class AsyncConfig {
+
+    @Bean("sqlExecutor")
+    public Executor sqlExecutor() {
+
+        ThreadPoolTaskExecutor executor =
+                new ThreadPoolTaskExecutor();
+
+        executor.setCorePoolSize(2);
+
+        executor.setMaxPoolSize(2);
+
+        executor.setQueueCapacity(10);
+
+        executor.setThreadNamePrefix(
+                "SQL-EXECUTOR-"
+        );
+
+        executor.initialize();
+
+        return executor;
+    }
+}
