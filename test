@@ -1,62 +1,11 @@
-package com.fincore.transactions_service.controller;
-
-import com.fincore.transactions_service.service.AdminSupportService;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.util.Map;
-
-@Slf4j
-@RestController
-@RequiredArgsConstructor
-@RequestMapping("/api/admin-support")
-public class AdminSupportController {
-
-    private final AdminSupportService adminSupportService;
-
-    @PostMapping(
-            value = "/upload-script",
-            consumes = MediaType.MULTIPART_FORM_DATA_VALUE
-    )
-    public ResponseEntity<?> uploadScript(
-            @RequestParam("file") MultipartFile file
-    ) {
-
-        log.info(
-                "SQL Upload Received : {} | Size : {} bytes",
-                file.getOriginalFilename(),
-                file.getSize()
-        );
-
-        return ResponseEntity.ok(
-                adminSupportService.uploadSqlFile(file)
-        );
-    }
-
-    @GetMapping("/job-status/{jobId}")
-    public ResponseEntity<?> getJobStatus(
-            @PathVariable String jobId
-    ) {
-
-        return ResponseEntity.ok(
-                adminSupportService.getJobStatus(jobId)
-        );
-    }
-}
-
-
 package com.fincore.transactions_service.service;
 
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import org.springframework.web.multipart.MultipartFile;
@@ -65,16 +14,379 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
-import java.util.Map;
-import java.util.UUID;
+import java.sql.*;
+import java.sql.Date;
+
+import java.util.*;
 
 @Slf4j
 @Service("AdminSupportService")
 @RequiredArgsConstructor
 public class AdminSupportServiceImpl implements AdminSupportService {
 
+    private final JdbcTemplate jdbcTemplate;
+
     private final AdminSupportExecutor adminSupportExecutor;
 
+    /**
+     * COMMAND PANEL EXECUTION
+     */
+    @Override
+    public Map<String, Object> executeAdminSql(
+            AdminSupportDTO dto
+    ) {
+
+        String rawSql = dto.getSql().trim();
+
+        String[] statements = rawSql.split(";");
+
+        List<String> cleanStatements =
+                new ArrayList<>();
+
+        for (String s : statements) {
+
+            String clean = s
+                    .replaceAll("(?m)^--.*", "")
+                    .trim();
+
+            if (!clean.isEmpty()) {
+
+                cleanStatements.add(clean);
+            }
+        }
+
+        boolean isSingleSelect =
+                cleanStatements.size() == 1
+                        &&
+                        (
+                                cleanStatements.get(0)
+                                        .toUpperCase()
+                                        .startsWith("SELECT")
+
+                                        ||
+
+                                        cleanStatements.get(0)
+                                                .toUpperCase()
+                                                .startsWith("WITH")
+                        );
+
+        int page =
+                dto.getPage() != null
+                        ? dto.getPage()
+                        : 0;
+
+        int size =
+                dto.getSize() != null
+                        ? dto.getSize()
+                        : 5;
+
+        /**
+         * SELECT QUERY
+         */
+        if (isSingleSelect) {
+
+            String sql = cleanStatements.get(0);
+
+            try {
+
+                String countSql =
+                        "SELECT COUNT(*) FROM (" + sql + ")";
+
+                Integer total =
+                        jdbcTemplate.queryForObject(
+                                countSql,
+                                Integer.class
+                        );
+
+                String paginatedSql =
+                        sql
+                                + " OFFSET "
+                                + (page * size)
+                                + " ROWS FETCH NEXT "
+                                + size
+                                + " ROWS ONLY";
+
+                return jdbcTemplate.query(
+                        paginatedSql,
+                        rs -> {
+
+                            ResultSetMetaData meta =
+                                    rs.getMetaData();
+
+                            int columnCount =
+                                    meta.getColumnCount();
+
+                            List<Map<String, String>>
+                                    columns =
+                                    new ArrayList<>();
+
+                            for (
+                                    int i = 1;
+                                    i <= columnCount;
+                                    i++
+                            ) {
+
+                                columns.add(
+                                        Map.of(
+                                                "name",
+                                                meta.getColumnLabel(i)
+                                        )
+                                );
+                            }
+
+                            List<Map<String, Object>>
+                                    rows =
+                                    new ArrayList<>();
+
+                            while (rs.next()) {
+
+                                Map<String, Object> row =
+                                        new HashMap<>();
+
+                                for (
+                                        int i = 1;
+                                        i <= columnCount;
+                                        i++
+                                ) {
+
+                                    String columnName =
+                                            meta.getColumnLabel(i);
+
+                                    int columnType =
+                                            meta.getColumnType(i);
+
+                                    Object value = null;
+
+                                    switch (columnType) {
+
+                                        case Types.VARCHAR:
+                                        case Types.CHAR:
+                                        case Types.LONGVARCHAR:
+                                        case Types.NVARCHAR:
+                                        case Types.NCHAR:
+
+                                            value =
+                                                    rs.getString(i);
+
+                                            break;
+
+                                        case Types.INTEGER:
+                                        case Types.SMALLINT:
+                                        case Types.TINYINT:
+
+                                            int intVal =
+                                                    rs.getInt(i);
+
+                                            value =
+                                                    rs.wasNull()
+                                                            ? null
+                                                            : intVal;
+
+                                            break;
+
+                                        case Types.BIGINT:
+
+                                            long longVal =
+                                                    rs.getLong(i);
+
+                                            value =
+                                                    rs.wasNull()
+                                                            ? null
+                                                            : longVal;
+
+                                            break;
+
+                                        case Types.NUMERIC:
+                                        case Types.DECIMAL:
+
+                                            value =
+                                                    rs.getBigDecimal(i);
+
+                                            break;
+
+                                        case Types.FLOAT:
+                                        case Types.DOUBLE:
+                                        case Types.REAL:
+
+                                            double dbl =
+                                                    rs.getDouble(i);
+
+                                            value =
+                                                    rs.wasNull()
+                                                            ? null
+                                                            : dbl;
+
+                                            break;
+
+                                        case Types.DATE:
+
+                                            Date date =
+                                                    rs.getDate(i);
+
+                                            value =
+                                                    date != null
+                                                            ? date.toLocalDate().toString()
+                                                            : null;
+
+                                            break;
+
+                                        case Types.TIME:
+
+                                            Time time =
+                                                    rs.getTime(i);
+
+                                            value =
+                                                    time != null
+                                                            ? time.toLocalTime().toString()
+                                                            : null;
+
+                                            break;
+
+                                        case Types.TIMESTAMP:
+                                        case -101:
+
+                                            Timestamp ts =
+                                                    rs.getTimestamp(i);
+
+                                            value =
+                                                    ts != null
+                                                            ?
+                                                            ts.toLocalDateTime()
+                                                                    .format(
+                                                                            java.time.format.DateTimeFormatter.ofPattern(
+                                                                                    "dd-MM-yyyy HH:mm:ss"
+                                                                            )
+                                                                    )
+                                                            : null;
+
+                                            break;
+
+                                        case Types.CLOB:
+                                        case Types.NCLOB:
+
+                                            Clob clob =
+                                                    rs.getClob(i);
+
+                                            value =
+                                                    clob != null
+                                                            ?
+                                                            clob.getSubString(
+                                                                    1,
+                                                                    (int) clob.length()
+                                                            )
+                                                            : null;
+
+                                            break;
+
+                                        case Types.BLOB:
+                                        case Types.BINARY:
+                                        case Types.VARBINARY:
+                                        case Types.LONGVARBINARY:
+
+                                            value = "[BLOB DATA]";
+
+                                            break;
+
+                                        default:
+
+                                            Object obj =
+                                                    rs.getObject(i);
+
+                                            value =
+                                                    obj != null
+                                                            ? obj.toString()
+                                                            : null;
+                                    }
+
+                                    row.put(
+                                            columnName,
+                                            value
+                                    );
+                                }
+
+                                rows.add(row);
+                            }
+
+                            return Map.of(
+                                    "columns", columns,
+                                    "rows", rows,
+                                    "total", total,
+                                    "page", page,
+                                    "size", size,
+                                    "error", false
+                            );
+                        }
+                );
+
+            } catch (Exception e) {
+
+                log.error(
+                        "Execution Error",
+                        e
+                );
+
+                return Map.of(
+                        "error", true,
+                        "message", e.getMessage()
+                );
+            }
+        }
+
+        /**
+         * SCRIPT EXECUTION
+         */
+        else {
+
+            try {
+
+                int successful = 0;
+
+                for (String sql : cleanStatements) {
+
+                    jdbcTemplate.execute(sql);
+
+                    successful++;
+                }
+
+                return Map.of(
+                        "error", false,
+                        "columns",
+                        List.of(
+                                Map.of(
+                                        "name",
+                                        "RESULT"
+                                )
+                        ),
+                        "rows",
+                        List.of(
+                                Map.of(
+                                        "RESULT",
+                                        "Script executed successfully. Statements : "
+                                                + successful
+                                )
+                        ),
+                        "total",
+                        successful
+                );
+
+            } catch (Exception e) {
+
+                log.error(
+                        "Script Error",
+                        e
+                );
+
+                return Map.of(
+                        "error", true,
+                        "message", e.getMessage()
+                );
+            }
+        }
+    }
+
+    /**
+     * HUGE FILE EXECUTION
+     */
     @Override
     public Map<String, Object> uploadSqlFile(
             MultipartFile file
@@ -82,12 +394,14 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
         try {
 
-            String jobId = UUID.randomUUID().toString();
+            String jobId =
+                    UUID.randomUUID().toString();
 
-            Path tempFile = Files.createTempFile(
-                    "sql-upload-",
-                    ".sql"
-            );
+            Path tempFile =
+                    Files.createTempFile(
+                            "sql-upload-",
+                            ".sql"
+                    );
 
             Files.copy(
                     file.getInputStream(),
@@ -125,6 +439,9 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         }
     }
 
+    /**
+     * JOB STATUS
+     */
     @Override
     public Map<String, Object> getJobStatus(
             String jobId
@@ -133,306 +450,5 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         return adminSupportExecutor.getJobStatus(
                 jobId
         );
-    }
-}
-
-package com.fincore.transactions_service.service;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.stereotype.Service;
-
-import javax.sql.DataSource;
-
-import java.io.BufferedReader;
-
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-import java.sql.Connection;
-import java.sql.Statement;
-
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
-@Slf4j
-@Service
-@RequiredArgsConstructor
-public class AdminSupportExecutor {
-
-    private final DataSource dataSource;
-
-    private final Map<String, Map<String, Object>>
-            jobStatusMap = new ConcurrentHashMap<>();
-
-    @Async("sqlExecutor")
-    public void executeScriptAsync(
-            Path path,
-            String jobId
-    ) {
-
-        Connection connection = null;
-
-        BufferedReader reader = null;
-
-        int count = 0;
-
-        try {
-
-            log.info(
-                    "SQL execution started | JobId : {}",
-                    jobId
-            );
-
-            jobStatusMap.put(
-                    jobId,
-                    Map.of(
-                            "status", "RUNNING",
-                            "executedCount", 0
-                    )
-            );
-
-            connection = dataSource.getConnection();
-
-            connection.setAutoCommit(false);
-
-            Statement statement =
-                    connection.createStatement();
-
-            /**
-             * VERY IMPORTANT
-             */
-            statement.setQueryTimeout(0);
-
-            reader = Files.newBufferedReader(path);
-
-            StringBuilder sqlBuilder =
-                    new StringBuilder();
-
-            String line;
-
-            while ((line = reader.readLine()) != null) {
-
-                String trimmed = line.trim();
-
-                if (trimmed.isBlank()) {
-                    continue;
-                }
-
-                if (trimmed.startsWith("--")) {
-                    continue;
-                }
-
-                sqlBuilder.append(line).append("\n");
-
-                if (trimmed.endsWith(";")) {
-
-                    String sql =
-                            sqlBuilder.toString();
-
-                    sql = sql.substring(
-                            0,
-                            sql.lastIndexOf(";")
-                    );
-
-                    validateDangerousSql(sql);
-
-                    long start =
-                            System.currentTimeMillis();
-
-                    statement.execute(sql);
-
-                    long end =
-                            System.currentTimeMillis();
-
-                    count++;
-
-                    /**
-                     * COMMIT EVERY 500
-                     */
-                    if (count % 500 == 0) {
-
-                        connection.commit();
-
-                        log.info(
-                                "Batch committed | Count : {}",
-                                count
-                        );
-                    }
-
-                    if (count % 100 == 0) {
-
-                        log.info(
-                                "Executed : {} | Time : {} ms",
-                                count,
-                                (end - start)
-                        );
-                    }
-
-                    jobStatusMap.put(
-                            jobId,
-                            Map.of(
-                                    "status", "RUNNING",
-                                    "executedCount", count
-                            )
-                    );
-
-                    sqlBuilder.setLength(0);
-                }
-            }
-
-            connection.commit();
-
-            log.info(
-                    "SQL execution completed | Total : {}",
-                    count
-            );
-
-            jobStatusMap.put(
-                    jobId,
-                    Map.of(
-                            "status", "COMPLETED",
-                            "executedCount", count
-                    )
-            );
-
-            /**
-             * CLEANUP
-             */
-            Files.deleteIfExists(path);
-
-        } catch (Exception e) {
-
-            log.error(
-                    "SQL execution failed at count : {}",
-                    count,
-                    e
-            );
-
-            try {
-
-                if (connection != null &&
-                        !connection.isClosed()) {
-
-                    connection.rollback();
-
-                    log.error(
-                            "Transaction rollback completed"
-                    );
-                }
-
-            } catch (Exception rollbackEx) {
-
-                log.error(
-                        "Rollback failed",
-                        rollbackEx
-                );
-            }
-
-            jobStatusMap.put(
-                    jobId,
-                    Map.of(
-                            "status", "FAILED",
-                            "executedCount", count,
-                            "message", e.getMessage()
-                    )
-            );
-        }
-
-        finally {
-
-            try {
-
-                if (reader != null) {
-                    reader.close();
-                }
-
-                if (connection != null &&
-                        !connection.isClosed()) {
-
-                    connection.close();
-                }
-
-            } catch (Exception e) {
-
-                log.error(
-                        "Cleanup failed",
-                        e
-                );
-            }
-        }
-    }
-
-    private void validateDangerousSql(
-            String sql
-    ) {
-
-        String upper =
-                sql.toUpperCase();
-
-        if (
-                upper.contains("DROP DATABASE")
-                        || upper.contains("ALTER SYSTEM")
-                        || upper.contains("SHUTDOWN")
-                        || upper.contains("CREATE USER")
-                        || upper.contains("DROP USER")
-        ) {
-
-            throw new RuntimeException(
-                    "Dangerous SQL blocked"
-            );
-        }
-    }
-
-    public Map<String, Object> getJobStatus(
-            String jobId
-    ) {
-
-        return jobStatusMap.getOrDefault(
-                jobId,
-                Map.of(
-                        "status",
-                        "NOT_FOUND"
-                )
-        );
-    }
-}
-
-package com.fincore.transactions_service.config;
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-import org.springframework.scheduling.annotation.EnableAsync;
-
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-
-import java.util.concurrent.Executor;
-
-@Configuration
-@EnableAsync
-public class AsyncConfig {
-
-    @Bean("sqlExecutor")
-    public Executor sqlExecutor() {
-
-        ThreadPoolTaskExecutor executor =
-                new ThreadPoolTaskExecutor();
-
-        executor.setCorePoolSize(2);
-
-        executor.setMaxPoolSize(2);
-
-        executor.setQueueCapacity(10);
-
-        executor.setThreadNamePrefix(
-                "SQL-EXECUTOR-"
-        );
-
-        executor.initialize();
-
-        return executor;
     }
 }
