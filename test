@@ -1,167 +1,709 @@
-import React from "react";
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import {
+  Alert,
+  alpha,
   Box,
   Button,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
+  Chip,
+  Paper,
   Stack,
+  Tab,
+  Tabs,
   Typography,
+  useTheme,
 } from "@mui/material";
 
 import {
-  DeleteSweep,
-  WarningAmber,
+  Refresh,
+  Storage,
+  Terminal,
+  UploadFile,
 } from "@mui/icons-material";
 
-const ConfirmDialog = ({
-  open,
-  onClose,
-  onConfirm,
-}) => {
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      maxWidth="xs"
-      fullWidth
-      PaperProps={{
-        sx: {
-          borderRadius: 4,
-          overflow: "hidden",
+import {
+  useMutation,
+} from "@tanstack/react-query";
+
+import useApi from "../../hooks/useApi";
+
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+
+import CommandPanel from "./components/CommandPanel";
+
+import UploadScript from "./components/UploadScript";
+
+import ExecutionDashboard from "./components/ExecutionDashboard";
+
+import ResultGrid from "./components/ResultGrid";
+
+import LogsPanel from "./components/LogsPanel";
+
+import ConfirmDialog from "./components/ConfirmDialog";
+
+const AdminSupport = () => {
+  const theme = useTheme();
+
+  const { callApi } = useApi();
+
+  const showSnackbar = useCustomSnackbar();
+
+  /**
+   * =========================================
+   * STATES
+   * =========================================
+   */
+
+  const [mainTab, setMainTab] =
+    useState(0);
+
+  const [outputTab, setOutputTab] =
+    useState(0);
+
+  const [query, setQuery] = useState(
+    "SELECT * FROM USERS",
+  );
+
+  const [selectedFile, setSelectedFile] =
+    useState(null);
+
+  const [jobId, setJobId] =
+    useState(null);
+
+  const [jobStatus, setJobStatus] =
+    useState(null);
+
+  const [lastResponse, setLastResponse] =
+    useState(null);
+
+  const [confirmOpen, setConfirmOpen] =
+    useState(false);
+
+  const [results, setResults] =
+    useState({
+      rows: [],
+      columns: [],
+      total: 0,
+    });
+
+  const [paginationModel, setPaginationModel] =
+    useState({
+      page: 0,
+      pageSize: 10,
+    });
+
+  /**
+   * =========================================
+   * QUERY TYPE
+   * =========================================
+   */
+
+  const isSelect = useMemo(() => {
+    const q = query
+      .trim()
+      .toUpperCase();
+
+    return (
+      q.startsWith("SELECT") ||
+      q.startsWith("WITH")
+    );
+  }, [query]);
+
+  const isDangerous = useMemo(() => {
+    const q = query
+      .trim()
+      .toUpperCase();
+
+    return [
+      "DELETE",
+      "DROP",
+      "TRUNCATE",
+      "ALTER",
+    ].some((x) =>
+      q.startsWith(x),
+    );
+  }, [query]);
+
+  /**
+   * =========================================
+   * RESET
+   * =========================================
+   */
+
+  const resetScreen = () => {
+    setQuery("");
+
+    setSelectedFile(null);
+
+    setJobId(null);
+
+    setJobStatus(null);
+
+    setLastResponse(null);
+
+    setResults({
+      rows: [],
+      columns: [],
+      total: 0,
+    });
+
+    setPaginationModel({
+      page: 0,
+      pageSize: 10,
+    });
+
+    setOutputTab(0);
+
+    showSnackbar(
+      "Workspace reset completed",
+      "success",
+    );
+  };
+
+  /**
+   * =========================================
+   * EXECUTE SQL
+   * =========================================
+   */
+
+  const {
+    mutate: executeSql,
+    isPending,
+  } = useMutation({
+    mutationFn: async ({
+      sql,
+      page,
+      size,
+    }) => {
+      return await callApi(
+        "/TS/admin-support/admin-execute",
+        {
+          sql,
+          page,
+          size,
         },
+        "POST",
+      );
+    },
+
+    onSuccess: (data) => {
+      setLastResponse(data);
+
+      if (data?.error) {
+        setOutputTab(1);
+
+        return;
+      }
+
+      if (isSelect) {
+        const columns = (
+          data?.columns || []
+        ).map((col) => ({
+          field: col.name,
+          headerName: col.name,
+          flex: 1,
+          minWidth: 180,
+        }));
+
+        setResults({
+          rows: data?.rows || [],
+          columns,
+          total: data?.total || 0,
+        });
+
+        setOutputTab(0);
+      } else {
+        setOutputTab(1);
+      }
+    },
+
+    onError: (e) => {
+      setLastResponse({
+        error: true,
+        message:
+          e?.message ||
+          "Execution failed",
+      });
+
+      setOutputTab(1);
+    },
+  });
+
+  /**
+   * =========================================
+   * HANDLE EXECUTE
+   * =========================================
+   */
+
+  const handleExecute = (
+    reset = false,
+  ) => {
+    if (!query.trim()) {
+      showSnackbar(
+        "Enter SQL query",
+        "warning",
+      );
+
+      return;
+    }
+
+    const page = reset
+      ? 0
+      : paginationModel.page;
+
+    if (reset) {
+      setPaginationModel((p) => ({
+        ...p,
+        page: 0,
+      }));
+    }
+
+    executeSql({
+      sql: query,
+      page,
+      size: paginationModel.pageSize,
+    });
+  };
+
+  /**
+   * =========================================
+   * PAGINATION
+   * =========================================
+   */
+
+  useEffect(() => {
+    if (
+      results.columns.length > 0 &&
+      isSelect
+    ) {
+      handleExecute();
+    }
+  }, [
+    paginationModel.page,
+    paginationModel.pageSize,
+  ]);
+
+  /**
+   * =========================================
+   * FILE VALIDATION
+   * =========================================
+   */
+
+  const validateFile = (file) => {
+    if (!file) return;
+
+    if (
+      !file.name.endsWith(".sql")
+    ) {
+      showSnackbar(
+        "Only .sql file supported",
+        "error",
+      );
+
+      return;
+    }
+
+    setSelectedFile(file);
+  };
+
+  /**
+   * =========================================
+   * FILE UPLOAD
+   * =========================================
+   */
+
+  const handleUpload =
+    async () => {
+      try {
+        if (!selectedFile) {
+          showSnackbar(
+            "Choose SQL file",
+            "warning",
+          );
+
+          return;
+        }
+
+        const formData =
+          new FormData();
+
+        formData.append(
+          "file",
+          selectedFile,
+        );
+
+        const data =
+          await callApi(
+            "/TS/admin-support/upload-script",
+            formData,
+            "POST",
+            "json",
+            "multipart/form-data",
+          );
+
+        if (data?.error) {
+          showSnackbar(
+            data.message,
+            "error",
+          );
+
+          return;
+        }
+
+        setJobId(data.jobId);
+
+        setOutputTab(1);
+
+        showSnackbar(
+          "Execution started",
+          "success",
+        );
+      } catch (e) {
+        showSnackbar(
+          e.message ||
+            "Upload failed",
+          "error",
+        );
+      }
+    };
+
+  /**
+   * =========================================
+   * JOB POLLING
+   * =========================================
+   */
+
+  useEffect(() => {
+    if (!jobId) return;
+
+    const interval =
+      setInterval(async () => {
+        try {
+          const data =
+            await callApi(
+              `/TS/admin-support/job-status/${jobId}`,
+              {},
+              "GET",
+            );
+
+          setJobStatus(data);
+
+          if (
+            data.status ===
+              "COMPLETED" ||
+            data.status === "FAILED"
+          ) {
+            clearInterval(interval);
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }, 2000);
+
+    return () =>
+      clearInterval(interval);
+  }, [jobId]);
+
+  /**
+   * =========================================
+   * LEAVE WARNING
+   * =========================================
+   */
+
+  useEffect(() => {
+    const active =
+      jobStatus?.status ===
+      "RUNNING";
+
+    const beforeUnload = (
+      e,
+    ) => {
+      if (!active) return;
+
+      e.preventDefault();
+
+      e.returnValue =
+        "SQL execution is still running.";
+    };
+
+    window.addEventListener(
+      "beforeunload",
+      beforeUnload,
+    );
+
+    return () =>
+      window.removeEventListener(
+        "beforeunload",
+        beforeUnload,
+      );
+  }, [jobStatus]);
+
+  /**
+   * =========================================
+   * UI
+   * =========================================
+   */
+
+  return (
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        p: 2,
+        gap: 1.5,
       }}
     >
       {/* ================================================= */}
       {/* HEADER */}
       {/* ================================================= */}
 
-      <DialogTitle
+      <Paper
+        elevation={0}
         sx={{
-          p: 0,
+          px: 3,
+          py: 1.2,
+          borderRadius: 3,
+
+          border: `1px solid ${theme.palette.divider}`,
+
+          background: `linear-gradient(135deg,
+            ${alpha(
+              theme.palette.primary.main,
+              0.08,
+            )},
+            ${alpha(
+              theme.palette.background.paper,
+              0.9,
+            )})`,
         }}
       >
-        <Box
-          sx={{
-            px: 3,
-            py: 2,
-
-            background:
-              "linear-gradient(135deg,#991b1b,#dc2626)",
-
-            color: "white",
-          }}
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          flexWrap="wrap"
+          gap={2}
         >
           <Stack
             direction="row"
-            spacing={1.5}
+            spacing={2}
             alignItems="center"
           >
-            <WarningAmber />
+            <Storage
+              color="primary"
+            />
 
-            <Typography
-              variant="h6"
-              fontWeight={800}
-            >
-              Dangerous SQL Detected
-            </Typography>
+            <Box>
+              <Typography
+                variant="h6"
+                fontWeight={800}
+              >
+                FINCORE ADMIN SUPPORT
+              </Typography>
+
+              <Typography
+                variant="body2"
+                color="text.secondary"
+              >
+                Advanced SQL Console
+                & Script Executor
+              </Typography>
+            </Box>
           </Stack>
-        </Box>
-      </DialogTitle>
 
-      {/* ================================================= */}
-      {/* CONTENT */}
-      {/* ================================================= */}
-
-      <DialogContent
-        sx={{
-          pt: "24px !important",
-          pb: 2,
-        }}
-      >
-        <Typography
-          variant="body1"
-          sx={{
-            lineHeight: 1.8,
-          }}
-        >
-          This SQL statement can modify or
-          permanently delete production data.
-        </Typography>
-
-        <Box
-          sx={{
-            mt: 2,
-            p: 2,
-            borderRadius: 3,
-
-            bgcolor:
-              "rgba(239,68,68,0.08)",
-
-            border:
-              "1px solid rgba(239,68,68,0.2)",
-          }}
-        >
-          <Typography
-            variant="body2"
-            fontWeight={700}
-            color="error"
+          <Stack
+            direction="row"
+            spacing={1}
           >
-            Please verify the query before
-            continuing.
-          </Typography>
-        </Box>
-      </DialogContent>
+            <Chip
+              color="success"
+              label="Connected"
+            />
+
+            <Button
+              variant="outlined"
+              startIcon={<Refresh />}
+              onClick={resetScreen}
+            >
+              Reset Workspace
+            </Button>
+          </Stack>
+        </Stack>
+      </Paper>
 
       {/* ================================================= */}
-      {/* ACTIONS */}
+      {/* MAIN TABS */}
       {/* ================================================= */}
 
-      <DialogActions
+      <Paper
+        elevation={0}
         sx={{
-          px: 3,
-          pb: 3,
+          borderRadius: 3,
+          overflow: "hidden",
+          border: `1px solid ${theme.palette.divider}`,
         }}
       >
-        <Button
-          variant="outlined"
-          onClick={onClose}
-          sx={{
-            borderRadius: 3,
-            px: 3,
-          }}
+        <Tabs
+          value={mainTab}
+          onChange={(e, v) =>
+            setMainTab(v)
+          }
+          variant="fullWidth"
         >
-          Cancel
-        </Button>
+          <Tab
+            icon={<Terminal />}
+            label="SQL Console"
+          />
 
-        <Button
-          variant="contained"
-          color="error"
-          disableElevation
-          startIcon={<DeleteSweep />}
-          onClick={onConfirm}
-          sx={{
-            borderRadius: 3,
-            px: 3,
+          <Tab
+            icon={<UploadFile />}
+            label="Script Upload"
+          />
+        </Tabs>
+      </Paper>
 
-            background:
-              "linear-gradient(135deg,#dc2626,#ef4444)",
+      {/* ================================================= */}
+      {/* SQL CONSOLE */}
+      {/* ================================================= */}
 
-            boxShadow:
-              "0 8px 24px rgba(239,68,68,0.35)",
+      {mainTab === 0 && (
+        <CommandPanel
+          query={query}
+          setQuery={setQuery}
+          handleExecute={
+            handleExecute
+          }
+          isDangerous={
+            isDangerous
+          }
+          setConfirmOpen={
+            setConfirmOpen
+          }
+        />
+      )}
 
-            "&:hover": {
-              transform: "translateY(-1px)",
-            },
-          }}
+      {/* ================================================= */}
+      {/* UPLOAD */}
+      {/* ================================================= */}
+
+      {mainTab === 1 && (
+        <UploadScript
+          selectedFile={
+            selectedFile
+          }
+          validateFile={
+            validateFile
+          }
+          handleUpload={
+            handleUpload
+          }
+        />
+      )}
+
+      {/* ================================================= */}
+      {/* DASHBOARD */}
+      {/* ================================================= */}
+
+      {jobStatus && (
+        <ExecutionDashboard
+          jobStatus={
+            jobStatus
+          }
+        />
+      )}
+
+      {/* ================================================= */}
+      {/* OUTPUT */}
+      {/* ================================================= */}
+
+      <Paper
+        elevation={0}
+        sx={{
+          flex: 1,
+          borderRadius: 3,
+          overflow: "hidden",
+
+          border: `1px solid ${theme.palette.divider}`,
+        }}
+      >
+        <Tabs
+          value={outputTab}
+          onChange={(e, v) =>
+            setOutputTab(v)
+          }
         >
-          Execute Anyway
-        </Button>
-      </DialogActions>
-    </Dialog>
+          <Tab label="Data Grid" />
+
+          <Tab label="Logs" />
+        </Tabs>
+
+        {/* GRID */}
+
+        {outputTab === 0 && (
+          <ResultGrid
+            results={results}
+            isPending={
+              isPending
+            }
+            paginationModel={
+              paginationModel
+            }
+            setPaginationModel={
+              setPaginationModel
+            }
+          />
+        )}
+
+        {/* LOGS */}
+
+        {outputTab === 1 && (
+          <LogsPanel
+            lastResponse={
+              lastResponse
+            }
+            jobStatus={
+              jobStatus
+            }
+          />
+        )}
+      </Paper>
+
+      {/* ================================================= */}
+      {/* DIALOG */}
+      {/* ================================================= */}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onClose={() =>
+          setConfirmOpen(false)
+        }
+        onConfirm={() => {
+          setConfirmOpen(false);
+
+          handleExecute(true);
+        }}
+      />
+
+      {/* ================================================= */}
+      {/* RUNNING ALERT */}
+      {/* ================================================= */}
+
+      {jobStatus?.status ===
+        "RUNNING" && (
+        <Alert severity="warning">
+          SQL script execution is
+          currently running. Please
+          stay on this page.
+        </Alert>
+      )}
+    </Box>
   );
 };
 
-export default ConfirmDialog;
+export default AdminSupport;
