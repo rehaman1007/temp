@@ -1,1121 +1,230 @@
-import React, { useEffect, useMemo, useState } from "react";
-
-import {
-  Alert,
-  AlertTitle,
-  alpha,
-  Box,
-  Button,
-  Chip,
-  CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  Divider,
-  Fade,
-  Grid,
-  IconButton,
-  LinearProgress,
-  Paper,
-  Stack,
-  Tab,
-  Tabs,
-  TextField,
-  Tooltip,
-  Typography,
-  useTheme,
-} from "@mui/material";
-
-import {
-  AutoAwesome,
-  CleaningServices,
-  CloudUpload,
-  Code,
-  ContentCopy,
-  DeleteSweep,
-  FilePresent,
-  Info,
-  PlayArrow,
-  Refresh,
-  Terminal,
-  Timer,
-  UploadFile,
-  WarningAmber,
-} from "@mui/icons-material";
-
-import { DataGrid, GridToolbar } from "@mui/x-data-grid";
-
-import { useMutation } from "@tanstack/react-query";
-
-import useApi from "../../hooks/useApi";
-
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-
-const AdminSupport = () => {
-  const theme = useTheme();
-
-  const { callApi } = useApi();
-
-  const showSnackbar = useCustomSnackbar();
-
-  /**
-   * =========================================
-   * STATES
-   * =========================================
-   */
-  const [mainTab, setMainTab] = useState(0);
-
-  const [outputTab, setOutputTab] = useState(0);
-
-  const [query, setQuery] = useState("SELECT * FROM USERS");
-
-  const [selectedFile, setSelectedFile] = useState(null);
-
-  const [dragging, setDragging] = useState(false);
-
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const [jobId, setJobId] = useState(null);
-
-  const [jobStatus, setJobStatus] = useState(null);
-
-  const [lastResponse, setLastResponse] = useState(null);
-
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
-
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 10,
-  });
-
-  /**
-   * =========================================
-   * QUERY TYPES
-   * =========================================
-   */
-  const isSelect = useMemo(() => {
-    const q = query.trim().toUpperCase();
-
-    return q.startsWith("SELECT") || q.startsWith("WITH");
-  }, [query]);
-
-  const isDangerous = useMemo(() => {
-    const q = query.trim().toUpperCase();
-
-    return ["DELETE", "DROP", "TRUNCATE", "ALTER"].some((x) =>
-      q.startsWith(x),
-    );
-  }, [query]);
-
-  /**
-   * =========================================
-   * RESET SCREEN
-   * =========================================
-   */
-  const resetScreen = () => {
-    setQuery("");
-
-    setSelectedFile(null);
-
-    setDragging(false);
-
-    setJobId(null);
-
-    setJobStatus(null);
-
-    setLastResponse(null);
-
-    setResults({
-      rows: [],
-      columns: [],
-      total: 0,
-    });
-
-    setPaginationModel({
-      page: 0,
-      pageSize: 10,
-    });
-
-    setOutputTab(0);
-
-    showSnackbar("Workspace reset completed", "success");
-  };
-
-  /**
-   * =========================================
-   * EXECUTE SQL
-   * =========================================
-   */
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      return await callApi(
-        "/TS/admin-support/admin-execute",
-        {
-          sql,
-          page,
-          size,
-        },
-        "POST",
-      );
-    },
-
-    onSuccess: (data) => {
-      setLastResponse(data);
-
-      if (data?.error) {
-        setOutputTab(1);
-
-        return;
-      }
-
-      if (isSelect) {
-        const columns = (data?.columns || []).map((col) => ({
-          field: col.name,
-          headerName: col.name,
-          flex: 1,
-          minWidth: 180,
-        }));
-
-        setResults({
-          rows: data?.rows || [],
-          columns,
-          total: data?.total || 0,
-        });
-
-        setOutputTab(0);
-      } else {
-        setOutputTab(1);
-      }
-    },
-
-    onError: (e) => {
-      setLastResponse({
-        error: true,
-        message: e?.message || "Execution failed",
-      });
-
-      setOutputTab(1);
-    },
-  });
-
-  /**
-   * =========================================
-   * EXECUTE QUERY
-   * =========================================
-   */
-  const handleExecute = (reset = false) => {
-    if (!query.trim()) {
-      showSnackbar("Enter SQL query", "warning");
-
-      return;
-    }
-
-    const page = reset ? 0 : paginationModel.page;
-
-    if (reset) {
-      setPaginationModel((p) => ({
-        ...p,
-        page: 0,
-      }));
-    }
-
-    executeSql({
-      sql: query,
-      page,
-      size: paginationModel.pageSize,
-    });
-  };
-
-  /**
-   * =========================================
-   * PAGINATION
-   * =========================================
-   */
-  useEffect(() => {
-    if (results.columns.length > 0 && isSelect) {
-      handleExecute();
-    }
-  }, [paginationModel.page, paginationModel.pageSize]);
-
-  /**
-   * =========================================
-   * FILE VALIDATION
-   * =========================================
-   */
-  const validateFile = (file) => {
-    if (!file) return;
-
-    if (!file.name.endsWith(".sql")) {
-      showSnackbar("Only .sql file supported", "error");
-
-      return;
-    }
-
-    setSelectedFile(file);
-  };
-
-  /**
-   * =========================================
-   * FILE UPLOAD
-   * =========================================
-   */
-  const handleUpload = async () => {
-    try {
-      if (!selectedFile) {
-        showSnackbar("Choose SQL file", "warning");
-
-        return;
-      }
-
-      const formData = new FormData();
-
-      formData.append("file", selectedFile);
-
-      const data = await callApi(
-        "/TS/admin-support/upload-script",
-        formData,
-        "POST",
-        "json",
-        "multipart/form-data",
-      );
-
-      if (data?.error) {
-        showSnackbar(data.message, "error");
-
-        return;
-      }
-
-      setJobId(data.jobId);
-
-      setOutputTab(1);
-
-      showSnackbar("Execution started", "success");
-    } catch (e) {
-      showSnackbar(e.message || "Upload failed", "error");
-    }
-  };
-
-  /**
-   * =========================================
-   * JOB POLLING
-   * =========================================
-   */
-  useEffect(() => {
-    if (!jobId) return;
-
-    const interval = setInterval(async () => {
-      try {
-        const data = await callApi(
-          `/TS/admin-support/job-status/${jobId}`,
-          {},
-          "GET",
-        );
-
-        setJobStatus(data);
-
-        if (
-          data.status === "COMPLETED" ||
-          data.status === "FAILED"
-        ) {
-          clearInterval(interval);
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }, 2000);
-
-    return () => clearInterval(interval);
-  }, [jobId]);
-
-  /**
-   * =========================================
-   * SHORTCUT
-   * =========================================
-   */
-  const handleKeyDown = (e) => {
-    if (e.ctrlKey && e.key === "Enter") {
-      e.preventDefault();
-
-      handleExecute(true);
-    }
-  };
-
-  /**
-   * =========================================
-   * PAGE LEAVE WARNING
-   * =========================================
-   */
-  useEffect(() => {
-    const active =
-      jobStatus?.status === "RUNNING";
-
-    const beforeUnload = (e) => {
-      if (!active) return;
-
-      e.preventDefault();
-
-      e.returnValue =
-        "SQL execution is still running.";
-    };
-
-    window.addEventListener(
-      "beforeunload",
-      beforeUnload,
-    );
-
-    return () =>
-      window.removeEventListener(
-        "beforeunload",
-        beforeUnload,
-      );
-  }, [jobStatus]);
-
-  /**
-   * =========================================
-   * UI
-   * =========================================
-   */
-  return (
-    <Box
-      sx={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        p: 2,
-        gap: 1.5,
-        bgcolor:
-          theme.palette.mode === "dark"
-            ? "#0f1115"
-            : "#f5f7fb",
-      }}
-    >
-      {/* ================================================= */}
-      {/* HEADER */}
-      {/* ================================================= */}
-
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 4,
-          p: 2,
-          background:
-            "linear-gradient(135deg,#111827,#1f2937)",
-          color: "white",
-          border: `1px solid ${alpha(
-            "#ffffff",
-            0.08,
-          )}`,
-        }}
-      >
-        <Stack
-          direction={{
-            xs: "column",
-            md: "row",
-          }}
-          spacing={2}
-          justifyContent="space-between"
-          alignItems={{
-            xs: "flex-start",
-            md: "center",
-          }}
-        >
-          <Box>
-            <Stack
-              direction="row"
-              spacing={1}
-              alignItems="center"
-            >
-              <AutoAwesome />
-
-              <Typography
-                variant="h5"
-                fontWeight={800}
-              >
-                FINCORE ADMIN SUPPORT
-              </Typography>
-            </Stack>
-
-            <Typography
-              variant="body2"
-              sx={{
-                opacity: 0.7,
-                mt: 0.5,
-              }}
-            >
-              Advanced SQL Console & Script
-              Executor
-            </Typography>
-          </Box>
-
-          <Stack
-            direction="row"
-            spacing={1}
-            flexWrap="wrap"
-          >
-            <Chip
-              icon={<Code />}
-              label="CTRL + ENTER"
-              sx={{
-                bgcolor: alpha("#fff", 0.1),
-                color: "white",
-              }}
-            />
-
-            <Button
-              variant="outlined"
-              color="inherit"
-              startIcon={<Refresh />}
-              onClick={resetScreen}
-              sx={{
-                borderColor: alpha(
-                  "#fff",
-                  0.2,
-                ),
-              }}
-            >
-              Reset Workspace
-            </Button>
-          </Stack>
-        </Stack>
-      </Paper>
-
-      {/* ================================================= */}
-      {/* TABS */}
-      {/* ================================================= */}
-
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 4,
-          overflow: "hidden",
-        }}
-      >
-        <Tabs
-          value={mainTab}
-          onChange={(e, v) => setMainTab(v)}
-          variant="fullWidth"
-        >
-          <Tab
-            icon={<Terminal />}
-            label="SQL Console"
-          />
-
-          <Tab
-            icon={<UploadFile />}
-            label="Script Upload"
-          />
-        </Tabs>
-      </Paper>
-
-      {/* ================================================= */}
-      {/* SQL CONSOLE */}
-      {/* ================================================= */}
-
-      {mainTab === 0 && (
-        <Fade in>
-          <Paper
-            elevation={0}
-            sx={{
-              borderRadius: 4,
-              overflow: "hidden",
-              border: `1px solid ${theme.palette.divider}`,
-            }}
-          >
-            {/* TOP BAR */}
-
-            <Box
-              sx={{
-                px: 2,
-                py: 1.2,
-                bgcolor: "#111827",
-                color: "white",
-              }}
-            >
-              <Stack
-                direction="row"
-                justifyContent="space-between"
-                alignItems="center"
-              >
-                <Stack
-                  direction="row"
-                  spacing={1}
-                  alignItems="center"
-                >
-                  <Terminal fontSize="small" />
-
-                  <Typography fontWeight={700}>
-                    SQL Worksheet
-                  </Typography>
-                </Stack>
-
-                <Stack direction="row" spacing={1}>
-                  <Tooltip title="Copy SQL">
-                    <IconButton
-                      size="small"
-                      onClick={() =>
-                        navigator.clipboard.writeText(
-                          query,
-                        )
-                      }
-                    >
-                      <ContentCopy
-                        sx={{
-                          color: "white",
-                        }}
-                      />
-                    </IconButton>
-                  </Tooltip>
-
-                  <Tooltip title="Clear">
-                    <IconButton
-                      size="small"
-                      onClick={() => setQuery("")}
-                    >
-                      <CleaningServices
-                        sx={{
-                          color: "white",
-                        }}
-                      />
-                    </IconButton>
-                  </Tooltip>
-
-                  <Button
-                    variant="contained"
-                    color={
-                      isDangerous
-                        ? "error"
-                        : "primary"
-                    }
-                    startIcon={<PlayArrow />}
-                    onClick={() =>
-                      isDangerous
-                        ? setConfirmOpen(true)
-                        : handleExecute(true)
-                    }
-                  >
-                    Execute
-                  </Button>
-                </Stack>
-              </Stack>
-            </Box>
-
-            {/* SQL AREA */}
-
-            <TextField
-              multiline
-              fullWidth
-              minRows={14}
-              value={query}
-              onKeyDown={handleKeyDown}
-              onChange={(e) =>
-                setQuery(e.target.value)
-              }
-              variant="standard"
-              InputProps={{
-                disableUnderline: true,
-                sx: {
-                  p: 3,
-                  bgcolor: "#0d1117",
-                  color: "#d4d4d4",
-                  fontFamily:
-                    "'Fira Code', monospace",
-                  fontSize: 14,
-                },
-              }}
-            />
-          </Paper>
-        </Fade>
-      )}
-
-      {/* ================================================= */}
-      {/* FILE UPLOAD */}
-      {/* ================================================= */}
-
-      {mainTab === 1 && (
-        <Paper
-          elevation={0}
-          sx={{
-            borderRadius: 4,
-            p: 3,
-          }}
-        >
-          <Box
-            onDragOver={(e) => {
-              e.preventDefault();
-
-              setDragging(true);
-            }}
-            onDragLeave={() =>
-              setDragging(false)
-            }
-            onDrop={(e) => {
-              e.preventDefault();
-
-              setDragging(false);
-
-              validateFile(
-                e.dataTransfer.files[0],
-              );
-            }}
-            sx={{
-              border: `2px dashed ${
-                dragging
-                  ? theme.palette.primary.main
-                  : theme.palette.divider
-              }`,
-              borderRadius: 4,
-              p: 6,
-              textAlign: "center",
-              transition: "0.3s",
-              bgcolor: dragging
-                ? alpha(
-                    theme.palette.primary.main,
-                    0.08,
-                  )
-                : "transparent",
-            }}
-          >
-            <CloudUpload
-              sx={{
-                fontSize: 80,
-                color:
-                  theme.palette.primary.main,
-              }}
-            />
-
-            <Typography
-              variant="h6"
-              fontWeight={700}
-              mt={2}
-            >
-              Drag & Drop SQL Script
-            </Typography>
-
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              mt={1}
-            >
-              Handles huge SQL files with live
-              tracking
-            </Typography>
-
-            <Button
-              component="label"
-              variant="contained"
-              sx={{
-                mt: 3,
-                borderRadius: 3,
-              }}
-            >
-              Browse File
-
-              <input
-                hidden
-                type="file"
-                accept=".sql"
-                onChange={(e) =>
-                  validateFile(
-                    e.target.files[0],
-                  )
-                }
-              />
-            </Button>
-          </Box>
-
-          {selectedFile && (
-            <Alert
-              severity="info"
-              sx={{
-                mt: 2,
-                borderRadius: 3,
-              }}
-              icon={<FilePresent />}
-            >
-              <AlertTitle>
-                Selected File
-              </AlertTitle>
-
-              {selectedFile.name}
-
-              <br />
-
-              Size :{" "}
-              {(
-                selectedFile.size /
-                1024 /
-                1024
-              ).toFixed(2)}{" "}
-              MB
-            </Alert>
-          )}
-
-          <Stack
-            direction="row"
-            justifyContent="flex-end"
-            mt={2}
-          >
-            <Button
-              size="large"
-              variant="contained"
-              startIcon={<UploadFile />}
-              onClick={handleUpload}
-              sx={{
-                borderRadius: 3,
-                px: 4,
-              }}
-            >
-              Start Execution
-            </Button>
-          </Stack>
-        </Paper>
-      )}
-
-      {/* ================================================= */}
-      {/* PREMIUM EXECUTION DASHBOARD */}
-      {/* ================================================= */}
-
-      {jobStatus && (
-        <Paper
-          elevation={0}
-          sx={{
-            borderRadius: 4,
-            p: 2.5,
-            border: `1px solid ${theme.palette.divider}`,
-          }}
-        >
-          <Stack
-            direction="row"
-            justifyContent="space-between"
-            alignItems="center"
-            mb={2}
-          >
-            <Box>
-              <Typography
-                variant="h6"
-                fontWeight={800}
-              >
-                Live Execution Monitor
-              </Typography>
-
-              <Typography
-                variant="body2"
-                color="text.secondary"
-              >
-                Job ID : {jobStatus.jobId}
-              </Typography>
-            </Box>
-
-            <Chip
-              color={
-                jobStatus.status ===
-                "COMPLETED"
-                  ? "success"
-                  : jobStatus.status ===
-                      "FAILED"
-                    ? "error"
-                    : "warning"
-              }
-              label={jobStatus.status}
-            />
-          </Stack>
-
-          <LinearProgress
-            variant="determinate"
-            value={jobStatus.progress || 0}
-            sx={{
-              height: 12,
-              borderRadius: 10,
-              mb: 2,
-            }}
-          />
-
-          <Grid container spacing={2}>
-            {[
-              {
-                label: "Executed",
-                value:
-                  jobStatus.executedCount || 0,
-              },
-              {
-                label: "Insert",
-                value:
-                  jobStatus.insertCount || 0,
-              },
-              {
-                label: "Update",
-                value:
-                  jobStatus.updateCount || 0,
-              },
-              {
-                label: "Delete",
-                value:
-                  jobStatus.deleteCount || 0,
-              },
-              {
-                label: "Others",
-                value:
-                  jobStatus.otherCount || 0,
-              },
-              {
-                label: "Total",
-                value:
-                  jobStatus.totalStatements ||
-                  0,
-              },
-              {
-                label: "Elapsed",
-                value: `${
-                  jobStatus.elapsedSeconds ||
-                  0
-                } sec`,
-              },
-              {
-                label: "ETA",
-                value: `${
-                  jobStatus.etaSeconds || 0
-                } sec`,
-              },
-            ].map((item) => (
-              <Grid
-                item
-                xs={6}
-                md={3}
-                key={item.label}
-              >
-                <Paper
-                  elevation={0}
-                  sx={{
-                    borderRadius: 3,
-                    p: 2,
-                    textAlign: "center",
-                    bgcolor: alpha(
-                      theme.palette.primary.main,
-                      0.04,
-                    ),
-                  }}
-                >
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                  >
-                    {item.label}
-                  </Typography>
-
-                  <Typography
-                    variant="h5"
-                    fontWeight={800}
-                  >
-                    {item.value}
-                  </Typography>
-                </Paper>
-              </Grid>
-            ))}
-          </Grid>
-
-          {jobStatus.status === "RUNNING" && (
-            <Alert
-              severity="warning"
-              sx={{
-                mt: 2,
-                borderRadius: 3,
-              }}
-              icon={<WarningAmber />}
-            >
-              Please stay on this screen until
-              execution completes.
-            </Alert>
-          )}
-
-          {jobStatus.status === "FAILED" && (
-            <Alert
-              severity="error"
-              sx={{
-                mt: 2,
-                borderRadius: 3,
-              }}
-            >
-              <AlertTitle>
-                Execution Failed
-              </AlertTitle>
-
-              {jobStatus.message}
-
-              <br />
-
-              Failed Line :
-              {" "}
-              {jobStatus.failedLine}
-            </Alert>
-          )}
-        </Paper>
-      )}
-
-      {/* ================================================= */}
-      {/* OUTPUT */}
-      {/* ================================================= */}
-
-      <Paper
-        elevation={0}
-        sx={{
-          flex: 1,
-          borderRadius: 4,
-          overflow: "hidden",
-        }}
-      >
-        <Tabs
-          value={outputTab}
-          onChange={(e, v) => setOutputTab(v)}
-        >
-          <Tab label="Data Grid" />
-
-          <Tab label="Logs" />
-        </Tabs>
-
-        {/* GRID */}
-
-        {outputTab === 0 && (
-          <DataGrid
-            rows={results.rows}
-            columns={results.columns}
-            rowCount={results.total}
-            paginationMode="server"
-            paginationModel={paginationModel}
-            onPaginationModelChange={
-              setPaginationModel
-            }
-            disableRowSelectionOnClick
-            pageSizeOptions={[
-              10,
-              25,
-              50,
-              100,
-            ]}
-            loading={isPending}
-            slots={{
-              toolbar: GridToolbar,
-              loadingOverlay: CircularProgress,
-            }}
-            getRowId={(row) =>
-              row.ID ||
-              row.id ||
-              Math.random()
-            }
-            sx={{
-              border: "none",
-              height: "100%",
-              "& .MuiDataGrid-columnHeaders":
-                {
-                  bgcolor: alpha(
-                    theme.palette.primary.main,
-                    0.06,
-                  ),
-                },
-            }}
-          />
-        )}
-
-        {/* LOGS */}
-
-        {outputTab === 1 && (
-          <Box p={2}>
-            {!lastResponse && !jobStatus && (
-              <Alert
-                severity="info"
-                sx={{
-                  borderRadius: 3,
-                }}
-                icon={<Info />}
-              >
-                Waiting for execution...
-              </Alert>
-            )}
-
-            {lastResponse?.error && (
-              <Alert
-                severity="error"
-                sx={{
-                  borderRadius: 3,
-                }}
-              >
-                <AlertTitle>Error</AlertTitle>
-
-                {lastResponse.message}
-              </Alert>
-            )}
-
-            {lastResponse &&
-              !lastResponse?.error && (
-                <Alert
-                  severity="success"
-                  sx={{
-                    borderRadius: 3,
-                  }}
-                >
-                  <AlertTitle>
-                    Execution Completed
-                  </AlertTitle>
-
-                  {lastResponse?.rows?.[0]
-                    ?.RESULT ||
-                    "SQL executed successfully"}
-                </Alert>
-              )}
-          </Box>
-        )}
-      </Paper>
-
-      {/* ================================================= */}
-      {/* CONFIRM DIALOG */}
-      {/* ================================================= */}
-
-      <Dialog
-        open={confirmOpen}
-        onClose={() =>
-          setConfirmOpen(false)
-        }
-      >
-        <DialogTitle>
-          Confirm Dangerous Query
-        </DialogTitle>
-
-        <DialogContent>
-          <Typography>
-            This query can modify/delete data.
-            Continue?
-          </Typography>
-        </DialogContent>
-
-        <DialogActions>
-          <Button
-            onClick={() =>
-              setConfirmOpen(false)
-            }
-          >
-            Cancel
-          </Button>
-
-          <Button
-            color="error"
-            variant="contained"
-            onClick={() => {
-              setConfirmOpen(false);
-
-              handleExecute(true);
-            }}
-          >
-            Execute Anyway
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
-  );
-};
-
-export default AdminSupport;
+2026-05-13 17:11:27.592 INFO  [http-nio-4000-exec-4] c.f.t.c.AdminSupportController: 
+==================================================
+ADMIN EXECUTE REQUEST RECEIVED
+==================================================
+userId=1015698
+sql=SELECT * FROM USERS;
+page=0
+size=10
+==================================================
+ 
+{"@timestamp":"2026-05-13T17:11:27.592201+05:30","level":"INFO","service":"TransactionsService","traceId":"679b0604-1981-402c-9fc2-701a6fffced1","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/admin-execute","class":"c.f.t.controller.AdminSupportController","message":"\n==================================================\nADMIN EXECUTE REQUEST RECEIVED\n==================================================\nuserId=1015698\nsql=SELECT * FROM USERS;\npage=0\nsize=10\n==================================================\n","stack_trace":""}
+2026-05-13 17:11:27.593 INFO  [http-nio-4000-exec-4] c.f.t.s.AdminSupportServiceImpl: 
+==================================================
+ADMIN SQL EXECUTION STARTED
+==================================================
+userId=1015698
+clientIp=::1
+page=0
+size=10
+sql=SELECT * FROM USERS;
+==================================================
+ 
+{"@timestamp":"2026-05-13T17:11:27.5931988+05:30","level":"INFO","service":"TransactionsService","traceId":"679b0604-1981-402c-9fc2-701a6fffced1","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/admin-execute","class":"c.f.t.service.AdminSupportServiceImpl","message":"\n==================================================\nADMIN SQL EXECUTION STARTED\n==================================================\nuserId=1015698\nclientIp=::1\npage=0\nsize=10\nsql=SELECT * FROM USERS;\n==================================================\n","stack_trace":""}
+2026-05-13 17:11:27.659 ERROR [http-nio-4000-exec-4] c.f.t.s.AdminSupportServiceImpl: ADMIN SQL EXECUTION FAILED 
+org.springframework.jdbc.BadSqlGrammarException: PreparedStatementCallback; bad SQL grammar [SELECT * FROM
+(
+    SELECT A.*, ROWNUM RN FROM
+    (
+SELECT * FROM USERS;
+    ) A
+    WHERE ROWNUM <= ?
+)
+WHERE RN > ?
+]
+	at org.springframework.jdbc.support.SQLExceptionSubclassTranslator.doTranslate(SQLExceptionSubclassTranslator.java:103)
+	at org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:107)
+	at org.springframework.jdbc.core.JdbcTemplate.translateException(JdbcTemplate.java:1548)
+	at org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:677)
+	at org.springframework.jdbc.core.JdbcTemplate.query(JdbcTemplate.java:723)
+	at org.springframework.jdbc.core.JdbcTemplate.query(JdbcTemplate.java:754)
+	at org.springframework.jdbc.core.JdbcTemplate.query(JdbcTemplate.java:809)
+	at com.fincore.transactions_service.service.AdminSupportServiceImpl.executeAdminSql(AdminSupportServiceImpl.java:84)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
+	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
+	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
+	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
+	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
+	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
+	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.framework.CglibAopProxy$DynamicAdvisedInterceptor.intercept(CglibAopProxy.java:720)
+	at com.fincore.transactions_service.service.AdminSupportServiceImpl$$SpringCGLIB$$0.executeAdminSql(<generated>)
+	at com.fincore.transactions_service.controller.AdminSupportController.executeAdminSql(AdminSupportController.java:45)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.web.method.support.InvocableHandlerMethod.doInvoke(InvocableHandlerMethod.java:255)
+	at org.springframework.web.method.support.InvocableHandlerMethod.invokeForRequest(InvocableHandlerMethod.java:188)
+	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.invokeHandlerMethod(RequestMappingHandlerAdapter.java:926)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter.handleInternal(RequestMappingHandlerAdapter.java:831)
+	at org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter.handle(AbstractHandlerMethodAdapter.java:87)
+	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
+	at org.springframework.web.servlet.DispatcherServlet.doService(DispatcherServlet.java:979)
+	at org.springframework.web.servlet.FrameworkServlet.processRequest(FrameworkServlet.java:1014)
+	at org.springframework.web.servlet.FrameworkServlet.doPost(FrameworkServlet.java:914)
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:590)
+	at org.springframework.web.servlet.FrameworkServlet.service(FrameworkServlet.java:885)
+	at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:658)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:195)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.apache.tomcat.websocket.server.WsFilter.doFilter(WsFilter.java:51)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:108)
+	at org.springframework.security.web.FilterChainProxy.lambda$doFilterInternal$3(FilterChainProxy.java:231)
+	at org.springframework.security.web.ObservationFilterChainDecorator$FilterObservation$SimpleFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:479)
+	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$1(ObservationFilterChainDecorator.java:340)
+	at org.springframework.security.web.ObservationFilterChainDecorator.lambda$wrapSecured$0(ObservationFilterChainDecorator.java:82)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:128)
+	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:100)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
+	at org.springframework.security.web.access.ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:120)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:131)
+	at org.springframework.security.web.session.SessionManagementFilter.doFilter(SessionManagementFilter.java:85)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.authentication.AnonymousAuthenticationFilter.doFilter(AnonymousAuthenticationFilter.java:100)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter.doFilter(SecurityContextHolderAwareRequestFilter.java:179)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.savedrequest.RequestCacheAwareFilter.doFilter(RequestCacheAwareFilter.java:63)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at com.fincore.commonutilities.security.ContextRbacFilter.doFilterInternal(ContextRbacFilter.java:145)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at com.fincore.commonutilities.logging.MdcLoggingFilter.doFilterInternal(MdcLoggingFilter.java:66)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:107)
+	at org.springframework.security.web.authentication.logout.LogoutFilter.doFilter(LogoutFilter.java:93)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.web.filter.CorsFilter.doFilterInternal(CorsFilter.java:91)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.header.HeaderWriterFilter.doHeadersAfter(HeaderWriterFilter.java:90)
+	at org.springframework.security.web.header.HeaderWriterFilter.doFilterInternal(HeaderWriterFilter.java:75)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:82)
+	at org.springframework.security.web.context.SecurityContextHolderFilter.doFilter(SecurityContextHolderFilter.java:69)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter.doFilterInternal(WebAsyncManagerIntegrationFilter.java:62)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:227)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.session.DisableEncodeUrlFilter.doFilterInternal(DisableEncodeUrlFilter.java:42)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.wrapFilter(ObservationFilterChainDecorator.java:240)
+	at org.springframework.security.web.ObservationFilterChainDecorator$AroundFilterObservation$SimpleAroundFilterObservation.lambda$wrap$0(ObservationFilterChainDecorator.java:323)
+	at org.springframework.security.web.ObservationFilterChainDecorator$ObservationFilter.doFilter(ObservationFilterChainDecorator.java:224)
+	at org.springframework.security.web.ObservationFilterChainDecorator$VirtualFilterChain.doFilter(ObservationFilterChainDecorator.java:137)
+	at org.springframework.security.web.FilterChainProxy.doFilterInternal(FilterChainProxy.java:233)
+	at org.springframework.security.web.FilterChainProxy.doFilter(FilterChainProxy.java:191)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
+	at org.springframework.web.servlet.handler.HandlerMappingIntrospector.lambda$createCacheFilter$3(HandlerMappingIntrospector.java:195)
+	at org.springframework.web.filter.CompositeFilter$VirtualFilterChain.doFilter(CompositeFilter.java:113)
+	at org.springframework.web.filter.CompositeFilter.doFilter(CompositeFilter.java:74)
+	at org.springframework.security.config.annotation.web.configuration.WebMvcSecurityConfiguration$CompositeFilterChainProxy.doFilter(WebMvcSecurityConfiguration.java:230)
+	at org.springframework.web.filter.DelegatingFilterProxy.invokeDelegate(DelegatingFilterProxy.java:352)
+	at org.springframework.web.filter.DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:268)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.RequestContextFilter.doFilterInternal(RequestContextFilter.java:100)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.FormContentFilter.doFilterInternal(FormContentFilter.java:93)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.ServerHttpObservationFilter.doFilterInternal(ServerHttpObservationFilter.java:109)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.springframework.web.filter.CharacterEncodingFilter.doFilterInternal(CharacterEncodingFilter.java:201)
+	at org.springframework.web.filter.OncePerRequestFilter.doFilter(OncePerRequestFilter.java:116)
+	at org.apache.catalina.core.ApplicationFilterChain.internalDoFilter(ApplicationFilterChain.java:164)
+	at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:140)
+	at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:167)
+	at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:90)
+	at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:482)
+	at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
+	at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:93)
+	at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:74)
+	at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:344)
+	at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:389)
+	at org.apache.coyote.AbstractProcessorLight.process(AbstractProcessorLight.java:63)
+	at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:896)
+	at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:1741)
+	at org.apache.tomcat.util.net.SocketProcessorBase.run(SocketProcessorBase.java:52)
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1190)
+	at org.apache.tomcat.util.threads.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:659)
+	at org.apache.tomcat.util.threads.TaskThread$WrappingRunnable.run(TaskThread.java:63)
+	at java.base/java.lang.Thread.run(Thread.java:1570)
+Caused by: java.sql.SQLSyntaxErrorException: ORA-00907: missing right parenthesis
+
+	at oracle.jdbc.driver.T4CTTIoer11.processError(T4CTTIoer11.java:629)
+	at oracle.jdbc.driver.T4CTTIoer11.processError(T4CTTIoer11.java:563)
+	at oracle.jdbc.driver.T4C8Oall.processError(T4C8Oall.java:1230)
+	at oracle.jdbc.driver.T4CTTIfun.receive(T4CTTIfun.java:771)
+	at oracle.jdbc.driver.T4CTTIfun.doRPC(T4CTTIfun.java:298)
+	at oracle.jdbc.driver.T4C8Oall.doOALL(T4C8Oall.java:511)
+	at oracle.jdbc.driver.T4CPreparedStatement.doOall8(T4CPreparedStatement.java:162)
+	at oracle.jdbc.driver.T4CPreparedStatement.executeForDescribe(T4CPreparedStatement.java:1009)
+	at oracle.jdbc.driver.OracleStatement.prepareDefineBufferAndExecute(OracleStatement.java:1270)
+	at oracle.jdbc.driver.OracleStatement.executeMaybeDescribe(OracleStatement.java:1148)
+	at oracle.jdbc.driver.OracleStatement.executeSQLSelect(OracleStatement.java:1660)
+	at oracle.jdbc.driver.OracleStatement.doExecuteWithTimeout(OracleStatement.java:1469)
+	at oracle.jdbc.driver.OraclePreparedStatement.executeInternal(OraclePreparedStatement.java:3760)
+	at oracle.jdbc.driver.OraclePreparedStatement.executeQuery(OraclePreparedStatement.java:3935)
+	at oracle.jdbc.driver.OraclePreparedStatementWrapper.executeQuery(OraclePreparedStatementWrapper.java:1101)
+	at com.zaxxer.hikari.pool.ProxyPreparedStatement.executeQuery(ProxyPreparedStatement.java:52)
+	at com.zaxxer.hikari.pool.HikariProxyPreparedStatement.executeQuery(HikariProxyPreparedStatement.java)
+	at org.springframework.jdbc.core.JdbcTemplate$1.doInPreparedStatement(JdbcTemplate.java:732)
+	at org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:658)
+	... 165 common frames omitted
+Caused by: oracle.jdbc.OracleDatabaseException: ORA-00907: missing right parenthesis
+
+	at oracle.jdbc.driver.T4CTTIoer11.processError(T4CTTIoer11.java:636)
+	... 183 common frames omitted
+{"@timestamp":"2026-05-13T17:11:27.6591483+05:30","level":"ERROR","service":"TransactionsService","traceId":"679b0604-1981-402c-9fc2-701a6fffced1","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/admin-execute","class":"c.f.t.service.AdminSupportServiceImpl","message":"ADMIN SQL EXECUTION FAILED","stack_trace":"org.springframework.jdbc.BadSqlGrammarException: PreparedStatementCallback; bad SQL grammar [SELECT * FROM\n(\n    SELECT A.*, ROWNUM RN FROM\n    (\nSELECT * FROM USERS;\n    ) A\n    WHERE ROWNUM <= ?\n)\nWHERE RN > ?\n]\r\n\tat org.springframework.jdbc.support.SQLExceptionSubclassTranslator.doTranslate(SQLExceptionSubclassTranslator.java:103)\r\n\tat org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:107)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.translateException(JdbcTemplate.java:1548)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.execute(JdbcTemplate.java:677)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.query(JdbcTemplate.java:723)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.query(JdbcTemplate.java:754)\r\n\tat org.springframework.jdbc.core.JdbcTemplate.query(JdbcTemplate.java:809)\r\n\tat com.fincore.transactions_service.service.AdminSupportServiceImpl.executeAdminSql(AdminSupportServiceImpl.java:84)\r\n\tat java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)\r\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\r\nCaused by: java.sql.SQLSyntaxErrorException: ORA-00907: missing right parenthesis\n\r\n\tat oracle.jdbc.driver.T4CTTIoer11.processError(T4CTTIoer11.java:629)\r\n\tat oracle.jdbc.driver.T4CTTIoer11.processError(T4CTTIoer11.java:563)\r\n\tat oracle.jdbc.driver.T4C8Oall.processError(T4C8Oall.java:1230)\r\n\tat oracle.jdbc.driver.T4CTTIfun.receive(T4CTTIfun.java:771)\r\n\tat oracle.jdbc.driver.T4CTTIfun.doRPC(T4CTTIfun.java:298)\r\n\tat oracle.jdbc.driver.T4C8Oall.doOALL(T4C8Oall.java:511)\r\n\tat oracle.jdbc.driver.T4CPreparedStatement.doOall8(T4CPreparedStatement.java:162)\r\n\tat oracle.jdbc.driver.T4CPreparedStatement.executeForDescribe(T4CPreparedStatement.java:1009)\r\n\tat oracle.jdbc.driver.OracleStatement.prepareDefineBufferAndExecute(OracleStatement.java:1270)\r\n\tat oracle.jdbc.driver.OracleStatement.executeMaybeDescribe(OracleStatement.java:1148)\r\nCaused by: oracle.jdbc.OracleDatabaseException: ORA-00907: missing right parenthesis\n\r\n\tat oracle.jdbc.driver.T4CTTIoer11.processError(T4CTTIoer11.java:636)\r\n\tat oracle.jdbc.driver.T4CTTIoer11.processError(T4CTTIoer11.java:563)\r\n\tat oracle.jdbc.driver.T4C8Oall.processError(T4C8Oall.java:1230)\r\n\tat oracle.jdbc.driver.T4CTTIfun.receive(T4CTTIfun.java:771)\r\n\tat oracle.jdbc.driver.T4CTTIfun.doRPC(T4CTTIfun.java:298)\r\n\tat oracle.jdbc.driver.T4C8Oall.doOALL(T4C8Oall.java:511)\r\n\tat oracle.jdbc.driver.T4CPreparedStatement.doOall8(T4CPreparedStatement.java:162)\r\n\tat oracle.jdbc.driver.T4CPreparedStatement.executeForDescribe(T4CPreparedStatement.java:1009)\r\n\tat oracle.jdbc.driver.OracleStatement.prepareDefineBufferAndExecute(OracleStatement.java:1270)\r\n\tat oracle.jdbc.driver.OracleStatement.executeMaybeDescribe(OracleStatement.java:1148)\r\n"}
