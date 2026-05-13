@@ -1,5 +1,845 @@
-R:\Rehaman_Workspace\FINCORE\fincore_v1.3\Backend\TransactionsService\src\main\java\com\fincore\transactions_service\service\AdminSupportServiceImpl.java:120:17
-java: method insertExecutionLog in class com.fincore.transactions_service.service.AdminSupportServiceImpl cannot be applied to given types;
-  required: java.lang.String,java.lang.String,java.lang.String,java.lang.String,java.lang.String,java.lang.String,int,int,int,int,int,int,java.lang.Integer,java.lang.String,java.lang.String,java.lang.String,long,long,java.lang.String
-  found:    java.lang.String,java.lang.String,java.lang.String,<nulltype>,java.lang.String,java.lang.String,int,int,int,int,int,int,<nulltype>,<nulltype>,<nulltype>,long,long,java.lang.String
-  reason: actual and formal argument lists differ in length
+package com.fincore.transactions_service.controller;
+
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import com.fincore.transactions_service.service.AdminSupportService;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+@RestController
+@RequestMapping("/api/admin-support")
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportController {
+
+    private final AdminSupportService adminSupportService;
+
+    @PostMapping("/admin-execute")
+    public ResponseEntity<?> executeAdminSql(
+            @RequestBody AdminSupportDTO dto,
+            HttpServletRequest request
+    ) {
+
+        String userId =
+                request.getHeader("userId");
+
+        log.info("""
+                
+                ==================================================
+                ADMIN EXECUTE REQUEST RECEIVED
+                ==================================================
+                userId={}
+                sql={}
+                page={}
+                size={}
+                ==================================================
+                """,
+                userId,
+                dto.getSql(),
+                dto.getPage(),
+                dto.getSize()
+        );
+
+        return ResponseEntity.ok(
+                adminSupportService.executeAdminSql(
+                        dto,
+                        userId,
+                        request
+                )
+        );
+    }
+
+    @PostMapping("/upload-script")
+    public ResponseEntity<?> uploadSqlFile(
+            @RequestParam("file") MultipartFile file,
+            HttpServletRequest request
+    ) {
+
+        String userId =
+                request.getHeader("userId");
+
+        log.info("""
+                
+                ==================================================
+                SQL FILE UPLOAD REQUEST RECEIVED
+                ==================================================
+                userId={}
+                fileName={}
+                size={} MB
+                ==================================================
+                """,
+                userId,
+                file.getOriginalFilename(),
+                String.format(
+                        "%.2f",
+                        file.getSize() / 1024.0 / 1024.0
+                )
+        );
+
+        return ResponseEntity.ok(
+                adminSupportService.uploadSqlFile(
+                        file,
+                        userId,
+                        request
+                )
+        );
+    }
+
+    @GetMapping("/job-status/{jobId}")
+    public ResponseEntity<?> getJobStatus(
+            @PathVariable String jobId
+    ) {
+
+        return ResponseEntity.ok(
+                adminSupportService.getJobStatus(
+                        jobId
+                )
+        );
+    }
+}
+
+
+package com.fincore.transactions_service.service;
+
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.util.Map;
+
+public interface AdminSupportService {
+
+    Map<String, Object> executeAdminSql(
+            AdminSupportDTO dto,
+            String userId,
+            HttpServletRequest request
+    );
+
+    Map<String, Object> uploadSqlFile(
+            MultipartFile file,
+            String userId,
+            HttpServletRequest request
+    );
+
+    Map<String, Object> getJobStatus(
+            String jobId
+    );
+}
+
+
+package com.fincore.transactions_service.service;
+
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportServiceImpl implements AdminSupportService {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    private final AdminSupportExecutor adminSupportExecutor;
+
+    @Override
+    public Map<String, Object> executeAdminSql(
+            AdminSupportDTO dto,
+            String userId,
+            HttpServletRequest request
+    ) {
+
+        Instant start =
+                Instant.now();
+
+        String clientIp =
+                getClientIp(request);
+
+        String sql =
+                dto.getSql();
+
+        int page =
+                dto.getPage();
+
+        int size =
+                dto.getSize();
+
+        Map<String, Object> response =
+                new HashMap<>();
+
+        try {
+
+            String normalizedSql =
+                    sql.trim();
+
+            String upperSql =
+                    normalizedSql.toUpperCase();
+
+            log.info("""
+                    
+                    ==================================================
+                    ADMIN SQL EXECUTION STARTED
+                    ==================================================
+                    userId={}
+                    clientIp={}
+                    page={}
+                    size={}
+                    sql={}
+                    ==================================================
+                    """,
+                    userId,
+                    clientIp,
+                    page,
+                    size,
+                    normalizedSql
+            );
+
+            /**
+             * SELECT
+             */
+            if (
+                    upperSql.startsWith("SELECT")
+                            || upperSql.startsWith("WITH")
+            ) {
+
+                int offset =
+                        page * size;
+
+                String paginatedSql =
+                        """
+                        SELECT * FROM
+                        (
+                            SELECT A.*, ROWNUM RN
+                            FROM
+                            (
+                        """
+                                + normalizedSql
+                                +
+                                """
+                            ) A
+                            WHERE ROWNUM <= ?
+                        )
+                        WHERE RN > ?
+                        """;
+
+                List<Map<String, Object>> rows =
+                        jdbcTemplate.queryForList(
+                                paginatedSql,
+                                offset + size,
+                                offset
+                        );
+
+                Integer total =
+                        jdbcTemplate.queryForObject(
+                                "SELECT COUNT(*) FROM (" +
+                                        normalizedSql +
+                                        ")",
+                                Integer.class
+                        );
+
+                List<Map<String, Object>> columns =
+                        new ArrayList<>();
+
+                if (!rows.isEmpty()) {
+
+                    rows.get(0)
+                            .keySet()
+                            .forEach(key -> {
+
+                                Map<String, Object> col =
+                                        new HashMap<>();
+
+                                col.put("name", key);
+
+                                columns.add(col);
+                            });
+                }
+
+                long executionTime =
+                        Duration.between(
+                                start,
+                                Instant.now()
+                        ).toMillis();
+
+                response.put("error", false);
+                response.put("rows", rows);
+                response.put("columns", columns);
+                response.put("total", total);
+
+                insertExecutionLog(
+                        UUID.randomUUID().toString(),
+                        userId,
+                        clientIp,
+                        null,
+                        "SELECT",
+                        "COMPLETED",
+                        1,
+                        1,
+                        0,
+                        0,
+                        0,
+                        rows.size(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        executionTime,
+                        executionTime / 1000,
+                        normalizedSql
+                );
+
+                log.info("""
+                        
+                        SELECT EXECUTED
+                        | rows={}
+                        | total={}
+                        | executionTime={} ms
+                        """,
+                        rows.size(),
+                        total,
+                        executionTime
+                );
+
+                return response;
+            }
+
+            /**
+             * DML
+             */
+            int affectedRows =
+                    jdbcTemplate.update(
+                            normalizedSql
+                    );
+
+            int insertCount = 0;
+            int updateCount = 0;
+            int deleteCount = 0;
+            int otherCount = 0;
+
+            if (upperSql.startsWith("INSERT")) {
+
+                insertCount = affectedRows;
+
+            } else if (upperSql.startsWith("UPDATE")) {
+
+                updateCount = affectedRows;
+
+            } else if (upperSql.startsWith("DELETE")) {
+
+                deleteCount = affectedRows;
+
+            } else {
+
+                otherCount = affectedRows;
+            }
+
+            long executionTime =
+                    Duration.between(
+                            start,
+                            Instant.now()
+                    ).toMillis();
+
+            response.put("error", false);
+            response.put("affectedRows", affectedRows);
+            response.put("message", "Execution completed");
+
+            insertExecutionLog(
+                    UUID.randomUUID().toString(),
+                    userId,
+                    clientIp,
+                    null,
+                    "MANUAL_SQL",
+                    "COMPLETED",
+                    1,
+                    1,
+                    insertCount,
+                    updateCount,
+                    deleteCount,
+                    otherCount,
+                    null,
+                    null,
+                    null,
+                    null,
+                    executionTime,
+                    executionTime / 1000,
+                    normalizedSql
+            );
+
+            log.info("""
+                    
+                    SQL EXECUTED SUCCESSFULLY
+                    | affectedRows={}
+                    | executionTime={} ms
+                    """,
+                    affectedRows,
+                    executionTime
+            );
+
+            return response;
+
+        } catch (Exception e) {
+
+            long executionTime =
+                    Duration.between(
+                            start,
+                            Instant.now()
+                    ).toMillis();
+
+            log.error("""
+                    
+                    ==================================================
+                    ADMIN SQL EXECUTION FAILED
+                    ==================================================
+                    userId={}
+                    clientIp={}
+                    sql={}
+                    ==================================================
+                    """,
+                    userId,
+                    clientIp,
+                    sql,
+                    e
+            );
+
+            insertExecutionLog(
+                    UUID.randomUUID().toString(),
+                    userId,
+                    clientIp,
+                    null,
+                    "FAILED_SQL",
+                    "FAILED",
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                    sql,
+                    e.getClass().getSimpleName(),
+                    e.getMessage(),
+                    executionTime,
+                    executionTime / 1000,
+                    sql
+            );
+
+            response.put("error", true);
+            response.put("message", e.getMessage());
+
+            return response;
+        }
+    }
+
+    @Override
+    public Map<String, Object> uploadSqlFile(
+            MultipartFile file,
+            String userId,
+            HttpServletRequest request
+    ) {
+
+        try {
+
+            String jobId =
+                    UUID.randomUUID().toString();
+
+            String clientIp =
+                    getClientIp(request);
+
+            byte[] fileBytes =
+                    file.getBytes();
+
+            adminSupportExecutor.executeScriptAsync(
+                    fileBytes,
+                    file.getOriginalFilename(),
+                    jobId,
+                    userId,
+                    clientIp
+            );
+
+            return Map.of(
+                    "error", false,
+                    "jobId", jobId,
+                    "message", "Execution started"
+            );
+
+        } catch (Exception e) {
+
+            log.error(
+                    "UPLOAD FAILED",
+                    e
+            );
+
+            return Map.of(
+                    "error", true,
+                    "message", e.getMessage()
+            );
+        }
+    }
+
+    @Override
+    public Map<String, Object> getJobStatus(
+            String jobId
+    ) {
+
+        return AdminSupportExecutor.JOB_STATUS_MAP
+                .getOrDefault(
+                        jobId,
+                        Map.of(
+                                "status",
+                                "NOT_FOUND"
+                        )
+                );
+    }
+
+    private void insertExecutionLog(
+            String jobId,
+            String userId,
+            String clientIp,
+            String fileName,
+            String executionType,
+            String status,
+            int totalStatements,
+            int executedCount,
+            int insertCount,
+            int updateCount,
+            int deleteCount,
+            int otherCount,
+            Integer failedStatementNumber,
+            String failedSql,
+            String exceptionType,
+            String exceptionMessage,
+            long executionSpeed,
+            long elapsedSeconds,
+            String sqlText
+    ) {
+
+        try {
+
+            jdbcTemplate.update(
+                    """
+                    INSERT INTO ADMIN_SUPPORT_LOG
+                    (
+                        ID,
+                        JOB_ID,
+                        USER_ID,
+                        CLIENT_IP,
+                        FILE_NAME,
+                        EXECUTION_TYPE,
+                        STATUS,
+                        TOTAL_STATEMENTS,
+                        EXECUTED_COUNT,
+                        INSERT_COUNT,
+                        UPDATE_COUNT,
+                        DELETE_COUNT,
+                        OTHER_COUNT,
+                        FAILED_STATEMENT_NUMBER,
+                        FAILED_SQL,
+                        EXCEPTION_TYPE,
+                        EXCEPTION_MESSAGE,
+                        EXECUTION_SPEED,
+                        ELAPSED_SECONDS,
+                        SQL_TEXT,
+                        CREATED_AT
+                    )
+                    VALUES
+                    (
+                        ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
+                    )
+                    """,
+                    jobId,
+                    userId,
+                    clientIp,
+                    fileName,
+                    executionType,
+                    status,
+                    totalStatements,
+                    executedCount,
+                    insertCount,
+                    updateCount,
+                    deleteCount,
+                    otherCount,
+                    failedStatementNumber,
+                    failedSql,
+                    exceptionType,
+                    exceptionMessage,
+                    executionSpeed,
+                    elapsedSeconds,
+                    sqlText
+            );
+
+        } catch (Exception e) {
+
+            log.error(
+                    "FAILED TO INSERT LOG",
+                    e
+            );
+        }
+    }
+
+    private String getClientIp(
+            HttpServletRequest request
+    ) {
+
+        try {
+
+            String xfHeader =
+                    request.getHeader(
+                            "X-Forwarded-For"
+                    );
+
+            if (
+                    xfHeader == null
+                            || xfHeader.isBlank()
+            ) {
+
+                return request.getRemoteAddr();
+            }
+
+            return xfHeader.split(",")[0];
+
+        } catch (Exception e) {
+
+            return "UNKNOWN";
+        }
+    }
+}
+
+
+
+package com.fincore.transactions_service.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportExecutor {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public static final Map<String, Map<String, Object>>
+            JOB_STATUS_MAP =
+            new ConcurrentHashMap<>();
+
+    private static final int BATCH_SIZE = 1000;
+
+    @Async("adminSupportExecutor")
+    public void executeScriptAsync(
+            byte[] fileBytes,
+            String fileName,
+            String jobId,
+            String userId,
+            String clientIp
+    ) {
+
+        Instant start =
+                Instant.now();
+
+        int executed = 0;
+
+        int insertCount = 0;
+        int updateCount = 0;
+        int deleteCount = 0;
+        int otherCount = 0;
+
+        String failedSql = null;
+
+        try {
+
+            JOB_STATUS_MAP.put(
+                    jobId,
+                    new ConcurrentHashMap<>()
+            );
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("status", "RUNNING");
+
+            BufferedReader reader =
+                    new BufferedReader(
+                            new InputStreamReader(
+                                    new ByteArrayInputStream(fileBytes),
+                                    StandardCharsets.UTF_8
+                            )
+                    );
+
+            StringBuilder sqlBuilder =
+                    new StringBuilder();
+
+            String line;
+
+            while ((line = reader.readLine()) != null) {
+
+                sqlBuilder.append(line).append("\n");
+
+                if (line.trim().endsWith(";")) {
+
+                    String sql =
+                            sqlBuilder.toString()
+                                    .replace(";", "")
+                                    .trim();
+
+                    sqlBuilder.setLength(0);
+
+                    if (sql.isBlank()) {
+
+                        continue;
+                    }
+
+                    failedSql = sql;
+
+                    String upperSql =
+                            sql.toUpperCase();
+
+                    jdbcTemplate.update(sql);
+
+                    executed++;
+
+                    if (upperSql.startsWith("INSERT")) {
+
+                        insertCount++;
+
+                    } else if (upperSql.startsWith("UPDATE")) {
+
+                        updateCount++;
+
+                    } else if (upperSql.startsWith("DELETE")) {
+
+                        deleteCount++;
+
+                    } else {
+
+                        otherCount++;
+                    }
+
+                    if (executed % BATCH_SIZE == 0) {
+
+                        long elapsed =
+                                Duration.between(
+                                        start,
+                                        Instant.now()
+                                ).toSeconds();
+
+                        JOB_STATUS_MAP.get(jobId)
+                                .put("executedCount", executed);
+
+                        JOB_STATUS_MAP.get(jobId)
+                                .put("elapsedSeconds", elapsed);
+
+                        log.info("""
+                                
+                                BATCH EXECUTED
+                                | jobId={}
+                                | executed={}
+                                | elapsed={} sec
+                                """,
+                                jobId,
+                                executed,
+                                elapsed
+                        );
+                    }
+                }
+            }
+
+            long elapsed =
+                    Duration.between(
+                            start,
+                            Instant.now()
+                    ).toSeconds();
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("status", "COMPLETED");
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("executedCount", executed);
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("elapsedSeconds", elapsed);
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("insertCount", insertCount);
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("updateCount", updateCount);
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("deleteCount", deleteCount);
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("otherCount", otherCount);
+
+            log.info("""
+                    
+                    SCRIPT EXECUTION COMPLETED
+                    | jobId={}
+                    | executed={}
+                    | insert={}
+                    | update={}
+                    | delete={}
+                    | other={}
+                    | elapsed={} sec
+                    """,
+                    jobId,
+                    executed,
+                    insertCount,
+                    updateCount,
+                    deleteCount,
+                    otherCount,
+                    elapsed
+            );
+
+        } catch (Exception e) {
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("status", "FAILED");
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("executedCount", executed);
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("failedSql", failedSql);
+
+            JOB_STATUS_MAP.get(jobId)
+                    .put("message", e.getMessage());
+
+            log.error("""
+                    
+                    SCRIPT EXECUTION FAILED
+                    | jobId={}
+                    | executed={}
+                    | failedSql={}
+                    """,
+                    jobId,
+                    executed,
+                    failedSql,
+                    e
+            );
+        }
+    }
+}
