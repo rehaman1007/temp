@@ -1,119 +1,354 @@
-package com.fincore.transactions_service.service;
+@Override
+public Map<String, Object> executeAdminSql(
+        AdminSupportDTO dto,
+        String userId,
+        HttpServletRequest request
+) {
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
+    Instant start = Instant.now();
 
-import java.sql.ResultSetMetaData;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+    String clientIp = getClientIp(request);
 
-@Slf4j
-@Service("AdminSupportService")
-@RequiredArgsConstructor
-public class AdminSupportServiceImpl implements AdminSupportService {
+    String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
 
-    private final JdbcTemplate jdbcTemplate;
+    Map<String, Object> response = new HashMap<>();
 
-    @Override
-    public Map<String, Object> executeAdminSql(AdminSupportDTO adminSupportDTO) {
-        String rawSql = adminSupportDTO.getSql().trim();
+    try {
 
-        // 1. Split script by semicolon
+        log.info("""
+                
+                ==================================================
+                ADMIN SQL EXECUTION STARTED
+                ==================================================
+                userId={}
+                clientIp={}
+                page={}
+                size={}
+                sql={}
+                ==================================================
+                """,
+                userId,
+                clientIp,
+                dto.getPage(),
+                dto.getSize(),
+                rawSql
+        );
+
+        // --------------------------------------------------
+        // CLEAN SCRIPT
+        // --------------------------------------------------
+
+        rawSql = rawSql.replaceAll(";\\s*$", "").trim();
+
         String[] statements = rawSql.split(";");
 
-        // Filter out empty lines/comments to get "Real" statements
         List<String> cleanStatements = new ArrayList<>();
-        for (String s : statements) {
-            String clean = s.replaceAll("(?m)^--.*", "").trim();
-            if (!clean.isEmpty()) cleanStatements.add(clean);
+
+        for (String stmt : statements) {
+
+            String clean = stmt
+                    .replaceAll("(?m)^--.*", "")
+                    .trim();
+
+            if (!clean.isEmpty()) {
+                cleanStatements.add(clean);
+            }
         }
 
-        // 2. LOGIC: Is this a single SELECT query?
-        boolean isSingleSelect = cleanStatements.size() == 1 &&
-                cleanStatements.get(0).toUpperCase().startsWith("SELECT");
+        if (cleanStatements.isEmpty()) {
 
-        log.info("Admin SQL Request - Mode: {}", isSingleSelect ? "SELECT_GRID" : "SCRIPT_EXECUTION");
+            response.put("error", true);
+            response.put("message", "SQL cannot be empty");
 
-        int page = (adminSupportDTO.getPage() != null) ? adminSupportDTO.getPage() : 0;
-        int size = (adminSupportDTO.getSize() != null) ? adminSupportDTO.getSize() : 5;
+            return response;
+        }
+
+        // --------------------------------------------------
+        // SINGLE SELECT
+        // --------------------------------------------------
+
+        boolean isSingleSelect =
+                cleanStatements.size() == 1
+                        &&
+                        cleanStatements.get(0)
+                                .trim()
+                                .toUpperCase()
+                                .startsWith("SELECT");
+
+        int page = dto.getPage() != null ? dto.getPage() : 0;
+        int size = dto.getSize() != null ? dto.getSize() : 10;
 
         if (isSingleSelect) {
+
             String executableSelect = cleanStatements.get(0);
-            try {
-                // A. Syntax Validation (EXPLAIN PLAN)
-                try {
-                    jdbcTemplate.execute("EXPLAIN PLAN FOR " + executableSelect);
-                } catch (DataAccessException e) {
-                    return Map.of("error", true, "message", "Oracle Syntax Error: " + e.getMostSpecificCause().getMessage());
-                }
 
-                // B. Count records for Pagination
-                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
-                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
-                final Integer finalTotal = (total == null) ? 0 : total;
+            // -------------------------------
+            // COUNT
+            // -------------------------------
 
-                // C. Paginated Query (Oracle 12c+)
-                String paginatedSql = String.format("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", executableSelect, (page * size), size);
+            String countSql =
+                    "SELECT COUNT(*) FROM (" + executableSelect + ")";
 
-                return jdbcTemplate.query(paginatedSql, rs -> {
-                    ResultSetMetaData metaData = rs.getMetaData();
-                    int columnCount = metaData.getColumnCount();
-
-                    List<Map<String, String>> columns = new ArrayList<>();
-                    for (int i = 1; i <= columnCount; i++) {
-                        columns.add(Map.of("name", metaData.getColumnLabel(i)));
-                    }
-
-                    List<Map<String, Object>> rows = new ArrayList<>();
-                    while (rs.next()) {
-                        Map<String, Object> row = new HashMap<>();
-                        for (int i = 1; i <= columnCount; i++) {
-                            Object value = rs.getObject(i);
-                            if (value instanceof java.io.InputStream) value = "[BLOB DATA]";
-                            else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) value = value.toString();
-                            row.put(metaData.getColumnLabel(i), value);
-                        }
-                        rows.add(row);
-                    }
-
-                    return Map.of(
-                            "columns", columns, "rows", rows, "total", finalTotal,
-                            "page", page, "size", size, "error", false
+            Integer total =
+                    jdbcTemplate.queryForObject(
+                            countSql,
+                            Integer.class
                     );
-                });
 
-            } catch (Exception e) {
-                log.error("Execution Error", e);
-                return Map.of("error", true, "message", "Execution failed: " + e.getMessage());
+            if (total == null) {
+                total = 0;
             }
-        } else {
-            // 3. SCRIPT EXECUTION (DDL or Multiple Statements)
-            try {
-                int successfulStatements = 0;
-                for (String execSql : cleanStatements) {
-                    try {
-                        jdbcTemplate.execute(execSql);
-                        successfulStatements++;
-                    } catch (DataAccessException e) {
-                        throw new RuntimeException("Error in statement " + (successfulStatements + 1) + ": " + e.getMostSpecificCause().getMessage());
+
+            // -------------------------------
+            // PAGINATION
+            // -------------------------------
+
+            int startRow = page * size;
+            int endRow = startRow + size;
+
+            String paginatedSql = """
+                    SELECT * FROM
+                    (
+                        SELECT A.*, ROWNUM RN FROM
+                        (
+                    """ + executableSelect + """
+                        ) A
+                        WHERE ROWNUM <= ?
+                    )
+                    WHERE RN > ?
+                    """;
+
+            List<Map<String, Object>> rawRows =
+                    jdbcTemplate.queryForList(
+                            paginatedSql,
+                            endRow,
+                            startRow
+                    );
+
+            // -------------------------------
+            // CLEAN ORACLE TYPES
+            // -------------------------------
+
+            List<Map<String, Object>> rows =
+                    new ArrayList<>();
+
+            for (Map<String, Object> rawRow : rawRows) {
+
+                Map<String, Object> cleanRow =
+                        new LinkedHashMap<>();
+
+                for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
+
+                    Object value = entry.getValue();
+
+                    if (value instanceof oracle.sql.TIMESTAMP ts) {
+
+                        cleanRow.put(
+                                entry.getKey(),
+                                ts.timestampValue().toString()
+                        );
+                    }
+
+                    else if (value instanceof java.sql.Timestamp ts) {
+
+                        cleanRow.put(
+                                entry.getKey(),
+                                ts.toLocalDateTime().toString()
+                        );
+                    }
+
+                    else if (value instanceof java.sql.Clob clob) {
+
+                        cleanRow.put(
+                                entry.getKey(),
+                                clob.getSubString(
+                                        1,
+                                        (int) clob.length()
+                                )
+                        );
+                    }
+
+                    else if (value instanceof java.io.InputStream) {
+
+                        cleanRow.put(
+                                entry.getKey(),
+                                "[BLOB DATA]"
+                        );
+                    }
+
+                    else if (
+                            value != null
+                                    &&
+                                    value.getClass()
+                                            .getName()
+                                            .startsWith("oracle.sql.")
+                    ) {
+
+                        cleanRow.put(
+                                entry.getKey(),
+                                value.toString()
+                        );
+                    }
+
+                    else {
+
+                        cleanRow.put(
+                                entry.getKey(),
+                                value
+                        );
                     }
                 }
-                return Map.of(
-                        "error", false,
-                        "columns", List.of(Map.of("name", "RESULT")),
-                        "rows", List.of(Map.of("RESULT", "Script completed successfully. " + successfulStatements + " statements processed.")),
-                        "total", successfulStatements
+
+                rows.add(cleanRow);
+            }
+
+            // -------------------------------
+            // COLUMNS
+            // -------------------------------
+
+            List<Map<String, String>> columns =
+                    new ArrayList<>();
+
+            if (!rows.isEmpty()) {
+
+                for (String key : rows.get(0).keySet()) {
+
+                    columns.add(
+                            Map.of("name", key)
+                    );
+                }
+            }
+
+            response.put("error", false);
+            response.put("columns", columns);
+            response.put("rows", rows);
+            response.put("total", total);
+            response.put("page", page);
+            response.put("size", size);
+
+            log.info("""
+                    
+                    SELECT EXECUTED
+                    | rows={}
+                    | total={}
+                    | executionTime={} ms
+                    """,
+                    rows.size(),
+                    total,
+                    Duration.between(start, Instant.now()).toMillis()
+            );
+
+            return response;
+        }
+
+        // --------------------------------------------------
+        // SCRIPT EXECUTION
+        // --------------------------------------------------
+
+        int successCount = 0;
+
+        for (int i = 0; i < cleanStatements.size(); i++) {
+
+            String sql = cleanStatements.get(i);
+
+            try {
+
+                jdbcTemplate.execute(sql);
+
+                successCount++;
+
+                log.info("""
+                        
+                        STATEMENT EXECUTED
+                        | line={}
+                        | sql={}
+                        """,
+                        i + 1,
+                        sql
                 );
+
             } catch (Exception e) {
-                log.error("Script Error", e);
-                return Map.of("error", true, "message", e.getMessage());
+
+                log.error("""
+                        
+                        SCRIPT EXECUTION FAILED
+                        | line={}
+                        | sql={}
+                        | error={}
+                        """,
+                        i + 1,
+                        sql,
+                        e.getMessage(),
+                        e
+                );
+
+                response.put("error", true);
+                response.put(
+                        "message",
+                        "Error at statement "
+                                + (i + 1)
+                                + " : "
+                                + e.getMessage()
+                );
+
+                response.put("failedSql", sql);
+
+                return response;
             }
         }
+
+        response.put("error", false);
+        response.put(
+                "message",
+                "Script executed successfully"
+        );
+        response.put("executedStatements", successCount);
+
+        response.put(
+                "rows",
+                List.of(
+                        Map.of(
+                                "RESULT",
+                                successCount
+                                        + " statements executed successfully"
+                        )
+                )
+        );
+
+        response.put(
+                "columns",
+                List.of(
+                        Map.of("name", "RESULT")
+                )
+        );
+
+        response.put("total", 1);
+
+        log.info("""
+                
+                ==================================================
+                SCRIPT EXECUTION COMPLETED
+                ==================================================
+                executedStatements={}
+                executionTime={} ms
+                ==================================================
+                """,
+                successCount,
+                Duration.between(start, Instant.now()).toMillis()
+        );
+
+        return response;
+
+    } catch (Exception e) {
+
+        log.error(
+                "ADMIN SQL EXECUTION FAILED",
+                e
+        );
+
+        response.put("error", true);
+        response.put("message", e.getMessage());
+
+        return response;
     }
 }
