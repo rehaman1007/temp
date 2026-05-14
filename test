@@ -1,28 +1,294 @@
-adminSupportExecutor.insertExecutionLog(
-        jobId,
-        userId,
-        clientIp,
-        null,
-        "COMMAND",
-        "SUCCESS",
-        totalStatements,
-        executedCount, // processedCount
-        executedCount, // executedCount
-        insertCount,
-        updateCount,
-        deleteCount,
-        otherCount,
-        null,
-        null,
-        null,
-        null,
-        0,
-        elapsedSeconds,
-        sql
-);
+package com.fincore.transactions_service.service;
 
-totalStatements,
-executedCount,
-executedCount,
-insertCount,
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.File;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportServiceImpl implements AdminSupportService {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    private final AdminSupportExecutor adminSupportExecutor;
+
+    /**
+     * ============================================
+     * EXECUTE ADMIN SQL
+     * ============================================
+     */
+    @Override
+    public Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request) {
+
+        Instant start = Instant.now();
+
+        String clientIp = getClientIp(request);
+
+        String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
+
+        Map<String, Object> response = new HashMap<>();
+
+        try {
+
+            log.info("""
+                    
+                    ==================================================
+                    ADMIN SQL EXECUTION STARTED
+                    ==================================================
+                    userId={}
+                    clientIp={}
+                    page={}
+                    size={}
+                    sql={}
+                    ==================================================
+                    """, userId, clientIp, dto.getPage(), dto.getSize(), rawSql);
+
+            /**
+             * ============================================
+             * CLEAN SQL
+             * ============================================
+             */
+            rawSql = rawSql.replaceAll(";\\s*$", "").trim();
+
+            String[] statements = rawSql.split(";");
+
+            List<String> cleanStatements = new ArrayList<>();
+
+            for (String stmt : statements) {
+
+                String clean = stmt.replaceAll("(?m)^--.*", "").trim();
+
+                if (!clean.isEmpty()) {
+
+                    cleanStatements.add(clean);
+                }
+            }
+
+            if (cleanStatements.isEmpty()) {
+
+                response.put("error", true);
+                response.put("message", "SQL cannot be empty");
+
+                return response;
+            }
+
+            /**
+             * ============================================
+             * SINGLE SELECT
+             * ============================================
+             */
+            boolean isSingleSelect = cleanStatements.size() == 1 && cleanStatements.get(0).trim().toUpperCase().startsWith("SELECT");
+
+            int page = dto.getPage() != null ? dto.getPage() : 0;
+
+            int size = dto.getSize() != null ? dto.getSize() : 10;
+
+            if (isSingleSelect) {
+
+                String executableSelect = cleanStatements.get(0);
+
+                /**
+                 * COUNT
+                 */
+                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
+
+                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+
+                if (total == null) {
+
+                    total = 0;
+                }
+
+                /**
+                 * PAGINATION
+                 */
+                int startRow = page * size;
+
+                int endRow = startRow + size;
+
+                String paginatedSql = """
+                        SELECT * FROM
+                        (
+                            SELECT A.*, ROWNUM RN FROM
+                            (
+                        """ + executableSelect + """
+                            ) A
+                            WHERE ROWNUM <= ?
+                        )
+                        WHERE RN > ?
+                        """;
+
+                List<Map<String, Object>> rawRows = jdbcTemplate.queryForList(paginatedSql, endRow, startRow);
+
+                /**
+                 * CLEAN ORACLE TYPES
+                 */
+                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
+
+                /**
+                 * COLUMNS
+                 */
+                List<Map<String, String>> columns = new ArrayList<>();
+
+                if (!rows.isEmpty()) {
+
+                    for (String key : rows.get(0).keySet()) {
+
+                        columns.add(Map.of("name", key));
+                    }
+                }
+
+                response.put("error", false);
+                response.put("columns", columns);
+                response.put("rows", rows);
+                response.put("total", total);
+                response.put("page", page);
+                response.put("size", size);
+
+                /**
+                 * LOG
+                 */
+                adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", 1, 1, 0, 0, 0, 1, null, null, null, null, 1, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+                return response;
+            }
+
+            /**
+             * ============================================
+             * SCRIPT EXECUTION
+             * ============================================
+             */
+            int successCount = 0;
+
+            for (int i = 0; i < cleanStatements.size(); i++) {
+
+                String sql = cleanStatements.get(i);
+
+                try {
+
+                    jdbcTemplate.execute(sql);
+
+                    successCount++;
+
+                } catch (Exception e) {
+
+                    adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", cleanStatements.size(), successCount, 0, 0, 0, successCount, i + 1, sql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+                    response.put("error", true);
+                    response.put("message", "Error at statement " + (i + 1) + " : " + e.getMessage());
+
+                    response.put("failedSql", sql);
+
+                    return response;
+                }
+            }
+
+            response.put("error", false);
+
+            response.put("message", "Script executed successfully");
+
+            response.put("rows", List.of(Map.of("RESULT", successCount + " statements executed successfully")));
+
+            response.put("columns", List.of(Map.of("name", "RESULT")));
+
+            response.put("total", 1);
+
+            /**
+             * LOG SUCCESS
+             */
+            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", successCount, successCount, 0, 0, 0, successCount, null, null, null, null, successCount, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+            return response;
+
+        } catch (Exception e) {
+
+            log.error("ADMIN SQL EXECUTION FAILED", e);
+
+            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", 0, 0, 0, 0, 0, 0, null, rawSql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+            response.put("error", true);
+            response.put("message", e.getMessage());
+
+            return response;
+        }
+    }
+
+    /**
+     * ============================================
+     * UPLOAD SQL FILE
+     * ============================================
+     */
+    @Override
+    public Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request) {
+
+        Map<String, Object> response = new HashMap<>();
+
+        try {
+
+            String jobId = UUID.randomUUID().toString();
+
+            File tempFile = File.createTempFile("admin_support_", ".sql");
+
+            file.transferTo(tempFile);
+
+            adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, getClientIp(request));
+
+            response.put("jobId", jobId);
+            response.put("status", "STARTED");
+
+            return response;
+
+        } catch (Exception e) {
+
+            response.put("error", true);
+            response.put("message", e.getMessage());
+
+            return response;
+        }
+    }
+
+    @Override
+    public Map<String, Object> getJobStatus(String jobId) {
+
+        Map<String, Object> status = AdminSupportExecutor.JOB_STATUS.get(jobId);
+
+        if (status == null) {
+
+            return Map.of("status", "NOT_FOUND");
+        }
+
+        /**
+         * RETURN NEW OBJECT
+         */
+        return new HashMap<>(status);
+    }
+
+    /**
+     * ============================================
+     * CLIENT IP
+     * ============================================
+     */
+    private String getClientIp(HttpServletRequest request) {
+
+        String xfHeader = request.getHeader("X-Forwarded-For");
+
+        if (xfHeader == null || xfHeader.isEmpty() || "unknown".equalsIgnoreCase(xfHeader)) {
+
+            return request.getRemoteAddr();
+        }
+
+        return xfHeader.split(",")[0];
+    }
+}
+
 
