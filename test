@@ -1,849 +1,758 @@
-package com.fincore.transactions_service.service;
+import React from "react";
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.stereotype.Service;
+import {
+  Alert,
+  AlertTitle,
+  alpha,
+  Box,
+  Chip,
+  Grid,
+  LinearProgress,
+  Paper,
+  Stack,
+  Typography,
+  useTheme,
+} from "@mui/material";
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.sql.Connection;
-import java.sql.Statement;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import {
+  CheckCircle,
+  ErrorOutline,
+  Pending,
+  Timer,
+  WarningAmber,
+} from "@mui/icons-material";
 
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class AdminSupportExecutor {
+const ExecutionDashboard = ({ jobStatus }) => {
+  const theme = useTheme();
 
-    /**
-     * =================================================
-     * LIVE JOB STATUS CACHE
-     * =================================================
-     */
-    public static final Map<String, Map<String, Object>> JOB_STATUS =
-            new ConcurrentHashMap<>();
+  if (!jobStatus) return null;
 
-    /**
-     * =================================================
-     * PERFORMANCE CONFIG
-     * =================================================
-     */
-    private static final int COMMIT_BATCH_SIZE = 10000;
+  /**
+   * =========================================
+   * STATUS COLOR
+   * =========================================
+   */
+  const getStatusColor = () => {
+    switch (jobStatus.status) {
+      case "COMPLETED":
+        return "success";
 
-    private static final int STATUS_UPDATE_INTERVAL = 1000;
+      case "FAILED":
+        return "error";
 
-    private static final int LOG_INTERVAL = 10000;
-
-    private final JdbcTemplate jdbcTemplate;
-
-    /**
-     * =================================================
-     * CLEAN ORACLE TYPES
-     * =================================================
-     */
-    public List<Map<String, Object>> cleanOracleRows(
-            List<Map<String, Object>> rawRows) {
-
-        List<Map<String, Object>> rows = new ArrayList<>();
-
-        for (Map<String, Object> rawRow : rawRows) {
-
-            Map<String, Object> cleanRow = new LinkedHashMap<>();
-
-            for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
-
-                Object value = entry.getValue();
-
-                try {
-
-                    if (value instanceof oracle.sql.TIMESTAMP ts) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                ts.timestampValue().toString()
-                        );
-
-                    } else if (value instanceof java.sql.Timestamp ts) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                ts.toLocalDateTime().toString()
-                        );
-
-                    } else if (value instanceof java.sql.Clob clob) {
-
-                        cleanRow.put(
-                                entry.getKey(),
-                                clob.getSubString(1, (int) clob.length())
-                        );
-
-                    } else if (value instanceof java.io.InputStream) {
-
-                        cleanRow.put(entry.getKey(), "[BLOB DATA]");
-
-                    } else if (
-                            value != null &&
-                            value.getClass().getName().startsWith("oracle.sql.")
-                    ) {
-
-                        cleanRow.put(entry.getKey(), value.toString());
-
-                    } else {
-
-                        cleanRow.put(entry.getKey(), value);
-                    }
-
-                } catch (Exception e) {
-
-                    cleanRow.put(entry.getKey(), "[UNSUPPORTED]");
-                }
-            }
-
-            rows.add(cleanRow);
-        }
-
-        return rows;
+      default:
+        return "warning";
     }
+  };
 
-    /**
-     * =================================================
-     * INSERT EXECUTION LOG
-     * =================================================
-     */
-    public void insertExecutionLog(
-            String jobId,
-            String userId,
-            String clientIp,
-            String fileName,
-            String executionType,
-            String status,
-            int totalStatements,
-            int processedCount,
-            int executedCount,
-            int insertCount,
-            int updateCount,
-            int deleteCount,
-            int otherCount,
-            Integer failedStatementNumber,
-            String failedSql,
-            String exceptionType,
-            String exceptionMessage,
-            long executionSpeed,
-            long elapsedSeconds,
-            String sqlText
-    ) {
+  /**
+   * =========================================
+   * STATUS ICON
+   * =========================================
+   */
+  const getStatusIcon = () => {
+    switch (jobStatus.status) {
+      case "COMPLETED":
+        return <CheckCircle />;
 
-        try {
+      case "FAILED":
+        return <ErrorOutline />;
 
-            jdbcTemplate.update("""
-                    INSERT INTO ADMIN_SUPPORT_LOG
-                    (
-                        ID,
-                        JOB_ID,
-                        USER_ID,
-                        CLIENT_IP,
-                        FILE_NAME,
-                        EXECUTION_TYPE,
-                        STATUS,
-                        TOTAL_STATEMENTS,
-                        EXECUTED_COUNT,
-                        INSERT_COUNT,
-                        UPDATE_COUNT,
-                        DELETE_COUNT,
-                        OTHER_COUNT,
-                        FAILED_STATEMENT_NUMBER,
-                        FAILED_SQL,
-                        EXCEPTION_TYPE,
-                        EXCEPTION_MESSAGE,
-                        EXECUTION_SPEED,
-                        ELAPSED_SECONDS,
-                        SQL_TEXT,
-                        CREATED_AT
-                    )
-                    VALUES
-                    (
-                        ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
-                    )
-                    """,
-
-                    jobId,
-                    userId,
-                    clientIp,
-                    fileName,
-                    executionType,
-                    status,
-                    totalStatements,
-                    executedCount,
-                    insertCount,
-                    updateCount,
-                    deleteCount,
-                    otherCount,
-                    failedStatementNumber,
-                    failedSql,
-                    exceptionType,
-                    exceptionMessage,
-                    executionSpeed,
-                    elapsedSeconds,
-                    sqlText
-            );
-
-        } catch (Exception e) {
-
-            log.error("FAILED TO INSERT LOG", e);
-        }
+      default:
+        return <Pending />;
     }
-
-    /**
-     * =================================================
-     * EXECUTE SCRIPT ASYNC
-     * =================================================
-     */
-    @Async("sqlTaskExecutor")
-    public void executeScriptAsync(
-            File sqlFile,
-            String jobId,
-            String userId,
-            String clientIp
-    ) {
-
-        Instant start = Instant.now();
-
-        long startedAt = System.currentTimeMillis();
-
-        int totalStatements = 0;
-
-        int processedCount = 0;
-
-        int executedCount = 0;
-
-        int insertCount = 0;
-
-        int updateCount = 0;
-
-        int deleteCount = 0;
-
-        int otherCount = 0;
-
-        int failedLine = 0;
-
-        String failedSql = null;
-
-        try {
-
-            /**
-             * =================================================
-             * INITIAL STATUS
-             * =================================================
-             */
-            Map<String, Object> initialStatus =
-                    new ConcurrentHashMap<>();
-
-            initialStatus.put("jobId", jobId);
-            initialStatus.put("status", "RUNNING");
-            initialStatus.put("progress", 0);
-            initialStatus.put("processedCount", 0);
-            initialStatus.put("executedCount", 0);
-            initialStatus.put("insertCount", 0);
-            initialStatus.put("updateCount", 0);
-            initialStatus.put("deleteCount", 0);
-            initialStatus.put("otherCount", 0);
-            initialStatus.put("totalStatements", 0);
-            initialStatus.put("startedAt", startedAt);
-            initialStatus.put("message", "Execution started");
-
-            JOB_STATUS.put(jobId, initialStatus);
-
-            /**
-             * =================================================
-             * COUNT STATEMENTS
-             * =================================================
-             */
-            try (
-                    BufferedReader counterReader =
-                            new BufferedReader(new FileReader(sqlFile))
-            ) {
-
-                String line;
-
-                while ((line = counterReader.readLine()) != null) {
-
-                    line = line.trim();
-
-                    if (
-                            line.isEmpty() ||
-                            line.startsWith("--")
-                    ) {
-                        continue;
-                    }
-
-                    if (line.endsWith(";")) {
-
-                        totalStatements++;
-                    }
-                }
-            }
-
-            /**
-             * =================================================
-             * UPDATE TOTAL COUNT
-             * =================================================
-             */
-            Map<String, Object> countStatus =
-                    new ConcurrentHashMap<>(JOB_STATUS.get(jobId));
-
-            countStatus.put("totalStatements", totalStatements);
-
-            JOB_STATUS.put(jobId, countStatus);
-
-            /**
-             * =================================================
-             * EXECUTION
-             * =================================================
-             */
-            try (
-                    Connection connection =
-                            jdbcTemplate.getDataSource().getConnection();
-
-                    BufferedReader reader =
-                            new BufferedReader(new FileReader(sqlFile))
-            ) {
-
-                connection.setAutoCommit(false);
-
-                Statement statement = connection.createStatement();
-
-                statement.setFetchSize(1000);
-
-                statement.setQueryTimeout(0);
-
-                StringBuilder sqlBuilder = new StringBuilder();
-
-                String line;
-
-                int lineNumber = 0;
-
-                int batchCounter = 0;
-
-                while ((line = reader.readLine()) != null) {
-
-                    lineNumber++;
-
-                    line = line.trim();
-
-                    /**
-                     * SKIP COMMENTS
-                     */
-                    if (
-                            line.isEmpty() ||
-                            line.startsWith("--")
-                    ) {
-                        continue;
-                    }
-
-                    sqlBuilder.append(line).append(" ");
-
-                    /**
-                     * SQL END
-                     */
-                    if (line.endsWith(";")) {
-
-                        String sql =
-                                sqlBuilder.toString().trim();
-
-                        while (sql.endsWith(";")) {
-
-                            sql =
-                                    sql.substring(
-                                            0,
-                                            sql.length() - 1
-                                    ).trim();
-                        }
-
-                        sqlBuilder.setLength(0);
-
-                        failedSql = sql;
-
-                        failedLine = lineNumber;
-
-                        processedCount++;
-
-                        String upperSql =
-                                sql.toUpperCase();
-
-                        /**
-                         * =================================================
-                         * TYPE COUNTS
-                         * =================================================
-                         */
-                        if (upperSql.startsWith("INSERT")) {
-
-                            insertCount++;
-
-                        } else if (upperSql.startsWith("UPDATE")) {
-
-                            updateCount++;
-
-                        } else if (upperSql.startsWith("DELETE")) {
-
-                            deleteCount++;
-
-                        } else {
-
-                            otherCount++;
-                        }
-
-                        /**
-                         * =================================================
-                         * DDL
-                         * =================================================
-                         */
-                        boolean isDDL =
-                                upperSql.startsWith("CREATE") ||
-                                upperSql.startsWith("ALTER") ||
-                                upperSql.startsWith("DROP") ||
-                                upperSql.startsWith("TRUNCATE");
-
-                        if (isDDL) {
-
-                            statement.execute(sql);
-
-                            connection.commit();
-
-                            executedCount++;
-
-                        } else {
-
-                            /**
-                             * =================================================
-                             * BATCH DML
-                             * =================================================
-                             */
-                            statement.addBatch(sql);
-
-                            batchCounter++;
-
-                            /**
-                             * =================================================
-                             * EXECUTE BATCH
-                             * =================================================
-                             */
-                            if (
-                                    batchCounter >= COMMIT_BATCH_SIZE
-                            ) {
-
-                                int[] result =
-                                        statement.executeBatch();
-
-                                connection.commit();
-
-                                statement.clearBatch();
-
-                                executedCount += result.length;
-
-                                batchCounter = 0;
-                            }
-                        }
-
-                        /**
-                         * =================================================
-                         * STATUS UPDATE
-                         * =================================================
-                         */
-                        if (
-                                processedCount %
-                                        STATUS_UPDATE_INTERVAL == 0 ||
-                                processedCount == totalStatements
-                        ) {
-
-                            int progress =
-                                    totalStatements == 0
-                                            ? 0
-                                            : (processedCount * 100)
-                                            / totalStatements;
-
-                            long elapsedSeconds =
-                                    Duration.between(
-                                            start,
-                                            Instant.now()
-                                    ).toSeconds();
-
-                            long executionSpeed =
-                                    elapsedSeconds == 0
-                                            ? executedCount
-                                            : executedCount /
-                                            Math.max(elapsedSeconds, 1);
-
-                            long etaSeconds =
-                                    executionSpeed == 0
-                                            ? 0
-                                            : (totalStatements -
-                                            processedCount)
-                                            / executionSpeed;
-
-                            Map<String, Object> status =
-                                    new ConcurrentHashMap<>();
-
-                            status.put("jobId", jobId);
-
-                            status.put("status", "RUNNING");
-
-                            status.put("progress", progress);
-
-                            status.put(
-                                    "processedCount",
-                                    processedCount
-                            );
-
-                            status.put(
-                                    "executedCount",
-                                    executedCount
-                            );
-
-                            status.put(
-                                    "insertCount",
-                                    insertCount
-                            );
-
-                            status.put(
-                                    "updateCount",
-                                    updateCount
-                            );
-
-                            status.put(
-                                    "deleteCount",
-                                    deleteCount
-                            );
-
-                            status.put(
-                                    "otherCount",
-                                    otherCount
-                            );
-
-                            status.put(
-                                    "totalStatements",
-                                    totalStatements
-                            );
-
-                            status.put(
-                                    "executionSpeed",
-                                    executionSpeed
-                            );
-
-                            status.put(
-                                    "etaSeconds",
-                                    etaSeconds
-                            );
-
-                            status.put(
-                                    "currentLine",
-                                    lineNumber
-                            );
-
-                            status.put(
-                                    "startedAt",
-                                    startedAt
-                            );
-
-                            status.put(
-                                    "message",
-                                    "Processing " +
-                                    processedCount +
-                                    " / " +
-                                    totalStatements
-                            );
-
-                            JOB_STATUS.put(jobId, status);
-                        }
-
-                        /**
-                         * =================================================
-                         * LOGGING
-                         * =================================================
-                         */
-                        if (
-                                processedCount %
-                                        LOG_INTERVAL == 0
-                        ) {
-
-                            log.info("""
-                                    
-                                    ==================================================
-                                    LIVE EXECUTION STATUS
-                                    ==================================================
-                                    jobId={}
-                                    progress={}%
-                                    processed={}
-                                    executed={}
-                                    ==================================================
-                                    """,
-
-                                    jobId,
-
-                                    totalStatements == 0
-                                            ? 0
-                                            : (processedCount * 100)
-                                            / totalStatements,
-
-                                    processedCount,
-
-                                    executedCount
-                            );
-                        }
-                    }
-                }
-
-                /**
-                 * =================================================
-                 * FINAL BATCH
-                 * =================================================
-                 */
-                if (batchCounter > 0) {
-
-                    int[] result =
-                            statement.executeBatch();
-
-                    connection.commit();
-
-                    statement.clearBatch();
-
-                    executedCount += result.length;
-                }
-
-                long elapsedSeconds =
-                        Duration.between(
-                                start,
-                                Instant.now()
-                        ).toSeconds();
-
-                long executionSpeed =
-                        elapsedSeconds == 0
-                                ? executedCount
-                                : executedCount /
-                                Math.max(elapsedSeconds, 1);
-
-                /**
-                 * =================================================
-                 * FINAL STATUS
-                 * =================================================
-                 */
-                Map<String, Object> completedStatus =
-                        new ConcurrentHashMap<>();
-
-                completedStatus.put("jobId", jobId);
-
-                completedStatus.put("status", "COMPLETED");
-
-                completedStatus.put("progress", 100);
-
-                completedStatus.put(
-                        "processedCount",
-                        processedCount
-                );
-
-                completedStatus.put(
-                        "executedCount",
-                        executedCount
-                );
-
-                completedStatus.put(
-                        "insertCount",
-                        insertCount
-                );
-
-                completedStatus.put(
-                        "updateCount",
-                        updateCount
-                );
-
-                completedStatus.put(
-                        "deleteCount",
-                        deleteCount
-                );
-
-                completedStatus.put(
-                        "otherCount",
-                        otherCount
-                );
-
-                completedStatus.put(
-                        "totalStatements",
-                        totalStatements
-                );
-
-                completedStatus.put(
-                        "executionSpeed",
-                        executionSpeed
-                );
-
-                completedStatus.put(
-                        "startedAt",
-                        startedAt
-                );
-
-                completedStatus.put(
-                        "etaSeconds",
-                        0
-                );
-
-                completedStatus.put(
-                        "completed",
-                        true
-                );
-
-                completedStatus.put(
-                        "message",
-                        "Execution completed"
-                );
-
-                JOB_STATUS.put(jobId, completedStatus);
-
-                /**
-                 * =================================================
-                 * SUCCESS LOG
-                 * =================================================
-                 */
-                insertExecutionLog(
-                        jobId,
-                        userId,
-                        clientIp,
-                        sqlFile.getName(),
-                        "FILE",
-                        "SUCCESS",
-                        totalStatements,
-                        processedCount,
-                        executedCount,
-                        insertCount,
-                        updateCount,
-                        deleteCount,
-                        otherCount,
-                        null,
-                        null,
-                        null,
-                        null,
-                        executionSpeed,
-                        elapsedSeconds,
-                        null
-                );
-            }
-
-        } catch (Exception e) {
-
-            long elapsedSeconds =
-                    Duration.between(
-                            start,
-                            Instant.now()
-                    ).toSeconds();
-
-            Map<String, Object> failedMap =
-                    new ConcurrentHashMap<>();
-
-            failedMap.put("jobId", jobId);
-
-            failedMap.put("status", "FAILED");
-
-            failedMap.put("message", e.getMessage());
-
-            failedMap.put("failedLine", failedLine);
-
-            failedMap.put("failedSql", failedSql);
-
-            failedMap.put(
-                    "processedCount",
-                    processedCount
-            );
-
-            failedMap.put(
-                    "executedCount",
-                    executedCount
-            );
-
-            failedMap.put(
-                    "insertCount",
-                    insertCount
-            );
-
-            failedMap.put(
-                    "updateCount",
-                    updateCount
-            );
-
-            failedMap.put(
-                    "deleteCount",
-                    deleteCount
-            );
-
-            failedMap.put(
-                    "otherCount",
-                    otherCount
-            );
-
-            failedMap.put(
-                    "totalStatements",
-                    totalStatements
-            );
-
-            failedMap.put(
-                    "startedAt",
-                    startedAt
-            );
-
-            JOB_STATUS.put(jobId, failedMap);
-
-            insertExecutionLog(
-                    jobId,
-                    userId,
-                    clientIp,
-                    sqlFile.getName(),
-                    "FILE",
-                    "FAILED",
-                    totalStatements,
-                    processedCount,
-                    executedCount,
-                    insertCount,
-                    updateCount,
-                    deleteCount,
-                    otherCount,
-                    failedLine,
-                    failedSql,
-                    e.getClass().getSimpleName(),
-                    e.getMessage(),
-                    0,
-                    elapsedSeconds,
-                    null
-            );
-
-            log.error("SQL EXECUTION FAILED", e);
-
-        } finally {
-
-            try {
-
-                if (
-                        sqlFile != null &&
-                        sqlFile.exists()
-                ) {
-
-                    sqlFile.delete();
-                }
-
-            } catch (Exception ex) {
-
-                log.error(
-                        "FAILED TO DELETE TEMP FILE",
-                        ex
-                );
-            }
-        }
-    }
-}
+  };
+
+  /**
+   * =========================================
+   * STATS
+   * =========================================
+   */
+  const stats = [
+    {
+      label: "Executed",
+      value: jobStatus.executedCount || 0,
+    },
+
+    {
+      label: "Insert",
+      value: jobStatus.insertCount || 0,
+    },
+
+    {
+      label: "Update",
+      value: jobStatus.updateCount || 0,
+    },
+
+    {
+      label: "Delete",
+      value: jobStatus.deleteCount || 0,
+    },
+
+    {
+      label: "Others",
+      value: jobStatus.otherCount || 0,
+    },
+
+    {
+      label: "Total",
+      value: jobStatus.totalStatements || 0,
+    },
+
+    {
+      label: "Elapsed",
+      value: `${jobStatus.elapsedSeconds || 0} sec`,
+    },
+
+    {
+      label: "ETA",
+      value: `${jobStatus.etaSeconds || 0} sec`,
+    },
+  ];
+
+  return (
+    <Paper
+      elevation={0}
+      sx={{
+        borderRadius: 4,
+        p: 3,
+        border: `1px solid ${theme.palette.divider}`,
+        overflow: "hidden",
+        position: "relative",
+      }}
+    >
+      {/* ================================================= */}
+      {/* BACKGROUND GLOW */}
+      {/* ================================================= */}
+
+      <Box
+        sx={{
+          position: "absolute",
+          top: -80,
+          right: -80,
+
+          width: 220,
+          height: 220,
+
+          borderRadius: "50%",
+
+          background:
+            "radial-gradient(circle, rgba(59,130,246,0.18), transparent)",
+
+          pointerEvents: "none",
+        }}
+      />
+
+      {/* ================================================= */}
+      {/* HEADER */}
+      {/* ================================================= */}
+
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="center"
+        flexWrap="wrap"
+        gap={2}
+        mb={3}
+      >
+        <Box>
+          <Typography variant="h6" fontWeight={800}>
+            Live Execution Monitor
+          </Typography>
+
+          <Typography variant="body2" color="text.secondary" mt={0.5}>
+            Job ID : {jobStatus.jobId}
+          </Typography>
+        </Box>
+
+        <Chip
+          icon={getStatusIcon()}
+          label={jobStatus.status}
+          color={getStatusColor()}
+          sx={{
+            fontWeight: 700,
+            px: 1,
+          }}
+        />
+      </Stack>
+
+      {/* ================================================= */}
+      {/* PROGRESS */}
+      {/* ================================================= */}
+
+      <Box
+        sx={{
+          position: "relative",
+          mb: 4,
+        }}
+      >
+        <LinearProgress
+          variant="determinate"
+          value={jobStatus.progress || 0}
+          sx={{
+            height: 16,
+            borderRadius: 20,
+            bgcolor: alpha(theme.palette.primary.main, 0.12),
+
+            "& .MuiLinearProgress-bar": {
+              borderRadius: 20,
+
+              background: "linear-gradient(90deg,#2563eb,#7c3aed)",
+            },
+          }}
+        />
+
+        <Typography
+          variant="caption"
+          sx={{
+            position: "absolute",
+            top: -24,
+            right: 0,
+            fontWeight: 800,
+          }}
+        >
+          {jobStatus.progress || 0}%
+        </Typography>
+      </Box>
+
+      {/* ================================================= */}
+      {/* STATS */}
+      {/* ================================================= */}
+
+      <Grid container spacing={2}>
+        {stats.map((item) => (
+          <Grid
+            size={{
+              xs: 6,
+              md: 3,
+            }}
+            key={item.label}
+          >
+            <Paper
+              elevation={0}
+              sx={{
+                borderRadius: 3,
+                p: 2,
+
+                textAlign: "center",
+
+                bgcolor: alpha(theme.palette.primary.main, 0.04),
+
+                border: "1px solid rgba(59,130,246,0.08)",
+
+                transition: "all .25s ease",
+
+                "&:hover": {
+                  transform: "translateY(-2px)",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+                },
+              }}
+            >
+              <Typography variant="body2" color="text.secondary">
+                {item.label}
+              </Typography>
+
+              <Typography variant="h5" fontWeight={800} mt={0.5}>
+                {item.value}
+              </Typography>
+            </Paper>
+          </Grid>
+        ))}
+      </Grid>
+
+      {/* ================================================= */}
+      {/* RUNNING */}
+      {/* ================================================= */}
+
+      {jobStatus.status === "RUNNING" && (
+        <Alert
+          severity="warning"
+          icon={<Timer />}
+          sx={{
+            mt: 3,
+            borderRadius: 3,
+          }}
+        >
+          <AlertTitle>Execution In Progress</AlertTitle>
+          Please stay on this screen until execution completes.
+        </Alert>
+      )}
+
+      {/* ================================================= */}
+      {/* FAILED */}
+      {/* ================================================= */}
+
+      {jobStatus.status === "FAILED" && (
+        <Alert
+          severity="error"
+          icon={<WarningAmber />}
+          sx={{
+            mt: 3,
+            borderRadius: 3,
+          }}
+        >
+          <AlertTitle>Execution Failed</AlertTitle>
+
+          <Typography variant="body2">{jobStatus.message}</Typography>
+
+          <Typography variant="body2" mt={1} fontWeight={700}>
+            Failed Line : {jobStatus.failedLine || "-"}
+          </Typography>
+
+          {jobStatus.failedSql && (
+            <Box
+              sx={{
+                mt: 2,
+                p: 2,
+                borderRadius: 2,
+                bgcolor: "#111827",
+                overflowX: "auto",
+              }}
+            >
+              <Typography
+                variant="caption"
+                sx={{
+                  color: "#fca5a5",
+                  fontFamily: "monospace",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {jobStatus.failedSql}
+              </Typography>
+            </Box>
+          )}
+        </Alert>
+      )}
+
+      {/* ================================================= */}
+      {/* SUCCESS */}
+      {/* ================================================= */}
+
+      {jobStatus.status === "COMPLETED" && (
+        <Alert
+          severity="success"
+          sx={{
+            mt: 3,
+            borderRadius: 3,
+            color: "white",
+          }}
+        >
+          <AlertTitle>Execution Completed Successfully</AlertTitle>
+          Total statements executed : {jobStatus.executedCount}
+        </Alert>
+      )}
+    </Paper>
+  );
+};
+
+export default ExecutionDashboard;
+
+
+
+
+
+import React from "react";
+
+import {
+  Alert,
+  AlertTitle,
+  alpha,
+  Box,
+  Chip,
+  Divider,
+  Paper,
+  Stack,
+  Typography,
+  useTheme,
+} from "@mui/material";
+
+import {
+  CheckCircle,
+  ErrorOutline,
+  Info,
+  Terminal,
+  WarningAmber,
+} from "@mui/icons-material";
+import CustomChip from "../../../utils/CustomChip";
+
+const LogsPanel = ({ lastResponse, jobStatus }) => {
+  const theme = useTheme();
+
+  /**
+   * =========================================
+   * EMPTY STATE
+   * =========================================
+   */
+  if (!lastResponse && !jobStatus) {
+    return (
+      <Paper
+        elevation={0}
+        sx={{
+          borderRadius: 1,
+          border: `1px solid ${theme.palette.divider}`,
+          overflow: "hidden",
+        }}
+      >
+        <Box
+          sx={{
+            px: 2.5,
+            py: 1.5,
+
+            background: "linear-gradient(135deg,#111827,#1f2937)",
+
+            color: "white",
+          }}
+        >
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Terminal fontSize="small" />
+
+            <Typography fontWeight={800}>Execution Logs</Typography>
+          </Stack>
+        </Box>
+
+        <Box p={3}>
+          <Alert
+            severity="info"
+            icon={<Info />}
+            sx={{
+              borderRadius: 3,
+            }}
+          >
+            <AlertTitle>Waiting for execution</AlertTitle>
+            Execute SQL query or upload script to view logs.
+          </Alert>
+        </Box>
+      </Paper>
+    );
+  }
+
+  return (
+    <Paper
+      elevation={0}
+      sx={{
+        borderRadius: 1,
+        overflow: "hidden",
+        border: `1px solid ${theme.palette.divider}`,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {/* ================================================= */}
+      {/* HEADER */}
+      {/* ================================================= */}
+
+      <Box
+        sx={{
+          px: 2.5,
+          py: 1.5,
+
+          background: "linear-gradient(135deg,#111827,#1f2937)",
+
+          color: "white",
+
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          flexWrap="wrap"
+          gap={1}
+        >
+          {/* LEFT */}
+
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Terminal fontSize="small" />
+
+            <Typography fontWeight={800}>Execution Logs</Typography>
+          </Stack>
+
+          {/* STATUS */}
+
+          {jobStatus?.status && (
+            <Chip
+              size="small"
+              label={jobStatus.status}
+              color={
+                jobStatus.status === "COMPLETED"
+                  ? "success"
+                  : jobStatus.status === "FAILED"
+                    ? "error"
+                    : "warning"
+              }
+            />
+          )}
+        </Stack>
+      </Box>
+
+      {/* ================================================= */}
+      {/* TERMINAL BODY */}
+      {/* ================================================= */}
+
+      <Box
+        sx={{
+          p: 2.5,
+
+          bgcolor: "#020617",
+
+          color: "#e2e8f0",
+
+          fontFamily: "monospace",
+
+          flex: 1,
+
+          overflow: "auto",
+
+          minHeight: 400,
+        }}
+      >
+        {/* ============================================= */}
+        {/* JOB STATUS */}
+        {/* ============================================= */}
+
+        {jobStatus && (
+          <>
+            <Typography
+              sx={{
+                color: "#38bdf8",
+                mb: 1,
+              }}
+            >
+              {">"} JOB STATUS
+            </Typography>
+
+            <Box
+              sx={{
+                mb: 3,
+                p: 2,
+                borderRadius: 2,
+
+                bgcolor: "rgba(255,255,255,0.03)",
+
+                border: "1px solid rgba(255,255,255,0.06)",
+              }}
+            >
+              <Stack spacing={1}>
+                <Typography>STATUS : {jobStatus.status}</Typography>
+
+                <Typography>JOB ID : {jobStatus.jobId}</Typography>
+
+                <Typography>
+                  EXECUTED : {jobStatus.executedCount || 0}
+                </Typography>
+
+                <Typography>
+                  TOTAL : {jobStatus.totalStatements || 0}
+                </Typography>
+
+                <Typography>
+                  ELAPSED : {jobStatus.elapsedSeconds || 0} sec
+                </Typography>
+
+                <Typography>PROGRESS : {jobStatus.progress || 0}%</Typography>
+              </Stack>
+            </Box>
+          </>
+        )}
+
+        {/* ============================================= */}
+        {/* ERROR */}
+        {/* ============================================= */}
+
+        {(lastResponse?.error || jobStatus?.status === "FAILED") && (
+          <>
+            <Typography
+              sx={{
+                color: "#f87171",
+                mb: 1,
+              }}
+            >
+              {">"} ERROR LOG
+            </Typography>
+
+            <Alert
+              severity="error"
+              icon={<ErrorOutline />}
+              sx={{
+                mb: 3,
+                borderRadius: 3,
+              }}
+            >
+              <AlertTitle>Execution Failed</AlertTitle>
+
+              {lastResponse?.message || jobStatus?.message || "Unknown error"}
+
+              {jobStatus?.failedLine && (
+                <>
+                  <Divider
+                    sx={{
+                      my: 1,
+                    }}
+                  />
+                  Failed Line : {jobStatus.failedLine}
+                </>
+              )}
+            </Alert>
+          </>
+        )}
+
+        {/* ============================================= */}
+        {/* FAILED SQL */}
+        {/* ============================================= */}
+
+        {jobStatus?.failedSql && (
+          <>
+            <Typography
+              sx={{
+                color: "#fb7185",
+                mb: 1,
+              }}
+            >
+              {">"} FAILED SQL
+            </Typography>
+
+            <Box
+              sx={{
+                mb: 3,
+                p: 2,
+
+                borderRadius: 2,
+
+                bgcolor: "#111827",
+
+                border: "1px solid rgba(248,113,113,0.2)",
+
+                overflowX: "auto",
+              }}
+            >
+              <Typography
+                sx={{
+                  whiteSpace: "pre-wrap",
+                  color: "#fca5a5",
+                  fontSize: 13,
+                  lineHeight: 1.8,
+                }}
+              >
+                {jobStatus.failedSql}
+              </Typography>
+            </Box>
+          </>
+        )}
+
+        {/* ============================================= */}
+        {/* SUCCESS */}
+        {/* ============================================= */}
+
+        {lastResponse && !lastResponse.error && (
+          <>
+            <Typography
+              sx={{
+                color: "#4ade80",
+                mb: 1,
+              }}
+            >
+              {">"} EXECUTION SUCCESS
+            </Typography>
+
+            <Alert
+              severity="success"
+              icon={<CheckCircle sx={{ color: "white" }} />}
+              sx={{
+                mb: 3,
+                borderRadius: 3,
+                color: "white",
+              }}
+            >
+              <AlertTitle>SQL Executed Successfully</AlertTitle>
+
+              {lastResponse?.rows?.[0]?.RESULT ||
+                "Execution completed successfully"}
+            </Alert>
+          </>
+        )}
+
+        {/* ============================================= */}
+        {/* SUMMARY */}
+        {/* ============================================= */}
+
+        {jobStatus && (
+          <>
+            <Typography
+              sx={{
+                color: "#c084fc",
+                mb: 1,
+              }}
+            >
+              {">"} EXECUTION SUMMARY
+            </Typography>
+
+            <Box
+              sx={{
+                p: 2,
+
+                borderRadius: 2,
+
+                bgcolor: alpha(theme.palette.primary.main, 0.08),
+
+                border: "1px solid rgba(255,255,255,0.06)",
+              }}
+            >
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <CustomChip
+                  variant="outlined"
+                  label={`INSERT : ${jobStatus.insertCount || 0}`}
+                  color="success"
+                  size="small"
+                />
+
+                <CustomChip
+                  variant="outlined"
+                  label={`UPDATE : ${jobStatus.updateCount || 0}`}
+                  color="warning"
+                  size="small"
+                />
+
+                <CustomChip
+                  variant="outlined"
+                  label={`DELETE : ${jobStatus.deleteCount || 0}`}
+                  color="error"
+                  size="small"
+                />
+
+                <CustomChip
+                  variant="outlined"
+                  label={`OTHERS : ${jobStatus.otherCount || 0}`}
+                  color="info"
+                  size="small"
+                />
+              </Stack>
+            </Box>
+          </>
+        )}
+
+        {/* ============================================= */}
+        {/* RUNNING */}
+        {/* ============================================= */}
+
+        {jobStatus?.status === "RUNNING" && (
+          <Alert
+            severity="warning"
+            icon={<WarningAmber />}
+            sx={{
+              mt: 3,
+              borderRadius: 3,
+            }}
+          >
+            <AlertTitle>Execution In Progress</AlertTitle>
+            Total statements pending :{" "}
+            {Number(jobStatus?.totalStatements || 0) -
+              Number(jobStatus?.executedCount || 0)}
+          </Alert>
+        )}
+      </Box>
+    </Paper>
+  );
+};
+
+export default LogsPanel;
