@@ -1,230 +1,812 @@
-import React from "react";
+package com.fincore.transactions_service.service;
 
-import {
-  alpha,
-  Box,
-  Chip,
-  Paper,
-  Stack,
-  Typography,
-  useTheme,
-} from "@mui/material";
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 
-import { AutoAwesome, Storage, TableRows } from "@mui/icons-material";
+import java.io.File;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
 
-import { DataGrid, GridToolbar } from "@mui/x-data-grid";
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportServiceImpl implements AdminSupportService {
 
-const ResultGrid = ({
-  results,
-  loading,
-  paginationModel,
-  setPaginationModel,
-}) => {
-  const theme = useTheme();
+    private final JdbcTemplate jdbcTemplate;
 
-  const rows = results?.rows || [];
+    private final AdminSupportExecutor adminSupportExecutor;
 
-  const columns = results?.columns || [];
+    /**
+     * ============================================
+     * EXECUTE ADMIN SQL
+     * ============================================
+     */
+    @Override
+    public Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request) {
 
-  const total = results?.total || 0;
+        Instant start = Instant.now();
 
-  return (
-    <Paper
-      elevation={0}
-      sx={{
-        height: "100%",
-        borderRadius: 1,
-        overflow: "hidden",
-        border: `1px solid ${theme.palette.divider}`,
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      {/* ================================================= */}
-      {/* HEADER */}
-      {/* ================================================= */}
+        String clientIp = getClientIp(request);
 
-      <Box
-        sx={{
-          px: 2.5,
-          py: 1.5,
+        String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
 
-          background: "linear-gradient(135deg,#111827,#1f2937)",
+        Map<String, Object> response = new HashMap<>();
 
-          color: "white",
+        try {
 
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-        }}
-      >
-        <Stack
-          direction="row"
-          justifyContent="space-between"
-          alignItems="center"
-          flexWrap="wrap"
-          gap={1}
-        >
-          {/* LEFT */}
+            log.info("""
+                    
+                    ==================================================
+                    ADMIN SQL EXECUTION STARTED
+                    ==================================================
+                    userId={}
+                    clientIp={}
+                    page={}
+                    size={}
+                    sql={}
+                    ==================================================
+                    """, userId, clientIp, dto.getPage(), dto.getSize(), rawSql);
 
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Storage fontSize="small" />
+            // --------------------------------------------------
+            // CLEAN SCRIPT
+            // --------------------------------------------------
 
-            <Typography fontWeight={800}>Query Result Grid</Typography>
-          </Stack>
+            rawSql = rawSql.replaceAll(";\\s*$", "").trim();
 
-          {/* RIGHT */}
+            String[] statements = rawSql.split(";");
 
-          <Stack direction="row" spacing={1} flexWrap="wrap">
-            <Chip
-              size="small"
-              icon={<TableRows />}
-              label={`${rows.length} Rows`}
-              sx={{
-                bgcolor: "rgba(255,255,255,0.08)",
-                color: "white",
-              }}
-            />
+            List<String> cleanStatements = new ArrayList<>();
 
-            <Chip
-              size="small"
-              icon={<AutoAwesome />}
-              label={`${columns.length} Columns`}
-              sx={{
-                bgcolor: "rgba(255,255,255,0.08)",
-                color: "white",
-              }}
-            />
+            for (String stmt : statements) {
 
-            <Chip
-              size="small"
-              label={`Total : ${total}`}
-              sx={{
-                bgcolor: "rgba(255,255,255,0.08)",
-                color: "white",
-              }}
-            />
-          </Stack>
-        </Stack>
-      </Box>
+                String clean = stmt.replaceAll("(?m)^--.*", "").trim();
 
-      {/* ================================================= */}
-      {/* GRID */}
-      {/* ================================================= */}
+                if (!clean.isEmpty()) {
+                    cleanStatements.add(clean);
+                }
+            }
 
-      <Box
-        sx={{
-          flex: 1,
-          // minHeight: 500,
-        }}
-      >
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          rowCount={total}
-          loading={loading}
-          disableRowSelectionOnClick
-          paginationMode="server"
-          paginationModel={paginationModel}
-          onPaginationModelChange={setPaginationModel}
-          pageSizeOptions={[10, 25, 50, 100]}
-          slots={{
-            toolbar: GridToolbar,
-          }}
-          getRowId={(row, index) =>
-            row.ID ?? row.id ?? row.RN ?? `${index}-${JSON.stringify(row)}`
-          }
-          sx={{
-            border: "none",
+            if (cleanStatements.isEmpty()) {
 
-            fontSize: 13,
+                response.put("error", true);
+                response.put("message", "SQL cannot be empty");
 
-            bgcolor: "#ffffff",
+                return response;
+            }
+
+            // --------------------------------------------------
+            // SINGLE SELECT
+            // --------------------------------------------------
+
+            boolean isSingleSelect = cleanStatements.size() == 1 && cleanStatements.get(0).trim().toUpperCase().startsWith("SELECT");
+
+            int page = dto.getPage() != null ? dto.getPage() : 0;
+            int size = dto.getSize() != null ? dto.getSize() : 10;
+
+            if (isSingleSelect) {
+
+                String executableSelect = cleanStatements.get(0);
+
+                // -------------------------------
+                // COUNT
+                // -------------------------------
+
+                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
+
+                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+
+                if (total == null) {
+                    total = 0;
+                }
+
+                // -------------------------------
+                // PAGINATION
+                // -------------------------------
+
+                int startRow = page * size;
+                int endRow = startRow + size;
+
+                String paginatedSql = """
+                        SELECT * FROM
+                        (
+                            SELECT A.*, ROWNUM RN FROM
+                            (
+                        """ + executableSelect + """
+                            ) A
+                            WHERE ROWNUM <= ?
+                        )
+                        WHERE RN > ?
+                        """;
+
+                List<Map<String, Object>> rawRows = jdbcTemplate.queryForList(paginatedSql, endRow, startRow);
+
+                // -------------------------------
+                // CLEAN ORACLE TYPES
+                // -------------------------------
+
+                List<Map<String, Object>> rows = new ArrayList<>();
+
+                for (Map<String, Object> rawRow : rawRows) {
+
+                    Map<String, Object> cleanRow = new LinkedHashMap<>();
+
+                    for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
+
+                        Object value = entry.getValue();
+
+                        if (value instanceof oracle.sql.TIMESTAMP ts) {
+
+                            cleanRow.put(entry.getKey(), ts.timestampValue().toString());
+                        } else if (value instanceof java.sql.Timestamp ts) {
+
+                            cleanRow.put(entry.getKey(), ts.toLocalDateTime().toString());
+                        } else if (value instanceof java.sql.Clob clob) {
+
+                            cleanRow.put(entry.getKey(), clob.getSubString(1, (int) clob.length()));
+                        } else if (value instanceof java.io.InputStream) {
+
+                            cleanRow.put(entry.getKey(), "[BLOB DATA]");
+                        } else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) {
+
+                            cleanRow.put(entry.getKey(), value.toString());
+                        } else {
+
+                            cleanRow.put(entry.getKey(), value);
+                        }
+                    }
+
+                    rows.add(cleanRow);
+                }
+
+                // -------------------------------
+                // COLUMNS
+                // -------------------------------
+
+                List<Map<String, String>> columns = new ArrayList<>();
+
+                if (!rows.isEmpty()) {
+
+                    for (String key : rows.get(0).keySet()) {
+
+                        columns.add(Map.of("name", key));
+                    }
+                }
+
+                response.put("error", false);
+                response.put("columns", columns);
+                response.put("rows", rows);
+                response.put("total", total);
+                response.put("page", page);
+                response.put("size", size);
+
+                log.info("""
+                        
+                        SELECT EXECUTED
+                        | rows={}
+                        | total={}
+                        | executionTime={} ms
+                        """, rows.size(), total, Duration.between(start, Instant.now()).toMillis());
+
+                return response;
+            }
+
+            // --------------------------------------------------
+            // SCRIPT EXECUTION
+            // --------------------------------------------------
+
+            int successCount = 0;
+
+            for (int i = 0; i < cleanStatements.size(); i++) {
+
+                String sql = cleanStatements.get(i);
+
+                try {
+
+                    jdbcTemplate.execute(sql);
+
+                    successCount++;
+
+                    log.info("""
+                            
+                            STATEMENT EXECUTED
+                            | line={}
+                            | sql={}
+                            """, i + 1, sql);
+
+                } catch (Exception e) {
+
+                    log.error("""
+                            
+                            SCRIPT EXECUTION FAILED
+                            | line={}
+                            | sql={}
+                            | error={}
+                            """, i + 1, sql, e.getMessage(), e);
+
+                    response.put("error", true);
+                    response.put("message", "Error at statement " + (i + 1) + " : " + e.getMessage());
+
+                    response.put("failedSql", sql);
+
+                    return response;
+                }
+            }
+
+            response.put("error", false);
+            response.put("message", "Script executed successfully");
+            response.put("executedStatements", successCount);
+
+            response.put("rows", List.of(Map.of("RESULT", successCount + " statements executed successfully")));
+
+            response.put("columns", List.of(Map.of("name", "RESULT")));
+
+            response.put("total", 1);
+
+            log.info("""
+                    
+                    ==================================================
+                    SCRIPT EXECUTION COMPLETED
+                    ==================================================
+                    executedStatements={}
+                    executionTime={} ms
+                    ==================================================
+                    """, successCount, Duration.between(start, Instant.now()).toMillis());
+
+            return response;
+
+        } catch (Exception e) {
+
+            log.error("ADMIN SQL EXECUTION FAILED", e);
+
+            response.put("error", true);
+            response.put("message", e.getMessage());
+
+            return response;
+        }
+    }
+
+    /**
+     * ============================================
+     * UPLOAD SQL FILE
+     * ============================================
+     */
+    @Override
+    public Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request) {
+
+        Map<String, Object> response = new HashMap<>();
+
+        String clientIp = getClientIp(request);
+
+        try {
+
+            String jobId = UUID.randomUUID().toString();
 
             /**
-             * HEADER
+             * CREATE TEMP FILE
              */
-            "& .MuiDataGrid-columnHeaders": {
-              bgcolor: "#f8fafc",
-              borderBottom: "1px solid #e5e7eb",
-              fontWeight: 700,
-              minHeight: "52px !important",
-            },
-
-            "& .MuiDataGrid-columnHeaderTitle": {
-              fontWeight: 800,
-              color: "#111827",
-            },
+            File tempFile = File.createTempFile("admin_support_", ".sql");
 
             /**
-             * ROWS
+             * COPY UPLOAD TO TEMP FILE
              */
-            "& .MuiDataGrid-row": {
-              transition: "background-color .15s ease",
-            },
+            file.transferTo(tempFile);
 
-            "& .MuiDataGrid-row:hover": {
-              bgcolor: alpha(theme.palette.primary.main, 0.04),
-            },
-
-            "& .MuiDataGrid-cell": {
-              borderBottom: "1px solid #f1f5f9",
-
-              display: "flex",
-              alignItems: "center",
-            },
+            log.info("""
+                    
+                    ==================================================
+                    SQL FILE UPLOAD RECEIVED
+                    ==================================================
+                    userId={}
+                    clientIp={}
+                    fileName={}
+                    tempFile={}
+                    jobId={}
+                    ==================================================
+                    """, userId, clientIp, file.getOriginalFilename(), tempFile.getAbsolutePath(), jobId);
 
             /**
-             * FOOTER
+             * EXECUTE ASYNC
              */
-            "& .MuiDataGrid-footerContainer": {
-              borderTop: "1px solid #e5e7eb",
-              bgcolor: "#fafafa",
-            },
+            adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, clientIp);
+
+            response.put("jobId", jobId);
+            response.put("status", "STARTED");
+
+            return response;
+
+        } catch (Exception e) {
+
+            log.error("UPLOAD FAILED", e);
+
+            response.put("error", true);
+            response.put("message", e.getMessage());
+
+            return response;
+        }
+    }
+
+    /**
+     * ============================================
+     * JOB STATUS
+     * ============================================
+     */
+    @Override
+    public Map<String, Object> getJobStatus(String jobId) {
+
+        return AdminSupportExecutor.JOB_STATUS.getOrDefault(jobId, Map.of("status", "NOT_FOUND"));
+    }
+
+    /**
+     * ============================================
+     * INSERT EXECUTION LOG
+     * ============================================
+     */
+    private void insertExecutionLog(String jobId, String userId, String clientIp, String fileName, String executionType, String status, int totalStatements, int executedCount, int insertCount, int updateCount, int deleteCount, int otherCount, Integer failedStatementNumber, String failedSql, String exceptionType, String exceptionMessage, long executionSpeed, long elapsedSeconds, String sqlText) {
+
+        try {
+
+            jdbcTemplate.update("""
+                    INSERT INTO ADMIN_SUPPORT_LOG
+                    (
+                        ID,
+                        JOB_ID,
+                        USER_ID,
+                        CLIENT_IP,
+                        FILE_NAME,
+                        EXECUTION_TYPE,
+                        STATUS,
+                        TOTAL_STATEMENTS,
+                        EXECUTED_COUNT,
+                        INSERT_COUNT,
+                        UPDATE_COUNT,
+                        DELETE_COUNT,
+                        OTHER_COUNT,
+                        FAILED_STATEMENT_NUMBER,
+                        FAILED_SQL,
+                        EXCEPTION_TYPE,
+                        EXCEPTION_MESSAGE,
+                        EXECUTION_SPEED,
+                        ELAPSED_SECONDS,
+                        SQL_TEXT,
+                        CREATED_AT
+                    )
+                    VALUES
+                    (
+                        ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
+                    )
+                    """, jobId, userId == null ? "UNKNOWN" : userId, clientIp, fileName, executionType, status, totalStatements, executedCount, insertCount, updateCount, deleteCount, otherCount, failedStatementNumber, failedSql, exceptionType, exceptionMessage, executionSpeed, elapsedSeconds, sqlText);
+
+        } catch (Exception e) {
+
+            log.error("FAILED TO INSERT LOG", e);
+        }
+    }
+
+    /**
+     * ============================================
+     * CLIENT IP
+     * ============================================
+     */
+    private String getClientIp(HttpServletRequest request) {
+
+        String xfHeader = request.getHeader("X-Forwarded-For");
+
+        if (xfHeader == null || xfHeader.isEmpty() || "unknown".equalsIgnoreCase(xfHeader)) {
+
+            return request.getRemoteAddr();
+        }
+
+        return xfHeader.split(",")[0];
+    }
+}
+
+
+package com.fincore.transactions_service.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportExecutor {
+
+    /**
+     * LIVE JOB STATUS CACHE
+     */
+    public static final Map<String, Map<String, Object>> JOB_STATUS = new ConcurrentHashMap<>();
+    /**
+     * COMMIT BATCH SIZE
+     */
+    private static final int COMMIT_BATCH_SIZE = 1000;
+    private final JdbcTemplate jdbcTemplate;
+
+    /**
+     * ============================================
+     * EXECUTE SQL SCRIPT ASYNC
+     * ============================================
+     */
+    @Async("sqlTaskExecutor")
+    public void executeScriptAsync(File sqlFile, String jobId, String userId, String clientIp) {
+
+        Instant start = Instant.now();
+
+        long startedAt = System.currentTimeMillis();
+
+        int totalStatements = 0;
+
+        int executedCount = 0;
+
+        int insertCount = 0;
+
+        int updateCount = 0;
+
+        int deleteCount = 0;
+
+        int otherCount = 0;
+
+        int failedLine = 0;
+
+        String failedSql = null;
+
+        try {
+
+            log.info("""
+                    
+                    ==================================================
+                    SQL SCRIPT EXECUTION STARTED
+                    ==================================================
+                    jobId={}
+                    userId={}
+                    clientIp={}
+                    file={}
+                    batchCommitSize={}
+                    ==================================================
+                    """, jobId, userId, clientIp, sqlFile.getAbsolutePath(), COMMIT_BATCH_SIZE);
 
             /**
-             * TOOLBAR
+             * INITIAL JOB STATUS
              */
-            "& .MuiDataGrid-toolbarContainer": {
-              p: 1.2,
-              borderBottom: "1px solid #f1f5f9",
-              bgcolor: "#fcfcfc",
-            },
+            Map<String, Object> status = new ConcurrentHashMap<>();
+
+            status.put("jobId", jobId);
+            status.put("status", "RUNNING");
+            status.put("progress", 0);
+            status.put("executedCount", 0);
+            status.put("insertCount", 0);
+            status.put("updateCount", 0);
+            status.put("deleteCount", 0);
+            status.put("otherCount", 0);
+            status.put("startedAt", startedAt);
+            status.put("message", "Execution started");
+
+            JOB_STATUS.put(jobId, status);
 
             /**
-             * PAGINATION
+             * ============================================
+             * COUNT STATEMENTS
+             * ============================================
              */
-            "& .MuiTablePagination-root": {
-              color: "#374151",
-            },
+            try (BufferedReader counterReader = new BufferedReader(new FileReader(sqlFile))) {
+
+                String line;
+
+                while ((line = counterReader.readLine()) != null) {
+
+                    line = line.trim();
+
+                    if (line.isEmpty() || line.startsWith("--")) {
+
+                        continue;
+                    }
+
+                    if (line.endsWith(";")) {
+
+                        totalStatements++;
+                    }
+                }
+            }
+
+            status.put("totalStatements", totalStatements);
+
+            log.info("""
+                    
+                    ==================================================
+                    SQL STATEMENT COUNT COMPLETED
+                    ==================================================
+                    jobId={}
+                    totalStatements={}
+                    ==================================================
+                    """, jobId, totalStatements);
 
             /**
-             * REMOVE FOCUS BORDER
+             * ============================================
+             * EXECUTION
+             * ============================================
              */
-            "& .MuiDataGrid-cell:focus, & .MuiDataGrid-columnHeader:focus": {
-              outline: "none",
-            },
+            try (Connection connection = jdbcTemplate.getDataSource().getConnection();
 
-            "& .MuiDataGrid-cell:focus-within, & .MuiDataGrid-columnHeader:focus-within":
-              {
-                outline: "none",
-              },
+                 BufferedReader reader = new BufferedReader(new FileReader(sqlFile))) {
+
+                connection.setAutoCommit(false);
+
+                Statement statement = connection.createStatement();
+
+                StringBuilder sqlBuilder = new StringBuilder();
+
+                String line;
+
+                int lineNumber = 0;
+
+                while ((line = reader.readLine()) != null) {
+
+                    lineNumber++;
+
+                    line = line.trim();
+
+                    /**
+                     * SKIP EMPTY/COMMENT
+                     */
+                    if (line.isEmpty() || line.startsWith("--")) {
+
+                        continue;
+                    }
+
+                    sqlBuilder.append(line).append(" ");
+
+                    /**
+                     * SQL END
+                     */
+                    if (line.trim().endsWith(";")) {
+
+                        String sql = sqlBuilder.toString().trim();
+
+                        /**
+                         * REMOVE TRAILING ;
+                         * JDBC DOES NOT SUPPORT IT
+                         */
+                        while (sql.endsWith(";")) {
+
+                            sql = sql.substring(0, sql.length() - 1).trim();
+                        }
+
+                        sqlBuilder.setLength(0);
+
+                        failedSql = sql;
+
+                        failedLine = lineNumber;
+
+                        long queryStart = System.currentTimeMillis();
+
+                        /**
+                         * EXECUTE
+                         */
+                        statement.execute(sql);
+
+                        long queryEnd = System.currentTimeMillis();
+
+                        executedCount++;
+
+                        /**
+                         * QUERY TYPE COUNTS
+                         */
+                        String upperSql = sql.toUpperCase();
+
+                        if (upperSql.startsWith("INSERT")) {
+
+                            insertCount++;
+
+                        } else if (upperSql.startsWith("UPDATE")) {
+
+                            updateCount++;
+
+                        } else if (upperSql.startsWith("DELETE")) {
+
+                            deleteCount++;
+
+                        } else {
+
+                            otherCount++;
+                        }
+
+                        /**
+                         * COMMIT BATCH
+                         */
+                        if (executedCount % COMMIT_BATCH_SIZE == 0) {
+
+                            connection.commit();
+
+                            log.info("""
+                                    
+                                    ==================================================
+                                    BATCH COMMIT SUCCESS
+                                    ==================================================
+                                    jobId={}
+                                    executed={}
+                                    elapsed={} sec
+                                    ==================================================
+                                    """, jobId, executedCount, Duration.between(start, Instant.now()).toSeconds());
+                        }
+
+                        /**
+                         * ETA CALCULATION
+                         */
+                        long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+
+                        long avgPerStatement = executedCount == 0 ? 0 : Math.max(1, elapsedSeconds / executedCount);
+
+                        long remaining = totalStatements - executedCount;
+
+                        long etaSeconds = avgPerStatement * remaining;
+
+                        int progress = totalStatements == 0 ? 0 : (executedCount * 100) / totalStatements;
+
+                        /**
+                         * UPDATE LIVE STATUS
+                         */
+                        status.put("status", "RUNNING");
+                        status.put("progress", progress);
+                        status.put("executedCount", executedCount);
+                        status.put("insertCount", insertCount);
+                        status.put("updateCount", updateCount);
+                        status.put("deleteCount", deleteCount);
+                        status.put("otherCount", otherCount);
+                        status.put("elapsedSeconds", elapsedSeconds);
+                        status.put("etaSeconds", etaSeconds);
+                        status.put("currentLine", lineNumber);
+
+                        /**
+                         * DEBUG LOG
+                         */
+                        if (executedCount % 100 == 0) {
+
+                            log.info("""
+                                    
+                                    ==================================================
+                                    LIVE EXECUTION STATUS
+                                    ==================================================
+                                    jobId={}
+                                    progress={}%
+                                    executed={}
+                                    inserts={}
+                                    updates={}
+                                    deletes={}
+                                    others={}
+                                    currentLine={}
+                                    eta={} sec
+                                    queryTime={} ms
+                                    ==================================================
+                                    """, jobId, progress, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, etaSeconds, (queryEnd - queryStart));
+                        }
+                    }
+                }
+
+                /**
+                 * FINAL COMMIT
+                 */
+                connection.commit();
+
+                long totalElapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+
+                long executionSpeed = totalElapsedSeconds == 0 ? executedCount : executedCount / totalElapsedSeconds;
+
+                /**
+                 * FINAL STATUS
+                 */
+                status.put("status", "COMPLETED");
+                status.put("progress", 100);
+                status.put("executedCount", executedCount);
+                status.put("insertCount", insertCount);
+                status.put("updateCount", updateCount);
+                status.put("deleteCount", deleteCount);
+                status.put("otherCount", otherCount);
+                status.put("elapsedSeconds", totalElapsedSeconds);
+                status.put("executionSpeed", executionSpeed);
+                status.put("completed", true);
+                status.put("message", "Execution completed");
+
+                log.info("""
+                        
+                        ==================================================
+                        SQL SCRIPT EXECUTION COMPLETED
+                        ==================================================
+                        jobId={}
+                        totalStatements={}
+                        executed={}
+                        inserts={}
+                        updates={}
+                        deletes={}
+                        others={}
+                        elapsed={} sec
+                        executionSpeed={} stmt/sec
+                        ==================================================
+                        """, jobId, totalStatements, executedCount, insertCount, updateCount, deleteCount, otherCount, totalElapsedSeconds, executionSpeed);
+            }
+
+        } catch (Exception e) {
+
+            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+
+            Map<String, Object> failedStatus = JOB_STATUS.get(jobId);
+
+            if (failedStatus != null) {
+
+                failedStatus.put("status", "FAILED");
+                failedStatus.put("message", e.getMessage());
+                failedStatus.put("failedLine", failedLine);
+                failedStatus.put("failedSql", failedSql);
+                failedStatus.put("executedCount", executedCount);
+                failedStatus.put("insertCount", insertCount);
+                failedStatus.put("updateCount", updateCount);
+                failedStatus.put("deleteCount", deleteCount);
+                failedStatus.put("otherCount", otherCount);
+                failedStatus.put("elapsedSeconds", elapsedSeconds);
+            }
+
+            log.error("""
+                    
+                    ==================================================
+                    SQL EXECUTION FAILED
+                    ==================================================
+                    jobId={}
+                    failedLine={}
+                    failedSql={}
+                    executedCount={}
+                    elapsed={} sec
+                    exception={}
+                    ==================================================
+                    """, jobId, failedLine, failedSql, executedCount, elapsedSeconds, e.getMessage(), e);
+
+        } finally {
 
             /**
-             * SCROLLBAR
+             * DELETE TEMP FILE
              */
-            "& ::-webkit-scrollbar": {
-              width: 8,
-              height: 8,
-            },
+            try {
 
-            "& ::-webkit-scrollbar-thumb": {
-              background: "rgba(100,116,139,0.35)",
-              borderRadius: 20,
-            },
-          }}
-        />
-      </Box>
-    </Paper>
-  );
-};
+                if (sqlFile != null && sqlFile.exists()) {
 
-export default ResultGrid;
+                    boolean deleted = sqlFile.delete();
+
+                    log.info("""
+                            
+                            ==================================================
+                            TEMP FILE CLEANUP
+                            ==================================================
+                            file={}
+                            deleted={}
+                            ==================================================
+                            """, sqlFile.getAbsolutePath(), deleted);
+                }
+
+            } catch (Exception ex) {
+
+                log.error("FAILED TO DELETE TEMP FILE", ex);
+            }
+        }
+    }
+}
+
+
