@@ -28,13 +28,19 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      * ============================================
      */
     @Override
-    public Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request) {
+    public Map<String, Object> executeAdminSql(
+            AdminSupportDTO dto,
+            String userId,
+            HttpServletRequest request
+    ) {
 
         Instant start = Instant.now();
 
         String clientIp = getClientIp(request);
 
-        String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
+        String rawSql = dto.getSql() == null
+                ? ""
+                : dto.getSql().trim();
 
         Map<String, Object> response = new HashMap<>();
 
@@ -51,7 +57,13 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                     size={}
                     sql={}
                     ==================================================
-                    """, userId, clientIp, dto.getPage(), dto.getSize(), rawSql);
+                    """,
+                    userId,
+                    clientIp,
+                    dto.getPage(),
+                    dto.getSize(),
+                    rawSql
+            );
 
             /**
              * ============================================
@@ -66,7 +78,9 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
             for (String stmt : statements) {
 
-                String clean = stmt.replaceAll("(?m)^--.*", "").trim();
+                String clean = stmt
+                        .replaceAll("(?m)^--.*", "")
+                        .trim();
 
                 if (!clean.isEmpty()) {
 
@@ -87,12 +101,27 @@ public class AdminSupportServiceImpl implements AdminSupportService {
              * SINGLE SELECT
              * ============================================
              */
-            boolean isSingleSelect = cleanStatements.size() == 1 && cleanStatements.get(0).trim().toUpperCase().startsWith("SELECT");
+            boolean isSingleSelect =
+                    cleanStatements.size() == 1
+                            && cleanStatements
+                            .get(0)
+                            .trim()
+                            .toUpperCase()
+                            .startsWith("SELECT");
 
-            int page = dto.getPage() != null ? dto.getPage() : 0;
+            int page = dto.getPage() != null
+                    ? dto.getPage()
+                    : 0;
 
-            int size = dto.getSize() != null ? dto.getSize() : 10;
+            int size = dto.getSize() != null
+                    ? dto.getSize()
+                    : 10;
 
+            /**
+             * ============================================
+             * SELECT QUERY
+             * ============================================
+             */
             if (isSingleSelect) {
 
                 String executableSelect = cleanStatements.get(0);
@@ -100,9 +129,14 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                 /**
                  * COUNT
                  */
-                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
+                String countSql =
+                        "SELECT COUNT(*) FROM (" + executableSelect + ")";
 
-                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+                Integer total =
+                        jdbcTemplate.queryForObject(
+                                countSql,
+                                Integer.class
+                        );
 
                 if (total == null) {
 
@@ -128,17 +162,24 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                         WHERE RN > ?
                         """;
 
-                List<Map<String, Object>> rawRows = jdbcTemplate.queryForList(paginatedSql, endRow, startRow);
+                List<Map<String, Object>> rawRows =
+                        jdbcTemplate.queryForList(
+                                paginatedSql,
+                                endRow,
+                                startRow
+                        );
 
                 /**
                  * CLEAN ORACLE TYPES
                  */
-                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
+                List<Map<String, Object>> rows =
+                        adminSupportExecutor.cleanOracleRows(rawRows);
 
                 /**
                  * COLUMNS
                  */
-                List<Map<String, String>> columns = new ArrayList<>();
+                List<Map<String, String>> columns =
+                        new ArrayList<>();
 
                 if (!rows.isEmpty()) {
 
@@ -156,19 +197,56 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                 response.put("size", size);
 
                 /**
-                 * LOG
+                 * LOG SUCCESS
                  */
-                adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", 1, 1, 0, 0, 0, 1, null, null, null, null, 1, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+                adminSupportExecutor.insertExecutionLog(
+                        UUID.randomUUID().toString(),
+                        userId,
+                        clientIp,
+                        null,
+                        "COMMAND",
+                        "SUCCESS",
+
+                        1, // totalStatements
+                        1, // processedCount
+                        1, // executedCount
+
+                        0, // insertCount
+                        0, // updateCount
+                        0, // deleteCount
+                        1, // otherCount
+
+                        null,
+                        null,
+                        null,
+                        null,
+
+                        1,
+
+                        Duration
+                                .between(start, Instant.now())
+                                .toSeconds(),
+
+                        rawSql
+                );
 
                 return response;
             }
 
             /**
              * ============================================
-             * SCRIPT EXECUTION
+             * COMMAND EXECUTION
              * ============================================
              */
             int successCount = 0;
+
+            int insertCount = 0;
+
+            int updateCount = 0;
+
+            int deleteCount = 0;
+
+            int otherCount = 0;
 
             for (int i = 0; i < cleanStatements.size(); i++) {
 
@@ -180,12 +258,72 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
                     successCount++;
 
+                    String upperSql = sql.toUpperCase();
+
+                    if (upperSql.startsWith("INSERT")) {
+
+                        insertCount++;
+
+                    } else if (upperSql.startsWith("UPDATE")) {
+
+                        updateCount++;
+
+                    } else if (upperSql.startsWith("DELETE")) {
+
+                        deleteCount++;
+
+                    } else {
+
+                        otherCount++;
+                    }
+
                 } catch (Exception e) {
 
-                    adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", cleanStatements.size(), successCount, 0, 0, 0, successCount, i + 1, sql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+                    /**
+                     * LOG FAILURE
+                     */
+                    adminSupportExecutor.insertExecutionLog(
+                            UUID.randomUUID().toString(),
+                            userId,
+                            clientIp,
+                            null,
+                            "COMMAND",
+                            "FAILED",
+
+                            cleanStatements.size(),
+
+                            successCount, // processedCount
+                            successCount, // executedCount
+
+                            insertCount,
+                            updateCount,
+                            deleteCount,
+                            otherCount,
+
+                            i + 1,
+                            sql,
+
+                            e.getClass().getSimpleName(),
+                            e.getMessage(),
+
+                            0,
+
+                            Duration
+                                    .between(start, Instant.now())
+                                    .toSeconds(),
+
+                            rawSql
+                    );
 
                     response.put("error", true);
-                    response.put("message", "Error at statement " + (i + 1) + " : " + e.getMessage());
+
+                    response.put(
+                            "message",
+                            "Error at statement "
+                                    + (i + 1)
+                                    + " : "
+                                    + e.getMessage()
+                    );
 
                     response.put("failedSql", sql);
 
@@ -195,28 +333,113 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
             response.put("error", false);
 
-            response.put("message", "Script executed successfully");
+            response.put(
+                    "message",
+                    "Script executed successfully"
+            );
 
-            response.put("rows", List.of(Map.of("RESULT", successCount + " statements executed successfully")));
+            response.put(
+                    "rows",
+                    List.of(
+                            Map.of(
+                                    "RESULT",
+                                    successCount
+                                            + " statements executed successfully"
+                            )
+                    )
+            );
 
-            response.put("columns", List.of(Map.of("name", "RESULT")));
+            response.put(
+                    "columns",
+                    List.of(
+                            Map.of("name", "RESULT")
+                    )
+            );
 
             response.put("total", 1);
 
             /**
              * LOG SUCCESS
              */
-            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", successCount, successCount, 0, 0, 0, successCount, null, null, null, null, successCount, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+            adminSupportExecutor.insertExecutionLog(
+                    UUID.randomUUID().toString(),
+                    userId,
+                    clientIp,
+                    null,
+                    "COMMAND",
+                    "SUCCESS",
+
+                    successCount,
+
+                    successCount, // processedCount
+                    successCount, // executedCount
+
+                    insertCount,
+                    updateCount,
+                    deleteCount,
+                    otherCount,
+
+                    null,
+                    null,
+                    null,
+                    null,
+
+                    successCount,
+
+                    Duration
+                            .between(start, Instant.now())
+                            .toSeconds(),
+
+                    rawSql
+            );
 
             return response;
 
         } catch (Exception e) {
 
-            log.error("ADMIN SQL EXECUTION FAILED", e);
+            log.error(
+                    "ADMIN SQL EXECUTION FAILED",
+                    e
+            );
 
-            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", 0, 0, 0, 0, 0, 0, null, rawSql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+            /**
+             * LOG FAILURE
+             */
+            adminSupportExecutor.insertExecutionLog(
+                    UUID.randomUUID().toString(),
+                    userId,
+                    clientIp,
+                    null,
+                    "COMMAND",
+                    "FAILED",
+
+                    0,
+
+                    0, // processedCount
+                    0, // executedCount
+
+                    0,
+                    0,
+                    0,
+                    0,
+
+                    null,
+                    rawSql,
+
+                    e.getClass().getSimpleName(),
+                    e.getMessage(),
+
+                    0,
+
+                    Duration
+                            .between(start, Instant.now())
+                            .toSeconds(),
+
+                    rawSql
+            );
 
             response.put("error", true);
+
             response.put("message", e.getMessage());
 
             return response;
@@ -229,7 +452,11 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      * ============================================
      */
     @Override
-    public Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request) {
+    public Map<String, Object> uploadSqlFile(
+            MultipartFile file,
+            String userId,
+            HttpServletRequest request
+    ) {
 
         Map<String, Object> response = new HashMap<>();
 
@@ -237,13 +464,23 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
             String jobId = UUID.randomUUID().toString();
 
-            File tempFile = File.createTempFile("admin_support_", ".sql");
+            File tempFile =
+                    File.createTempFile(
+                            "admin_support_",
+                            ".sql"
+                    );
 
             file.transferTo(tempFile);
 
-            adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, getClientIp(request));
+            adminSupportExecutor.executeScriptAsync(
+                    tempFile,
+                    jobId,
+                    userId,
+                    getClientIp(request)
+            );
 
             response.put("jobId", jobId);
+
             response.put("status", "STARTED");
 
             return response;
@@ -251,24 +488,34 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         } catch (Exception e) {
 
             response.put("error", true);
+
             response.put("message", e.getMessage());
 
             return response;
         }
     }
 
+    /**
+     * ============================================
+     * JOB STATUS
+     * ============================================
+     */
     @Override
     public Map<String, Object> getJobStatus(String jobId) {
 
-        Map<String, Object> status = AdminSupportExecutor.JOB_STATUS.get(jobId);
+        Map<String, Object> status =
+                AdminSupportExecutor.JOB_STATUS.get(jobId);
 
         if (status == null) {
 
-            return Map.of("status", "NOT_FOUND");
+            return Map.of(
+                    "status",
+                    "NOT_FOUND"
+            );
         }
 
         /**
-         * RETURN NEW OBJECT
+         * RETURN COPY
          */
         return new HashMap<>(status);
     }
@@ -280,9 +527,12 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      */
     private String getClientIp(HttpServletRequest request) {
 
-        String xfHeader = request.getHeader("X-Forwarded-For");
+        String xfHeader =
+                request.getHeader("X-Forwarded-For");
 
-        if (xfHeader == null || xfHeader.isEmpty() || "unknown".equalsIgnoreCase(xfHeader)) {
+        if (xfHeader == null
+                || xfHeader.isEmpty()
+                || "unknown".equalsIgnoreCase(xfHeader)) {
 
             return request.getRemoteAddr();
         }
@@ -290,5 +540,3 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         return xfHeader.split(",")[0];
     }
 }
-
-
