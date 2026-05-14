@@ -2,7 +2,6 @@ package com.fincore.transactions_service.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -14,6 +13,9 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -23,19 +25,134 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AdminSupportExecutor {
 
     /**
+     * =================================================
      * LIVE JOB STATUS CACHE
+     * =================================================
      */
     public static final Map<String, Map<String, Object>> JOB_STATUS = new ConcurrentHashMap<>();
+
     /**
-     * COMMIT BATCH SIZE
+     * =================================================
+     * PERFORMANCE CONFIG
+     * =================================================
      */
-    private static final int COMMIT_BATCH_SIZE = 1000;
+    private static final int COMMIT_BATCH_SIZE = 10000;
+
+    private static final int STATUS_UPDATE_INTERVAL = 1;
+
+    private static final int LOG_INTERVAL = 10000;
+
     private final JdbcTemplate jdbcTemplate;
 
     /**
-     * ============================================
-     * EXECUTE SQL SCRIPT ASYNC
-     * ============================================
+     * =================================================
+     * CLEAN ORACLE TYPES
+     * =================================================
+     */
+    public List<Map<String, Object>> cleanOracleRows(List<Map<String, Object>> rawRows) {
+
+        List<Map<String, Object>> rows = new ArrayList<>();
+
+        for (Map<String, Object> rawRow : rawRows) {
+
+            Map<String, Object> cleanRow = new LinkedHashMap<>();
+
+            for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
+
+                Object value = entry.getValue();
+
+                try {
+
+                    if (value instanceof oracle.sql.TIMESTAMP ts) {
+
+                        cleanRow.put(entry.getKey(), ts.timestampValue().toString());
+
+                    } else if (value instanceof java.sql.Timestamp ts) {
+
+                        cleanRow.put(entry.getKey(), ts.toLocalDateTime().toString());
+
+                    } else if (value instanceof java.sql.Clob clob) {
+
+                        cleanRow.put(entry.getKey(), clob.getSubString(1, (int) clob.length()));
+
+                    } else if (value instanceof java.io.InputStream) {
+
+                        cleanRow.put(entry.getKey(), "[BLOB DATA]");
+
+                    } else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) {
+
+                        cleanRow.put(entry.getKey(), value.toString());
+
+                    } else {
+
+                        cleanRow.put(entry.getKey(), value);
+                    }
+
+                } catch (Exception e) {
+
+                    cleanRow.put(entry.getKey(), "[UNSUPPORTED]");
+                }
+            }
+
+            rows.add(cleanRow);
+        }
+
+        return rows;
+    }
+
+    /**
+     * =================================================
+     * INSERT EXECUTION LOG
+     * =================================================
+     */
+    public void insertExecutionLog(String jobId, String userId, String clientIp, String fileName, String executionType, String status, int totalStatements, int processedCount, int executedCount, int insertCount, int updateCount, int deleteCount, int otherCount, Integer failedStatementNumber, String failedSql, String exceptionType, String exceptionMessage, long executionSpeed, long elapsedSeconds, String sqlText) {
+
+        try {
+
+            jdbcTemplate.update("""
+                    INSERT INTO ADMIN_SUPPORT_LOG
+                    (
+                        ID,
+                        JOB_ID,
+                        USER_ID,
+                        CLIENT_IP,
+                        FILE_NAME,
+                        EXECUTION_TYPE,
+                        STATUS,
+                        TOTAL_STATEMENTS,
+                        PROCESSED_COUNT,
+                        EXECUTED_COUNT,
+                        INSERT_COUNT,
+                        UPDATE_COUNT,
+                        DELETE_COUNT,
+                        OTHER_COUNT,
+                        FAILED_STATEMENT_NUMBER,
+                        FAILED_SQL,
+                        EXCEPTION_TYPE,
+                        EXCEPTION_MESSAGE,
+                        EXECUTION_SPEED,
+                        ELAPSED_SECONDS,
+                        SQL_TEXT,
+                        CREATED_AT
+                    )
+                    VALUES
+                    (
+                        ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
+                    )
+                    """, jobId, userId, clientIp, fileName, executionType, status, totalStatements, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, failedStatementNumber, failedSql, exceptionType, exceptionMessage, executionSpeed, elapsedSeconds, sqlText);
+
+        } catch (Exception e) {
+
+            log.error("FAILED TO INSERT LOG", e);
+        }
+    }
+
+    /**
+     * =================================================
+     * EXECUTE SCRIPT ASYNC
+     * =================================================
      */
     @Async("sqlTaskExecutor")
     public void executeScriptAsync(File sqlFile, String jobId, String userId, String clientIp) {
@@ -45,6 +162,8 @@ public class AdminSupportExecutor {
         long startedAt = System.currentTimeMillis();
 
         int totalStatements = 0;
+
+        int processedCount = 0;
 
         int executedCount = 0;
 
@@ -71,32 +190,35 @@ public class AdminSupportExecutor {
                     userId={}
                     clientIp={}
                     file={}
-                    batchCommitSize={}
+                    batchSize={}
                     ==================================================
                     """, jobId, userId, clientIp, sqlFile.getAbsolutePath(), COMMIT_BATCH_SIZE);
 
             /**
-             * INITIAL JOB STATUS
+             * =================================================
+             * INITIAL STATUS
+             * =================================================
              */
-            Map<String, Object> status = new ConcurrentHashMap<>();
+            Map<String, Object> initialStatus = new ConcurrentHashMap<>();
 
-            status.put("jobId", jobId);
-            status.put("status", "RUNNING");
-            status.put("progress", 0);
-            status.put("executedCount", 0);
-            status.put("insertCount", 0);
-            status.put("updateCount", 0);
-            status.put("deleteCount", 0);
-            status.put("otherCount", 0);
-            status.put("startedAt", startedAt);
-            status.put("message", "Execution started");
+            initialStatus.put("jobId", jobId);
+            initialStatus.put("status", "RUNNING");
+            initialStatus.put("progress", 0);
+            initialStatus.put("processedCount", 0);
+            initialStatus.put("executedCount", 0);
+            initialStatus.put("insertCount", 0);
+            initialStatus.put("updateCount", 0);
+            initialStatus.put("deleteCount", 0);
+            initialStatus.put("otherCount", 0);
+            initialStatus.put("startedAt", startedAt);
+            initialStatus.put("message", "Execution started");
 
-            JOB_STATUS.put(jobId, status);
+            JOB_STATUS.put(jobId, initialStatus);
 
             /**
-             * ============================================
+             * =================================================
              * COUNT STATEMENTS
-             * ============================================
+             * =================================================
              */
             try (BufferedReader counterReader = new BufferedReader(new FileReader(sqlFile))) {
 
@@ -118,22 +240,10 @@ public class AdminSupportExecutor {
                 }
             }
 
-            status.put("totalStatements", totalStatements);
-
-            log.info("""
-                    
-                    ==================================================
-                    SQL STATEMENT COUNT COMPLETED
-                    ==================================================
-                    jobId={}
-                    totalStatements={}
-                    ==================================================
-                    """, jobId, totalStatements);
-
             /**
-             * ============================================
+             * =================================================
              * EXECUTION
-             * ============================================
+             * =================================================
              */
             try (Connection connection = jdbcTemplate.getDataSource().getConnection();
 
@@ -148,6 +258,8 @@ public class AdminSupportExecutor {
                 String line;
 
                 int lineNumber = 0;
+
+                int batchCounter = 0;
 
                 while ((line = reader.readLine()) != null) {
 
@@ -168,14 +280,10 @@ public class AdminSupportExecutor {
                     /**
                      * SQL END
                      */
-                    if (line.trim().endsWith(";")) {
+                    if (line.endsWith(";")) {
 
                         String sql = sqlBuilder.toString().trim();
 
-                        /**
-                         * REMOVE TRAILING ;
-                         * JDBC DOES NOT SUPPORT IT
-                         */
                         while (sql.endsWith(";")) {
 
                             sql = sql.substring(0, sql.length() - 1).trim();
@@ -187,22 +295,50 @@ public class AdminSupportExecutor {
 
                         failedLine = lineNumber;
 
-                        long queryStart = System.currentTimeMillis();
+                        processedCount++;
 
-                        /**
-                         * EXECUTE
-                         */
-                        statement.execute(sql);
-
-                        long queryEnd = System.currentTimeMillis();
-
-                        executedCount++;
-
-                        /**
-                         * QUERY TYPE COUNTS
-                         */
                         String upperSql = sql.toUpperCase();
 
+                        boolean isDDL = upperSql.startsWith("CREATE") || upperSql.startsWith("ALTER") || upperSql.startsWith("DROP") || upperSql.startsWith("TRUNCATE");
+
+                        /**
+                         * =================================================
+                         * EXECUTION
+                         * =================================================
+                         */
+                        if (isDDL) {
+
+                            statement.execute(sql);
+
+                            connection.commit();
+
+                            executedCount++;
+
+                        } else {
+
+                            statement.addBatch(sql);
+
+                            batchCounter++;
+
+                            executedCount++;
+
+                            if (batchCounter >= COMMIT_BATCH_SIZE) {
+
+                                statement.executeBatch();
+
+                                connection.commit();
+
+                                statement.clearBatch();
+
+                                batchCounter = 0;
+                            }
+                        }
+
+                        /**
+                         * =================================================
+                         * TYPE COUNTS
+                         * =================================================
+                         */
                         if (upperSql.startsWith("INSERT")) {
 
                             insertCount++;
@@ -221,55 +357,70 @@ public class AdminSupportExecutor {
                         }
 
                         /**
-                         * COMMIT BATCH
+                         * =================================================
+                         * LIVE STATUS UPDATE
+                         * =================================================
                          */
-                        if (executedCount % COMMIT_BATCH_SIZE == 0) {
+                        if (processedCount % STATUS_UPDATE_INTERVAL == 0 || processedCount == totalStatements) {
 
-                            connection.commit();
+                            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
 
-                            log.info("""
-                                    
-                                    ==================================================
-                                    BATCH COMMIT SUCCESS
-                                    ==================================================
-                                    jobId={}
-                                    executed={}
-                                    elapsed={} sec
-                                    ==================================================
-                                    """, jobId, executedCount, Duration.between(start, Instant.now()).toSeconds());
+                            int progress = totalStatements == 0 ? 0 : (processedCount * 100) / totalStatements;
+
+                            long executionSpeed = elapsedSeconds == 0 ? processedCount : processedCount / Math.max(elapsedSeconds, 1);
+
+                            long avgTime = processedCount == 0 ? 0 : elapsedSeconds / Math.max(processedCount, 1);
+
+                            long etaSeconds = avgTime * (totalStatements - processedCount);
+
+                            /**
+                             * IMPORTANT:
+                             * CREATE NEW MAP
+                             * EVERY UPDATE
+                             */
+                            Map<String, Object> updatedStatus = new ConcurrentHashMap<>();
+
+                            updatedStatus.put("jobId", jobId);
+
+                            updatedStatus.put("status", "RUNNING");
+
+                            updatedStatus.put("progress", progress);
+
+                            updatedStatus.put("processedCount", processedCount);
+
+                            updatedStatus.put("executedCount", executedCount);
+
+                            updatedStatus.put("insertCount", insertCount);
+
+                            updatedStatus.put("updateCount", updateCount);
+
+                            updatedStatus.put("deleteCount", deleteCount);
+
+                            updatedStatus.put("otherCount", otherCount);
+
+                            updatedStatus.put("totalStatements", totalStatements);
+
+                            updatedStatus.put("elapsedSeconds", elapsedSeconds);
+
+                            updatedStatus.put("etaSeconds", etaSeconds);
+
+                            updatedStatus.put("executionSpeed", executionSpeed);
+
+                            updatedStatus.put("currentLine", lineNumber);
+
+                            updatedStatus.put("startedAt", startedAt);
+
+                            updatedStatus.put("message", "Processing " + processedCount + " / " + totalStatements);
+
+                            JOB_STATUS.put(jobId, updatedStatus);
                         }
 
                         /**
-                         * ETA CALCULATION
+                         * =================================================
+                         * LOGGING
+                         * =================================================
                          */
-                        long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
-
-                        long avgPerStatement = executedCount == 0 ? 0 : Math.max(1, elapsedSeconds / executedCount);
-
-                        long remaining = totalStatements - executedCount;
-
-                        long etaSeconds = avgPerStatement * remaining;
-
-                        int progress = totalStatements == 0 ? 0 : (executedCount * 100) / totalStatements;
-
-                        /**
-                         * UPDATE LIVE STATUS
-                         */
-                        status.put("status", "RUNNING");
-                        status.put("progress", progress);
-                        status.put("executedCount", executedCount);
-                        status.put("insertCount", insertCount);
-                        status.put("updateCount", updateCount);
-                        status.put("deleteCount", deleteCount);
-                        status.put("otherCount", otherCount);
-                        status.put("elapsedSeconds", elapsedSeconds);
-                        status.put("etaSeconds", etaSeconds);
-                        status.put("currentLine", lineNumber);
-
-                        /**
-                         * DEBUG LOG
-                         */
-                        if (executedCount % 100 == 0) {
+                        if (processedCount % LOG_INTERVAL == 0) {
 
                             log.info("""
                                     
@@ -278,116 +429,170 @@ public class AdminSupportExecutor {
                                     ==================================================
                                     jobId={}
                                     progress={}%
+                                    processed={}
                                     executed={}
                                     inserts={}
                                     updates={}
                                     deletes={}
                                     others={}
-                                    currentLine={}
-                                    eta={} sec
-                                    queryTime={} ms
                                     ==================================================
-                                    """, jobId, progress, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, etaSeconds, (queryEnd - queryStart));
+                                    """, jobId, (processedCount * 100) / totalStatements, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount);
                         }
                     }
                 }
 
                 /**
-                 * FINAL COMMIT
+                 * =================================================
+                 * FINAL BATCH EXECUTION
+                 * =================================================
                  */
-                connection.commit();
+                if (batchCounter > 0) {
+
+                    statement.executeBatch();
+
+                    connection.commit();
+
+                    statement.clearBatch();
+                }
 
                 long totalElapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
 
-                long executionSpeed = totalElapsedSeconds == 0 ? executedCount : executedCount / totalElapsedSeconds;
+                long executionSpeed = totalElapsedSeconds == 0 ? executedCount : executedCount / Math.max(totalElapsedSeconds, 1);
 
                 /**
+                 * =================================================
                  * FINAL STATUS
+                 * =================================================
                  */
-                status.put("status", "COMPLETED");
-                status.put("progress", 100);
-                status.put("executedCount", executedCount);
-                status.put("insertCount", insertCount);
-                status.put("updateCount", updateCount);
-                status.put("deleteCount", deleteCount);
-                status.put("otherCount", otherCount);
-                status.put("elapsedSeconds", totalElapsedSeconds);
-                status.put("executionSpeed", executionSpeed);
-                status.put("completed", true);
-                status.put("message", "Execution completed");
+                Map<String, Object> completedStatus = new ConcurrentHashMap<>();
 
-                log.info("""
-                        
-                        ==================================================
-                        SQL SCRIPT EXECUTION COMPLETED
-                        ==================================================
-                        jobId={}
-                        totalStatements={}
-                        executed={}
-                        inserts={}
-                        updates={}
-                        deletes={}
-                        others={}
-                        elapsed={} sec
-                        executionSpeed={} stmt/sec
-                        ==================================================
-                        """, jobId, totalStatements, executedCount, insertCount, updateCount, deleteCount, otherCount, totalElapsedSeconds, executionSpeed);
+                completedStatus.put("jobId", jobId);
+
+                completedStatus.put("status", "COMPLETED");
+
+                completedStatus.put("progress", 100);
+
+                completedStatus.put("processedCount", processedCount);
+
+                completedStatus.put("executedCount", executedCount);
+
+                completedStatus.put("insertCount", insertCount);
+
+                completedStatus.put("updateCount", updateCount);
+
+                completedStatus.put("deleteCount", deleteCount);
+
+                completedStatus.put("otherCount", otherCount);
+
+                completedStatus.put("totalStatements", totalStatements);
+
+                completedStatus.put("elapsedSeconds", totalElapsedSeconds);
+
+                completedStatus.put("executionSpeed", executionSpeed);
+
+                completedStatus.put("etaSeconds", 0);
+
+                completedStatus.put("currentLine", lineNumber);
+
+                completedStatus.put("startedAt", startedAt);
+
+                completedStatus.put("completed", true);
+
+                completedStatus.put("message", "Execution completed");
+
+                JOB_STATUS.put(jobId, completedStatus);
+
+                /**
+                 * =================================================
+                 * SUCCESS LOG
+                 * =================================================
+                 */
+                insertExecutionLog(jobId, userId, clientIp, sqlFile.getName(), "FILE", "SUCCESS",
+
+                        totalStatements, processedCount, executedCount,
+
+                        insertCount, updateCount, deleteCount, otherCount,
+
+                        null, null, null, null,
+
+                        executionSpeed, totalElapsedSeconds,
+
+                        null);
+
             }
 
         } catch (Exception e) {
 
             long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
 
-            Map<String, Object> failedStatus = JOB_STATUS.get(jobId);
+            /**
+             * =================================================
+             * FAILED STATUS
+             * =================================================
+             */
+            Map<String, Object> failedMap = new ConcurrentHashMap<>();
 
-            if (failedStatus != null) {
+            failedMap.put("jobId", jobId);
 
-                failedStatus.put("status", "FAILED");
-                failedStatus.put("message", e.getMessage());
-                failedStatus.put("failedLine", failedLine);
-                failedStatus.put("failedSql", failedSql);
-                failedStatus.put("executedCount", executedCount);
-                failedStatus.put("insertCount", insertCount);
-                failedStatus.put("updateCount", updateCount);
-                failedStatus.put("deleteCount", deleteCount);
-                failedStatus.put("otherCount", otherCount);
-                failedStatus.put("elapsedSeconds", elapsedSeconds);
-            }
+            failedMap.put("status", "FAILED");
 
-            log.error("""
-                    
-                    ==================================================
-                    SQL EXECUTION FAILED
-                    ==================================================
-                    jobId={}
-                    failedLine={}
-                    failedSql={}
-                    executedCount={}
-                    elapsed={} sec
-                    exception={}
-                    ==================================================
-                    """, jobId, failedLine, failedSql, executedCount, elapsedSeconds, e.getMessage(), e);
+            failedMap.put("message", e.getMessage());
+
+            failedMap.put("failedLine", failedLine);
+
+            failedMap.put("failedSql", failedSql);
+
+            failedMap.put("processedCount", processedCount);
+
+            failedMap.put("executedCount", executedCount);
+
+            failedMap.put("insertCount", insertCount);
+
+            failedMap.put("updateCount", updateCount);
+
+            failedMap.put("deleteCount", deleteCount);
+
+            failedMap.put("otherCount", otherCount);
+
+            failedMap.put("totalStatements", totalStatements);
+
+            failedMap.put("elapsedSeconds", elapsedSeconds);
+
+            JOB_STATUS.put(jobId, failedMap);
+
+            /**
+             * =================================================
+             * FAILURE LOG
+             * =================================================
+             */
+            insertExecutionLog(jobId, userId, clientIp, sqlFile.getName(), "FILE", "FAILED",
+
+                    totalStatements, processedCount, executedCount,
+
+                    insertCount, updateCount, deleteCount, otherCount,
+
+                    failedLine, failedSql,
+
+                    e.getClass().getSimpleName(), e.getMessage(),
+
+                    0, elapsedSeconds,
+
+                    null);
+
+            log.error("SQL EXECUTION FAILED", e);
 
         } finally {
 
             /**
+             * =================================================
              * DELETE TEMP FILE
+             * =================================================
              */
             try {
 
                 if (sqlFile != null && sqlFile.exists()) {
 
-                    boolean deleted = sqlFile.delete();
-
-                    log.info("""
-                            
-                            ==================================================
-                            TEMP FILE CLEANUP
-                            ==================================================
-                            file={}
-                            deleted={}
-                            ==================================================
-                            """, sqlFile.getAbsolutePath(), deleted);
+                    sqlFile.delete();
                 }
 
             } catch (Exception ex) {
@@ -397,3 +602,4 @@ public class AdminSupportExecutor {
         }
     }
 }
+
