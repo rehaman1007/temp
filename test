@@ -1,259 +1,50 @@
-import axios from "axios";
-import { resolveConfig } from "../config/EnvironmentConfig"; // Ensure this path is correct
-import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
-import { parseJwt } from "../utils/EncryptionUtilities";
-import { encryptPayload , decryptPayload } from "../utils/cryptoUtil";
-
-let store; // Will hold the Redux store reference
-
-// Inject store from App.js or index.js to avoid circular dependency
-export const injectStore = (_store) => {
-  store = _store;
-};
-
-// Create a Singleton Axios Instance
-const api = axios.create({
-  baseURL: "", // Base URL
-  withCredentials: true, // IMPORTANT: Allows sending/receiving HttpOnly Cookies
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
-
-// --- Request Interceptor ---
-api.interceptors.request.use(
-  async(config) => {
-    // 1. Get Token from Redux Store
-    const state = store?.getState();
-    const token = state?.auth?.token;
-
-    // 2. Attach Authorization Header
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-
-    // 3. Attach Context Header (X-Request-Type) if passed in config
-    // The hook will pass this in, or defaults to '*'
-    if (!config.headers["X-Request-Type"]) {
-      config.headers["X-Request-Type"] = "*";
-    }
-
-    // 4. Encrypt POST/PUT/PATCH request payloads
-
-    const excludedUrls = [
-      "/login",
-      "/check-user",
-    ];
-
-    const shouldSkipEncryption =
-      excludedUrls.some((url) =>
-        config.url?.includes(url)
-      );
-
-    if (
-      !shouldSkipEncryption &&
-      ["post", "put", "patch"].includes(
-        config.method?.toLowerCase()
-      ) &&
-      config.data &&
-      !(config.data instanceof FormData)
-    ) {
-      const sessionKey =
-        localStorage.getItem(
-          "payloadEncryptionKey"
-        );
-
-      if (sessionKey) {
-        const encryptedString =
-          await encryptPayload(
-            config.data,
-            sessionKey
-          );
-
-        config.data = encryptedString;
-
-        config.headers[
-          "X-Encrypted-Payload"
-        ] = "true";
-
-        config.headers[
-          "Content-Type"
-        ] = "application/json";
-      }
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
-
-// --- Response Interceptor ---
-let isRefreshing = false;
-let failedQueue = [];
-
-const processQueue = (error, token = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
-};
-
-// api.interceptors.response.use(
-//   (response) => {
-//     return response;
-//   },
-api.interceptors.response.use(
-  async (response) => {
-
-    const isEncrypted =
-      response.headers["x-encrypted-response"] ===
-      "true";
-
-    if (
-      isEncrypted &&
-      response.data 
-    ) {
-      const sessionKey =
-        localStorage.getItem(
-          "payloadEncryptionKey"
-        );
-
-      if (sessionKey) {
-        try {
-          const decryptedJsonString =
-            await decryptPayload(
-              response.data.encryptedResponse,
-              sessionKey
-            );
-
-          response.data = JSON.parse(
-            decryptedJsonString
-          );
-          console.log("decrypted reponse:",response.data);
-        } catch (error) {
-          console.error(
-            "Failed to decrypt response",
-            error
-          );
-
-          return Promise.reject(error);
-        }
-      }
-    }
-
-    return response;
-  },
-
-  async (error) => {
-    const originalRequest = error.config;
-
-    // Safety check to prevent infinite loops
-    if (!originalRequest || originalRequest._retryCount > 2) {
-      return Promise.reject(error);
-    }
-
-    // Extract Error Details
-    const status = error.response?.status;
-    const errorCode = error.response?.data?.error || error.response?.data?.code;
-
-    // ---------------------------------------------------------
-    // SCENARIO 1: Concurrent Login / Session Invalidated
-    // ---------------------------------------------------------
-    if (
-      status === 401 &&
-      (errorCode === "CONCURRENT_LOGIN" ||
-        errorCode === "SESSION_EXPIRED" ||
-        errorCode === "INVALID_TOKEN")
-    ) {
-      // Do NOT attempt refresh. The session is dead.
-      // We dispatch a custom event that AuthContext listens to for the Dialog
-      window.dispatchEvent(
-        new CustomEvent("auth:session-expired", {
-          detail: { reason: errorCode },
-        })
-      );
-
-      // Clear local state immediately
-      store.dispatch(logoutSuccess());
-      return Promise.reject(error);
-    }
-
-    // ---------------------------------------------------------
-    // SCENARIO 2: Access Token Expired (Try Refresh)
-    // ---------------------------------------------------------
-    if (
-      status === 401 &&
-      errorCode === "TOKEN_EXPIRED" &&
-      !originalRequest._retry
-    ) {
-      if (isRefreshing) {
-        // If already refreshing, queue this request
-        return new Promise(function (resolve, reject) {
-          failedQueue.push({
-            resolve: (token) => {
-              originalRequest.headers["Authorization"] = "Bearer " + token;
-              resolve(api(originalRequest));
-            },
-            reject: (err) => {
-              reject(err);
-            },
-          });
-        });
-      }
-
-      originalRequest._retry = true;
-      isRefreshing = true;
-
-      try {
-        // Call Backend Refresh Endpoint
-        // Note: We don't send the refresh token in body; backend reads the Cookie
-        const response = await api.post(
-          `${resolveConfig("/LS") || ""}/auth/refresh-token`
-        );
-
-        // const { accessToken } = response?.data?.data || "";
-        const { accessToken, payloadEncryptionKey } = response?.data?.data || {};
-
-        if (payloadEncryptionKey) {
-        localStorage.setItem(
-          "payloadEncryptionKey",
-          payloadEncryptionKey
-        );
-      }
-
-        if (accessToken) {
-          // 1. Update Redux
-          const user = parseJwt(accessToken);
-          store.dispatch(tokenRefreshed({ token: accessToken, user }));
-
-          // 2. Process Queue
-          processQueue(null, accessToken);
-
-          // 3. Retry Original Request
-          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
-          return api(originalRequest);
-        } else {
-          throw new Error("No access token returned");
-        }
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        store.dispatch(logoutSuccess());
-        window.dispatchEvent(
-          new CustomEvent("auth:session-expired", {
-            detail: { reason: "SESSION_EXPIRED" },
-          })
-        );
-        return Promise.reject(refreshError);
-      } finally {
-        isRefreshing = false;
-      }
-    }
-
-    return Promise.reject(error);
-  }
-);
-
-export default api;
+2026-05-18 13:24:10.521 INFO  [http-nio-4000-exec-7] c.f.c.l.MdcLoggingFilter: API Execution Completed - Method: GET | URL: http://10.0.19.203:4000/api/admin-support/job-status/5b23a398-12d6-4b20-b3a4-e36aff6db4fa | Status: 200 
+{"@timestamp":"2026-05-18T13:24:10.5214008+05:30","level":"INFO","service":"TransactionsService","traceId":"8bb97c7c-57ea-4cee-b9de-2ff968d65ef8","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/job-status/5b23a398-12d6-4b20-b3a4-e36aff6db4fa","class":"c.f.c.logging.MdcLoggingFilter","message":"API Execution Completed - Method: GET | URL: http://10.0.19.203:4000/api/admin-support/job-status/5b23a398-12d6-4b20-b3a4-e36aff6db4fa | Status: 200","stack_trace":""}
+2026-05-18 13:24:11.848 WARN  [SQL-EXECUTOR-1] c.z.h.p.ProxyConnection: HikariPool-8 - Connection oracle.jdbc.driver.T4CConnection@65a760ca marked as broken because of an exception closing open statements during Connection.close() 
+{"@timestamp":"2026-05-18T13:24:11.8483798+05:30","level":"WARN","service":"TransactionsService","traceId":"","userId":"","clientIp":"","apiPath":"","class":"com.zaxxer.hikari.pool.ProxyConnection","message":"HikariPool-8 - Connection oracle.jdbc.driver.T4CConnection@65a760ca marked as broken because of an exception closing open statements during Connection.close()","stack_trace":""}
+2026-05-18 13:24:11.930 ERROR [SQL-EXECUTOR-1] c.f.t.s.AdminSupportExecutor: SQL EXECUTION FAILED 
+java.sql.BatchUpdateException: error occurred during batching: IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
+	at oracle.jdbc.driver.OracleStatement.executeLargeBatch(OracleStatement.java:5452)
+	at oracle.jdbc.driver.OracleStatement.executeBatch(OracleStatement.java:5327)
+	at oracle.jdbc.driver.OracleStatementWrapper.executeBatch(OracleStatementWrapper.java:261)
+	at com.zaxxer.hikari.pool.ProxyStatement.executeBatch(ProxyStatement.java:127)
+	at com.zaxxer.hikari.pool.HikariProxyStatement.executeBatch(HikariProxyStatement.java)
+	at com.fincore.transactions_service.service.AdminSupportExecutor.executeScriptAsync(AdminSupportExecutor.java:329)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:163)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.interceptor.ExposeInvocationInterceptor.invoke(ExposeInvocationInterceptor.java:97)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.aspectj.MethodInvocationProceedingJoinPoint.proceed(MethodInvocationProceedingJoinPoint.java:89)
+	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.lambda$applyResilience$0(GlobalResilienceAspect.java:56)
+	at io.github.resilience4j.retry.Retry.lambda$decorateSupplier$5(Retry.java:301)
+	at io.github.resilience4j.circuitbreaker.CircuitBreaker.lambda$decorateSupplier$5(CircuitBreaker.java:194)
+	at com.fincore.commonutilities.aspect.GlobalResilienceAspect.applyResilience(GlobalResilienceAspect.java:75)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethodWithGivenArgs(AbstractAspectJAdvice.java:637)
+	at org.springframework.aop.aspectj.AbstractAspectJAdvice.invokeAdviceMethod(AbstractAspectJAdvice.java:627)
+	at org.springframework.aop.aspectj.AspectJAroundAdvice.invoke(AspectJAroundAdvice.java:71)
+	at org.springframework.aop.framework.ReflectiveMethodInvocation.proceed(ReflectiveMethodInvocation.java:184)
+	at org.springframework.aop.framework.CglibAopProxy$CglibMethodInvocation.proceed(CglibAopProxy.java:768)
+	at org.springframework.aop.interceptor.AsyncExecutionInterceptor.lambda$invoke$0(AsyncExecutionInterceptor.java:113)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:317)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1575)
+{"@timestamp":"2026-05-18T13:24:11.9306592+05:30","level":"ERROR","service":"TransactionsService","traceId":"","userId":"","clientIp":"","apiPath":"","class":"c.f.t.service.AdminSupportExecutor","message":"SQL EXECUTION FAILED","stack_trace":"java.sql.BatchUpdateException: error occurred during batching: IO Error: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond\r\n\tat oracle.jdbc.driver.OracleStatement.executeLargeBatch(OracleStatement.java:5452)\r\n\tat oracle.jdbc.driver.OracleStatement.executeBatch(OracleStatement.java:5327)\r\n\tat oracle.jdbc.driver.OracleStatementWrapper.executeBatch(OracleStatementWrapper.java:261)\r\n\tat com.zaxxer.hikari.pool.ProxyStatement.executeBatch(ProxyStatement.java:127)\r\n\tat com.zaxxer.hikari.pool.HikariProxyStatement.executeBatch(HikariProxyStatement.java)\r\n\tat com.fincore.transactions_service.service.AdminSupportExecutor.executeScriptAsync(AdminSupportExecutor.java:329)\r\n\tat java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)\r\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\r\n\tat org.springframework.aop.support.AopUtils.invokeJoinpointUsingReflection(AopUtils.java:354)\r\n\tat org.springframework.aop.framework.ReflectiveMethodInvocation.invokeJoinpoint(ReflectiveMethodInvocation.java:196)\r\n"}
+2026-05-18 13:24:12.507 INFO  [http-nio-4000-exec-8] c.f.t.c.AdminSupportController: 
+==================================================
+JOB STATUS REQUEST
+==================================================
+userId=1015698
+jobId=5b23a398-12d6-4b20-b3a4-e36aff6db4fa
+==================================================
+ 
+{"@timestamp":"2026-05-18T13:24:12.507954+05:30","level":"INFO","service":"TransactionsService","traceId":"9caed9a8-f27b-48a2-ac81-5554d1161386","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/job-status/5b23a398-12d6-4b20-b3a4-e36aff6db4fa","class":"c.f.t.controller.AdminSupportController","message":"\n==================================================\nJOB STATUS REQUEST\n==================================================\nuserId=1015698\njobId=5b23a398-12d6-4b20-b3a4-e36aff6db4fa\n==================================================\n","stack_trace":""}
+2026-05-18 13:24:12.511 INFO  [http-nio-4000-exec-8] c.f.c.l.MdcLoggingFilter: API Execution Completed - Method: GET | URL: http://10.0.19.203:4000/api/admin-support/job-status/5b23a398-12d6-4b20-b3a4-e36aff6db4fa | Status: 200 
+{"@timestamp":"2026-05-18T13:24:12.5110784+05:30","level":"INFO","service":"TransactionsService","traceId":"9caed9a8-f27b-48a2-ac81-5554d1161386","userId":"1015698","clientIp":"","apiPath":"/api/admin-support/job-status/5b23a398-12d6-4b20-b3a4-e36aff6db4fa","class":"c.f.c.logging.MdcLoggingFilter","message":"API Execution Completed - Method: GET | URL: http://10.0.19.203:4000/api/admin-support/job-status/5b23a398-12d6-4b20-b3a4-e36aff6db4fa | Status: 200","stack_trace":""}
