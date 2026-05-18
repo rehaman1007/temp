@@ -1,385 +1,320 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import {
-  Alert,
   Box,
   Button,
   Chip,
-  Paper,
+  CircularProgress,
+  Divider,
+  IconButton,
   Stack,
-  Tab,
-  Tabs,
+  TextField,
+  Tooltip,
   Typography,
   useTheme,
 } from "@mui/material";
-import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
-import { useMutation } from "@tanstack/react-query";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import CommandPanel from "./components/CommandPanel";
-import UploadScript from "./components/UploadScript";
-import ResultGrid from "./components/ResultGrid";
-import LogsPanel from "./components/LogsPanel";
-import ConfirmDialog from "./components/ConfirmDialog";
+import {
+  CleaningServices,
+  ContentCopy,
+  PlayArrow,
+  Terminal,
+  Timer,
+} from "@mui/icons-material";
+import CustomChip from "../../../utils/CustomChip";
 
-const AdminSupport = () => {
+const quickCommands = [
+  "SELECT * FROM USERS",
+  "SELECT * FROM ADMIN_SUPPORT_LOG",
+  "SELECT SYSDATE FROM DUAL",
+  "COMMIT",
+  "ROLLBACK",
+  "SELECT COUNT(*) FROM USERS",
+];
+
+const CommandPanel = ({
+  query,
+  setQuery,
+  onExecute,
+  loading,
+  onDangerousExecute,
+}) => {
   const theme = useTheme();
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
 
-  const [mainTab, setMainTab] = useState(0);
-  const [outputTab, setOutputTab] = useState(0);
-  const [query, setQuery] = useState("SELECT * FROM ADMIN_SUPPORT_LOG");
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [lastResponse, setLastResponse] = useState(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
-
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 10,
-  });
-
-  // QUERY TYPE
+  /**
+   * QUERY TYPE
+   */
   const isSelect = useMemo(() => {
     const q = query.trim().toUpperCase();
+
     return q.startsWith("SELECT") || q.startsWith("WITH");
   }, [query]);
 
-  // RESET
-  const resetScreen = () => {
-    setQuery("");
-    setSelectedFile(null);
-    setJobId(null);
-    setJobStatus(null);
-    setLastResponse(null);
-    setResults({
-      rows: [],
-      columns: [],
-      total: 0,
-    });
-    setPaginationModel({
-      page: 0,
-      pageSize: 10,
-    });
-    setOutputTab(0);
-    showSnackbar("Workspace reset completed", "success");
-  };
+  const isDangerous = useMemo(() => {
+    const q = query.trim().toUpperCase();
 
-  // EXECUTE SQL
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      return await callApi(
-        "/TS/admin-support/admin-execute",
-        {
-          sql,
-          page,
-          size,
-        },
-        "POST",
-      );
-    },
+    return ["DELETE", "DROP", "TRUNCATE", "ALTER"].some((x) => q.startsWith(x));
+  }, [query]);
 
-    onSuccess: (data) => {
-      setLastResponse(data);
-
-      if (data?.error) {
-        setOutputTab(1);
-
-        return;
-      }
-
-      if (isSelect) {
-        const columns = (data?.columns || []).map((col) => ({
-          field: col.name,
-          headerName: col.name,
-          flex: 1,
-          minWidth: 180,
-        }));
-
-        setResults({
-          rows: data?.rows || [],
-          columns,
-          total: data?.total || 0,
-        });
-
-        setOutputTab(0);
-      } else {
-        setOutputTab(1);
-      }
-    },
-
-    onError: (e) => {
-      setLastResponse({
-        error: true,
-        message: e?.message || "Execution failed",
-      });
-
-      setOutputTab(1);
-    },
-  });
-
-  // HANDLE EXECUTE
-  const handleExecute = useCallback(
-    (reset = false) => {
-      if (!query.trim()) {
-        showSnackbar("Enter SQL query", "warning");
-
-        return;
-      }
-
-      const page = reset ? 0 : paginationModel.page;
-
-      if (reset) {
-        setPaginationModel((p) => ({
-          ...p,
-          page: 0,
-        }));
-      }
-
-      executeSql({
-        sql: query,
-        page,
-        size: paginationModel.pageSize,
-      });
-    },
-    [
-      executeSql,
-      paginationModel.page,
-      paginationModel.pageSize,
-      query,
-      showSnackbar,
-    ],
-  );
-
-  // PAGINATION
-  useEffect(() => {
-    if (results.columns.length > 0 && isSelect) {
-      handleExecute();
-    }
-  }, [
-    handleExecute,
-    isSelect,
-    paginationModel.page,
-    paginationModel.pageSize,
-    results.columns.length,
-  ]);
-
-  // FILE UPLOAD
-  const handleUpload = async (file) => {
-    try {
-      if (!file) {
-        showSnackbar("Choose SQL file", "warning");
-        return;
-      }
-
-      const formData = new FormData();
-      formData.append("file", file);
-      const data = await callApi(
-        "/TS/admin-support/upload-script",
-        formData,
-        "POST",
-        "json",
-        "multipart/form-data",
-      );
-
-      if (data?.error) {
-        showSnackbar(data.message, "error");
-        return;
-      }
-
-      setJobId(data.jobId);
-      setOutputTab(1);
-      showSnackbar("Execution started", "success");
-    } catch (e) {
-      showSnackbar(e.message || "Upload failed", "error");
-    }
-  };
-
-  // JOB POLLING
-  useEffect(() => {
-    if (!jobId) return;
-
-    const interval = setInterval(async () => {
-      try {
-        const data = await callApi(
-          `/TS/admin-support/job-status/${jobId}`,
-          {},
-          "GET",
-        );
-
-        setJobStatus(data);
-
-        if (data.status === "COMPLETED" || data.status === "FAILED") {
-          clearInterval(interval);
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }, 2000);
-
-    return () => clearInterval(interval);
-  }, [callApi, jobId]);
-
-  // LEAVE WARNING
-  useEffect(() => {
-    const active = jobStatus?.status === "RUNNING";
-
-    const beforeUnload = (e) => {
-      if (!active) return;
-
+  /**
+   * SHORTCUT
+   */
+  const handleKeyDown = (e) => {
+    if (e.ctrlKey && e.key === "Enter") {
       e.preventDefault();
 
-      e.returnValue = "SQL execution is still running.";
-    };
+      if (isDangerous) {
+        onDangerousExecute?.();
+      } else {
+        onExecute?.();
+      }
+    }
+  };
 
-    window.addEventListener("beforeunload", beforeUnload);
-
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [jobStatus]);
+  /**
+   * COPY
+   */
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(query);
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   return (
     <Box
       sx={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
+        borderRadius: 3,
         overflow: "hidden",
-        p: 2,
-        gap: 1.5,
+        border: `1px solid ${theme.palette.divider}`,
+        bgcolor: "#0b1120",
       }}
     >
       {/* HEADER */}
-      <Paper
-        elevation={0}
+      <Box
         sx={{
-          px: 3,
-          py: 1,
-          borderBottom: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          borderRadius: 1,
-          bgcolor: theme.palette.background.paper,
+          px: 2,
+          py: 1.2,
+          bgcolor: "#111827",
+          color: "white",
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
         }}
       >
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Storage color="primary" />
-          <Box>
-            <Typography
-              variant="subtitle2"
-              fontWeight={800}
-              sx={{ letterSpacing: 0.5 }}
-            >
-              FINCORE ADMIN SUPPORT
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              Advanced SQL Console & Script Executor are Connected and ready for
-              excecution
-            </Typography>
-          </Box>
-        </Stack>
-
-        <Stack direction="row" spacing={2} flexWrap="wrap">
-          <Button
-            variant="outlined"
-            startIcon={<Refresh />}
-            onClick={resetScreen}
-          >
-            Reset Workspace
-          </Button>
-        </Stack>
-      </Paper>
-
-      {/* MAIN TABS */}
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-        }}
-      >
-        <Tabs
-          value={mainTab}
-          onChange={(e, v) => setMainTab(v)}
-          variant="fullWidth"
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          flexWrap="wrap"
+          gap={1}
         >
-          <Tab icon={<Terminal />} label="SQL Console" />
+          {/* LEFT */}
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Box
+              sx={{
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                bgcolor: "#22c55e",
+                boxShadow: "0 0 12px #22c55e",
+                animation: "pulse 1.5s infinite",
+                "@keyframes pulse": {
+                  "0%": { opacity: 0.5 },
+                  "50%": { opacity: 1 },
+                  "100%": { opacity: 0.5 },
+                },
+              }}
+            />
+            <Terminal fontSize="small" />
+            <Typography fontWeight={800}>SQL Worksheet</Typography>
+            <Typography
+              variant="caption"
+              sx={{
+                opacity: 0.7,
+              }}
+            >
+              Ctrl + Enter to Execute
+            </Typography>
+          </Stack>
 
-          <Tab icon={<UploadFile />} label="Script Upload" />
-        </Tabs>
-      </Paper>
+          {/* RIGHT */}
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Tooltip title="Copy SQL">
+              <IconButton size="small" onClick={handleCopy}>
+                <ContentCopy
+                  sx={{
+                    color: "white",
+                  }}
+                />
+              </IconButton>
+            </Tooltip>
 
-      {/* SQL CONSOLE */}
-      {mainTab === 0 && (
-        <CommandPanel
-          query={query}
-          setQuery={setQuery}
-          onExecute={handleExecute}
-          loading={false}
-          onDangerousExecute={() => setConfirmOpen(true)}
-        />
-      )}
+            <Divider
+              orientation="vertical"
+              flexItem
+              sx={{
+                borderColor: "rgba(255,255,255,0.08)",
+              }}
+            />
 
-      {/* UPLOAD */}
-      {mainTab === 1 && (
-        <UploadScript
-          onUpload={handleUpload}
-          loading={false}
-          showSnackbar={showSnackbar}
-        />
-      )}
+            <Tooltip title="Clear">
+              <IconButton size="small" onClick={() => setQuery("")}>
+                <CleaningServices
+                  sx={{
+                    color: "white",
+                  }}
+                />
+              </IconButton>
+            </Tooltip>
 
-      {/* OUTPUT */}
-      <Paper
-        elevation={0}
+            <Divider
+              orientation="vertical"
+              flexItem
+              sx={{
+                borderColor: "rgba(255,255,255,0.08)",
+              }}
+            />
+
+            <Button
+              variant="contained"
+              disableElevation
+              startIcon={
+                loading ? (
+                  <CircularProgress size={16} color="inherit" />
+                ) : (
+                  <PlayArrow />
+                )
+              }
+              onClick={() =>
+                isDangerous ? onDangerousExecute?.() : onExecute?.()
+              }
+              sx={{
+                borderRadius: 3,
+                px: 3,
+                fontWeight: 700,
+
+                background: isDangerous
+                  ? "linear-gradient(135deg,#dc2626,#ef4444)"
+                  : "linear-gradient(135deg,#2563eb,#3b82f6)",
+
+                boxShadow: isDangerous
+                  ? "0 8px 30px rgba(239,68,68,0.35)"
+                  : "0 8px 30px rgba(37,99,235,0.35)",
+
+                "&:hover": {
+                  transform: "translateY(-1px)",
+                },
+
+                transition: "all .25s ease",
+              }}
+            >
+              {loading ? "Executing..." : "Execute"}
+            </Button>
+          </Stack>
+        </Stack>
+      </Box>
+
+      {/* QUICK COMMANDS */}
+      <Box
         sx={{
-          flex: 1,
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
+          px: 2,
+          py: 1,
+          bgcolor: "#0f172a",
+          borderBottom: "1px solid rgba(255,255,255,0.05)",
         }}
       >
-        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
-          <Tab label="Data Grid" />
-          <Tab label="Logs" />
-        </Tabs>
+        <Stack direction="row" spacing={1} flexWrap="wrap">
+          {quickCommands.map((cmd) => (
+            <Chip
+              key={cmd}
+              label={cmd}
+              clickable
+              onClick={() => setQuery(cmd)}
+              sx={{
+                bgcolor: "rgba(255,255,255,0.06)",
+                color: "white",
 
-        {/* GRID */}
-        {outputTab === 0 && (
-          <ResultGrid
-            results={results}
-            loading={isPending}
-            paginationModel={paginationModel}
-            setPaginationModel={setPaginationModel}
-          />
-        )}
+                "&:hover": {
+                  bgcolor: "rgba(255,255,255,0.12)",
+                },
+              }}
+            />
+          ))}
+        </Stack>
+      </Box>
 
-        {/* LOGS */}
-        {outputTab === 1 && (
-          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
-        )}
-      </Paper>
+      {/* EDITOR */}
+      <TextField
+        multiline
+        fullWidth
+        minRows={14}
+        value={query}
+        onKeyDown={handleKeyDown}
+        onChange={(e) => setQuery(e.target.value)}
+        variant="standard"
+        placeholder="Write SQL query here..."
+        InputProps={{
+          disableUnderline: true,
 
-      {/* DIALOG */}
-      <ConfirmDialog
-        open={confirmOpen}
-        onClose={() => setConfirmOpen(false)}
-        onConfirm={() => {
-          setConfirmOpen(false);
-
-          handleExecute(true);
+          sx: {
+            p: 3,
+            bgcolor: "#0d1117",
+            color: "#d4d4d4",
+            fontFamily: "'Fira Code', monospace",
+            fontSize: 14,
+            lineHeight: 1.7,
+          },
         }}
       />
+
+      {/* FOOTER STATUS */}
+      <Box
+        sx={{
+          px: 2,
+          py: 1,
+          borderTop: "1px solid rgba(255,255,255,0.06)",
+          bgcolor: "#111827",
+        }}
+      >
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+          <CustomChip
+            size="small"
+            variant="outlined"
+            label={isSelect ? "Read Only" : "Write Mode"}
+            color={isSelect ? "success" : "warning"}
+          />
+
+          {isDangerous && <Chip size="small" label="DANGEROUS" color="error" />}
+
+          <CustomChip
+            size="small"
+            variant="outlined"
+            label={`${query.length} chars`}
+            sx={{
+              color: "white",
+              borderColor: "rgba(255,255,255,0.2)",
+            }}
+          />
+
+          <CustomChip
+            size="small"
+            variant="outlined"
+            label={`${query.split(";").filter(Boolean).length} statements`}
+            sx={{
+              color: "white",
+              borderColor: "rgba(255,255,255,0.2)",
+            }}
+          />
+
+          <CustomChip
+            size="small"
+            variant="outlined"
+            icon={<Timer />}
+            label={loading ? "Executing..." : "Ready"}
+            color={loading ? "warning" : "success"}
+          />
+        </Stack>
+      </Box>
     </Box>
   );
 };
 
-export default AdminSupport;
+export default CommandPanel;
