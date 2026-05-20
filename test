@@ -1,84 +1,112 @@
-spring.application.name=EnquiryService
-spring.profiles.active=dev
-server.port=4001
-
-
-# --- Actuator Base Config ---
-# Enable the endpoints, but control exposure in specific profile files
-management.endpoints.web.base-path=/actuator
-management.endpoint.health.probes.enabled=true
-management.endpoints.web.exposure.include=health, info, prometheus
-management.endpoint.health.show-details=always
-management.metrics.tags.application=${spring.application.name}
-management.info.env.enabled=true
-
-# Add some custom info to the /info endpoint
-info.app.name=EnquiryService
-info.app.description=Service to manage and retrieve different reports
-info.app.version=1.0.0
-
-# Shows the SQL query strings
-spring.jpa.show-sql=false
-
-# Makes the displayed SQL queries readable (pretty-printed)
-spring.jpa.properties.hibernate.format_sql=true
-
-# Logs the parameters bound to the query (e.g., replacement of '?' with actual values)
-logging.level.org.hibernate.type.descriptor.sql.BasicBinder=TRACE
-
-# LOGIN SERVICE KEY
-jwt.secret=bWV0aGlvbnlsdGhyZW9ueWx0aHJlb255bGdsdXRhbWlueWxhbGFueWw=
-
-
-# --- Redis Configuration ---
-spring.data.redis.host=10.0.17.242
-spring.data.redis.port=6379
-spring.cache.type=redis
-
-# DB Timeouts: Configuration of connection pooling timeouts ## 40 sec.
-spring.datasource.hikari.connection-timeout=40000
-spring.datasource.hikari.maximum-pool-size=40
-
-
 # ==============================================================
 # RESILIENCE4J CONFIGURATION (Global Rules)
 # ==============================================================
-# --- 1. RETRY STRATEGY ---
-# A. RETRY ON THESE (Transient / "Blips")
-# 1. Spring's wrapper for DB Timeouts, Deadlocks, Connection Drops
+
+# --- RETRY CONFIG ---
+resilience4j.retry.instances.defaultService.max-attempts=2
+resilience4j.retry.instances.defaultService.wait-duration=2s
+
+# RETRY ONLY TRANSIENT ISSUES
 resilience4j.retry.instances.defaultService.retry-exceptions[0]=org.springframework.dao.TransientDataAccessException
-# 2. Connection failure at start of transaction
 resilience4j.retry.instances.defaultService.retry-exceptions[1]=org.springframework.transaction.CannotCreateTransactionException
-# 3. DB Resource Failure (DB Down)
 resilience4j.retry.instances.defaultService.retry-exceptions[2]=org.springframework.dao.DataAccessResourceFailureException
-# 4. Network I/O errors (for Feign/RestCalls)
 resilience4j.retry.instances.defaultService.retry-exceptions[3]=java.io.IOException
 resilience4j.retry.instances.defaultService.retry-exceptions[4]=java.net.ConnectException
 resilience4j.retry.instances.defaultService.retry-exceptions[5]=java.net.SocketTimeoutException
 
-# B. DO NOT RETRY ON THESE (Logic / Permanent Errors)
-# Even if these happen, we fail immediately so GlobalExceptionHandler can return 400/409
+# DO NOT RETRY BUSINESS ERRORS
 resilience4j.retry.instances.defaultService.ignore-exceptions[0]=java.lang.IllegalArgumentException
 resilience4j.retry.instances.defaultService.ignore-exceptions[1]=java.lang.NullPointerException
 resilience4j.retry.instances.defaultService.ignore-exceptions[2]=org.springframework.dao.DataIntegrityViolationException
 resilience4j.retry.instances.defaultService.ignore-exceptions[3]=org.springframework.dao.DuplicateKeyException
 resilience4j.retry.instances.defaultService.ignore-exceptions[4]=org.springframework.web.client.HttpClientErrorException
+resilience4j.retry.instances.defaultService.ignore-exceptions[5]=com.fincore.enquiry_service.exception.ExportLimitException
+resilience4j.retry.instances.defaultService.ignore-exceptions[6]=com.fincore.enquiry_service.exception.NoDataFoundException
 
-# --- 2. CIRCUIT BREAKER STRATEGY ---
-# If 50% of requests fail, OPEN the circuit (Fail Fast)
+# --- CIRCUIT BREAKER CONFIG ---
 resilience4j.circuitbreaker.instances.defaultService.failure-rate-threshold=50
-# Wait 10 seconds before trying again (Half-Open state)
-resilience4j.circuitbreaker.instances.defaultService.wait-duration-in-open-state=10s
-# Must have at least 5 calls to calculate failure rate
-resilience4j.circuitbreaker.instances.defaultService.minimum-number-of-calls=5
-# When Half-Open, allow 3 test calls to see if backend is up
-resilience4j.circuitbreaker.instances.defaultService.permitted-number-of-calls-in-half-open-state=3
-# Automatically move from Open to Half-Open
+
+# increase because export/search APIs are long running
+resilience4j.circuitbreaker.instances.defaultService.slow-call-rate-threshold=80
+resilience4j.circuitbreaker.instances.defaultService.slow-call-duration-threshold=60s
+
+# prevent quick OPEN state
+resilience4j.circuitbreaker.instances.defaultService.minimum-number-of-calls=10
+
+# HALF OPEN
+resilience4j.circuitbreaker.instances.defaultService.permitted-number-of-calls-in-half-open-state=5
+resilience4j.circuitbreaker.instances.defaultService.wait-duration-in-open-state=20s
 resilience4j.circuitbreaker.instances.defaultService.automatic-transition-from-open-to-half-open-enabled=true
 
-# enable gzip compressionfor response
+# SLIDING WINDOW
+resilience4j.circuitbreaker.instances.defaultService.sliding-window-size=20
+resilience4j.circuitbreaker.instances.defaultService.sliding-window-type=COUNT_BASED
+
+
+
+# ==============================================================
+# EXPORT / LARGE RESPONSE TIMEOUTS
+# ==============================================================
+
+# Spring async timeout
+spring.mvc.async.request-timeout=30m
+
+# Tomcat connection timeout
+server.tomcat.connection-timeout=30m
+
+# Keep alive
+server.tomcat.keep-alive-timeout=30m
+
+# Large uploads/downloads
+spring.servlet.multipart.max-file-size=200MB
+spring.servlet.multipart.max-request-size=200MB
+
+
+
+# ==============================================================
+# RESPONSE COMPRESSION
+# ==============================================================
+
 server.compression.enabled=true
-# compress only those content types
-server.compression.mime-types=application/json,application/xml,text/html,text/plain
-# compress only if response size => 1KB
+
+# DO NOT compress excel/zip responses
+server.compression.mime-types=application/json,text/html,text/plain
+
 server.compression.min-response-size=1024
+
+
+HttpServletRequest request =
+        ((ServletRequestAttributes)
+                RequestContextHolder
+                        .currentRequestAttributes())
+                .getRequest();
+
+String uri = request.getRequestURI();
+
+/*
+ * Skip resilience for export APIs
+ */
+if (
+        uri.contains("/export-excel")
+) {
+
+    return joinPoint.proceed();
+}
+
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+
+
+@Configuration
+@EnableAsync
+public class AsyncConfig {
+}
+
+@Async
+public void sendToMyDownloads(
+        String userId,
+        LedgerEnquiryRequest dto,
+        byte[] content
+)
