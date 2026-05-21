@@ -1,27 +1,440 @@
-<Autocomplete
-  multiple
-  size="small"
-  disableCloseOnSelect
-  options={["ALL", ...branches]}
-  loading={loading.branch}
-  value={filters.branches}
-  inputValue={branchSearch}
-  onInputChange={(event, newInputValue, reason) => {
-    // Prevent long typing
-    if (newInputValue.length > 30) {
-      return;
+import { DataGrid } from "@mui/x-data-grid";
+import { Box, IconButton, Stack, Tooltip, Typography } from "@mui/material";
+import InfoIcon from "@mui/icons-material/Info";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
+import TableRowsIcon from "@mui/icons-material/TableRows";
+import MemoryIcon from "@mui/icons-material/Memory";
+import AnalyticsIcon from "@mui/icons-material/Analytics";
+import ApprovalIcon from "@mui/icons-material/Approval";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+import AppRegistrationIcon from "@mui/icons-material/AppRegistration";
+import { StageStatus, StageStatusConfig } from "../util/StageStatus";
+import { useMemo } from "react";
+import { timeStampFormatter } from "../../../utils/CommonUtilities";
+import CustomChip from "../../../utils/CustomChip";
+import { getIconComponent } from "../../../utils/IconUtils";
+
+/* =====================================================
+   MAIN COMPONENT
+===================================================== */
+
+const ProcessStatusTable = ({
+  processes = [],
+  isCurrentDate,
+  actions,
+  loading,
+  permissions = {},
+}) => {
+  const SUMMARY_STAGES = new Set([
+    "cntr_summary_calculated",
+    "intr_summary_calculated",
+    "balance_Compare_generated",
+  ]);
+
+  /* =====================================================
+     FIND LATEST RUN FOR EACH PROCESS
+  ===================================================== */
+
+  const latestRunMap = useMemo(() => {
+    const map = new Map();
+
+    processes.forEach((p) => {
+      const type = p.processType;
+      const runId = Number(p.runId) || 0;
+
+      if (!map.has(type) || runId > map.get(type)) {
+        map.set(type, runId);
+      }
+    });
+
+    return map;
+  }, [processes]);
+
+  /* =====================================================
+     ROWS
+  ===================================================== */
+
+  const rows = useMemo(() => {
+    return processes
+      .map((p) => {
+        const lastStage = p.stages?.at(-1);
+
+        const runId = Number(p.runId) || 1;
+        const latestRunId = latestRunMap.get(p.processType);
+
+        const isLatestRun = runId === latestRunId;
+
+        const hasSummary =
+          p.processType?.toUpperCase() === "DIFFERENCE" &&
+          p.stages?.some(
+            (s) =>
+              s.stageStatus === StageStatus.COMPLETED &&
+              SUMMARY_STAGES.has(s.stageId),
+          );
+
+        return {
+          id: `${p.processType}_${p.processId}_${runId}`, // UNIQUE KEY
+
+          processId: p.processId,
+          processRunId: p.processRunId,
+          processType: p.processType,
+
+          runId,
+          isLatestRun,
+
+          status: p.status,
+
+          stageTitle: lastStage?.stageTitle ?? "Unknown",
+          stageIcon: lastStage?.stageIcon ?? "AccessTime",
+
+          startTime: p.processStartTime,
+          endTime: p.processEndTime,
+
+          hasSummary,
+
+          raw: p,
+        };
+      })
+      .sort((a, b) => {
+        // Convert to Date objects to compare (handles ISO strings, timestamps, etc.)
+        const dateA = new Date(a.startTime);
+        const dateB = new Date(b.startTime);
+
+        // Sort Descending (latest date first)
+        return dateB - dateA;
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processes, latestRunMap]);
+
+  const statusOptions = Object.entries(StageStatusConfig).map(
+    ([value, details]) => ({
+      value: Number(value),
+      label: details.label,
+    }),
+  );
+
+  /* =====================================================
+     COLUMNS
+  ===================================================== */
+
+  const columns = useMemo(
+    () => [
+      {
+        field: "processType",
+        flex: 1,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <MemoryIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Process Name</Typography>
+          </Box>
+        ),
+        renderCell: (params) => {
+          const name = params.row.processType;
+          const runId = params.row.runId;
+
+          /* ordinal helper */
+          const getOrdinal = (n) => {
+            const s = ["th", "st", "nd", "rd"];
+            const v = n % 100;
+            return n + (s[(v - 20) % 10] || s[v] || s[0]);
+          };
+
+          return (
+            <Typography variant="body1" component="span">
+              {runId > 1 ? `${name} (${getOrdinal(runId)} run)` : name}
+            </Typography>
+          );
+        },
+      },
+
+      {
+        field: "status",
+        headerName: "Status",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        type: "singleSelect",
+        valueOptions: statusOptions,
+
+        // Sort logic: alphabetical by Label
+        sortComparator: (v1, v2) => {
+          const label1 = StageStatusConfig[v1]?.label || "";
+          const label2 = StageStatusConfig[v2]?.label || "";
+          return label1.localeCompare(label2);
+        },
+
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AnalyticsIcon sx={{ mr: 0.5, fontSize: "1.1rem" }} />
+            <Typography variant="subtitle2" fontWeight="600">
+              Status
+            </Typography>
+          </Box>
+        ),
+
+        // Inline Chip Rendering (No separate component needed)
+        renderCell: (params) => {
+          const config = StageStatusConfig[params.value];
+          if (!config) return null;
+          const Icon = getIconComponent(config.icon);
+          return (
+            <CustomChip
+              icon={<Icon />}
+              label={config.label}
+              color={config.color}
+              variant="contained"
+            />
+          );
+        },
+      },
+
+      {
+        field: "stageTitle",
+        headerName: "Stage",
+        flex: 1.2,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <ApprovalIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Stage</Typography>
+          </Box>
+        ),
+        renderCell: (params) => {
+          const Icon = getIconComponent(params.row?.stageIcon);
+
+          return (
+            <CustomChip
+              label={params.row?.stageTitle}
+              icon={<Icon />}
+              variant="outlined"
+            />
+          );
+        },
+      },
+
+      {
+        field: "startTime",
+        headerName: "Started",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Started</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value)}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "endTime",
+        headerName: "Ended",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Ended</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value) || "-"}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.8,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AppRegistrationIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Actions</Typography>
+          </Box>
+        ),
+
+        renderCell: (params) => {
+          const row = params.row.raw;
+          const isLatest = params.row.isLatestRun;
+
+          const showRestart = isLatest && row.status !== StageStatus.STARTED;
+
+          const showStop = isLatest && row.status === StageStatus.STARTED;
+
+          const nonActionableProcess =
+            row.processId == 7 || row.processId == 12;
+
+          return (
+            <Stack
+              direction="row"
+              spacing={1}
+              alignItems="center"
+              justifyContent="center"
+              sx={{ height: "100%" }}
+            >
+              {(permissions.restart || permissions.start) &&
+                isCurrentDate &&
+                showRestart &&
+                !nonActionableProcess && (
+                  <Tooltip title="Restart">
+                    <IconButton
+                      size="small"
+                      onClick={() => actions.onStart(row)}
+                    >
+                      <RestartAltIcon />
+                    </IconButton>
+                  </Tooltip>
+                )}
+
+              {permissions.stop &&
+                isCurrentDate &&
+                showStop &&
+                !nonActionableProcess && (
+                  <Tooltip title="Stop">
+                    <IconButton
+                      size="small"
+                      onClick={() => actions.onStop(row)}
+                    >
+                      <StopIcon />
+                    </IconButton>
+                  </Tooltip>
+                )}
+
+              {permissions.view && (
+                <Tooltip title="View">
+                  <IconButton size="small" onClick={() => actions.onView(row)}>
+                    <VisibilityIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
+
+              {permissions.view && params.row.hasSummary && (
+                <Tooltip title="Summary">
+                  <IconButton
+                    size="small"
+                    onClick={() => actions.onSummary(row)}
+                  >
+                    <SummarizeOutlinedIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </Stack>
+          );
+        },
+      },
+    ],
+    [
+      actions,
+      isCurrentDate,
+      permissions.restart,
+      permissions.start,
+      permissions.stop,
+      permissions.view,
+      statusOptions,
+    ],
+  );
+
+  const filteredColumns = useMemo(() => {
+    if (
+      permissions.start ||
+      permissions.stop ||
+      permissions.restart ||
+      permissions.view
+    ) {
+      return columns;
     }
+    return columns.filter((c) => c.field !== "actions");
+  }, [columns, permissions]);
 
-    setBranchSearch(newInputValue);
+  /* =====================================================
+     FINAL RENDER
+  ===================================================== */
 
-    if (reason === "input" && newInputValue.length >= 3) {
-      fetchSearchData("branch", newInputValue);
-    }
-  }}
-  onChange={(_, val) => {
-    handleBranchChange(val);
+  return (
+    <Box
+      sx={{
+        "& .MuiDataGrid-columnHeaders": {
+          backgroundColor: "#b4a7d6",
+          fontWeight: 600,
+        },
+        "& .MuiDataGrid-row:hover": {
+          backgroundColor: "action.hover",
+        },
+      }}
+    >
+      <DataGrid
+        rows={rows}
+        columns={filteredColumns}
+        pageSizeOptions={[5, 10, 25, 50]}
+        initialState={{
+          pagination: {
+            paginationModel: {
+              pageSize: 5,
+              page: 0,
+            },
+          },
+        }}
+        loading={loading}
+        getRowId={(p) => p.id}
+        disableRowSelectionOnClick
+        slots={{
+          noRowsOverlay: () => (
+            <Stack height="100%" alignItems="center" justifyContent="center">
+              <InfoIcon
+                sx={{
+                  fontSize: 48,
+                  color: "text.secondary",
+                  mb: 1,
+                }}
+              />
+              <Typography variant="h6">No processes available</Typography>
+              <Typography variant="body2">
+                Processes not found for the ETL date.
+              </Typography>
+            </Stack>
+          ),
+        }}
+      />
+    </Box>
+  );
+};
 
-    // Clear search after selection
-    setBranchSearch("");
-  }}
-/>
+export default ProcessStatusTable;
