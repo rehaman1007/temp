@@ -1,8 +1,156 @@
+package com.fincore.transactions_service.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportExecutor {
+
+    /**
+     * LIVE JOB STATUS CACHE
+     */
+    public static final Map<String, Map<String, Object>> JOB_STATUS = new ConcurrentHashMap<>();
+
+    /**
+     * PERFORMANCE CONFIG
+     */
+    private static final int COMMIT_BATCH_SIZE = 1000;
+    private static final int STATUS_UPDATE_INTERVAL = 1000;
+    private static final int LOG_INTERVAL = 10000;
+
+    private final JdbcTemplate jdbcTemplate;
+
+    /**
+     * CLEAN ORACLE TYPES
+     */
+    public List<Map<String, Object>> cleanOracleRows(List<Map<String, Object>> rawRows) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> rawRow : rawRows) {
+            Map<String, Object> cleanRow = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
+                Object value = entry.getValue();
+                try {
+                    if (value instanceof oracle.sql.TIMESTAMP ts) {
+                        cleanRow.put(entry.getKey(), ts.timestampValue().toString());
+                    } else if (value instanceof java.sql.Timestamp ts) {
+                        cleanRow.put(entry.getKey(), ts.toLocalDateTime().toString());
+                    } else if (value instanceof java.sql.Clob clob) {
+                        cleanRow.put(entry.getKey(), clob.getSubString(1, (int) clob.length()));
+                    } else if (value instanceof java.io.InputStream) {
+                        cleanRow.put(entry.getKey(), "[BLOB DATA]");
+                    } else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) {
+                        cleanRow.put(entry.getKey(), value.toString());
+                    } else {
+                        cleanRow.put(entry.getKey(), value);
+                    }
+                } catch (Exception e) {
+                    cleanRow.put(entry.getKey(), "[UNSUPPORTED]");
+                }
+            }
+            rows.add(cleanRow);
+        }
+        return rows;
+    }
+
+    /**
+     * INSERT EXECUTION LOG
+     */
+    public void insertExecutionLog(String jobId, String userId, String clientIp, String fileName, String executionType, String status, long totalStatements, int processedCount, int executedCount, int insertCount, int updateCount, int deleteCount, int otherCount, Integer failedStatementNumber, String failedSql, String exceptionType, String exceptionMessage, long executionSpeed, long elapsedSeconds, String sqlText) {
+        try {
+            jdbcTemplate.update("""
+                            INSERT INTO ADMIN_SUPPORT_LOG
+                            (
+                                ID, JOB_ID, USER_ID, CLIENT_IP, FILE_NAME,
+                                EXECUTION_TYPE, STATUS, TOTAL_STATEMENTS, EXECUTED_COUNT,
+                                INSERT_COUNT, UPDATE_COUNT, DELETE_COUNT, OTHER_COUNT,
+                                FAILED_STATEMENT_NUMBER, FAILED_SQL, EXCEPTION_TYPE,
+                                EXCEPTION_MESSAGE, EXECUTION_SPEED, ELAPSED_SECONDS, SQL_TEXT, CREATED_AT
+                            )
+                            VALUES
+                            (
+                                ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
+                            )
+                            """,
+                    jobId, userId, clientIp, fileName, executionType, status, totalStatements, executedCount,
+                    insertCount, updateCount, deleteCount, otherCount, failedStatementNumber, failedSql,
+                    exceptionType, exceptionMessage, executionSpeed, elapsedSeconds, sqlText);
+        } catch (Exception e) {
+            log.error("FAILED TO INSERT LOG", e);
+        }
+    }
+
+    /**
+     * EXECUTE SCRIPT ASYNC
+     */
+    @Async("sqlTaskExecutor")
+    public void executeScriptAsync(File sqlFile, String jobId, String userId, String clientIp, String hdfsFilename) {
+        Instant start = Instant.now();
+        log.info("Starting processing for file: {}", hdfsFilename);
+
+        long startedAt = System.currentTimeMillis();
+        long totalBytes = sqlFile.length();
+        long bytesRead = 0;
+
+        int processedCount = 0;
+        int executedCount = 0;
+        int insertCount = 0;
+        int updateCount = 0;
+        int deleteCount = 0;
+        int otherCount = 0;
+        int failedLine = 0;
+        String failedSql = null;
+
+        Map<String, Object> statusMap = new ConcurrentHashMap<>();
+        statusMap.put("jobId", jobId);
+        statusMap.put("status", "RUNNING");
+        statusMap.put("progress", 0);
+        statusMap.put("processedCount", 0);
+        statusMap.put("executedCount", 0);
+        statusMap.put("insertCount", 0);
+        statusMap.put("updateCount", 0);
+        statusMap.put("deleteCount", 0);
+        statusMap.put("otherCount", 0);
+        statusMap.put("startedAt", startedAt);
+        statusMap.put("message", "Stream parsing and execution started");
+        JOB_STATUS.put(jobId, statusMap);
+
+        try (Connection connection = jdbcTemplate.getDataSource().getConnection();
+             BufferedReader reader = new BufferedReader(new FileReader(sqlFile))) {
+
+            connection.setAutoCommit(false);
+            Statement statement = connection.createStatement();
+            statement.setFetchSize(1000);
+            statement.setQueryTimeout(0);
+
+            StringBuilder sqlBuilder = new StringBuilder();
+            String line;
+            int lineNumber = 0;
+            int batchCounter = 0;
+
             while ((line = reader.readLine()) != null) {
                 lineNumber++;
                 
-                // 1. FAST PROGRESS TRACKING (Fixed CPU/Memory Leak)
-                bytesRead += line.length() + 1; 
+                // FAST PROGRESS TRACKING (Zero memory allocation)
+                bytesRead += line.length() + 1;
 
                 line = line.trim();
 
@@ -55,12 +203,11 @@
                     }
 
                     /**
-                     * 2. FIXED LIVE STATUS UPDATE (Dynamic Estimation)
+                     * FIXED LIVE STATUS UPDATE (Dynamic Estimation)
                      */
                     if (processedCount % STATUS_UPDATE_INTERVAL == 0) {
-                        // Cap progress at 99% until file is totally finished
                         int progress = totalBytes == 0 ? 0 : (int) ((bytesRead * 100) / totalBytes);
-                        
+
                         // Dynamically estimate total statements based on byte density
                         long estimatedTotalStatements = bytesRead == 0 ? 0 : (totalBytes * processedCount) / bytesRead;
                         long pendingStatements = Math.max(0, estimatedTotalStatements - processedCount);
@@ -68,28 +215,108 @@
                         long elapsedMillis = Duration.between(start, Instant.now()).toMillis();
                         long elapsedSeconds = Math.max(elapsedMillis / 1000, 1);
                         long executionSpeed = (processedCount * 1000L) / Math.max(elapsedMillis, 1);
-                        
+
                         // Calculate ETA based on current speed
                         long etaSeconds = executionSpeed == 0 ? 0 : pendingStatements / executionSpeed;
 
-                        statusMap.put("progress", Math.min(progress, 99)); 
+                        statusMap.put("progress", Math.min(progress, 99)); // Cap at 99% until complete
                         statusMap.put("processedCount", processedCount);
                         statusMap.put("executedCount", executedCount);
                         statusMap.put("insertCount", insertCount);
                         statusMap.put("updateCount", updateCount);
                         statusMap.put("deleteCount", deleteCount);
                         statusMap.put("otherCount", otherCount);
-                        
-                        // Populate Total and ETA
+
+                        // Populate Dynamic Fields
                         statusMap.put("totalStatements", estimatedTotalStatements);
                         statusMap.put("etaSeconds", etaSeconds);
-                        
+
                         statusMap.put("executionSpeed", executionSpeed);
                         statusMap.put("elapsedSeconds", elapsedSeconds);
                         statusMap.put("currentLine", lineNumber);
                         statusMap.put("message", "Processing script...");
-                        
+
                         JOB_STATUS.put(jobId, statusMap);
+                    }
+
+                    if (processedCount % LOG_INTERVAL == 0) {
+                        log.info("Live execution benchmark tracking -> Job: {}, Total Processed: {}, Executed: {}",
+                                jobId, processedCount, executedCount);
                     }
                 }
             }
+
+            /**
+             * FINAL BATCH FLUSH
+             */
+            if (batchCounter > 0) {
+                int[] result = statement.executeBatch();
+                connection.commit();
+                statement.clearBatch();
+                executedCount += result.length;
+            }
+
+            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+            long executionSpeed = elapsedSeconds == 0 ? executedCount : executedCount / Math.max(elapsedSeconds, 1);
+
+            /**
+             * FINAL STATUS DEPLOYMENT
+             */
+            statusMap.put("status", "COMPLETED");
+            statusMap.put("progress", 100);
+            statusMap.put("processedCount", processedCount);
+            statusMap.put("executedCount", executedCount);
+            statusMap.put("insertCount", insertCount);
+            statusMap.put("updateCount", updateCount);
+            statusMap.put("deleteCount", deleteCount);
+            statusMap.put("otherCount", otherCount);
+            
+            // Hardcode the final true count at the very end
+            statusMap.put("totalStatements", processedCount); 
+            
+            statusMap.put("executionSpeed", executionSpeed);
+            statusMap.put("completedAt", System.currentTimeMillis());
+            statusMap.put("elapsedSeconds", elapsedSeconds);
+            statusMap.put("etaSeconds", 0);
+            statusMap.put("completed", true);
+            statusMap.put("message", "Execution completely finished successfully.");
+
+            JOB_STATUS.put(jobId, statusMap);
+
+            insertExecutionLog(jobId, userId, clientIp, hdfsFilename, "FILE", "SUCCESS", processedCount, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, null, null, null, null, executionSpeed, elapsedSeconds, null);
+
+        } catch (Exception e) {
+            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+            
+            // Use estimated totals for failure state if file didn't finish reading
+            long estimatedTotal = bytesRead == 0 ? processedCount : (totalBytes * processedCount) / Math.max(bytesRead, 1);
+
+            statusMap.put("status", "FAILED");
+            statusMap.put("message", e.getMessage());
+            statusMap.put("failedLine", failedLine);
+            statusMap.put("failedSql", failedSql != null ? failedSql : "Parsing Failure");
+            statusMap.put("processedCount", processedCount);
+            statusMap.put("executedCount", executedCount);
+            statusMap.put("insertCount", insertCount);
+            statusMap.put("updateCount", updateCount);
+            statusMap.put("deleteCount", deleteCount);
+            statusMap.put("otherCount", otherCount);
+            statusMap.put("totalStatements", Math.max(processedCount, estimatedTotal));
+
+            JOB_STATUS.put(jobId, statusMap);
+
+            insertExecutionLog(jobId, userId, clientIp, hdfsFilename, "FILE", "FAILED", Math.max(processedCount, estimatedTotal), processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, failedLine, failedSql, e.getClass().getSimpleName(), e.getMessage(), 0, elapsedSeconds, null);
+            log.error("CRITICAL ASYNC SQL TRANSACTION FAILURE", e);
+
+        } finally {
+            try {
+                if (sqlFile != null && sqlFile.exists()) {
+                    boolean deleted = sqlFile.delete();
+                    log.info("Temporary execution workfile cleanup status: {}", deleted);
+                }
+            } catch (Exception ex) {
+                log.error("FAILED TO PURGE LOCAL MULTIPART WORKFILE", ex);
+            }
+        }
+    }
+}
