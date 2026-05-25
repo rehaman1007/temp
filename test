@@ -1,296 +1,311 @@
-import React, { useMemo, useRef } from "react";
+            /**
+             * EXECUTE SELECT QUERY
+             */
+            if (isSingleSelect) {
+                String executableSelect = cleanStatements.get(0);
+                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
+                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+
+                if (total == null) total = 0;
+
+                int startRow = page * size;
+                int endRow = startRow + size;
+
+                // Pagination Query for Oracle
+                String paginatedSql = """
+                        SELECT * FROM
+                        (
+                            SELECT A.*, ROWNUM RN FROM
+                            (
+                        """ + executableSelect + """
+                            ) A
+                            WHERE ROWNUM <= ?
+                        )
+                        WHERE RN > ?
+                        """;
+
+                List<Map<String, String>> columns = new ArrayList<>();
+                List<Map<String, Object>> rawRows = new ArrayList<>();
+
+                jdbcTemplate.query(paginatedSql, (java.sql.ResultSet rs) -> {
+                    java.sql.ResultSetMetaData metaData = rs.getMetaData();
+                    int columnCount = metaData.getColumnCount();
+
+                    // Extract Columns (Skipping the internal RN column)
+                    for (int i = 1; i <= columnCount; i++) {
+                        String colName = metaData.getColumnName(i);
+                        if (!colName.equalsIgnoreCase("RN")) {
+                            columns.add(Map.of("name", colName));
+                        }
+                    }
+
+                    // Extract Rows (Skipping the internal RN column)
+                    while (rs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        for (int i = 1; i <= columnCount; i++) {
+                            String colName = metaData.getColumnName(i);
+                            if (!colName.equalsIgnoreCase("RN")) {
+                                row.put(colName, rs.getObject(i));
+                            }
+                        }
+                        rawRows.add(row);
+                    }
+                    return null; 
+                }, endRow, startRow);
+
+                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
+
+                response.put("error", false);
+                response.put("columns", columns);
+                response.put("rows", rows);
+                response.put("total", total);
+                response.put("page", page);
+                response.put("size", size);
+
+                adminSupportExecutor.insertExecutionLog(
+                        UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS",
+                        1, 1, 1, 0, 0, 0, 1, null, null, null, null, 1, 
+                        Duration.between(start, Instant.now()).toSeconds(), rawSql
+                );
+
+                return response;
+            }
+
+
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Box,
   Button,
-  Chip,
-  CircularProgress,
-  Divider,
-  IconButton,
+  Paper,
   Stack,
-  Tooltip,
+  Tab,
+  Tabs,
   Typography,
   useTheme,
 } from "@mui/material";
-import {
-  CleaningServices,
-  ContentCopy,
-  PlayArrow,
-  PlaylistPlay,
-  Terminal,
-  Timer,
-} from "@mui/icons-material";
-import CustomChip from "../../../utils/CustomChip";
+import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
+import { useMutation } from "@tanstack/react-query";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import CommandPanel from "./components/CommandPanel";
+import UploadScript from "./components/UploadScript";
+import ResultGrid from "./components/ResultGrid";
+import LogsPanel from "./components/LogsPanel";
+import ConfirmDialog from "./components/ConfirmDialog";
 
-const quickCommands = [
-  "SELECT * FROM USERS;",
-  "SELECT * FROM ADMIN_SUPPORT_LOG;",
-  "SELECT * FROM PERMISSIONS;",
-  "SELECT * FROM ROLES;",
-  "SELECT * FROM USER_ROLES;",
-  "SELECT * FROM ROLE_PERMISSIONS;",
-  "SELECT * FROM GL_BALANCE WHERE BALANCE_DATE = TO_DATE('01/04/2026','DD/MM/YYYY');",
-  "SELECT * FROM GL_TRANSACTIONS WHERE TRANSACTION_DATE = TO_DATE('01/04/2026','DD/MM/YYYY');",
-];
-
-const CommandPanel = ({
-  query,
-  setQuery,
-  onExecute,
-  loading,
-  onDangerousExecute,
-}) => {
+const AdminSupport = () => {
   const theme = useTheme();
-  
-  // Ref to track the cursor position in the native textarea
-  const inputRef = useRef(null);
+  const { callApi } = useApi();
+  const showSnackbar = useCustomSnackbar();
 
-  /**
-   * =========================================================
-   * EXTRACT STATEMENT (SQL DEVELOPER LOGIC)
-   * =========================================================
-   */
-  const getStatementAtCursor = () => {
-    if (!inputRef.current || !query) return null;
+  const [mainTab, setMainTab] = useState(0);
+  const [outputTab, setOutputTab] = useState(0);
 
-    const start = inputRef.current.selectionStart;
-    const end = inputRef.current.selectionEnd;
+  const [query, setQuery] = useState("");
+  const [lastExecutedQuery, setLastExecutedQuery] = useState("");
 
-    // 1. If user highlighted specific text, run ONLY the highlighted text
-    if (start !== end) {
-      const selected = query.substring(start, end).trim();
-      if (selected) return selected;
-    }
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [jobId, setJobId] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
+  const [lastResponse, setLastResponse] = useState(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-    // 2. If it's a standard blinking cursor, find the surrounding statement
-    let pos = start;
-    
-    // Step backwards past trailing spaces and semicolons to ensure we are "inside" the statement
-    while (pos > 0 && (query.charAt(pos - 1).match(/\s/) || query.charAt(pos - 1) === ';')) {
-      pos--;
-    }
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
 
-    const beforeCursor = query.substring(0, pos);
-    const afterCursor = query.substring(pos);
-
-    const startIdx = beforeCursor.lastIndexOf(";");
-    const endIdx = afterCursor.indexOf(";");
-
-    const startIndex = startIdx === -1 ? 0 : startIdx + 1;
-    const endIndex = endIdx === -1 ? query.length : pos + endIdx;
-
-    const extractedStatement = query.substring(startIndex, endIndex).trim();
-    
-    return extractedStatement || null;
-  };
-
-  /**
-   * =========================================================
-   * EXECUTION HANDLERS
-   * =========================================================
-   */
-  const handleRunStatement = () => {
-    const statement = getStatementAtCursor();
-    
-    if (!statement) {
-      // Pass empty string to trigger parent's validation warning, preventing full-script fallback
-      onExecute?.(false, ""); 
-      return;
-    }
-    checkAndExecute(statement);
-  };
-
-  const handleRunScript = () => {
-    if (!query.trim()) {
-      onExecute?.(false, "");
-      return;
-    }
-    checkAndExecute(query);
-  };
-
-  const checkAndExecute = (sqlToRun) => {
-    const q = sqlToRun.trim().toUpperCase();
-    const dangerous = ["DELETE", "DROP", "TRUNCATE", "ALTER"].some((x) => q.startsWith(x));
-
-    if (dangerous) {
-      onDangerousExecute?.(sqlToRun);
-    } else {
-      onExecute?.(false, sqlToRun); // Pass the specific extracted SQL
-    }
-  };
-
-  /**
-   * KEYBOARD SHORTCUTS
-   */
-  const handleKeyDown = (e) => {
-    if (e.ctrlKey && e.key === "Enter") {
-      e.preventDefault();
-      handleRunStatement();
-    }
-    if (e.key === "F5") {
-      e.preventDefault();
-      handleRunScript();
-    }
-  };
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 10,
+  });
 
   const isSelect = useMemo(() => {
     const q = query.trim().toUpperCase();
     return q.startsWith("SELECT") || q.startsWith("WITH");
   }, [query]);
 
+  const resetScreen = () => {
+    setQuery("");
+    setLastExecutedQuery("");
+    setSelectedFile(null);
+    setJobId(null);
+    setJobStatus(null);
+    setLastResponse(null);
+    setResults({ rows: [], columns: [], total: 0 });
+    setPaginationModel({ page: 0, pageSize: 10 });
+    setOutputTab(0);
+    showSnackbar("Workspace reset completed", "success");
+  };
+
+  const { mutate: executeSql, isPending } = useMutation({
+    mutationFn: async ({ sql, page, size }) => {
+      return await callApi("/TS/admin-support/admin-execute", { sql, page, size }, "POST");
+    },
+    onSuccess: (data) => {
+      setLastResponse(data);
+      if (data?.error) {
+        setOutputTab(1);
+        return;
+      }
+      if (isSelect) {
+        const columns = (data?.columns || []).map((col) => ({
+          field: col.name,
+          headerName: col.name,
+          flex: 1,
+          minWidth: 180,
+        }));
+        setResults({
+          rows: data?.rows || [],
+          columns,
+          total: data?.total || 0,
+        });
+        setOutputTab(0);
+      } else {
+        setOutputTab(1);
+      }
+    },
+    onError: (e) => {
+      setLastResponse({ error: true, message: e?.message || "Execution failed" });
+      setOutputTab(1);
+    },
+  });
+
+  const handleExecute = useCallback((reset = false, customSql = null) => {
+    const targetSql = customSql !== null ? customSql : query;
+
+    if (!targetSql.trim()) {
+      showSnackbar("Enter SQL query to execute", "warning");
+      return;
+    }
+
+    setLastExecutedQuery(targetSql);
+    setSelectedFile(null);
+    setJobId(null);
+    setJobStatus(null);
+    setLastResponse(null);
+
+    const page = reset ? 0 : paginationModel.page;
+    if (reset) setPaginationModel((p) => ({ ...p, page: 0 }));
+
+    executeSql({ sql: targetSql, page, size: paginationModel.pageSize });
+  }, [executeSql, paginationModel.page, paginationModel.pageSize, query, showSnackbar]);
+
+  const handlePaginationChange = (newModel) => {
+    setPaginationModel(newModel);
+
+    const q = lastExecutedQuery.trim().toUpperCase();
+    if (lastExecutedQuery && (q.startsWith("SELECT") || q.startsWith("WITH"))) {
+      executeSql({
+        sql: lastExecutedQuery,
+        page: newModel.page,
+        size: newModel.pageSize,
+      });
+    }
+  };
+
+  const handleUpload = async (file) => {
+    try {
+      if (!file) {
+        showSnackbar("Choose SQL file", "warning");
+        return;
+      }
+      const formData = new FormData();
+      formData.append("file", file);
+      const data = await callApi(
+        "/TS/admin-support/upload-script", formData, "POST", "json", "multipart/form-data"
+      );
+      if (data?.error) {
+        showSnackbar(data.message, "error");
+        return;
+      }
+      setJobId(data.jobId);
+      setOutputTab(1);
+      showSnackbar("Execution started", "success");
+    } catch (e) {
+      showSnackbar(e?.message || "Upload failed", "error");
+    }
+  };
+
+  useEffect(() => {
+    if (!jobId) return;
+    const interval = setInterval(async () => {
+      try {
+        const data = await callApi(`/TS/admin-support/job-status/${jobId}`, {}, "GET");
+        setJobStatus(data);
+        if (data.status === "COMPLETED" || data.status === "FAILED") {
+          clearInterval(interval);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [callApi, jobId]);
+
+  useEffect(() => {
+    const active = jobStatus?.status === "RUNNING";
+    const beforeUnload = (e) => {
+      if (!active) return;
+      e.preventDefault();
+      e.returnValue = "SQL execution is still running.";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [jobStatus]);
+
   return (
-    <Box
-      sx={{
-        borderRadius: 3,
-        overflow: "hidden",
-        border: `1px solid ${theme.palette.divider}`,
-        bgcolor: "#0b1120",
-        display: "flex",
-        flexDirection: "column",
-        flex: 1,
-      }}
-    >
-      {/* HEADER BAR */}
-      <Box sx={{ px: 2, py: 1.2, bgcolor: "#111827", color: "white", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
-          
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Box
-              sx={{
-                width: 10, height: 10, borderRadius: "50%", bgcolor: "#22c55e",
-                boxShadow: "0 0 12px #22c55e", animation: "pulse 1.5s infinite",
-                "@keyframes pulse": { "0%": { opacity: 0.5 }, "50%": { opacity: 1 }, "100%": { opacity: 0.5 } }
-              }}
-            />
-            <Terminal fontSize="small" />
-            <Typography fontWeight={800}>SQL Worksheet</Typography>
-            <Typography variant="caption" sx={{ opacity: 0.7, ml: 2, display: { xs: 'none', md: 'block' } }}>
-              Ctrl+Enter: Statement | F5: Script
-            </Typography>
-          </Stack>
-
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Tooltip title="Copy SQL">
-              <IconButton size="small" onClick={() => navigator.clipboard.writeText(query)}>
-                <ContentCopy sx={{ color: "white" }} />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title="Clear">
-              <IconButton size="small" onClick={() => setQuery("")}>
-                <CleaningServices sx={{ color: "white" }} />
-              </IconButton>
-            </Tooltip>
-
-            <Divider orientation="vertical" flexItem sx={{ borderColor: "rgba(255,255,255,0.08)", mx: 1 }} />
-
-            <Tooltip title="Run statement at cursor or highlighted text (Ctrl+Enter)">
-              <Button
-                variant="contained"
-                disableElevation
-                startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <PlayArrow />}
-                onClick={handleRunStatement}
-                sx={{
-                  borderRadius: 2, px: 2, fontWeight: 700,
-                  background: "linear-gradient(135deg,#10b981,#059669)",
-                  boxShadow: "0 4px 15px rgba(16,185,129,0.25)",
-                  "&:hover": { transform: "translateY(-1px)" },
-                }}
-              >
-                Statement
-              </Button>
-            </Tooltip>
-
-            <Tooltip title="Run entire script (F5)">
-              <Button
-                variant="contained"
-                disableElevation
-                startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <PlaylistPlay />}
-                onClick={handleRunScript}
-                sx={{
-                  borderRadius: 2, px: 2, fontWeight: 700,
-                  background: "linear-gradient(135deg,#2563eb,#3b82f6)",
-                  boxShadow: "0 4px 15px rgba(37,99,235,0.25)",
-                  "&:hover": { transform: "translateY(-1px)" },
-                }}
-              >
-                Script
-              </Button>
-            </Tooltip>
-
-          </Stack>
+    <Box sx={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden", p: 2, gap: 1.5 }}>
+      {/* HEADER */}
+      <Paper elevation={0} sx={{ px: 3, py: 1, borderBottom: `1px solid ${theme.palette.divider}`, display: "flex", alignItems: "center", justifyContent: "space-between", borderRadius: 1 }}>
+        <Stack direction="row" spacing={2} alignItems="center">
+          <Storage color="primary" />
+          <Box>
+            <Typography variant="subtitle2" fontWeight={800} sx={{ letterSpacing: 0.5 }}>FINCORE ADMIN SUPPORT</Typography>
+            <Typography variant="caption" color="text.secondary">Advanced SQL Console & Script Executor</Typography>
+          </Box>
         </Stack>
-      </Box>
-
-      {/* QUICK COMMANDS - Fixed visual layout */}
-      <Box sx={{ px: 2, py: 1.5, bgcolor: "#0f172a", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-        <Stack direction="row" useFlexGap flexWrap="wrap" sx={{ gap: 1 }}>
-          {quickCommands.map((cmd) => (
-            <Chip
-              key={cmd}
-              label={cmd}
-              clickable
-              onClick={() => setQuery(query ? query + "\n\n" + cmd : cmd)}
-              sx={{ 
-                bgcolor: "rgba(255,255,255,0.06)", 
-                color: "white", 
-                border: "1px solid rgba(255,255,255,0.1)",
-                "&:hover": { bgcolor: "rgba(255,255,255,0.15)" } 
-              }}
-            />
-          ))}
+        <Stack direction="row" spacing={2} flexWrap="wrap">
+          <Button variant="outlined" startIcon={<Refresh />} onClick={resetScreen}>Reset Workspace</Button>
         </Stack>
-      </Box>
+      </Paper>
 
-      {/* NATIVE TEXTAREA - Bulletproof rendering */}
-      <Box sx={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <textarea
-          ref={inputRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={handleKeyDown}
-          spellCheck="false"
-          placeholder={`-- Write SQL queries here... \nSELECT * FROM USERS;\nSELECT SYSDATE FROM DUAL;`}
-          style={{
-            flex: 1,
-            width: "100%",
-            minHeight: "350px",
-            padding: "24px",
-            backgroundColor: "#0d1117",
-            color: "#e2e8f0", // Light grey text, guaranteed visible
-            fontFamily: "'Fira Code', 'Courier New', monospace",
-            fontSize: "14px",
-            lineHeight: "1.7",
-            border: "none",
-            outline: "none",
-            resize: "none",
-          }}
-        />
-      </Box>
+      {/* INPUT TABS */}
+      <Paper elevation={0} sx={{ borderRadius: 1, overflow: "hidden", border: `1px solid ${theme.palette.divider}` }}>
+        <Tabs value={mainTab} onChange={(e, v) => setMainTab(v)} variant="fullWidth">
+          <Tab icon={<Terminal />} label="SQL Console" />
+          <Tab icon={<UploadFile />} label="Script Upload" />
+        </Tabs>
+      </Paper>
 
-      {/* FOOTER STATUS */}
-      <Box sx={{ px: 2, py: 1, borderTop: "1px solid rgba(255,255,255,0.06)", bgcolor: "#111827" }}>
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" sx={{ gap: 1 }}>
-          <CustomChip
-            size="small" variant="outlined" label={isSelect ? "Read Mode" : "Mixed Mode"}
-            color={isSelect ? "success" : "info"}
-          />
-          <CustomChip
-            size="small" variant="outlined" label={`${query.length} chars`}
-            sx={{ color: "white", borderColor: "rgba(255,255,255,0.2)" }}
-          />
-          <CustomChip
-            size="small" variant="outlined" 
-            label={`${query.split(";").filter(x => x.trim() && !x.trim().startsWith("--")).length} statements`}
-            sx={{ color: "white", borderColor: "rgba(255,255,255,0.2)" }}
-          />
-          <CustomChip
-            size="small" variant="outlined" icon={<Timer />}
-            label={loading ? "Executing..." : "Ready"} color={loading ? "warning" : "success"}
-          />
-        </Stack>
-      </Box>
+      {mainTab === 0 && (
+        <CommandPanel query={query} setQuery={setQuery} onExecute={handleExecute} loading={isPending} onDangerousExecute={() => setConfirmOpen(true)} />
+      )}
+
+      {mainTab === 1 && (
+        <UploadScript onUpload={handleUpload} loading={false} showSnackbar={showSnackbar} />
+      )}
+
+      {/* OUTPUT TABS */}
+      <Paper elevation={0} sx={{ flex: 1, borderRadius: 1, overflow: "hidden", border: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column' }}>
+        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
+          <Tab label="Data Grid" />
+          <Tab label="Live Logs" />
+        </Tabs>
+
+        {outputTab === 0 && (
+          <ResultGrid results={results} loading={isPending} paginationModel={paginationModel} setPaginationModel={handlePaginationChange} />
+        )}
+
+        {outputTab === 1 && (
+          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
+        )}
+      </Paper>
+
+      <ConfirmDialog open={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={() => { setConfirmOpen(false); handleExecute(true); }} />
     </Box>
   );
 };
 
-export default CommandPanel;
+export default AdminSupport;
