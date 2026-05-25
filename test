@@ -1,311 +1,291 @@
-            /**
-             * EXECUTE SELECT QUERY
-             */
-            if (isSingleSelect) {
-                String executableSelect = cleanStatements.get(0);
-                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
-                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+package com.fincore.transactions_service.service;
 
-                if (total == null) total = 0;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
 
-                int startRow = page * size;
-                int endRow = startRow + size;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
-                // Pagination Query for Oracle
-                String paginatedSql = """
-                        SELECT * FROM
-                        (
-                            SELECT A.*, ROWNUM RN FROM
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportExecutor {
+
+    public static final Map<String, Map<String, Object>> JOB_STATUS = new ConcurrentHashMap<>();
+
+    // STRICT PERFORMANCE LIMITS
+    private static final int COMMIT_BATCH_SIZE = 500; // Do not exceed 1000 for Oracle JDBC
+    private static final int STATUS_UPDATE_INTERVAL = 1000;
+    private static final int LOG_INTERVAL = 5000;
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public List<Map<String, Object>> cleanOracleRows(List<Map<String, Object>> rawRows) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> rawRow : rawRows) {
+            Map<String, Object> cleanRow = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
+                Object value = entry.getValue();
+                try {
+                    if (value instanceof oracle.sql.TIMESTAMP ts) {
+                        cleanRow.put(entry.getKey(), ts.timestampValue().toString());
+                    } else if (value instanceof java.sql.Timestamp ts) {
+                        cleanRow.put(entry.getKey(), ts.toLocalDateTime().toString());
+                    } else if (value instanceof java.sql.Clob clob) {
+                        cleanRow.put(entry.getKey(), clob.getSubString(1, (int) clob.length()));
+                    } else if (value instanceof java.io.InputStream) {
+                        cleanRow.put(entry.getKey(), "[BLOB DATA]");
+                    } else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) {
+                        cleanRow.put(entry.getKey(), value.toString());
+                    } else {
+                        cleanRow.put(entry.getKey(), value);
+                    }
+                } catch (Exception e) {
+                    cleanRow.put(entry.getKey(), "[UNSUPPORTED]");
+                }
+            }
+            rows.add(cleanRow);
+        }
+        return rows;
+    }
+
+    public void insertExecutionLog(String jobId, String userId, String clientIp, String fileName, String executionType, String status, long totalStatements, int processedCount, int executedCount, int insertCount, int updateCount, int deleteCount, int otherCount, Integer failedStatementNumber, String failedSql, String exceptionType, String exceptionMessage, long executionSpeed, long elapsedSeconds, String sqlText) {
+        try {
+            jdbcTemplate.update("""
+                            INSERT INTO ADMIN_SUPPORT_LOG
                             (
-                        """ + executableSelect + """
-                            ) A
-                            WHERE ROWNUM <= ?
-                        )
-                        WHERE RN > ?
-                        """;
+                                ID, JOB_ID, USER_ID, CLIENT_IP, FILE_NAME,
+                                EXECUTION_TYPE, STATUS, TOTAL_STATEMENTS, EXECUTED_COUNT,
+                                INSERT_COUNT, UPDATE_COUNT, DELETE_COUNT, OTHER_COUNT,
+                                FAILED_STATEMENT_NUMBER, FAILED_SQL, EXCEPTION_TYPE,
+                                EXCEPTION_MESSAGE, EXECUTION_SPEED, ELAPSED_SECONDS, SQL_TEXT, CREATED_AT
+                            )
+                            VALUES
+                            (
+                                ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
+                            )
+                            """,
+                    jobId, userId, clientIp, fileName, executionType, status, totalStatements, executedCount,
+                    insertCount, updateCount, deleteCount, otherCount, failedStatementNumber, failedSql,
+                    exceptionType, exceptionMessage, executionSpeed, elapsedSeconds, sqlText);
+        } catch (Exception e) {
+            log.error("FAILED TO INSERT LOG", e);
+        }
+    }
 
-                List<Map<String, String>> columns = new ArrayList<>();
-                List<Map<String, Object>> rawRows = new ArrayList<>();
+    /**
+     * CENTRALIZED STATUS UPDATER (Fixes the Speed/ETA bug)
+     */
+    private void updateJobStatus(String jobId, Instant start, long totalBytes, long bytesRead, int processedCount, int executedCount, int insertCount, int updateCount, int deleteCount, int otherCount, int lineNumber, String message) {
+        Map<String, Object> statusMap = JOB_STATUS.getOrDefault(jobId, new ConcurrentHashMap<>());
 
-                jdbcTemplate.query(paginatedSql, (java.sql.ResultSet rs) -> {
-                    java.sql.ResultSetMetaData metaData = rs.getMetaData();
-                    int columnCount = metaData.getColumnCount();
+        int progress = totalBytes == 0 ? 0 : (int) ((bytesRead * 100) / totalBytes);
+        long estimatedTotalStatements = bytesRead == 0 ? 0 : (totalBytes * processedCount) / bytesRead;
+        long pendingStatements = Math.max(0, estimatedTotalStatements - executedCount);
 
-                    // Extract Columns (Skipping the internal RN column)
-                    for (int i = 1; i <= columnCount; i++) {
-                        String colName = metaData.getColumnName(i);
-                        if (!colName.equalsIgnoreCase("RN")) {
-                            columns.add(Map.of("name", colName));
+        long elapsedMillis = Duration.between(start, Instant.now()).toMillis();
+        long elapsedSeconds = Math.max(elapsedMillis / 1000, 1);
+
+        // TRUE SPEED: Calculated using actual database executions, not string parsing
+        long executionSpeed = (executedCount * 1000L) / Math.max(elapsedMillis, 1);
+        long etaSeconds = executionSpeed == 0 ? 0 : pendingStatements / executionSpeed;
+
+        statusMap.put("progress", Math.min(progress, 99));
+        statusMap.put("processedCount", processedCount);
+        statusMap.put("executedCount", executedCount);
+        statusMap.put("insertCount", insertCount);
+        statusMap.put("updateCount", updateCount);
+        statusMap.put("deleteCount", deleteCount);
+        statusMap.put("otherCount", otherCount);
+        statusMap.put("totalStatements", estimatedTotalStatements);
+        statusMap.put("etaSeconds", etaSeconds);
+        statusMap.put("executionSpeed", executionSpeed);
+        statusMap.put("elapsedSeconds", elapsedSeconds);
+        statusMap.put("currentLine", lineNumber);
+        statusMap.put("message", message);
+
+        JOB_STATUS.put(jobId, statusMap);
+    }
+
+    @Async("sqlTaskExecutor")
+    public void executeScriptAsync(File sqlFile, String jobId, String userId, String clientIp, String hdfsFilename) {
+        Instant start = Instant.now();
+        log.info("Starting processing for file: {}", hdfsFilename);
+
+        long startedAt = System.currentTimeMillis();
+        long totalBytes = sqlFile.length();
+        long bytesRead = 0;
+
+        int processedCount = 0, executedCount = 0, insertCount = 0, updateCount = 0;
+        int deleteCount = 0, otherCount = 0, failedLine = 0;
+        String failedSql = null;
+
+        // Initialize Map
+        Map<String, Object> initMap = new ConcurrentHashMap<>();
+        initMap.put("jobId", jobId);
+        initMap.put("status", "RUNNING");
+        initMap.put("startedAt", startedAt);
+        JOB_STATUS.put(jobId, initMap);
+
+        try (Connection connection = jdbcTemplate.getDataSource().getConnection();
+             BufferedReader reader = new BufferedReader(new FileReader(sqlFile))) {
+
+            connection.setAutoCommit(false);
+            Statement statement = connection.createStatement();
+            statement.setFetchSize(500);
+            statement.setQueryTimeout(0);
+
+            StringBuilder sqlBuilder = new StringBuilder();
+            String line;
+            int lineNumber = 0;
+            int batchCounter = 0;
+
+            while ((line = reader.readLine()) != null) {
+                lineNumber++;
+                bytesRead += line.length() + 1; // Zero-allocation byte tracking
+
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("--")) continue;
+                
+                sqlBuilder.append(line).append(" ");
+
+                if (line.endsWith(";")) {
+                    String sql = sqlBuilder.toString().trim();
+                    while (sql.endsWith(";")) sql = sql.substring(0, sql.length() - 1).trim();
+
+                    sqlBuilder.setLength(0);
+                    failedSql = sql;
+                    failedLine = lineNumber;
+                    processedCount++;
+                    
+                    String upperSql = sql.toUpperCase();
+                    if (upperSql.startsWith("INSERT")) insertCount++;
+                    else if (upperSql.startsWith("UPDATE")) updateCount++;
+                    else if (upperSql.startsWith("DELETE")) deleteCount++;
+                    else otherCount++;
+
+                    boolean isDDL = upperSql.startsWith("CREATE") || upperSql.startsWith("ALTER") || upperSql.startsWith("DROP") || upperSql.startsWith("TRUNCATE");
+
+                    if (isDDL) {
+                        if (batchCounter > 0) {
+                            int[] result = statement.executeBatch();
+                            connection.commit();
+                            statement.clearBatch();
+                            executedCount += result.length;
+                            batchCounter = 0;
+                            // Update UI immediately after flush
+                            updateJobStatus(jobId, start, totalBytes, bytesRead, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, "Flushed batch before DDL");
+                        }
+                        statement.execute(sql);
+                        connection.commit();
+                        executedCount++;
+                    } else {
+                        statement.addBatch(sql);
+                        batchCounter++;
+
+                        if (batchCounter >= COMMIT_BATCH_SIZE) {
+                            int[] result = statement.executeBatch();
+                            connection.commit();
+                            statement.clearBatch();
+                            executedCount += result.length;
+                            batchCounter = 0;
+                            
+                            // Update UI immediately after successful DB transaction
+                            updateJobStatus(jobId, start, totalBytes, bytesRead, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, "Executing DB Batch...");
                         }
                     }
 
-                    // Extract Rows (Skipping the internal RN column)
-                    while (rs.next()) {
-                        Map<String, Object> row = new LinkedHashMap<>();
-                        for (int i = 1; i <= columnCount; i++) {
-                            String colName = metaData.getColumnName(i);
-                            if (!colName.equalsIgnoreCase("RN")) {
-                                row.put(colName, rs.getObject(i));
-                            }
-                        }
-                        rawRows.add(row);
+                    // Periodic read tracking (in case of massive files between batches)
+                    if (processedCount % STATUS_UPDATE_INTERVAL == 0) {
+                        updateJobStatus(jobId, start, totalBytes, bytesRead, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, "Parsing file into memory...");
                     }
-                    return null; 
-                }, endRow, startRow);
 
-                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
-
-                response.put("error", false);
-                response.put("columns", columns);
-                response.put("rows", rows);
-                response.put("total", total);
-                response.put("page", page);
-                response.put("size", size);
-
-                adminSupportExecutor.insertExecutionLog(
-                        UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS",
-                        1, 1, 1, 0, 0, 0, 1, null, null, null, null, 1, 
-                        Duration.between(start, Instant.now()).toSeconds(), rawSql
-                );
-
-                return response;
+                    if (processedCount % LOG_INTERVAL == 0) {
+                        log.info("Job: {} -> Processed: {}, Executed: {}", jobId, processedCount, executedCount);
+                    }
+                }
             }
 
+            // FINAL BATCH FLUSH
+            if (batchCounter > 0) {
+                int[] result = statement.executeBatch();
+                connection.commit();
+                statement.clearBatch();
+                executedCount += result.length;
+            }
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Box,
-  Button,
-  Paper,
-  Stack,
-  Tab,
-  Tabs,
-  Typography,
-  useTheme,
-} from "@mui/material";
-import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
-import { useMutation } from "@tanstack/react-query";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import CommandPanel from "./components/CommandPanel";
-import UploadScript from "./components/UploadScript";
-import ResultGrid from "./components/ResultGrid";
-import LogsPanel from "./components/LogsPanel";
-import ConfirmDialog from "./components/ConfirmDialog";
+            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+            long executionSpeed = elapsedSeconds == 0 ? executedCount : executedCount / Math.max(elapsedSeconds, 1);
 
-const AdminSupport = () => {
-  const theme = useTheme();
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
+            // COMPLETED STATUS
+            Map<String, Object> finalMap = JOB_STATUS.get(jobId);
+            finalMap.put("status", "COMPLETED");
+            finalMap.put("progress", 100);
+            finalMap.put("processedCount", processedCount);
+            finalMap.put("executedCount", executedCount);
+            finalMap.put("totalStatements", processedCount); // Exact final count
+            finalMap.put("executionSpeed", executionSpeed);
+            finalMap.put("completedAt", System.currentTimeMillis());
+            finalMap.put("elapsedSeconds", elapsedSeconds);
+            finalMap.put("etaSeconds", 0);
+            finalMap.put("message", "Execution successfully finished.");
 
-  const [mainTab, setMainTab] = useState(0);
-  const [outputTab, setOutputTab] = useState(0);
+            JOB_STATUS.put(jobId, finalMap);
 
-  const [query, setQuery] = useState("");
-  const [lastExecutedQuery, setLastExecutedQuery] = useState("");
+            insertExecutionLog(jobId, userId, clientIp, hdfsFilename, "FILE", "SUCCESS", processedCount, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, null, null, null, null, executionSpeed, elapsedSeconds, null);
 
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [lastResponse, setLastResponse] = useState(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+        } catch (Exception e) {
+            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+            long estimatedTotal = bytesRead == 0 ? processedCount : (totalBytes * processedCount) / Math.max(bytesRead, 1);
 
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
+            Map<String, Object> failMap = JOB_STATUS.get(jobId);
+            failMap.put("status", "FAILED");
+            failMap.put("message", e.getMessage());
+            failMap.put("failedLine", failedLine);
+            failMap.put("failedSql", failedSql != null ? failedSql : "Parsing Failure");
+            failMap.put("totalStatements", Math.max(processedCount, estimatedTotal));
 
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 10,
-  });
+            JOB_STATUS.put(jobId, failMap);
 
-  const isSelect = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    return q.startsWith("SELECT") || q.startsWith("WITH");
-  }, [query]);
+            insertExecutionLog(jobId, userId, clientIp, hdfsFilename, "FILE", "FAILED", Math.max(processedCount, estimatedTotal), processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, failedLine, failedSql, e.getClass().getSimpleName(), e.getMessage(), 0, elapsedSeconds, null);
+            log.error("ASYNC SQL TRANSACTION FAILURE", e);
 
-  const resetScreen = () => {
-    setQuery("");
-    setLastExecutedQuery("");
-    setSelectedFile(null);
-    setJobId(null);
-    setJobStatus(null);
-    setLastResponse(null);
-    setResults({ rows: [], columns: [], total: 0 });
-    setPaginationModel({ page: 0, pageSize: 10 });
-    setOutputTab(0);
-    showSnackbar("Workspace reset completed", "success");
-  };
-
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      return await callApi("/TS/admin-support/admin-execute", { sql, page, size }, "POST");
-    },
-    onSuccess: (data) => {
-      setLastResponse(data);
-      if (data?.error) {
-        setOutputTab(1);
-        return;
-      }
-      if (isSelect) {
-        const columns = (data?.columns || []).map((col) => ({
-          field: col.name,
-          headerName: col.name,
-          flex: 1,
-          minWidth: 180,
-        }));
-        setResults({
-          rows: data?.rows || [],
-          columns,
-          total: data?.total || 0,
-        });
-        setOutputTab(0);
-      } else {
-        setOutputTab(1);
-      }
-    },
-    onError: (e) => {
-      setLastResponse({ error: true, message: e?.message || "Execution failed" });
-      setOutputTab(1);
-    },
-  });
-
-  const handleExecute = useCallback((reset = false, customSql = null) => {
-    const targetSql = customSql !== null ? customSql : query;
-
-    if (!targetSql.trim()) {
-      showSnackbar("Enter SQL query to execute", "warning");
-      return;
-    }
-
-    setLastExecutedQuery(targetSql);
-    setSelectedFile(null);
-    setJobId(null);
-    setJobStatus(null);
-    setLastResponse(null);
-
-    const page = reset ? 0 : paginationModel.page;
-    if (reset) setPaginationModel((p) => ({ ...p, page: 0 }));
-
-    executeSql({ sql: targetSql, page, size: paginationModel.pageSize });
-  }, [executeSql, paginationModel.page, paginationModel.pageSize, query, showSnackbar]);
-
-  const handlePaginationChange = (newModel) => {
-    setPaginationModel(newModel);
-
-    const q = lastExecutedQuery.trim().toUpperCase();
-    if (lastExecutedQuery && (q.startsWith("SELECT") || q.startsWith("WITH"))) {
-      executeSql({
-        sql: lastExecutedQuery,
-        page: newModel.page,
-        size: newModel.pageSize,
-      });
-    }
-  };
-
-  const handleUpload = async (file) => {
-    try {
-      if (!file) {
-        showSnackbar("Choose SQL file", "warning");
-        return;
-      }
-      const formData = new FormData();
-      formData.append("file", file);
-      const data = await callApi(
-        "/TS/admin-support/upload-script", formData, "POST", "json", "multipart/form-data"
-      );
-      if (data?.error) {
-        showSnackbar(data.message, "error");
-        return;
-      }
-      setJobId(data.jobId);
-      setOutputTab(1);
-      showSnackbar("Execution started", "success");
-    } catch (e) {
-      showSnackbar(e?.message || "Upload failed", "error");
-    }
-  };
-
-  useEffect(() => {
-    if (!jobId) return;
-    const interval = setInterval(async () => {
-      try {
-        const data = await callApi(`/TS/admin-support/job-status/${jobId}`, {}, "GET");
-        setJobStatus(data);
-        if (data.status === "COMPLETED" || data.status === "FAILED") {
-          clearInterval(interval);
+        } finally {
+            try {
+                if (sqlFile != null && sqlFile.exists()) sqlFile.delete();
+            } catch (Exception ex) {
+                log.error("FAILED TO PURGE TEMP FILE", ex);
+            }
         }
-      } catch (e) {
-        console.error(e);
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [callApi, jobId]);
+    }
+}
 
-  useEffect(() => {
-    const active = jobStatus?.status === "RUNNING";
-    const beforeUnload = (e) => {
-      if (!active) return;
-      e.preventDefault();
-      e.returnValue = "SQL execution is still running.";
-    };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [jobStatus]);
+  // Change this to calculate pending based on executed, not processed
+  const pending = Math.max(total - executed, 0); 
+  const currentSpeed = jobStatus.executionSpeed || 0;
 
   return (
-    <Box sx={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden", p: 2, gap: 1.5 }}>
-      {/* HEADER */}
-      <Paper elevation={0} sx={{ px: 3, py: 1, borderBottom: `1px solid ${theme.palette.divider}`, display: "flex", alignItems: "center", justifyContent: "space-between", borderRadius: 1 }}>
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Storage color="primary" />
-          <Box>
-            <Typography variant="subtitle2" fontWeight={800} sx={{ letterSpacing: 0.5 }}>FINCORE ADMIN SUPPORT</Typography>
-            <Typography variant="caption" color="text.secondary">Advanced SQL Console & Script Executor</Typography>
-          </Box>
-        </Stack>
-        <Stack direction="row" spacing={2} flexWrap="wrap">
-          <Button variant="outlined" startIcon={<Refresh />} onClick={resetScreen}>Reset Workspace</Button>
-        </Stack>
-      </Paper>
+// ... (skip to the LIVE EXECUTION STATUS section) ...
 
-      {/* INPUT TABS */}
-      <Paper elevation={0} sx={{ borderRadius: 1, overflow: "hidden", border: `1px solid ${theme.palette.divider}` }}>
-        <Tabs value={mainTab} onChange={(e, v) => setMainTab(v)} variant="fullWidth">
-          <Tab icon={<Terminal />} label="SQL Console" />
-          <Tab icon={<UploadFile />} label="Script Upload" />
-        </Tabs>
-      </Paper>
+                <Typography>
+                  SPEED : {currentSpeed} stmt/sec
+                </Typography>
 
-      {mainTab === 0 && (
-        <CommandPanel query={query} setQuery={setQuery} onExecute={handleExecute} loading={isPending} onDangerousExecute={() => setConfirmOpen(true)} />
-      )}
-
-      {mainTab === 1 && (
-        <UploadScript onUpload={handleUpload} loading={false} showSnackbar={showSnackbar} />
-      )}
-
-      {/* OUTPUT TABS */}
-      <Paper elevation={0} sx={{ flex: 1, borderRadius: 1, overflow: "hidden", border: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column' }}>
-        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
-          <Tab label="Data Grid" />
-          <Tab label="Live Logs" />
-        </Tabs>
-
-        {outputTab === 0 && (
-          <ResultGrid results={results} loading={isPending} paginationModel={paginationModel} setPaginationModel={handlePaginationChange} />
-        )}
-
-        {outputTab === 1 && (
-          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
-        )}
-      </Paper>
-
-      <ConfirmDialog open={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={() => { setConfirmOpen(false); handleExecute(true); }} />
-    </Box>
-  );
-};
-
-export default AdminSupport;
+                {/* Protect against displaying 0 ETA before first batch executes */}
+                <Typography>
+                  ETA : {currentSpeed > 0 ? `${jobStatus.etaSeconds} sec` : 'Calculating...'}
+                </Typography>
