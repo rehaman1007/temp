@@ -1,425 +1,568 @@
-import React, { useEffect, useState } from "react";
+// GlifReports.jsx File
 
+import { useEffect, useState } from "react";
 import {
-  Alert,
-  AlertTitle,
-  alpha,
   Box,
-  Chip,
-  Divider,
-  LinearProgress,
-  Paper,
-  Stack,
   Typography,
-  useTheme,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Stack,
+  Button,
+  Card,
+  LinearProgress,
+  Grow,
+  Fade,
 } from "@mui/material";
-
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import DescriptionIcon from '@mui/icons-material/Description';
 import {
-  CheckCircle,
-  ErrorOutline,
-  Info,
-  Terminal,
-  WarningAmber,
+  Summarize,
+  CloudDownloadTwoTone,
+  LooksOne,
+  LooksTwo,
+  Looks3,
 } from "@mui/icons-material";
+import useApi from "../../hooks/useApi";
+import dayjs from "dayjs";
+import { useSelector } from "react-redux";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { useTheme } from "@mui/material/styles";
+import CustomChip from "../../utils/CustomChip";
+import GlifReportsStyles from "./GlifReportsStyles";
 
-import CustomChip from "../../../utils/CustomChip";
+// 1. Ensure strictly 'en-gb' locale logic if specific DD/MM formats are fighting with browser locale
+import "dayjs/locale/en-gb";
+const moduleType = "WHOLE_BANK";
 
-const LogsPanel = ({ lastResponse, jobStatus }) => {
+export default function GlifReports() {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const user = useSelector((state) => state.auth.user);
+
+  const [dateError, setDateError] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [repTypes, setRepTypes] = useState([]);
+  const [selectedReport, setReport] = useState(null);
+  const [selectedDate, setDate] = useState(null);
+
+  // Defaulting to a safe past date initially
+  const [minDate, setMinDate] = useState(dayjs("2020-01-01"));
+
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+
   const theme = useTheme();
-  const [elapsed, setElapsed] = useState(0);
+  const styles = GlifReportsStyles(theme);
 
+  const disableInputs = isLoading || isDownloading;
+
+  const downloadedMB =
+    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
+
+  // --- API Fetch ---
   useEffect(() => {
-    if (!jobStatus?.startedAt) return;
+    async function fetchData() {
+      setIsLoading(true);
+      try {
+        const data = await callApi(
+          "/RS/reports/types",
+          { roleId: user.role, moduleType: moduleType },
+          "POST",
+        );
+        const types = data.data || [];
+        setRepTypes(types);
 
-    /** COMPLETED / FAILED */
-    if (jobStatus.status === "COMPLETED" || jobStatus.status === "FAILED") {
-      setElapsed(Number(jobStatus?.elapsedSeconds || 0));
+        if (types.length > 0 && types[0].selectedDate) {
+          // IMPORTANT: Use .startOf('day') to ensure time is 00:00:00
+          // This fixes the "sometimes enabled/disabled arrow" issue by ensuring strict day comparison
+          setMinDate(dayjs(types[0].selectedDate).startOf("day"));
+        } else {
+          // Fallback
+          setMinDate(dayjs("2025-10-01").startOf("day"));
+        }
+      } catch (error) {
+        console.error("Failed to fetch report types:", error);
+        showSnackBar("Failed to load report types", "error");
+      }
+      setIsLoading(false);
+    }
+    fetchData();
+  }, [callApi, user.role, showSnackBar]);
+
+  const handleSelect = (report) => {
+    setReport(report);
+  };
+
+  // --- Download Logic ---
+  const handleFetchReportData = async () => {
+    if (!selectedReport?.fileName || !selectedDate) return;
+
+    if (dateError) {
+      showSnackBar(getErrorMessage(dateError), "error");
       return;
     }
 
-    /** LIVE TIMER */
-    const updateElapsed = () => {
-      const seconds = Math.floor(
-        (Date.now() - Number(jobStatus.startedAt)) / 1000,
-      );
+    setIsLoading(true);
+    setIsDownloading(true);
+    setDownloadedBytes(0);
 
-      setElapsed(seconds > 0 ? seconds : 0);
+    const payload = {
+      moduleType: moduleType,
+      fileName: selectedReport.fileName,
+      date: selectedDate.format("YYYY-MM-DD"),
+      roleId: user.role,
     };
 
-    updateElapsed();
+    try {
+      const response = await callApi(
+        "/RS/reports/download",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          onDownloadProgress: (event) => {
+            setIsDownloading(true);
+            if (event && typeof event.loaded === "number") {
+              setDownloadedBytes(event.loaded);
+            }
+          },
+        },
+        false,
+      );
 
-    const interval = setInterval(updateElapsed, 1000);
+      if (response.data && response.data.size > 22) {
+        const contentDisposition =
+          response.headers["content-disposition"] ||
+          response.headers["Content-Disposition"];
 
-    return () => clearInterval(interval);
-  }, [
-    jobStatus?.startedAt,
-    jobStatus?.completedAt,
-    jobStatus?.status,
-    jobStatus?.elapsedSeconds,
-  ]);
+        let filename = "report.zip";
+        if (
+          contentDisposition &&
+          contentDisposition.indexOf("attachment") !== -1
+        ) {
+          const filenameMatch = contentDisposition.match(/filename="(.+?)"/);
+          if (filenameMatch && filenameMatch.length > 1) {
+            filename = filenameMatch[1];
+          }
+        }
 
-  /** EMPTY STATE */
-  if (!lastResponse && !jobStatus) {
-    return (
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 1,
-          border: `1px solid ${theme.palette.divider}`,
-          overflow: "hidden",
-        }}
-      >
-        <Box
-          sx={{
-            px: 2.5,
-            py: 1.5,
-            background: "linear-gradient(135deg,#111827,#1f2937)",
-            color: "white",
-          }}
-        >
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Terminal fontSize="small" />
+        const downloadUrl = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+        showSnackBar(
+          `Reports "${filename}" downloaded successfully`,
+          "success",
+        );
+      } else {
+        showSnackBar("No reports found", "warning");
+      }
+    } catch (error) {
+      console.log("error", error);
 
-            <Typography fontWeight={800}>Execution Logs</Typography>
-          </Stack>
-        </Box>
+      if (error && error instanceof Blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const errorJson = JSON.parse(reader.result);
+            console.error(errorJson.message);
+            showSnackBar(errorJson.message || "No reports found", "error");
+          } catch (e) {
+            console.error(e);
+            showSnackBar("Something went wrong, kindly try again.", "error");
+          }
+        };
+        reader.readAsText(error);
+      } else {
+        showSnackBar("Network Error: Could not connect to server", "error");
+      }
+    } finally {
+      setIsLoading(false);
+      setIsDownloading(false);
+      setDownloadedBytes(0);
+    }
+  };
 
-        <Box p={3}>
-          <Alert
-            severity="info"
-            icon={<Info />}
-            sx={{
-              borderRadius: 3,
-            }}
-          >
-            <AlertTitle>Waiting for execution</AlertTitle>
-            Execute SQL query or upload script to view logs.
-          </Alert>
-        </Box>
-      </Paper>
-    );
-  }
+  // --- Validation Message Logic ---
+  const getErrorMessage = (error) => {
+    const minDateStr = minDate?.isValid()
+      ? minDate.format("DD/MM/YYYY")
+      : "Allowed Min Date";
 
-  // UPDATED MATH: Calculate based on what is strictly saved to the database
-  const processed = Number(jobStatus?.processedCount || 0);
-  const executed = Number(jobStatus?.executedCount || 0);
-  const total = Number(jobStatus?.totalStatements || 0);
-  const progress = Number(jobStatus?.progress || 0);
-  const pending = Math.max(total - executed, 0); 
-  const currentSpeed = Number(jobStatus?.executionSpeed || 0);
+    switch (error) {
+      case "maxDate":
+        return "Date cannot be in the future (Today is max)";
+      case "minDate":
+        return `Date cannot be prior to ${minDateStr}`;
+      case "invalidDate":
+        // This covers cases like 31st Feb or 31st April
+        return "Invalid date (Check day for this month)";
+      default:
+        // When no error, return instructions
+        return `Allowed Range: ${minDateStr} - Today`;
+    }
+  };
 
   return (
-    <Paper
-      elevation={0}
-      sx={{
-        borderRadius: 1,
-        overflow: "hidden",
-        border: `1px solid ${theme.palette.divider}`,
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      {/* HEADER */}
-      <Box
-        sx={{
-          px: 2.5,
-          py: 1.5,
-          background: "linear-gradient(135deg,#111827,#1f2937)",
-          color: "white",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-        }}
-      >
-        <Stack
-          direction="row"
-          justifyContent="space-between"
-          alignItems="center"
-          flexWrap="wrap"
-          gap={1}
-        >
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Terminal fontSize="small" />
-
-            <Typography fontWeight={800}>Execution Logs</Typography>
-          </Stack>
-
-          {jobStatus?.status && (
-            <Chip
-              size="small"
-              label={jobStatus.status}
-              color={
-                jobStatus.status === "COMPLETED"
-                  ? "success"
-                  : jobStatus.status === "FAILED"
-                    ? "error"
-                    : "warning"
-              }
-            />
-          )}
-        </Stack>
-      </Box>
-
-      {/* BODY */}
-      <Box
-        sx={{
-          p: 2.5,
-          bgcolor: "#020617",
-          color: "#e2e8f0",
-          fontFamily: "monospace",
-          flex: 1,
-          overflow: "auto",
-          minHeight: 400,
-        }}
-      >
-        {/* LIVE PROGRESS */}
-        {jobStatus && (
-          <>
-            <Typography
-              sx={{
-                color: "#38bdf8",
-                mb: 1,
-              }}
-            >
-              {">"} LIVE EXECUTION STATUS
-            </Typography>
-
-            <Box
-              sx={{
-                mb: 3,
-                p: 2,
-                borderRadius: 2,
-                bgcolor: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.06)",
-              }}
-            >
-              <Stack spacing={1.5}>
-                <Typography>STATUS : {jobStatus.status}</Typography>
-
-                <Typography>JOB ID : {jobStatus.jobId}</Typography>
-
-                <Typography>
-                  PROCESSED : {processed.toLocaleString()}
-                </Typography>
-
-                <Typography>EXECUTED : {executed.toLocaleString()}</Typography>
-
-                <Typography>TOTAL : {total.toLocaleString()}</Typography>
-
-                <Typography>PENDING : {pending.toLocaleString()}</Typography>
-
-                <Typography>
-                  SPEED : {currentSpeed.toLocaleString()} stmt/sec
-                </Typography>
-
-                <Typography>
-                  ETA : {jobStatus.status === 'COMPLETED' ? '0 sec' : currentSpeed > 0 ? `${jobStatus.etaSeconds} sec` : 'Calculating...'}
-                </Typography>
-
-                <Typography>ELAPSED : {elapsed} sec</Typography>
-
-                <Typography>
-                  CURRENT LINE : {jobStatus.currentLine || 0}
-                </Typography>
-
-                <Box mt={1}>
-                  <LinearProgress
-                    variant="determinate"
-                    value={progress}
-                    sx={{
-                      height: 10,
-                      borderRadius: 10,
-
-                      "& .MuiLinearProgress-bar": {
-                        background: "linear-gradient(90deg,#2563eb,#7c3aed)",
-                      },
-                    }}
-                  />
-
+    <Grow in timeout={500}>
+      <Stack spacing={4}>
+        <Box sx={styles.rootBox} elevation={10}>
+          <Stack
+            spacing={3}
+            direction={"column"}
+            alignItems="center"
+            justifyContent="center"
+          >
+            <Card sx={styles.card}>
+              <Box sx={styles.headerContainer}>
+                <Box sx={styles.headerIconWrapper}>
+                  <DescriptionIcon sx={styles.summaryIcon} />
+                </Box>
+                <Box sx={styles.headerTextBox}>
                   <Typography
-                    variant="caption"
-                    sx={{
-                      mt: 1,
-                      display: "block",
-                    }}
+                    variant="h5"
+                    fontWeight="bold"
+                    sx={styles.headerTitle}
                   >
-                    {progress}%
+                    Reports Generation
+                  </Typography>
+                  <Typography variant="body2" sx={styles.headerSubtitle}>
+                    Choose a specific required Report type and Date using the
+                    criteria below to download reports
                   </Typography>
                 </Box>
-              </Stack>
-            </Box>
-          </>
-        )}
+              </Box>
 
-        {/* ERROR */}
-        {(lastResponse?.error || jobStatus?.status === "FAILED") && (
-          <>
-            <Typography
-              sx={{
-                color: "#f87171",
-                mb: 1,
-              }}
-            >
-              {">"} ERROR LOG
-            </Typography>
+              <Box sx={styles.noteContainer}>
+                <Typography variant="body2" sx={styles.noteText}>
+                  Note: The generated reports cannot be viewed on-screen it can
+                  only be downloaded.
+                </Typography>
+                <Stack direction="row" spacing={2} sx={styles.stepsStack}>
+                  <CustomChip
+                    label="Select a report"
+                    variant="outlined"
+                    icon={<LooksOne />}
+                    color="info"
+                    sx={{ px: 1 }}
+                  />
+                  <CustomChip
+                    label="Select the report date"
+                    variant="outlined"
+                    icon={<LooksTwo />}
+                    color="info"
+                    sx={{ px: 1 }}
+                  />
+                  <CustomChip
+                    label="Click Fetch & Download button"
+                    variant="outlined"
+                    icon={<Looks3 />}
+                    color="info"
+                    sx={{ px: 1 }}
+                  />
+                </Stack>
+              </Box>
 
-            <Alert
-              severity="error"
-              icon={<ErrorOutline />}
-              sx={{
-                mb: 3,
-                borderRadius: 3,
-              }}
-            >
-              <AlertTitle>Execution Failed</AlertTitle>
+              <Box sx={styles.inputOuterBox}>
+                <Box sx={styles.inputInnerBox}>
+                  {/* Dropdown Menu */}
+                  <FormControl sx={styles.formControl}>
+                    <InputLabel id="menu-select-label">
+                      Select a report *
+                    </InputLabel>
+                    <Select
+                      labelId="menu-select-label"
+                      id="menu-select"
+                      value={selectedReport || ""}
+                      label="Select a report *"
+                      onChange={(e) => handleSelect(e.target.value)}
+                      disabled={repTypes.length === 0 || disableInputs}
+                    >
+                      {repTypes.map((item) => (
+                        <MenuItem key={item.fileName} value={item}>
+                          {item.reportName}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
 
-              {lastResponse?.message || jobStatus?.message || "Unknown error"}
+                  {/* Date Picker */}
+                  <FormControl sx={styles.formControl}>
+                    {/* Ensure adapterLocale is set to handle DD/MM logic naturally */}
+                    <LocalizationProvider
+                      dateAdapter={AdapterDayjs}
+                      adapterLocale="en-gb"
+                    >
+                      <DatePicker
+                        label="Select report date *"
+                        format="DD/MM/YYYY"
+                        views={["year", "month", "day"]}
+                        value={selectedDate}
+                        onChange={(newDate) => setDate(newDate)}
+                        // Explicitly set maxDate to Today
+                        maxDate={dayjs().endOf("day")}
+                        // Explicitly set minDate
+                        minDate={minDate}
+                        onError={(newError) => setDateError(newError)}
+                        disabled={repTypes.length === 0 || disableInputs}
+                        slotProps={{
+                          textField: {
+                            // Logic: If there is an error, show specific error msg.
+                            // If no error, show the range helper text to guide user.
+                            helperText: dateError
+                              ? getErrorMessage(dateError)
+                              : "",
+                            error: !!dateError,
+                            placeholder: "DD/MM/YYYY",
+                          },
+                          // Enhancement: Show days outside current month but verify they are disabled correctly
+                          day: {
+                            showDaysOutsideCurrentMonth: true,
+                          },
+                        }}
+                      />
+                    </LocalizationProvider>
+                  </FormControl>
+                </Box>
+              </Box>
 
-              {jobStatus?.failedLine && (
-                <>
-                  <Divider sx={{ my: 1 }} />
-                  Failed Line : {jobStatus.failedLine}
-                </>
-              )}
-            </Alert>
-          </>
-        )}
+              <Box sx={styles.buttonContainer}>
+                <Button
+                  sx={styles.downloadButton}
+                  endIcon={<CloudDownloadTwoTone />}
+                  variant="contained"
+                  onClick={handleFetchReportData}
+                  disabled={
+                    disableInputs ||
+                    !selectedReport ||
+                    !selectedDate ||
+                    !!dateError
+                  }
+                >
+                  {isDownloading ? "Downloading..." : "Fetch & Download"}
+                </Button>
 
-        {/* FAILED SQL */}
-        {jobStatus?.failedSql && (
-          <>
-            <Typography
-              sx={{
-                color: "#fb7185",
-                mb: 1,
-              }}
-            >
-              {">"} FAILED SQL
-            </Typography>
+                <Fade in={isDownloading} unmountOnExit>
+                  <Box sx={styles.progressContainer}>
+                    <Box sx={styles.progressHeader}>
+                      <Box sx={styles.progressIconWrapper}>
+                        <CloudDownloadTwoTone sx={styles.innerDownloadIcon} />
+                      </Box>
+                      <Box sx={styles.progressHeaderTextBox}>
+                        <Typography variant="body2" fontWeight={600}>
+                          Searching{" "}
+                          {selectedReport?.reportName ?? "the selected report"}{" "}
+                          for the period{" "}
+                          {selectedDate?.isValid()
+                            ? selectedDate.format("YYYY-MM-DD")
+                            : "an unknown period"}{" "}
+                          is in progress.
+                        </Typography>
 
-            <Box
-              sx={{
-                mb: 3,
-                p: 2,
-                borderRadius: 2,
-                bgcolor: "#111827",
-                border: "1px solid rgba(248,113,113,0.2)",
-                overflowX: "auto",
-              }}
-            >
-              <Typography
-                sx={{
-                  whiteSpace: "pre-wrap",
-                  color: "#fca5a5",
-                  fontSize: 13,
-                  lineHeight: 1.8,
-                }}
-              >
-                {jobStatus.failedSql}
-              </Typography>
-            </Box>
-          </>
-        )}
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={styles.progressCaption}
+                        >
+                          {downloadedMB
+                            ? `Streaming report data… ${downloadedMB} MB received`
+                            : "Preparing your report stream…"}
+                        </Typography>
+                      </Box>
 
-        {/* SUCCESS */}
-        {lastResponse && !lastResponse.error && (
-          <>
-            <Typography
-              sx={{
-                color: "#4ade80",
-                mb: 1,
-              }}
-            >
-              {">"} EXECUTION SUCCESS
-            </Typography>
-
-            <Alert
-              severity="success"
-              icon={<CheckCircle sx={{ color: "white" }} />}
-              sx={{
-                mb: 3,
-                borderRadius: 3,
-              }}
-            >
-              <AlertTitle color="white">SQL Executed Successfully</AlertTitle>
-
-              <Typography color="white">
-                {lastResponse?.rows?.[0]?.RESULT ||
-                  "Execution completed successfully"}
-              </Typography>
-            </Alert>
-          </>
-        )}
-
-        {/* SUMMARY */}
-        {jobStatus && (
-          <>
-            <Typography
-              sx={{
-                color: "#c084fc",
-                mb: 1,
-              }}
-            >
-              {">"} EXECUTION SUMMARY
-            </Typography>
-
-            <Box
-              sx={{
-                p: 2,
-                borderRadius: 2,
-                bgcolor: alpha(theme.palette.primary.main, 0.08),
-                border: "1px solid rgba(255,255,255,0.06)",
-              }}
-            >
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                <CustomChip
-                  variant="outlined"
-                  label={`INSERT : ${jobStatus.insertCount || 0}`}
-                  color="success"
-                  size="small"
-                />
-
-                <CustomChip
-                  variant="outlined"
-                  label={`UPDATE : ${jobStatus.updateCount || 0}`}
-                  color="warning"
-                  size="small"
-                />
-
-                <CustomChip
-                  variant="outlined"
-                  label={`DELETE : ${jobStatus.deleteCount || 0}`}
-                  color="error"
-                  size="small"
-                />
-
-                <CustomChip
-                  variant="outlined"
-                  label={`OTHERS : ${jobStatus.otherCount || 0}`}
-                  color="info"
-                  size="small"
-                />
-              </Stack>
-            </Box>
-          </>
-        )}
-
-        {/* RUNNING */}
-
-        {jobStatus?.status === "RUNNING" && (
-          <Alert
-            severity="warning"
-            icon={<WarningAmber />}
-            sx={{
-              mt: 3,
-              borderRadius: 3,
-            }}
-          >
-            <AlertTitle>Execution In Progress</AlertTitle>
-            Pending statements : {pending.toLocaleString()}
-          </Alert>
-        )}
-      </Box>
-    </Paper>
+                      {downloadedMB && (
+                        <CustomChip
+                          color="error"
+                          label={`${downloadedMB} MB downloaded`}
+                          variant="filled"
+                        />
+                      )}
+                    </Box>
+                    <LinearProgress
+                      variant="indeterminate"
+                      sx={styles.progressBar}
+                    />
+                  </Box>
+                </Fade>
+              </Box>
+            </Card>
+          </Stack>
+        </Box>
+      </Stack>
+    </Grow>
   );
-};
+}
+===================================================================================
 
-export default LogsPanel;
+// GlifReportsStyles.js File
+
+const GlifReportsStyles = (theme) => ({
+  rootBox: {
+    p: 3,
+    width: "100%",
+    mx: "auto",
+  },
+
+  card: {
+    width: "100%",
+    gap: 2,
+    borderRadius: 3,
+    boxShadow: 6,
+  },
+
+  headerContainer: {
+    display: "flex",
+    alignItems: "center",
+    gap: 2,
+    px: 1.5,
+    py: 1.5,
+    background: "linear-gradient(90deg, #5D3FD3 0%, #7b1fa2 50%)",
+    color: "common.white",
+  },
+
+  headerIconWrapper: {
+    borderRadius: "50%",
+    p: 1.5,
+    bgcolor: "rgba(255,255,255,0.12)",
+    display: "flex",
+  },
+
+  summaryIcon: {
+    height: 60,
+    width: 60,
+    transition: "transform 0.3s ease-in-out",
+  },
+
+  headerTextBox: {
+    flex: 1,
+  },
+
+  headerTitle: {
+    letterSpacing: 0.7,
+  },
+
+  headerSubtitle: {
+    opacity: 0.9,
+    mt: 0.5,
+  },
+
+  noteContainer: {
+    m: 1,
+    p: 1,
+  },
+
+  noteText: {
+    m: 1,
+  },
+
+  stepsStack: {
+    mt: 2,
+    mb: 3,
+  },
+
+  stepChip: {
+    transition: "transform 0.25s ease-in-out",
+    "&:hover": {
+      transform: "translateY(-3px)",
+    },
+  },
+
+  inputOuterBox: {
+    display: "flex",
+    justifyContent: "center",
+    width: "100%",
+  },
+
+  inputInnerBox: {
+    display: "flex",
+    gap: 3,
+    flexDirection:{xs:"column",md:"row"},
+    m: 1,
+    p: 1,
+    width: "70%",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  formControl: {
+    minWidth: "50%",
+  },
+
+  buttonContainer: {
+    width: "100%",
+    textAlign: "center",
+    m: 2,
+    p: 2,
+    gap: 2,
+  },
+
+  downloadButton: {
+    height: "50px",
+    flexShrink: 0,
+  },
+
+  progressContainer: {
+    mt: 3,
+    mx: "auto",
+    maxWidth: "70%",
+    textAlign: "left",
+  },
+
+  progressHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 2,
+    p: 1.5,
+    mb: 1.5,
+    borderRadius: 2,
+    bgcolor: "grey.100",
+    boxShadow: 1,
+  },
+
+  progressIconWrapper: {
+    p: 1,
+    borderRadius: "50%",
+    bgcolor: "primary.main",
+    color: "common.white",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  progressHeaderTextBox: {
+    flex: 1,
+  },
+
+  progressCaption: {
+    display: "block",
+    mt: 0.25,
+  },
+
+  progressBar: {
+    height: 8,
+    borderRadius: 999,
+    overflow: "hidden",
+    bgcolor: theme.palette.mode === "light" ? "grey.200" : "grey.800",
+    "& .MuiLinearProgress-bar": {
+      borderRadius: 999,
+      backgroundImage:
+        "linear-gradient(90deg, #42a5f5 0%, #7e57c2 50%, #ffb300 100%)",
+    },
+  },
+
+  innerDownloadIcon: {
+    fontSize: 22,
+    transform: "translateY(1px)",
+  },
+});
+
+export default GlifReportsStyles;
