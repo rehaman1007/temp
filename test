@@ -1,275 +1,449 @@
-import {
-  Box,
-  Typography,
-  Stack,
-  Tooltip,
-  Paper,
-  Chip,
-  IconButton,
-} from "@mui/material";
-import TrendingUpIcon from "@mui/icons-material/TrendingUp";
-import AirplanemodeActiveIcon from "@mui/icons-material/AirplanemodeActive";
-import PersonIcon from "@mui/icons-material/Person";
-import EventIcon from "@mui/icons-material/EventOutlined";
+import { DataGrid } from "@mui/x-data-grid";
+import { Box, IconButton, Stack, Tooltip, Typography } from "@mui/material";
+import InfoIcon from "@mui/icons-material/Info";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
+import TableRowsIcon from "@mui/icons-material/TableRows";
+import MemoryIcon from "@mui/icons-material/Memory";
+import AnalyticsIcon from "@mui/icons-material/Analytics";
+import ApprovalIcon from "@mui/icons-material/Approval";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+import AppRegistrationIcon from "@mui/icons-material/AppRegistration";
+import { StageStatus, StageStatusConfig } from "../util/StageStatus";
+import { useEffect, useMemo, useState } from "react";
+import { timeStampFormatter } from "../../../utils/CommonUtilities";
+import CustomChip from "../../../utils/CustomChip";
+import { getIconComponent } from "../../../utils/IconUtils";
 
-const formatDate = (isoDateString) => {
-  const dateObj = new Date(isoDateString);
+/* =====================================================
+   MAIN COMPONENT
+===================================================== */
 
-  const getOrdinalSuffix = (day) => {
-    if (day > 3 && day < 21) return "th";
-    switch (day % 10) {
-      case 1:
-        return "st";
-      case 2:
-        return "nd";
-      case 3:
-        return "rd";
-      default:
-        return "th";
-    }
-  };
-
-  const months = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-  ];
-
-  const days = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-  ];
-
-  const dayName = days[dateObj.getDay()];
-  const dayOfMonth = dateObj.getDate();
-  const monthName = months[dateObj.getMonth()];
-  const year = dateObj.getFullYear();
-
-  return `${dayOfMonth}${getOrdinalSuffix(
-    dayOfMonth
-  )} ${monthName} ${year} (${dayName})`;
-};
-
-const ProcessStatusHeader = ({
-  etlDate,
-  etlProcess,
-  handleRefreshClick,
+const ProcessStatusTable = ({
+  processes = [],
+  isCurrentDate,
+  actions,
+  loading,
+  permissions = {},
 }) => {
-  const isAirflow =
-    etlProcess?.triggeredBy?.toUpperCase() === "AIRFLOW";
+  const SUMMARY_STAGES = new Set([
+    "cntr_summary_calculated",
+    "intr_summary_calculated",
+    "balance_Compare_generated",
+  ]);
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 5,
+  });
+
+  /* =====================================================
+     FIND LATEST RUN FOR EACH PROCESS
+  ===================================================== */
+
+  const latestRunMap = useMemo(() => {
+    const map = new Map();
+
+    processes.forEach((p) => {
+      const type = p.processType;
+      const runId = Number(p.runId) || 0;
+
+      if (!map.has(type) || runId > map.get(type)) {
+        map.set(type, runId);
+      }
+    });
+
+    return map;
+  }, [processes]);
+
+  /* =====================================================
+     ROWS
+  ===================================================== */
+
+  const rows = useMemo(() => {
+    return processes
+      .map((p) => {
+        const lastStage = p.stages?.at(-1);
+
+        const runId = Number(p.runId) || 1;
+        const latestRunId = latestRunMap.get(p.processType);
+
+        const isLatestRun = runId === latestRunId;
+
+        const hasSummary =
+          p.processType?.toUpperCase() === "DIFFERENCE" &&
+          p.stages?.some(
+            (s) =>
+              s.stageStatus === StageStatus.COMPLETED &&
+              SUMMARY_STAGES.has(s.stageId),
+          );
+
+        return {
+          id: `${p.processType}_${p.processId}_${runId}`, // UNIQUE KEY
+
+          processId: p.processId,
+          processRunId: p.processRunId,
+          processType: p.processType,
+
+          runId,
+          isLatestRun,
+
+          status: p.status,
+
+          stageTitle: lastStage?.stageTitle ?? "Unknown",
+          stageIcon: lastStage?.stageIcon ?? "AccessTime",
+
+          startTime: p.processStartTime,
+          endTime: p.processEndTime,
+
+          hasSummary,
+
+          raw: p,
+        };
+      })
+      .sort((a, b) => {
+        // Convert to Date objects to compare (handles ISO strings, timestamps, etc.)
+        const dateA = new Date(a.startTime);
+        const dateB = new Date(b.startTime);
+
+        // Sort Descending (latest date first)
+        return dateB - dateA;
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processes, latestRunMap]);
+
+  const statusOptions = Object.entries(StageStatusConfig).map(
+    ([value, details]) => ({
+      value: Number(value),
+      label: details.label,
+    }),
+  );
+
+  /* =====================================================
+     COLUMNS
+  ===================================================== */
+
+  const columns = useMemo(
+    () => [
+      {
+        field: "processType",
+        flex: 1,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <MemoryIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Process Name</Typography>
+          </Box>
+        ),
+        renderCell: (params) => {
+          const name = params.row.processType;
+          const runId = params.row.runId;
+
+          /* ordinal helper */
+          const getOrdinal = (n) => {
+            const s = ["th", "st", "nd", "rd"];
+            const v = n % 100;
+            return n + (s[(v - 20) % 10] || s[v] || s[0]);
+          };
+
+          return (
+            <Typography variant="body1" component="span">
+              {runId > 1 ? `${name} (${getOrdinal(runId)} run)` : name}
+            </Typography>
+          );
+        },
+      },
+
+      {
+        field: "status",
+        headerName: "Status",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        type: "singleSelect",
+        valueOptions: statusOptions,
+
+        // Sort logic: alphabetical by Label
+        sortComparator: (v1, v2) => {
+          const label1 = StageStatusConfig[v1]?.label || "";
+          const label2 = StageStatusConfig[v2]?.label || "";
+          return label1.localeCompare(label2);
+        },
+
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AnalyticsIcon sx={{ mr: 0.5, fontSize: "1.1rem" }} />
+            <Typography variant="subtitle2" fontWeight="600">
+              Status
+            </Typography>
+          </Box>
+        ),
+
+        // Inline Chip Rendering (No separate component needed)
+        renderCell: (params) => {
+          const config = StageStatusConfig[params.value];
+          if (!config) return null;
+          const Icon = getIconComponent(config.icon);
+          return (
+            <CustomChip
+              icon={<Icon />}
+              label={config.label}
+              color={config.color}
+              variant="contained"
+            />
+          );
+        },
+      },
+
+      {
+        field: "stageTitle",
+        headerName: "Stage",
+        flex: 1.2,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <ApprovalIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Stage</Typography>
+          </Box>
+        ),
+        renderCell: (params) => {
+          const Icon = getIconComponent(params.row?.stageIcon);
+
+          return (
+            <CustomChip
+              label={params.row?.stageTitle}
+              icon={<Icon />}
+              variant="outlined"
+            />
+          );
+        },
+      },
+
+      {
+        field: "startTime",
+        headerName: "Started",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Started</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value)}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "endTime",
+        headerName: "Ended",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Ended</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value) || "-"}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.8,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AppRegistrationIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Actions</Typography>
+          </Box>
+        ),
+
+        renderCell: (params) => {
+          const row = params.row.raw;
+          const isLatest = params.row.isLatestRun;
+
+          const showRestart = isLatest && row.status !== StageStatus.STARTED;
+
+          const showStop = isLatest && row.status === StageStatus.STARTED;
+
+          const nonActionableProcess =
+            row.processId == 7 || row.processId == 12;
+
+          return (
+            <Stack
+              direction="row"
+              spacing={1}
+              alignItems="center"
+              justifyContent="center"
+              sx={{ height: "100%" }}
+            >
+              {(permissions.restart || permissions.start) &&
+                isCurrentDate &&
+                showRestart &&
+                !nonActionableProcess && (
+                  <Tooltip title="Restart">
+                    <IconButton
+                      size="small"
+                      onClick={() => actions.onStart(row)}
+                    >
+                      <RestartAltIcon />
+                    </IconButton>
+                  </Tooltip>
+                )}
+
+              {permissions.stop &&
+                isCurrentDate &&
+                showStop &&
+                !nonActionableProcess && (
+                  <Tooltip title="Stop">
+                    <IconButton
+                      size="small"
+                      onClick={() => actions.onStop(row)}
+                    >
+                      <StopIcon />
+                    </IconButton>
+                  </Tooltip>
+                )}
+
+              {permissions.view && (
+                <Tooltip title="View">
+                  <IconButton size="small" onClick={() => actions.onView(row)}>
+                    <VisibilityIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
+
+              {permissions.view && params.row.hasSummary && (
+                <Tooltip title="Summary">
+                  <IconButton
+                    size="small"
+                    onClick={() => actions.onSummary(row)}
+                  >
+                    <SummarizeOutlinedIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </Stack>
+          );
+        },
+      },
+    ],
+    [
+      actions,
+      isCurrentDate,
+      permissions.restart,
+      permissions.start,
+      permissions.stop,
+      permissions.view,
+      statusOptions,
+    ],
+  );
+
+  const filteredColumns = useMemo(() => {
+    if (
+      permissions.start ||
+      permissions.stop ||
+      permissions.restart ||
+      permissions.view
+    ) {
+      return columns;
+    }
+    return columns.filter((c) => c.field !== "actions");
+  }, [columns, permissions]);
+
+  // Reset to page 0 whenever loading changes
+  useEffect(() => {
+    if (loading) {
+      setPaginationModel((prev) => ({
+        ...prev,
+        page: 0,
+      }));
+    }
+  }, [processes, loading]);
+
+  /* =====================================================
+     FINAL RENDER
+  ===================================================== */
 
   return (
     <Box
       sx={{
-        mb: 2,
-        p: { xs: 2, sm: 2.5, md: 3 },
-        borderRadius: 2,
-        bgcolor: "background.paper",
-        boxShadow: 2,
-        borderLeft: "6px solid",
-        borderColor: "primary.main",
+        "& .MuiDataGrid-columnHeaders": {
+          backgroundColor: "#b4a7d6",
+          fontWeight: 600,
+        },
+        "& .MuiDataGrid-row:hover": {
+          backgroundColor: "action.hover",
+        },
       }}
     >
-      <Stack
-        direction={{
-          xs: "column",
-          md: "row",
-        }}
-        spacing={3}
-        justifyContent="space-between"
-        alignItems={{
-          xs: "flex-start",
-          md: "center",
-        }}
-      >
-        {/* LEFT */}
-        <Stack
-          direction="row"
-          spacing={2}
-          alignItems="flex-start"
-          sx={{ width: "100%" }}
-        >
-          <TrendingUpIcon
-            color="primary"
-            sx={{
-              fontSize: {
-                xs: 32,
-                sm: 36,
-                md: 42,
-              },
-              mt: 0.5,
-              flexShrink: 0,
-            }}
-          />
-
-          <Box sx={{ flex: 1, minWidth: 0 }}>
-            <Typography
-              variant="h6"
-              fontWeight={700}
-              sx={{
-                fontSize: {
-                  xs: "1rem",
-                  sm: "1.15rem",
-                  md: "1.35rem",
-                },
-              }}
-            >
-              EOD Process Execution Monitor/Overview
-            </Typography>
-
-            <Typography
-              color="text.secondary"
-              sx={{
-                mt: 0.5,
-                fontSize: {
-                  xs: "0.82rem",
-                  sm: "0.9rem",
-                  md: "0.95rem",
-                },
-              }}
-            >
-              Monitor/Track real-time execution of ETL,
-              reconciliation jobs, stage-wise outcomes and system
-              progress for the ETL run date.
-            </Typography>
-
-            {etlProcess && (
-              <Stack
-                direction={{
-                  xs: "column",
-                  sm: "row",
-                }}
-                spacing={1.5}
-                alignItems={{
-                  xs: "flex-start",
-                  sm: "center",
-                }}
-                sx={{ mt: 2 }}
-              >
-                <Typography
-                  variant="body2"
-                  color="text.secondary"
-                  fontWeight={500}
-                >
-                  EOD Process Triggered By:
-                </Typography>
-
-                <Tooltip
-                  title={
-                    isAirflow
-                      ? "System Automated Task"
-                      : `Manually Initiated Task (Remarks: ${
-                          etlProcess.remarks || "-"
-                        })`
-                  }
-                  arrow
-                >
-                  <Chip
-                    icon={
-                      isAirflow ? (
-                        <AirplanemodeActiveIcon />
-                      ) : (
-                        <PersonIcon />
-                      )
-                    }
-                    label={
-                      isAirflow
-                        ? "AIRFLOW SCHEDULER"
-                        : etlProcess.triggeredBy
-                    }
-                    variant="outlined"
-                    size="small"
-                    color={isAirflow ? "primary" : "secondary"}
-                    sx={{
-                      fontWeight: 700,
-                      borderRadius: 1.5,
-                      maxWidth: "100%",
-                    }}
-                  />
-                </Tooltip>
-              </Stack>
-            )}
-          </Box>
-        </Stack>
-
-        {/* RIGHT */}
-        {etlDate && (
-          <Paper
-            elevation={3}
-            sx={{
-              width: {
-                xs: "100%",
-                sm: "100%",
-                md: "auto",
-              },
-              px: { xs: 2, sm: 3 },
-              py: 1.5,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: {
-                xs: "center",
-                md: "flex-start",
-              },
-              gap: 1.5,
-              borderRadius: 2,
-              flexShrink: 0,
-            }}
-          >
-            <IconButton
-              onClick={handleRefreshClick}
-              color="primary"
-            >
-              <EventIcon
+      <DataGrid
+        rows={rows}
+        columns={filteredColumns}
+        pageSizeOptions={[5, 10, 25, 50]}
+        paginationModel={paginationModel}
+        onPaginationModelChange={setPaginationModel}
+        loading={loading}
+        getRowId={(p) => p.id}
+        disableRowSelectionOnClick
+        slots={{
+          noRowsOverlay: () => (
+            <Stack height="100%" alignItems="center" justifyContent="center">
+              <InfoIcon
                 sx={{
-                  fontSize: {
-                    xs: 28,
-                    md: 34,
-                  },
+                  fontSize: 48,
+                  color: "text.secondary",
+                  mb: 1,
                 }}
               />
-            </IconButton>
-
-            <Box>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                display="block"
-              >
-                Current ETL Date (System Generated)
+              <Typography variant="h6">No processes available</Typography>
+              <Typography variant="body2">
+                Processes not found for the ETL date.
               </Typography>
-
-              <Typography
-                fontWeight={600}
-                sx={{
-                  fontSize: {
-                    xs: "0.9rem",
-                    sm: "1rem",
-                  },
-                  wordBreak: "break-word",
-                }}
-              >
-                {formatDate(etlDate)}
-              </Typography>
-            </Box>
-          </Paper>
-        )}
-      </Stack>
+            </Stack>
+          ),
+        }}
+      />
     </Box>
   );
 };
 
-export default ProcessStatusHeader;
+export default ProcessStatusTable;
