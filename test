@@ -1,344 +1,129 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Box,
-  Button,
-  Paper,
-  Stack,
-  Tab,
-  Tabs,
-  Typography,
-  useTheme,
-} from "@mui/material";
-import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
-import { useMutation } from "@tanstack/react-query";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import CommandPanel from "./components/CommandPanel";
-import UploadScript from "./components/UploadScript";
-import ResultGrid from "./components/ResultGrid";
-import LogsPanel from "./components/LogsPanel";
-import ConfirmDialog from "./components/ConfirmDialog";
+const [exportType, setExportType] = useState("CSV");
+const [tableName, setTableName] = useState("");
 
-const AdminSupport = () => {
-  const theme = useTheme();
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
+const { mutate: exportData, isPending: exportLoading } = useMutation({
+  mutationFn: async ({ sql, exportType, tableName }) => {
+    const token = localStorage.getItem("token");
 
-  const [mainTab, setMainTab] = useState(0);
-  const [outputTab, setOutputTab] = useState(0);
+    const response = await fetch(
+      `${process.env.REACT_APP_API_URL}/TS/admin-support/export`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sql,
+          exportType,
+          tableName,
+        }),
+      },
+    );
 
-  const [query, setQuery] = useState("SELECT * FROM ADMIN_SUPPORT_LOG;");
-  const [lastExecutedQuery, setLastExecutedQuery] = useState("");
-
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [lastResponse, setLastResponse] = useState(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
-
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 10,
-  });
-
-  const isSelect = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    return q.startsWith("SELECT") || q.startsWith("WITH");
-  }, [query]);
-
-  const resetScreen = () => {
-    setQuery("");
-    setLastExecutedQuery("");
-    setSelectedFile(null);
-    setJobId(null);
-    setJobStatus(null);
-    setLastResponse(null);
-    setResults({ rows: [], columns: [], total: 0 });
-    setPaginationModel({ page: 0, pageSize: 10 });
-    setOutputTab(0);
-    showSnackbar("Workspace reset completed", "success");
-  };
-
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      return await callApi(
-        "/TS/admin-support/admin-execute",
-        { sql, page, size },
-        "POST",
-      );
-    },
-    onSuccess: (data) => {
-      setLastResponse(data);
-      if (data?.error) {
-        setOutputTab(1);
-        return;
-      }
-      if (isSelect) {
-        const columns = (data?.columns || []).map((col) => ({
-          field: col.name,
-          headerName: col.name,
-          flex: 1,
-          minWidth: 180,
-        }));
-        setResults({
-          rows: data?.rows || [],
-          columns,
-          total: data?.total || 0,
-        });
-        setOutputTab(0);
-      } else {
-        setOutputTab(1);
-      }
-    },
-    onError: (e) => {
-      setLastResponse({
-        error: true,
-        message: e?.message || "Execution failed",
-      });
-      setOutputTab(1);
-    },
-  });
-
-  const handleExecute = useCallback(
-    (reset = false, customSql = null) => {
-      const targetSql = customSql !== null ? customSql : query;
-
-      if (!targetSql.trim()) {
-        showSnackbar("Enter SQL query to execute", "warning");
-        return;
-      }
-
-      setLastExecutedQuery(targetSql);
-      setSelectedFile(null);
-      setJobId(null);
-      setJobStatus(null);
-      setLastResponse(null);
-
-      const page = reset ? 0 : paginationModel.page;
-      if (reset) setPaginationModel((p) => ({ ...p, page: 0 }));
-
-      executeSql({ sql: targetSql, page, size: paginationModel.pageSize });
-    },
-    [
-      executeSql,
-      paginationModel.page,
-      paginationModel.pageSize,
-      query,
-      showSnackbar,
-    ],
-  );
-
-  const handlePaginationChange = (newModel) => {
-    setPaginationModel(newModel);
-
-    const q = lastExecutedQuery.trim().toUpperCase();
-    if (lastExecutedQuery && (q.startsWith("SELECT") || q.startsWith("WITH"))) {
-      executeSql({
-        sql: lastExecutedQuery,
-        page: newModel.page,
-        size: newModel.pageSize,
-      });
+    if (!response.ok) {
+      throw new Error("Export failed");
     }
-  };
 
-  const handleUpload = async (file) => {
-    try {
-      if (!file) {
-        showSnackbar("Choose SQL file", "warning");
-        return;
+    const blob = await response.blob();
+
+    const disposition = response.headers.get(
+      "Content-Disposition",
+    );
+
+    let fileName = "export";
+
+    if (disposition) {
+      const match =
+        disposition.match(/filename="?([^"]+)"?/);
+
+      if (match?.[1]) {
+        fileName = match[1];
       }
-      const formData = new FormData();
-      formData.append("file", file);
-      const data = await callApi(
-        "/TS/admin-support/upload-script",
-        formData,
-        "POST",
-        "json",
-        "multipart/form-data",
-      );
-      if (data?.error) {
-        showSnackbar(data.message, "error");
-        return;
-      }
-      setJobId(data.jobId);
-      setOutputTab(1);
-      showSnackbar("Execution started", "success");
-    } catch (e) {
-      showSnackbar(e?.message || "Upload failed", "error");
     }
-  };
 
-  useEffect(() => {
-    if (!jobId) return;
-    const interval = setInterval(async () => {
-      try {
-        const data = await callApi(
-          `/TS/admin-support/job-status/${jobId}`,
-          {},
-          "GET",
-        );
-        setJobStatus(data);
-        if (data.status === "COMPLETED" || data.status === "FAILED") {
-          clearInterval(interval);
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [callApi, jobId]);
-
-  useEffect(() => {
-    const active = jobStatus?.status === "RUNNING";
-    const beforeUnload = (e) => {
-      if (!active) return;
-      e.preventDefault();
-      e.returnValue = "SQL execution is still running.";
+    return {
+      blob,
+      fileName,
     };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [jobStatus]);
+  },
 
-  return (
-    <Box
-      sx={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        p: 2,
-        gap: 1.5,
-      }}
-    >
-      {/* HEADER */}
-      <Paper
-        elevation={0}
-        sx={{
-          px: 3,
-          py: 1,
-          borderBottom: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          borderRadius: 1,
-        }}
-      >
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Storage color="primary" />
-          <Box>
-            <Typography
-              variant="subtitle2"
-              fontWeight={800}
-              sx={{ letterSpacing: 0.5 }}
-            >
-              FINCORE ADMIN SUPPORT
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              Advanced SQL Console & Script Executor
-            </Typography>
-          </Box>
-        </Stack>
-        <Stack direction="row" spacing={2} flexWrap="wrap">
-          <Button
-            variant="outlined"
-            startIcon={<Refresh />}
-            onClick={resetScreen}
-          >
-            Reset Workspace
-          </Button>
-        </Stack>
-      </Paper>
+  onSuccess: ({ blob, fileName }) => {
+    const url = window.URL.createObjectURL(blob);
 
-      {/* INPUT TABS */}
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-        }}
-      >
-        <Tabs
-          value={mainTab}
-          onChange={(e, v) => setMainTab(v)}
-          variant="fullWidth"
-        >
-          <Tab icon={<Terminal />} label="SQL Console" />
-          <Tab icon={<UploadFile />} label="Script Upload" />
-        </Tabs>
-      </Paper>
+    const link = document.createElement("a");
 
-      {mainTab === 0 && (
-        <CommandPanel
-          query={query}
-          setQuery={setQuery}
-          onExecute={handleExecute}
-          loading={isPending}
-          onDangerousExecute={() => setConfirmOpen(true)}
-        />
-      )}
+    link.href = url;
+    link.download = fileName;
 
-      {mainTab === 1 && (
-        <UploadScript
-          onUpload={handleUpload}
-          loading={false}
-          showSnackbar={showSnackbar}
-        />
-      )}
+    document.body.appendChild(link);
 
-      {/* OUTPUT TABS */}
-      <Paper
-        elevation={0}
-        sx={{
-          flex: 1,
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
-          <Tab label="Data Grid" />
-          <Tab label="Live Logs" />
-        </Tabs>
+    link.click();
 
-        {outputTab === 0 && (
-          <ResultGrid
-            results={results}
-            loading={isPending}
-            paginationModel={paginationModel}
-            setPaginationModel={handlePaginationChange}
-          />
-        )}
+    link.remove();
 
-        {outputTab === 1 && (
-          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
-        )}
-      </Paper>
+    URL.revokeObjectURL(url);
 
-      <ConfirmDialog
-        open={confirmOpen}
-        onClose={() => setConfirmOpen(false)}
-        onConfirm={() => {
-          setConfirmOpen(false);
-          handleExecute(true);
-        }}
-      />
-    </Box>
-  );
+    showSnackbar(
+      "Export completed successfully",
+      "success",
+    );
+  },
+
+  onError: (e) => {
+    showSnackbar(
+      e?.message || "Export failed",
+      "error",
+    );
+  },
+});
+
+
+const handleExport = () => {
+  if (!lastExecutedQuery) {
+    showSnackbar(
+      "Execute a SELECT query first",
+      "warning",
+    );
+    return;
+  }
+
+  if (
+    exportType === "INSERT" &&
+    !tableName.trim()
+  ) {
+    showSnackbar(
+      "Table name required for INSERT export",
+      "warning",
+    );
+    return;
+  }
+
+  exportData({
+    sql: lastExecutedQuery,
+    exportType,
+    tableName,
+  });
 };
 
-export default AdminSupport;
 
 
-import React from "react";
+
+
+<ResultGrid
+  results={results}
+  loading={isPending}
+  paginationModel={paginationModel}
+  setPaginationModel={handlePaginationChange}
+  exportType={exportType}
+  setExportType={setExportType}
+  tableName={tableName}
+  setTableName={setTableName}
+  onExport={handleExport}
+  exportLoading={exportLoading}
+/>
+
+
 import {
   alpha,
   Box,
@@ -347,204 +132,97 @@ import {
   Stack,
   Typography,
   useTheme,
+  Button,
+  MenuItem,
+  Select,
+  TextField,
 } from "@mui/material";
-import { AutoAwesome, Storage, TableRows } from "@mui/icons-material";
-import { DataGrid, GridToolbar } from "@mui/x-data-grid";
+import DownloadIcon from "@mui/icons-material/Download";
 
 const ResultGrid = ({
   results,
   loading,
   paginationModel,
   setPaginationModel,
+
+  exportType,
+  setExportType,
+
+  tableName,
+  setTableName,
+
+  onExport,
+  exportLoading,
 }) => {
-  const theme = useTheme();
-  const rows = results?.rows || [];
-  const columns = results?.columns || [];
-  const total = results?.total || 0;
 
-  return (
-    <Paper
-      elevation={0}
+
+
+<Stack
+  direction="row"
+  spacing={1}
+  alignItems="center"
+  flexWrap="wrap"
+>
+  <Select
+    size="small"
+    value={exportType}
+    onChange={(e) =>
+      setExportType(e.target.value)
+    }
+    sx={{
+      minWidth: 130,
+      bgcolor: "white",
+    }}
+  >
+    <MenuItem value="CSV">CSV</MenuItem>
+
+    <MenuItem value="EXCEL">
+      Excel
+    </MenuItem>
+
+    <MenuItem value="JSON">
+      JSON
+    </MenuItem>
+
+    <MenuItem value="INSERT">
+      INSERT
+    </MenuItem>
+  </Select>
+
+  {exportType === "INSERT" && (
+    <TextField
+      size="small"
+      placeholder="Table Name"
+      value={tableName}
+      onChange={(e) =>
+        setTableName(e.target.value)
+      }
       sx={{
-        height: "100%",
-        borderRadius: 1,
-        overflow: "hidden",
-        border: `1px solid ${theme.palette.divider}`,
-        display: "flex",
-        flexDirection: "column",
+        width: 180,
+        bgcolor: "white",
       }}
-    >
-      {/* HEADER */}
-      <Box
-        sx={{
-          px: 2.5,
-          py: 1.5,
-          background: "linear-gradient(135deg,#111827,#1f2937)",
-          color: "white",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-        }}
-      >
-        <Stack
-          direction="row"
-          justifyContent="space-between"
-          alignItems="center"
-          flexWrap="wrap"
-          gap={1}
-        >
-          {/* LEFT */}
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Storage fontSize="small" />
-            <Typography fontWeight={800}>Query Result Grid</Typography>
-          </Stack>
+    />
+  )}
 
-          {/* RIGHT */}
-          <Stack direction="row" spacing={1} flexWrap="wrap">
-            <Chip
-              size="small"
-              icon={<TableRows />}
-              label={`${rows.length} Rows`}
-              sx={{
-                bgcolor: "rgba(255,255,255,0.08)",
-                color: "white",
-              }}
-            />
+  <Button
+    size="small"
+    variant="contained"
+    startIcon={<DownloadIcon />}
+    onClick={onExport}
+    disabled={
+      exportLoading ||
+      loading ||
+      total === 0
+    }
+  >
+    Export
+  </Button>
+</Stack>
 
-            <Chip
-              size="small"
-              icon={<AutoAwesome />}
-              label={`${columns.length} Columns`}
-              sx={{
-                bgcolor: "rgba(255,255,255,0.08)",
-                color: "white",
-              }}
-            />
 
-            <Chip
-              size="small"
-              label={`Total : ${total}`}
-              sx={{
-                bgcolor: "rgba(255,255,255,0.08)",
-                color: "white",
-              }}
-            />
-          </Stack>
-        </Stack>
-      </Box>
-
-      {/* GRID */}
-      <Box
-        sx={{
-          flex: 1,
-          // minHeight: 500,
-        }}
-      >
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          rowCount={total}
-          loading={loading}
-          disableRowSelectionOnClick
-          paginationMode="server"
-          paginationModel={paginationModel}
-          onPaginationModelChange={setPaginationModel}
-          pageSizeOptions={[10, 25, 50, 100]}
-          slots={{
-            toolbar: GridToolbar,
-          }}
-          getRowId={(row, index) =>
-            row.ID ?? row.id ?? row.RN ?? `${index}-${JSON.stringify(row)}`
-          }
-          sx={{
-            border: "none",
-            fontSize: 13,
-            bgcolor: "#ffffff",
-
-            /**
-             * HEADER
-             */
-            "& .MuiDataGrid-columnHeaders": {
-              bgcolor: "#f8fafc",
-              borderBottom: "1px solid #e5e7eb",
-              fontWeight: 700,
-              minHeight: "52px !important",
-            },
-
-            "& .MuiDataGrid-columnHeaderTitle": {
-              fontWeight: 800,
-              color: "#111827",
-            },
-
-            /**
-             * ROWS
-             */
-            "& .MuiDataGrid-row": {
-              transition: "background-color .15s ease",
-            },
-
-            "& .MuiDataGrid-row:hover": {
-              bgcolor: alpha(theme.palette.primary.main, 0.04),
-            },
-
-            "& .MuiDataGrid-cell": {
-              borderBottom: "1px solid #f1f5f9",
-
-              display: "flex",
-              alignItems: "center",
-            },
-
-            /**
-             * FOOTER
-             */
-            "& .MuiDataGrid-footerContainer": {
-              borderTop: "1px solid #e5e7eb",
-              bgcolor: "#fafafa",
-            },
-
-            /**
-             * TOOLBAR
-             */
-            "& .MuiDataGrid-toolbarContainer": {
-              p: 1.2,
-              borderBottom: "1px solid #f1f5f9",
-              bgcolor: "#fcfcfc",
-            },
-
-            /**
-             * PAGINATION
-             */
-            "& .MuiTablePagination-root": {
-              color: "#374151",
-            },
-
-            /**
-             * REMOVE FOCUS BORDER
-             */
-            "& .MuiDataGrid-cell:focus, & .MuiDataGrid-columnHeader:focus": {
-              outline: "none",
-            },
-
-            "& .MuiDataGrid-cell:focus-within, & .MuiDataGrid-columnHeader:focus-within":
-              {
-                outline: "none",
-              },
-
-            /**
-             * SCROLLBAR
-             */
-            "& ::-webkit-scrollbar": {
-              width: 8,
-              height: 8,
-            },
-
-            "& ::-webkit-scrollbar-thumb": {
-              background: "rgba(100,116,139,0.35)",
-              borderRadius: 20,
-            },
-          }}
-        />
-      </Box>
-    </Paper>
-  );
-};
-
-export default ResultGrid;
+disabled={
+  exportLoading ||
+  loading ||
+  total === 0 ||
+  !results?.rows?.length
+}
