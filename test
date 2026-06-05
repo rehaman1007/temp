@@ -1,73 +1,135 @@
-const { mutate: exportData, isPending: exportLoading } = useMutation({
-    mutationFn: async ({ sql, exportType, tableName }) => {
-      const payload = {
-        sql,
-        exportType,
-        tableName,
-      };
+onSuccess: async (response, variables) => {
+  console.log("Blob Response", response);
+  console.log("Variables", variables);
 
-      console.log("Export Payload", payload);
+  const exportType =
+    variables.exportType?.toUpperCase();
 
-      return await callApi(
-        "/TS/admin-support/export-data",
-        payload,
-        "POST",
-        "blob",
-      );
-    },
+  /**
+   * CLIPBOARD EXPORT
+   */
+  if (exportType === "CLIPBOARD") {
+    try {
+      const text = await response.text();
 
-    onSuccess: (response, variables) => {
-      console.log("Blob Response", response);
-      console.log("Variables", variables);
-
-      let format = "csv";
-
-      switch (variables.exportType?.toUpperCase()) {
-        case "EXCEL":
-          format = "xlsx";
-          break;
-
-        case "JSON":
-          format = "json";
-          break;
-
-        case "INSERT":
-          format = "sql";
-          break;
-
-        case "CSV":
-        default:
-          format = "csv";
-          break;
+      if (!text?.trim()) {
+        showSnackbar(
+          "No data available to copy",
+          "warning",
+        );
+        return;
       }
 
-      downloadFile(response, format, `export_${Date.now()}`);
+      // Optional safety limit (10 MB)
+      if (text.length > 10_000_000) {
+        showSnackbar(
+          "Clipboard content is too large. Use INSERT export instead.",
+          "warning",
+        );
+        return;
+      }
 
-      showSnackbar("Export completed successfully", "success");
-    },
+      await navigator.clipboard.writeText(
+        text,
+      );
 
-    onError: (e) => {
-      showSnackbar(e?.message || "Export failed", "error");
-    },
-  });
+      showSnackbar(
+        "INSERT statements copied to clipboard",
+        "success",
+      );
 
-  const handleExport = (exportParams) => {
-    const sql = lastExecutedQuery;
-    const exportType = exportParams.exportType;
-    const tableName = exportParams.tableName;
-    if (!lastExecutedQuery) {
-      showSnackbar("Execute a SELECT query first", "warning");
+      return;
+    } catch (err) {
+      console.error(err);
+
+      showSnackbar(
+        "Failed to copy to clipboard",
+        "error",
+      );
+
       return;
     }
+  }
 
-    if (exportType === "INSERT" && !tableName.trim()) {
-      showSnackbar("Table name required for INSERT export", "warning");
-      return;
-    }
+  /**
+   * FILE EXPORT
+   */
+  let format = "csv";
 
-    exportData({
-      sql,
+  switch (exportType) {
+    case "EXCEL":
+      format = "xlsx";
+      break;
+
+    case "JSON":
+      format = "json";
+      break;
+
+    case "INSERT":
+      format = "sql";
+      break;
+
+    case "CSV":
+    default:
+      format = "csv";
+      break;
+  }
+
+  downloadFile(
+    response,
+    format,
+    `export_${Date.now()}`,
+  );
+
+  showSnackbar(
+    "Export completed successfully",
+    "success",
+  );
+},
+
+const handleExport = (
+  exportParams,
+) => {
+  const sql = lastExecutedQuery;
+
+  const exportType =
+    exportParams.exportType;
+
+  const tableName =
+    exportParams.tableName;
+
+  if (!lastExecutedQuery) {
+    showSnackbar(
+      "Execute a SELECT query first",
+      "warning",
+    );
+    return;
+  }
+
+  if (
+    ["INSERT", "CLIPBOARD"].includes(
       exportType,
-      tableName,
-    });
-  };
+    ) &&
+    !tableName?.trim()
+  ) {
+    showSnackbar(
+      "Table name required",
+      "warning",
+    );
+    return;
+  }
+
+  exportData({
+    sql,
+
+    /**
+     * Reuse existing INSERT backend export
+     */
+    exportType:
+      exportType === "CLIPBOARD"
+        ? "INSERT"
+        : exportType,
+
+    tableName,
+  });
+};
