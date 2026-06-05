@@ -1,753 +1,836 @@
-import {
-  Dialog,
-  DialogContent,
-  Button,
-  Paper,
-  Typography,
-  Box,
-  Stack,
-  IconButton,
-  Tooltip,
-  RadioGroup,
-  FormControlLabel,
-  Radio,
-} from "@mui/material";
+package com.fincore.transactions_service.config;
 
-import GppBadIcon from "@mui/icons-material/GppBad";
-import GppGoodIcon from "@mui/icons-material/GppGood";
-import CloseIcon from "@mui/icons-material/Close";
-import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { toPng } from "html-to-image";
-import { useRef, useState, useEffect, useMemo } from "react";
-import { TABLE_CONFIG } from "../util/ProcessSummaryTableConfig";
-import DynamicSummaryTable from "./ProcessDynamicSummaryTable";
-import ProcessReportDownloadProgress from "./ProcessReportDownloadProgress";
-import { StageStatus } from "../util/StageStatus";
+import java.util.concurrent.Executor;
 
-/* ================= FORMAT ================= */
+@Configuration
+@EnableAsync
+@Slf4j
+public class AsyncConfig {
 
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
+    /**
+     * SQL EXECUTOR
+     */
+    @Bean(name = "sqlTaskExecutor")
+    public Executor sqlTaskExecutor() {
 
-/* ================= SUMMARY → FILE MAP ================= */
+        ThreadPoolTaskExecutor executor =
+                new ThreadPoolTaskExecutor();
 
-const SUMMARY_FILE_MAP = {
-  BALANCE: "balance_compare_report",
-  CIBA: "intr_report",
-  SUSPENSE: "cntr_report",
-};
+        /**
+         * THREAD CONFIG
+         */
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(50);
+        executor.setThreadNamePrefix("SQL-EXECUTOR-");
 
-/* ====================================================== */
+        /**
+         * PERFORMANCE
+         */
 
-const ProcessSummaryDialog = ({
-  open,
-  data,
-  isCurrentDate,
-  onClose,
-  onAccept,
-  onReject,
-  onDownload,
-  downloadProgress,
-  permissions = {},
-}) => {
-  const reportRef = useRef(null);
-  const copyTimeoutRef = useRef(null);
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(60);
+        executor.setKeepAliveSeconds(120);
 
-  const [copied, setCopied] = useState(false);
-  const [summaryType, setSummaryType] = useState("BALANCE");
+        /**
+         * REJECTION POLICY
+         */
+        executor.setRejectedExecutionHandler((r, ex) -> {
 
-  const safeData = data || {};
-  /* ================= DATA ================= */
+            log.error("""
+                    
+                    ==================================================
+                    SQL EXECUTOR QUEUE FULL
+                    ==================================================
+                    task={}
+                    activeThreads={}
+                    queueSize={}
+                    ==================================================
+                    """,
+                    r,
+                    ex.getActiveCount(),
+                    ex.getQueue().size()
+            );
 
-  const {
-    process = {},
-    processRunId,
-    RECON_RUN_DATE,
-    differenceSummary = [],
-    cibaSummary = [],
-    suspenseSummary = [],
-    stages = [],
-  } = safeData;
+            throw new RuntimeException(
+                    "SQL execution queue is full"
+            );
+        });
 
-  /* ================= STAGE CHECK ================= */
+        executor.initialize();
 
-  const balanceDone = stages.some(
-    (s) => s.stageId === "balance_Compare_generated" && s.stageStatus === 2,
-  );
-
-  const cibaDone = stages.some(
-    (s) => s.stageId === "intr_summary_calculated" && s.stageStatus === 2,
-  );
-
-  const suspenseDone = stages.some(
-    (s) => s.stageId === "cntr_summary_calculated" && s.stageStatus === 2,
-  );
-
-  // const stageWaiting = stages.some(
-  //   (s) => s.stageId === "waiting_for_approval" && s.stageStatus === 1,
-  // );
-
-  const stageWaiting = process?.status == StageStatus.WAITING_FOR_APPROVAL;
-
-  /* ================= AVAILABLE TYPES ================= */
-
-  const availableSummaryTypes = useMemo(() => {
-    const arr = [];
-
-    if (balanceDone) arr.push("BALANCE");
-    if (cibaDone) arr.push("CIBA");
-    if (suspenseDone) arr.push("SUSPENSE");
-
-    return arr;
-  }, [balanceDone, cibaDone, suspenseDone]);
-
-  /* ================= AUTO FIX SELECTED TYPE ================= */
-
-  useEffect(() => {
-    if (!availableSummaryTypes.includes(summaryType)) {
-      setSummaryType(availableSummaryTypes[0] || "BALANCE");
+        return executor;
     }
-  }, [availableSummaryTypes, summaryType]);
+}
 
-  /* ================= ACTIVE SUMMARY ================= */
 
-  const activeSummary = useMemo(() => {
-    switch (summaryType) {
-      case "BALANCE":
-        return differenceSummary || [];
+package com.fincore.transactions_service.dto;
 
-      case "CIBA":
-        return cibaSummary || [];
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
 
-      case "SUSPENSE":
-        return suspenseSummary || [];
+@Data
+public class AdminSupportDTO {
 
-      default:
-        return [];
-    }
-  }, [summaryType, differenceSummary, cibaSummary, suspenseSummary]);
+    /**
+     * Raw SQL query string sent from the React editor.
+     * Use @NotBlank to ensure we don't process empty strings.
+     */
+    @NotBlank(message = "SQL query cannot be empty")
+    private String sql;
 
-  /* ================= EXPORT PDF ================= */
+    /**
+     * Current page index for server-side pagination (starts at 0)
+     */
+    private Integer page;
 
-  const exportPDF = () => {
-    const config = TABLE_CONFIG[summaryType];
+    /**
+     * Number of rows to fetch per page
+     */
+    private Integer size;
+}
 
-    if (!config) return;
 
-    const doc = new jsPDF("p", "pt");
+package com.fincore.transactions_service.controller;
 
-    doc.setFontSize(14);
-    doc.text(`${summaryType} Summary Report`, 40, 40);
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import com.fincore.transactions_service.service.AdminSupportService;
+import com.fincore.commonutilities.jwt.JwtUtil;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
-    doc.setFontSize(10);
-    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
+@RestController
+@RequestMapping("/api/admin-support")
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportController {
 
-    /* ================= HEADERS ================= */
+    private final AdminSupportService adminSupportService;
 
-    const headers = config.columns.map((col) => col.label);
+    private final JwtUtil jwtUtil;
 
-    /* ================= BODY ================= */
+    /**
+     * =========================================================
+     * EXECUTE SQL
+     * =========================================================
+     */
+    @PostMapping("/admin-execute")
+    public ResponseEntity<?> executeAdminSql(@RequestHeader("Authorization") String token, @RequestBody AdminSupportDTO dto, HttpServletRequest request) {
 
-    const body = activeSummary.map((row) =>
-      config.columns.map((col) =>
-        col.align === "right"
-          ? formatAmount(row[col.field]) || row[col.field]
-          : row[col.field] || "—",
-      ),
-    );
+        String userId = extractUserId(token);
 
-    /* ================= TOTAL ROW ================= */
+        log.info("""
+                
+                ==================================================
+                ADMIN EXECUTE REQUEST RECEIVED
+                ==================================================
+                userId={}
+                sql={}
+                page={}
+                size={}
+                ==================================================
+                """, userId, dto.getSql(), dto.getPage(), dto.getSize());
 
-    if (config.totalFields?.length) {
-      const totals = {};
-
-      config.totalFields.forEach((field) => {
-        totals[field] = activeSummary.reduce(
-          (sum, r) => sum + (Number(r[field]) || 0),
-          0,
-        );
-      });
-
-      const totalRow = config.columns.map((col, index) => {
-        if (index === 0) return "TOTAL";
-
-        if (totals[col.field] !== undefined)
-          return formatAmount(totals[col.field]);
-
-        return "";
-      });
-
-      body.push(totalRow);
+        return ResponseEntity.ok(adminSupportService.executeAdminSql(dto, userId, request));
     }
 
-    /* ================= GENERATE TABLE ================= */
+    /**
+     * =========================================================
+     * UPLOAD SQL FILE
+     * =========================================================
+     */
+    @PostMapping("/upload-script")
+    public ResponseEntity<?> uploadSqlFile(@RequestHeader("Authorization") String token, @RequestParam("file") MultipartFile file, HttpServletRequest request) {
 
-    autoTable(doc, {
-      startY: 80,
-      head: [headers],
-      body,
-      styles: {
-        fontSize: 9,
-        halign: "right",
-      },
-      columnStyles: {
-        0: { halign: "left" },
-      },
-      didParseCell: (data) => {
-        if (data.row.index === body.length - 1) {
-          data.cell.styles.fontStyle = "bold";
+        String userId = extractUserId(token);
+
+        log.info("""
+                
+                ==================================================
+                SQL FILE UPLOAD REQUEST RECEIVED
+                ==================================================
+                userId={}
+                fileName={}
+                fileSize={} MB
+                ==================================================
+                """, userId, file.getOriginalFilename(), String.format("%.2f", file.getSize() / 1024.0 / 1024.0));
+
+        return ResponseEntity.ok(adminSupportService.uploadSqlFile(file, userId, request));
+    }
+
+    /**
+     * =========================================================
+     * JOB STATUS
+     * =========================================================
+     */
+    @GetMapping("/job-status/{jobId}")
+    public ResponseEntity<?> getJobStatus(@RequestHeader("Authorization") String token, @PathVariable String jobId) {
+
+        String userId = extractUserId(token);
+
+        log.info("""
+                
+                ==================================================
+                JOB STATUS REQUEST
+                ==================================================
+                userId={}
+                jobId={}
+                ==================================================
+                """, userId, jobId);
+
+        return ResponseEntity.ok(adminSupportService.getJobStatus(jobId));
+    }
+
+    /**
+     * =========================================================
+     * EXTRACT USER ID FROM JWT TOKEN
+     * =========================================================
+     */
+    private String extractUserId(String token) {
+
+        try {
+
+            if (token == null || token.isBlank()) {
+
+                return "UNKNOWN";
+            }
+
+            /**
+             * REMOVE BEARER PREFIX
+             */
+            if (token.startsWith("Bearer ")) {
+
+                token = token.substring(7);
+            }
+
+            String userId = jwtUtil.getUserIdFromToken(token);
+
+            if (userId == null || userId.isBlank()) {
+
+                return "UNKNOWN";
+            }
+
+            return userId;
+
+        } catch (Exception e) {
+
+            log.error("""
+                    
+                    ==================================================
+                    FAILED TO EXTRACT USER ID FROM TOKEN
+                    ==================================================
+                    error={}
+                    ==================================================
+                    """, e.getMessage(), e);
+
+            return "UNKNOWN";
         }
-      },
-    });
-
-    doc.save(`${summaryType}_Summary_${RECON_RUN_DATE}.pdf`);
-  };
-
-  /* ================= COPY PNG ================= */
-  const copyPNGToClipboard = async () => {
-    if (!reportRef.current) return;
-
-    const element = reportRef.current;
-
-    try {
-      const dataUrl = await toPng(element, {
-        cacheBust: true,
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
-
-        /* fixes font/css errors */
-        skipFonts: true,
-      });
-
-      const blob = await (await fetch(dataUrl)).blob();
-
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          "image/png": blob,
-        }),
-      ]);
-
-      setCopied(true);
-
-      clearTimeout(copyTimeoutRef.current);
-
-      copyTimeoutRef.current = setTimeout(() => {
-        setCopied(false);
-      }, 2000);
-    } catch (err) {
-      console.error(err);
     }
-  };
+}
 
-  /* ====================================================== */
+package com.fincore.transactions_service.service;
 
-  return (
-    <>
-      <Dialog open={open} fullWidth maxWidth="md">
-        {/* HEADER */}
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.multipart.MultipartFile;
 
-        <Box
-          sx={{
-            px: 3,
-            py: 2,
-            borderBottom: 1,
-            borderColor: "divider",
-            display: "flex",
-            justifyContent: "space-between",
-          }}
-        >
-          <Box>
-            <Typography variant="h6" fontWeight={700}>
-              {summaryType} Summary Report
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Reconciliation Date: {RECON_RUN_DATE}
-            </Typography>
-          </Box>
+import java.util.Map;
 
-          <Stack direction="row" spacing={1}>
-            <Tooltip title="Export summary to PDF">
-              <IconButton onClick={exportPDF}>
-                <PictureAsPdfOutlinedIcon />
-              </IconButton>
-            </Tooltip>
+public interface AdminSupportService {
 
-            <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
-              <IconButton
-                onClick={copyPNGToClipboard}
-                sx={{ color: copied ? "success.main" : "inherit" }}
-              >
-                {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
-              </IconButton>
-            </Tooltip>
+    Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request);
 
-            <IconButton onClick={onClose}>
-              <CloseIcon />
-            </IconButton>
-          </Stack>
-        </Box>
+    Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request);
 
-        {/* BODY */}
+    Map<String, Object> getJobStatus(String jobId);
+}
 
-        <DialogContent>
-          {/* RADIO */}
-          {permissions.download && availableSummaryTypes.length > 0 && (
-            <Paper sx={{ p: 2, mb: 2 }}>
-              <Stack
-                direction="row"
-                justifyContent="space-between"
-                alignItems="center"
-                flexWrap="wrap"
-                gap={2}
-              >
-                <RadioGroup
-                  row
-                  value={summaryType}
-                  onChange={(e) => {
-                    setSummaryType(e.target.value);
-                  }}
-                >
-                  {availableSummaryTypes.includes("BALANCE") && (
-                    <FormControlLabel
-                      value="BALANCE"
-                      control={<Radio />}
-                      label="Balance Compare"
-                      disabled={downloadProgress?.inProgress}
-                    />
-                  )}
 
-                  {availableSummaryTypes.includes("CIBA") && (
-                    <FormControlLabel
-                      value="CIBA"
-                      control={<Radio />}
-                      label="CIBA"
-                      disabled={downloadProgress?.inProgress}
-                    />
-                  )}
 
-                  {availableSummaryTypes.includes("SUSPENSE") && (
-                    <FormControlLabel
-                      value="SUSPENSE"
-                      control={<Radio />}
-                      label="Suspense"
-                      disabled={downloadProgress?.inProgress}
-                    />
-                  )}
-                </RadioGroup>
+package com.fincore.transactions_service.service;
 
-                <Button
-                  startIcon={<CloudDownloadTwoToneIcon />}
-                  variant="contained"
-                  onClick={() =>
-                    onDownload(
-                      SUMMARY_FILE_MAP[summaryType],
-                      RECON_RUN_DATE,
-                      processRunId,
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.IOUtils;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportServiceImpl implements AdminSupportService {
+
+    private final JdbcTemplate jdbcTemplate;
+    private final AdminSupportExecutor adminSupportExecutor;
+    private final FileSystem hdfsFileSystem;
+
+    /**
+     * =========================================================
+     * EXECUTE ADMIN SQL (COMMAND CONSOLE)
+     * =========================================================
+     */
+    @Override
+    public Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request) {
+
+        Instant start = Instant.now();
+        String clientIp = getClientIp(request);
+        String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
+        Map<String, Object> response = new HashMap<>();
+
+        try {
+            log.info("""
+                    
+                    ==================================================
+                    ADMIN SQL EXECUTION STARTED
+                    ==================================================
+                    userId={}
+                    clientIp={}
+                    page={}
+                    size={}
+                    ==================================================
+                    """, userId, clientIp, dto.getPage(), dto.getSize());
+
+            /**
+             * CLEAN SQL
+             */
+            rawSql = rawSql.replaceAll(";\\s*$", "").trim();
+            String[] statements = rawSql.split(";");
+            List<String> cleanStatements = new ArrayList<>();
+
+            for (String stmt : statements) {
+                String clean = stmt.replaceAll("(?m)^--.*", "").trim();
+                if (!clean.isEmpty()) {
+                    cleanStatements.add(clean);
+                }
+            }
+
+            if (cleanStatements.isEmpty()) {
+                response.put("error", true);
+                response.put("message", "SQL cannot be empty");
+                return response;
+            }
+
+            /**
+             * SINGLE SELECT EVALUATION
+             */
+            boolean isSingleSelect = cleanStatements.size() == 1 && cleanStatements.get(0).trim().toUpperCase().startsWith("SELECT");
+            int page = dto.getPage() != null ? dto.getPage() : 0;
+            int size = dto.getSize() != null ? dto.getSize() : 10;
+
+            /**
+             * EXECUTE SELECT QUERY
+             */
+            if (isSingleSelect) {
+                String executableSelect = cleanStatements.get(0);
+                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
+                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+
+                if (total == null) total = 0;
+
+                int startRow = page * size;
+                int endRow = startRow + size;
+
+                // Pagination Query for Oracle
+                String paginatedSql = """
+                        SELECT * FROM
+                        (
+                            SELECT A.*, ROWNUM RN FROM
+                            (
+                        """ + executableSelect + """
+                            ) A
+                            WHERE ROWNUM <= ?
+                        )
+                        WHERE RN > ?
+                        """;
+
+                List<Map<String, String>> columns = new ArrayList<>();
+                List<Map<String, Object>> rawRows = new ArrayList<>();
+
+                jdbcTemplate.query(paginatedSql, (java.sql.ResultSet rs) -> {
+                    java.sql.ResultSetMetaData metaData = rs.getMetaData();
+                    int columnCount = metaData.getColumnCount();
+
+                    // Extract Columns (Skipping the internal RN column)
+                    for (int i = 1; i <= columnCount; i++) {
+                        String colName = metaData.getColumnName(i);
+                        if (!colName.equalsIgnoreCase("RN")) {
+                            columns.add(Map.of("name", colName));
+                        }
+                    }
+
+                    // Extract Rows (Skipping the internal RN column)
+                    while (rs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        for (int i = 1; i <= columnCount; i++) {
+                            String colName = metaData.getColumnName(i);
+                            if (!colName.equalsIgnoreCase("RN")) {
+                                row.put(colName, rs.getObject(i));
+                            }
+                        }
+                        rawRows.add(row);
+                    }
+                    return null;
+                }, endRow, startRow);
+
+                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
+
+                response.put("error", false);
+                response.put("columns", columns);
+                response.put("rows", rows);
+                response.put("total", total);
+                response.put("page", page);
+                response.put("size", size);
+
+                adminSupportExecutor.insertExecutionLog(
+                        UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS",
+                        1, 1, 1, 0, 0, 0, 1, null, null, null, null, 1,
+                        Duration.between(start, Instant.now()).toSeconds(), rawSql
+                );
+
+                return response;
+            }
+
+
+            /**
+             * EXECUTE DML/DDL COMMANDS
+             */
+            int successCount = 0;
+            int insertCount = 0, updateCount = 0, deleteCount = 0, otherCount = 0;
+
+            for (int i = 0; i < cleanStatements.size(); i++) {
+                String sql = cleanStatements.get(i);
+
+                try {
+                    jdbcTemplate.execute(sql);
+                    successCount++;
+                    String upperSql = sql.toUpperCase();
+
+                    if (upperSql.startsWith("INSERT")) insertCount++;
+                    else if (upperSql.startsWith("UPDATE")) updateCount++;
+                    else if (upperSql.startsWith("DELETE")) deleteCount++;
+                    else otherCount++;
+
+                } catch (Exception e) {
+                    adminSupportExecutor.insertExecutionLog(
+                            UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED",
+                            cleanStatements.size(), successCount, successCount, insertCount, updateCount, deleteCount, otherCount,
+                            i + 1, sql, e.getClass().getSimpleName(), e.getMessage(), 0,
+                            Duration.between(start, Instant.now()).toSeconds(), rawSql
+                    );
+
+                    response.put("error", true);
+                    response.put("message", "Error at statement " + (i + 1) + " : " + e.getMessage());
+                    response.put("failedSql", sql);
+                    return response;
+                }
+            }
+
+            response.put("error", false);
+            response.put("message", "Script executed successfully");
+            response.put("rows", List.of(Map.of("RESULT", successCount + " statements executed successfully")));
+            response.put("columns", List.of(Map.of("name", "RESULT")));
+            response.put("total", 1);
+
+            adminSupportExecutor.insertExecutionLog(
+                    UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS",
+                    successCount, successCount, successCount, insertCount, updateCount, deleteCount, otherCount,
+                    null, null, null, null, successCount, Duration.between(start, Instant.now()).toSeconds(), rawSql
+            );
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("ADMIN SQL EXECUTION FAILED", e);
+            adminSupportExecutor.insertExecutionLog(
+                    UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED",
+                    0, 0, 0, 0, 0, 0, 0, null, rawSql, e.getClass().getSimpleName(), e.getMessage(),
+                    0, Duration.between(start, Instant.now()).toSeconds(), rawSql
+            );
+
+            response.put("error", true);
+            response.put("message", e.getMessage());
+            return response;
+        }
+    }
+
+    /**
+     * =========================================================
+     * UPLOAD & EXECUTE SQL FILE
+     * =========================================================
+     */
+    @Override
+    public Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request) {
+
+        Map<String, Object> response = new HashMap<>();
+        String basePathStr = "/admin-support";
+        Path basePath = new Path(basePathStr);
+
+        try {
+            String jobId = UUID.randomUUID().toString();
+            String originalFilename = file.getOriginalFilename();
+            log.info("Receiving SQL Script: {}", originalFilename);
+
+            String baseName = originalFilename.substring(0, originalFilename.lastIndexOf('.'));
+            String extension = originalFilename.substring(originalFilename.lastIndexOf('.'));
+
+            File tempFile = File.createTempFile(baseName, extension);
+            String hdfsFilename = baseName + "_" + jobId + extension;
+            Path filePath = new Path(basePath, hdfsFilename);
+
+            // Transfer multipart payload to physical temp file
+            file.transferTo(tempFile);
+
+            // 1. BACKUP TO HDFS SYNCHRONOUSLY FIRST
+            if (!hdfsFileSystem.exists(basePath)) {
+                hdfsFileSystem.mkdirs(basePath);
+            }
+            try (InputStream in = new FileInputStream(tempFile);
+                 FSDataOutputStream out = hdfsFileSystem.create(filePath)) {
+                IOUtils.copyBytes(in, out, 4096, true);
+            } catch (Exception hdfsEx) {
+                log.error("HDFS Backup failed, but proceeding with execution", hdfsEx);
+            }
+
+            // 2. PASS TO ASYNC EXECUTOR
+            // We NO LONGER delete the file in a finally block here.
+            // The AdminSupportExecutor is now responsible for deleting it after processing completes.
+            adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, getClientIp(request), hdfsFilename);
+
+            response.put("jobId", jobId);
+            response.put("status", "STARTED");
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("Failed to initialize script upload process", e);
+            response.put("error", true);
+            response.put("message", e.getMessage());
+            return response;
+        }
+    }
+
+    /**
+     * =========================================================
+     * GET LIVE JOB STATUS
+     * =========================================================
+     */
+    @Override
+    public Map<String, Object> getJobStatus(String jobId) {
+        Map<String, Object> status = AdminSupportExecutor.JOB_STATUS.get(jobId);
+        if (status == null) {
+            return Map.of("status", "NOT_FOUND");
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.putAll(status);
+        return response;
+    }
+
+    /**
+     * =========================================================
+     * EXTRACT CLIENT IP
+     * =========================================================
+     */
+    private String getClientIp(HttpServletRequest request) {
+        String xfHeader = request.getHeader("X-Forwarded-For");
+        if (xfHeader == null || xfHeader.isEmpty() || "unknown".equalsIgnoreCase(xfHeader)) {
+            return request.getRemoteAddr();
+        }
+        return xfHeader.split(",")[0];
+    }
+}
+
+
+package com.fincore.transactions_service.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportExecutor {
+
+    public static final Map<String, Map<String, Object>> JOB_STATUS = new ConcurrentHashMap<>();
+
+    // STRICT PERFORMANCE LIMITS
+    private static final int COMMIT_BATCH_SIZE = 1000; // Do not exceed 1000 for Oracle JDBC
+    private static final int STATUS_UPDATE_INTERVAL = 1000;
+    private static final int LOG_INTERVAL = 5000;
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public List<Map<String, Object>> cleanOracleRows(List<Map<String, Object>> rawRows) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> rawRow : rawRows) {
+            Map<String, Object> cleanRow = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
+                Object value = entry.getValue();
+                try {
+                    if (value instanceof oracle.sql.TIMESTAMP ts) {
+                        cleanRow.put(entry.getKey(), ts.timestampValue().toString());
+                    } else if (value instanceof java.sql.Timestamp ts) {
+                        cleanRow.put(entry.getKey(), ts.toLocalDateTime().toString());
+                    } else if (value instanceof java.sql.Clob clob) {
+                        cleanRow.put(entry.getKey(), clob.getSubString(1, (int) clob.length()));
+                    } else if (value instanceof java.io.InputStream) {
+                        cleanRow.put(entry.getKey(), "[BLOB DATA]");
+                    } else if (value != null && value.getClass().getName().startsWith("oracle.sql.")) {
+                        cleanRow.put(entry.getKey(), value.toString());
+                    } else {
+                        cleanRow.put(entry.getKey(), value);
+                    }
+                } catch (Exception e) {
+                    cleanRow.put(entry.getKey(), "[UNSUPPORTED]");
+                }
+            }
+            rows.add(cleanRow);
+        }
+        return rows;
+    }
+
+    public void insertExecutionLog(String jobId, String userId, String clientIp, String fileName, String executionType, String status, long totalStatements, int processedCount, int executedCount, int insertCount, int updateCount, int deleteCount, int otherCount, Integer failedStatementNumber, String failedSql, String exceptionType, String exceptionMessage, long executionSpeed, long elapsedSeconds, String sqlText) {
+        try {
+            jdbcTemplate.update("""
+                    INSERT INTO ADMIN_SUPPORT_LOG
+                    (
+                        ID, JOB_ID, USER_ID, CLIENT_IP, FILE_NAME,
+                        EXECUTION_TYPE, STATUS, TOTAL_STATEMENTS, EXECUTED_COUNT,
+                        INSERT_COUNT, UPDATE_COUNT, DELETE_COUNT, OTHER_COUNT,
+                        FAILED_STATEMENT_NUMBER, FAILED_SQL, EXCEPTION_TYPE,
+                        EXCEPTION_MESSAGE, EXECUTION_SPEED, ELAPSED_SECONDS, SQL_TEXT, CREATED_AT
                     )
-                  }
-                  disabled={downloadProgress?.inProgress}
-                >
-                  Download Full Report
-                </Button>
-              </Stack>
-
-              {/* DOWNLOAD PROGRESS */}
-
-              <ProcessReportDownloadProgress
-                downloadProgress={downloadProgress}
-              />
-            </Paper>
-          )}
-
-          {/* TABLE */}
-
-          <Box ref={reportRef}>
-            <DynamicSummaryTable
-              summaryType={summaryType}
-              data={activeSummary}
-            />
-          </Box>
-        </DialogContent>
-
-        {/* FOOTER */}
-
-        {isCurrentDate && safeData && stageWaiting && (
-          <Box
-            sx={{
-              px: 3,
-              py: 2,
-              borderTop: 1,
-              borderColor: "divider",
-              display: "flex",
-              justifyContent: "center",
-              gap: 2,
-            }}
-          >
-            {permissions.reject && (
-              <Button
-                color="error"
-                variant="outlined"
-                startIcon={<GppBadIcon />}
-                onClick={onReject}
-              >
-                Reject
-              </Button>
-            )}
-
-            {permissions.approve && (
-              <Button
-                color="success"
-                variant="contained"
-                startIcon={<GppGoodIcon />}
-                onClick={onAccept}
-              >
-                Accept
-              </Button>
-            )}
-          </Box>
-        )}
-      </Dialog>
-    </>
-  );
-};
-
-export default ProcessSummaryDialog;
-
-
-
-import React, { useMemo, forwardRef, useState, useEffect } from "react";
-import {
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  TableSortLabel,
-} from "@mui/material";
-import { TABLE_CONFIG } from "../util/ProcessSummaryTableConfig";
-import AssignmentLateOutlinedIcon from "@mui/icons-material/AssignmentLateOutlined";
-import { visuallyHidden } from "@mui/utils";
-
-/* ================= FORMATTERS ================= */
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : num || "—";
-
-/* ================= COMPONENT ================= */
-const DynamicSummaryTable = forwardRef(
-  ({ summaryType = "BALANCE", data }, ref) => {
-    /* ================= SORTING STATE ================= */
-    const [order, setOrder] = useState("asc");
-    const [orderBy, setOrderBy] = useState("");
-
-    /* ================= RESET SORT ON SUMMARY CHANGE ================= */
-    // This effect ensures that whenever you switch summaries,
-    // the sorting resets to your required defaults.
-    useEffect(() => {
-      setOrder("asc");
-      setOrderBy(summaryType === "BALANCE" ? "HEAD" : "count");
-    }, [summaryType]);
-
-    const config = useMemo(() => {
-      return TABLE_CONFIG[summaryType] || { columns: [], totalFields: [] };
-    }, [summaryType]);
-
-    const handleRequestSort = (property) => {
-      const isAsc = orderBy === property && order === "asc";
-      setOrder(isAsc ? "desc" : "asc");
-      setOrderBy(property);
-    };
-
-    /* ================= MULTI-COLUMN SORTING (1, 2, 3) ================= */
-    const sortedData = useMemo(() => {
-      if (!data || data.length === 0) return [];
-
-      return [...data].sort((a, b) => {
-        // Sort based on the first 3 columns defined in the config
-        for (let i = 0; i < Math.min(config.columns.length, 3); i++) {
-          const colField = config.columns[i].field;
-
-          // Current column uses 'order' state; others default to 'asc'
-          const currentOrder = colField === orderBy ? order : "asc";
-
-          let valA = a[colField];
-          let valB = b[colField];
-
-          if (valA === valB) continue;
-
-          // Numeric Comparison
-          const numA = parseFloat(valA);
-          const numB = parseFloat(valB);
-          if (!isNaN(numA) && !isNaN(numB)) {
-            return currentOrder === "asc" ? numA - numB : numB - numA;
-          }
-
-          // String Comparison
-          const strA = String(valA || "").toLowerCase();
-          const strB = String(valB || "").toLowerCase();
-          if (strA < strB) return currentOrder === "asc" ? -1 : 1;
-          if (strA > strB) return currentOrder === "asc" ? 1 : -1;
+                    VALUES
+                    (
+                        ADMIN_SUPPORT_LOG_SEQ.NEXTVAL,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
+                    )
+                    """, jobId, userId, clientIp, fileName, executionType, status, totalStatements, executedCount, insertCount, updateCount, deleteCount, otherCount, failedStatementNumber, failedSql, exceptionType, exceptionMessage, executionSpeed, elapsedSeconds, sqlText);
+        } catch (Exception e) {
+            log.error("FAILED TO INSERT LOG", e);
         }
-        return 0;
-      });
-    }, [data, order, orderBy, config]);
-
-    /* ================= TOTAL CALCULATION ================= */
-    const totals = useMemo(() => {
-      const result = {};
-      config?.totalFields.forEach((field) => {
-        result[field] =
-          data?.reduce((sum, row) => sum + (Number(row[field]) || 0), 0) || 0;
-      });
-      return result;
-    }, [data, config]);
-
-    if (!config?.columns || config.columns.length === 0) {
-      return (
-        <Box p={2}>
-          <Typography color="text.secondary">No configuration found</Typography>
-        </Box>
-      );
     }
 
-    return (
-      <TableContainer component={Paper} ref={ref}>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              {config.columns.map((col) => (
-                <TableCell
-                  key={col.field}
-                  align={col.align}
-                  sx={{ fontWeight: 700, whiteSpace: "nowrap" }}
-                  sortDirection={orderBy === col.field ? order : false}
-                >
-                  <TableSortLabel
-                    active={orderBy === col.field}
-                    direction={orderBy === col.field ? order : "asc"}
-                    onClick={() => handleRequestSort(col.field)}
-                  >
-                    {col.label}
-                    {orderBy === col.field ? (
-                      <Box component="span" sx={visuallyHidden}>
-                        {order === "desc"
-                          ? "sorted descending"
-                          : "sorted ascending"}
-                      </Box>
-                    ) : null}
-                  </TableSortLabel>
-                </TableCell>
-              ))}
-            </TableRow>
-          </TableHead>
+    /**
+     * CENTRALIZED STATUS UPDATER (Fixes the Speed/ETA bug)
+     */
+    private void updateJobStatus(String jobId, Instant start, long totalBytes, long bytesRead, int processedCount, int executedCount, int insertCount, int updateCount, int deleteCount, int otherCount, int lineNumber, String message) {
+        Map<String, Object> statusMap = JOB_STATUS.getOrDefault(jobId, new ConcurrentHashMap<>());
 
-          <TableBody>
-            {sortedData.length > 0 ? (
-              <>
-                {sortedData.map((row, index) => (
-                  <TableRow key={index} hover>
-                    {config.columns.map((col) => (
-                      <TableCell
-                        key={col.field}
-                        align={col.align}
-                        sx={{
-                          ...(col.style || {}),
-                          ...(col.field !== "HEAD" &&
-                            !col.style && {
-                              fontFamily: "monospace",
-                              fontWeight: "bold",
-                            }),
-                        }}
-                      >
-                        {col.align === "right"
-                          ? formatAmount(row[col.field])
-                          : row[col.field] || "—"}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))}
+        int progress = totalBytes == 0 ? 0 : (int) ((bytesRead * 100) / totalBytes);
+        long estimatedTotalStatements = bytesRead == 0 ? 0 : (totalBytes * processedCount) / bytesRead;
+        long pendingStatements = Math.max(0, estimatedTotalStatements - executedCount);
 
-                {config.totalFields.length > 0 && (
-                  <TableRow sx={{ bgcolor: "#f5f5f5" }}>
-                    {config.columns.map((col, index) => {
-                      if (index === 0)
-                        return (
-                          <TableCell key="label">
-                            <b>TOTAL</b>
-                          </TableCell>
-                        );
-                      return (
-                        <TableCell key={col.field} align={col.align}>
-                          {totals[col.field] !== undefined ? (
-                            <b>{formatAmount(totals[col.field])}</b>
-                          ) : null}
-                        </TableCell>
-                      );
-                    })}
-                  </TableRow>
-                )}
-              </>
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={config.columns.length}
-                  sx={{ py: 6, textAlign: "center" }}
-                >
-                  <Box
-                    sx={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      opacity: 0.7,
-                    }}
-                  >
-                    <AssignmentLateOutlinedIcon
-                      sx={{
-                        fontSize: 56,
-                        mb: 2,
-                        color: "primary.main",
-                        opacity: 0.4,
-                      }}
-                    />
-                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                      NO SUMMARY DATA
-                    </Typography>
-                  </Box>
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </TableContainer>
-    );
-  },
-);
+        long elapsedMillis = Duration.between(start, Instant.now()).toMillis();
+        long elapsedSeconds = Math.max(elapsedMillis / 1000, 1);
 
-export default DynamicSummaryTable;
+        // TRUE SPEED: Calculated using actual database executions, not string parsing
+        long executionSpeed = (executedCount * 1000L) / Math.max(elapsedMillis, 1);
+        long etaSeconds = executionSpeed == 0 ? 0 : pendingStatements / executionSpeed;
 
+        statusMap.put("progress", Math.min(progress, 99));
+        statusMap.put("processedCount", processedCount);
+        statusMap.put("executedCount", executedCount);
+        statusMap.put("insertCount", insertCount);
+        statusMap.put("updateCount", updateCount);
+        statusMap.put("deleteCount", deleteCount);
+        statusMap.put("otherCount", otherCount);
+        statusMap.put("totalStatements", estimatedTotalStatements);
+        statusMap.put("etaSeconds", etaSeconds);
+        statusMap.put("executionSpeed", executionSpeed);
+        statusMap.put("elapsedSeconds", elapsedSeconds);
+        statusMap.put("currentLine", lineNumber);
+        statusMap.put("message", message);
 
-import React from "react";
-import {
-  Box,
-  Paper,
-  Typography,
-  Fade,
-  LinearProgress,
-  useTheme,
-} from "@mui/material";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
-import CustomChip from "../../../utils/CustomChip";
+        JOB_STATUS.put(jobId, statusMap);
+    }
 
-const ProcessReportDownloadProgress = ({ downloadProgress }) => {
-  const theme = useTheme();
+    @Async("sqlTaskExecutor")
+    public void executeScriptAsync(File sqlFile, String jobId, String userId, String clientIp, String hdfsFilename) {
+        Instant start = Instant.now();
+        log.info("Starting processing for file: {}", hdfsFilename);
 
-  const downloadedMB =
-    downloadProgress?.loadedBytes > 0
-      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
-      : null;
+        long startedAt = System.currentTimeMillis();
+        long totalBytes = sqlFile.length();
+        long bytesRead = 0;
 
-  return (
-    <Fade in={downloadProgress?.inProgress} unmountOnExit>
-      <Box sx={{ mt: 2 }}>
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            gap: 2,
-            p: 1.5,
-            mb: 1.5,
-            borderRadius: 2,
-            bgcolor: theme.palette.mode === "light" ? "grey.50" : "grey.800",
-            border: "1px solid",
-            borderColor: "divider",
-          }}
-        >
-          {/* Pulsing Icon Wrapper */}
-          <Box
-            sx={{
-              p: 1,
-              borderRadius: "50%",
-              bgcolor: "primary.main",
-              color: "common.white",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              boxShadow: `0 0 0 0 ${theme.palette.primary.main}44`,
-              animation: downloadProgress?.inProgress
-                ? "pulse 2s infinite"
-                : "none",
-              "@keyframes pulse": {
-                "0%": {
-                  boxShadow: `0 0 0 0 ${theme.palette.primary.main}66`,
-                },
-                "70%": {
-                  boxShadow: `0 0 0 10px ${theme.palette.primary.main}00`,
-                },
-                "100%": {
-                  boxShadow: `0 0 0 0 ${theme.palette.primary.main}00`,
-                },
-              },
-            }}
-          >
-            <CloudDownloadTwoToneIcon
-              sx={{
-                fontSize: 22,
-                transform: "translateY(1px)",
-              }}
-            />
-          </Box>
+        int processedCount = 0, executedCount = 0, insertCount = 0, updateCount = 0;
+        int deleteCount = 0, otherCount = 0, failedLine = 0;
+        String failedSql = null;
 
-          <Box sx={{ flex: 1 }}>
-            <Typography variant="body2" fontWeight={600} color="text.primary">
-              Downloading Report
-            </Typography>
+        // Initialize Map
+        Map<String, Object> initMap = new ConcurrentHashMap<>();
+        initMap.put("jobId", jobId);
+        initMap.put("status", "RUNNING");
+        initMap.put("startedAt", startedAt);
+        JOB_STATUS.put(jobId, initMap);
 
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block" }}
-            >
-              {downloadedMB > 0
-                ? `Streaming content… ${downloadedMB} MB received`
-                : "Establishing connection to report server…"}
-            </Typography>
-          </Box>
+        try (Connection connection = jdbcTemplate.getDataSource().getConnection(); BufferedReader reader = new BufferedReader(new FileReader(sqlFile))) {
 
-          {downloadedMB > 0 && (
-            <CustomChip
-              color="error"
-              label={`${downloadedMB} MB`}
-              variant="filled"
-            />
-          )}
-        </Box>
+            connection.setAutoCommit(false);
+            Statement statement = connection.createStatement();
+            statement.setFetchSize(500);
+            statement.setQueryTimeout(0);
 
-        <LinearProgress
-          variant="indeterminate"
-          sx={{
-            height: 8,
-            borderRadius: 4,
-            overflow: "hidden",
-            bgcolor: theme.palette.mode === "light" ? "grey.200" : "grey.800",
-            "& .MuiLinearProgress-bar": {
-              borderRadius: 4,
-              backgroundImage:
-                "linear-gradient(90deg, #42a5f5 0%, #7e57c2 50%, #ffb300 100%)",
-            },
-          }}
-        />
-      </Box>
-    </Fade>
-  );
-};
+            StringBuilder sqlBuilder = new StringBuilder();
+            String line;
+            int lineNumber = 0;
+            int batchCounter = 0;
 
-export default ProcessReportDownloadProgress;
+            while ((line = reader.readLine()) != null) {
+                lineNumber++;
+                bytesRead += line.length() + 1; // Zero-allocation byte tracking
+
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("--")) continue;
+
+                sqlBuilder.append(line).append(" ");
+
+                if (line.endsWith(";")) {
+                    String sql = sqlBuilder.toString().trim();
+                    while (sql.endsWith(";")) sql = sql.substring(0, sql.length() - 1).trim();
+
+                    sqlBuilder.setLength(0);
+                    failedSql = sql;
+                    failedLine = lineNumber;
+                    processedCount++;
+
+                    String upperSql = sql.toUpperCase();
+                    if (upperSql.startsWith("INSERT")) insertCount++;
+                    else if (upperSql.startsWith("UPDATE")) updateCount++;
+                    else if (upperSql.startsWith("DELETE")) deleteCount++;
+                    else otherCount++;
+
+                    boolean isDDL = upperSql.startsWith("CREATE") || upperSql.startsWith("ALTER") || upperSql.startsWith("DROP") || upperSql.startsWith("TRUNCATE");
+
+                    if (isDDL) {
+                        if (batchCounter > 0) {
+                            int[] result = statement.executeBatch();
+                            connection.commit();
+                            statement.clearBatch();
+                            executedCount += result.length;
+                            batchCounter = 0;
+                            // Update UI immediately after flush
+                            updateJobStatus(jobId, start, totalBytes, bytesRead, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, "Flushed batch before DDL");
+                        }
+                        statement.execute(sql);
+                        connection.commit();
+                        executedCount++;
+                    } else {
+                        statement.addBatch(sql);
+                        batchCounter++;
+
+                        if (batchCounter >= COMMIT_BATCH_SIZE) {
+                            int[] result = statement.executeBatch();
+                            connection.commit();
+                            statement.clearBatch();
+                            executedCount += result.length;
+                            batchCounter = 0;
+
+                            // Update UI immediately after successful DB transaction
+                            updateJobStatus(jobId, start, totalBytes, bytesRead, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, "Executing DB Batch...");
+                        }
+                    }
+
+                    // Periodic read tracking (in case of massive files between batches)
+                    if (processedCount % STATUS_UPDATE_INTERVAL == 0) {
+                        updateJobStatus(jobId, start, totalBytes, bytesRead, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, lineNumber, "Parsing file into memory...");
+                    }
+
+                    if (processedCount % LOG_INTERVAL == 0) {
+                        log.info("Job: {} -> Processed: {}, Executed: {}", jobId, processedCount, executedCount);
+                    }
+                }
+            }
+
+            // FINAL BATCH FLUSH
+            if (batchCounter > 0) {
+                int[] result = statement.executeBatch();
+                connection.commit();
+                statement.clearBatch();
+                executedCount += result.length;
+            }
+
+            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+            long executionSpeed = elapsedSeconds == 0 ? executedCount : executedCount / Math.max(elapsedSeconds, 1);
+
+            // COMPLETED STATUS
+            Map<String, Object> finalMap = JOB_STATUS.get(jobId);
+            finalMap.put("status", "COMPLETED");
+            finalMap.put("progress", 100);
+            finalMap.put("processedCount", processedCount);
+            finalMap.put("executedCount", executedCount);
+            finalMap.put("totalStatements", processedCount); // Exact final count
+            finalMap.put("executionSpeed", executionSpeed);
+            finalMap.put("completedAt", System.currentTimeMillis());
+            finalMap.put("elapsedSeconds", elapsedSeconds);
+            finalMap.put("etaSeconds", 0);
+            finalMap.put("message", "Execution successfully finished.");
+
+            JOB_STATUS.put(jobId, finalMap);
+
+            insertExecutionLog(jobId, userId, clientIp, hdfsFilename, "FILE", "SUCCESS", processedCount, processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, null, null, null, null, executionSpeed, elapsedSeconds, null);
+
+        } catch (Exception e) {
+            long elapsedSeconds = Duration.between(start, Instant.now()).toSeconds();
+            long estimatedTotal = bytesRead == 0 ? processedCount : (totalBytes * processedCount) / Math.max(bytesRead, 1);
+
+            Map<String, Object> failMap = JOB_STATUS.get(jobId);
+            failMap.put("status", "FAILED");
+            failMap.put("message", e.getMessage());
+            failMap.put("failedLine", failedLine);
+            failMap.put("failedSql", failedSql != null ? failedSql : "Parsing Failure");
+            failMap.put("totalStatements", Math.max(processedCount, estimatedTotal));
+
+            JOB_STATUS.put(jobId, failMap);
+
+            insertExecutionLog(jobId, userId, clientIp, hdfsFilename, "FILE", "FAILED", Math.max(processedCount, estimatedTotal), processedCount, executedCount, insertCount, updateCount, deleteCount, otherCount, failedLine, failedSql, e.getClass().getSimpleName(), e.getMessage(), 0, elapsedSeconds, null);
+            log.error("ASYNC SQL TRANSACTION FAILURE", e);
+
+        } finally {
+            try {
+                if (sqlFile != null && sqlFile.exists()) sqlFile.delete();
+            } catch (Exception ex) {
+                log.error("FAILED TO PURGE TEMP FILE", ex);
+            }
+        }
+    }
+}
