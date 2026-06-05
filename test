@@ -1,410 +1,62 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Box,
-  Button,
-  Paper,
-  Stack,
-  Tab,
-  Tabs,
-  Typography,
-  useTheme,
-} from "@mui/material";
-import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
-import { useMutation } from "@tanstack/react-query";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import CommandPanel from "./components/CommandPanel";
-import UploadScript from "./components/UploadScript";
-import ResultGrid from "./components/ResultGrid";
-import LogsPanel from "./components/LogsPanel";
-import ConfirmDialog from "./components/ConfirmDialog";
-import downloadFile from "../../utils/DownloadUtils";
-
-const AdminSupport = () => {
-  const theme = useTheme();
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
-
-  const [mainTab, setMainTab] = useState(0);
-  const [outputTab, setOutputTab] = useState(0);
-
-  const [query, setQuery] = useState("SELECT * FROM ADMIN_SUPPORT_LOG;");
-  const [lastExecutedQuery, setLastExecutedQuery] = useState("");
-
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [lastResponse, setLastResponse] = useState(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
-
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 10,
-  });
-
-  const isSelect = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    return q.startsWith("SELECT") || q.startsWith("WITH");
-  }, [query]);
-
-  const resetScreen = () => {
-    setQuery("");
-    setLastExecutedQuery("");
-    setSelectedFile(null);
-    setJobId(null);
-    setJobStatus(null);
-    setLastResponse(null);
-    setResults({ rows: [], columns: [], total: 0 });
-    setPaginationModel({ page: 0, pageSize: 10 });
-    setOutputTab(0);
-    showSnackbar("Workspace reset completed", "success");
-  };
-
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      return await callApi(
-        "/TS/admin-support/admin-execute",
-        { sql, page, size },
-        "POST",
-      );
-    },
-    onSuccess: (data) => {
-      setLastResponse(data);
-      if (data?.error) {
-        setOutputTab(1);
-        return;
-      }
-      if (isSelect) {
-        const columns = (data?.columns || []).map((col) => ({
-          field: col.name,
-          headerName: col.name,
-          flex: 1,
-          minWidth: 180,
-        }));
-        setResults({
-          rows: data?.rows || [],
-          columns,
-          total: data?.total || 0,
-        });
-        setOutputTab(0);
-      } else {
-        setOutputTab(1);
-      }
-    },
-    onError: (e) => {
-      setLastResponse({
-        error: true,
-        message: e?.message || "Execution failed",
-      });
-      setOutputTab(1);
-    },
-  });
-
-  const handleExecute = useCallback(
-    (reset = false, customSql = null) => {
-      const targetSql = customSql !== null ? customSql : query;
-
-      if (!targetSql.trim()) {
-        showSnackbar("Enter SQL query to execute", "warning");
-        return;
-      }
-
-      setLastExecutedQuery(targetSql);
-      setSelectedFile(null);
-      setJobId(null);
-      setJobStatus(null);
-      setLastResponse(null);
-
-      const page = reset ? 0 : paginationModel.page;
-      if (reset) setPaginationModel((p) => ({ ...p, page: 0 }));
-
-      executeSql({ sql: targetSql, page, size: paginationModel.pageSize });
-    },
-    [
-      executeSql,
-      paginationModel.page,
-      paginationModel.pageSize,
-      query,
-      showSnackbar,
-    ],
-  );
-
-  const { mutate: exportData, isPending: exportLoading } = useMutation({
-    mutationFn: async ({ sql, exportType, tableName }) => {
-      const payload = {
-        sql,
-        exportType,
-        tableName,
-      };
-      console.log(payload);
-      return await callApi(
-        "/TS/admin-support/export-data",
-        payload,
-        "POST",
-        "blob",
-      );
-    },
-
-    onSuccess: (response) => {
-      console.log(response);
-
-      let format = "csv";
-
-      switch (exportType) {
-        case "EXCEL":
-          format = "xlsx";
-          break;
-
-        case "JSON":
-          format = "json";
-          break;
-
-        case "INSERT":
-          format = "sql";
-          break;
-
-        default:
-          format = "csv";
-      }
-
-      downloadFile(response, format, `export_${Date.now()}`);
-
-      showSnackbar("Export completed successfully", "success");
-    },
-
-    onError: (e) => {
-      showSnackbar(e?.message || "Export failed", "error");
-    },
-  });
-
-  const handleExport = (exportParams) => {
-    const sql = lastExecutedQuery;
-    const exportType = exportParams.exportType;
-    const tableName = exportParams.tableName;
-    if (!lastExecutedQuery) {
-      showSnackbar("Execute a SELECT query first", "warning");
-      return;
-    }
-
-    if (exportType === "INSERT" && !tableName.trim()) {
-      showSnackbar("Table name required for INSERT export", "warning");
-      return;
-    }
-
-    exportData({
+const { mutate: exportData, isPending: exportLoading } = useMutation({
+  mutationFn: async ({ sql, exportType, tableName }) => {
+    const payload = {
       sql,
       exportType,
       tableName,
-    });
-  };
-
-  const handlePaginationChange = (newModel) => {
-    setPaginationModel(newModel);
-
-    const q = lastExecutedQuery.trim().toUpperCase();
-    if (lastExecutedQuery && (q.startsWith("SELECT") || q.startsWith("WITH"))) {
-      executeSql({
-        sql: lastExecutedQuery,
-        page: newModel.page,
-        size: newModel.pageSize,
-      });
-    }
-  };
-
-  const handleUpload = async (file) => {
-    try {
-      if (!file) {
-        showSnackbar("Choose SQL file", "warning");
-        return;
-      }
-      const formData = new FormData();
-      formData.append("file", file);
-      const data = await callApi(
-        "/TS/admin-support/upload-script",
-        formData,
-        "POST",
-        "json",
-        "multipart/form-data",
-      );
-      if (data?.error) {
-        showSnackbar(data.message, "error");
-        return;
-      }
-      setJobId(data.jobId);
-      setOutputTab(1);
-      showSnackbar("Execution started", "success");
-    } catch (e) {
-      showSnackbar(e?.message || "Upload failed", "error");
-    }
-  };
-
-  useEffect(() => {
-    if (!jobId) return;
-    const interval = setInterval(async () => {
-      try {
-        const data = await callApi(
-          `/TS/admin-support/job-status/${jobId}`,
-          {},
-          "GET",
-        );
-        setJobStatus(data);
-        if (data.status === "COMPLETED" || data.status === "FAILED") {
-          clearInterval(interval);
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [callApi, jobId]);
-
-  useEffect(() => {
-    const active = jobStatus?.status === "RUNNING";
-    const beforeUnload = (e) => {
-      if (!active) return;
-      e.preventDefault();
-      e.returnValue = "SQL execution is still running.";
     };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [jobStatus]);
 
-  return (
-    <Box
-      sx={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        p: 2,
-        gap: 1.5,
-      }}
-    >
-      {/* HEADER */}
-      <Paper
-        elevation={0}
-        sx={{
-          px: 3,
-          py: 1,
-          borderBottom: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          borderRadius: 1,
-        }}
-      >
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Storage color="primary" />
-          <Box>
-            <Typography
-              variant="subtitle2"
-              fontWeight={800}
-              sx={{ letterSpacing: 0.5 }}
-            >
-              FINCORE ADMIN SUPPORT
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              Advanced SQL Console & Script Executor
-            </Typography>
-          </Box>
-        </Stack>
-        <Stack direction="row" spacing={2} flexWrap="wrap">
-          <Button
-            variant="outlined"
-            startIcon={<Refresh />}
-            onClick={resetScreen}
-          >
-            Reset Workspace
-          </Button>
-        </Stack>
-      </Paper>
+    console.log("Export Payload", payload);
 
-      {/* INPUT TABS */}
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-        }}
-      >
-        <Tabs
-          value={mainTab}
-          onChange={(e, v) => setMainTab(v)}
-          variant="fullWidth"
-        >
-          <Tab icon={<Terminal />} label="SQL Console" />
-          <Tab icon={<UploadFile />} label="Script Upload" />
-        </Tabs>
-      </Paper>
+    return await callApi(
+      "/TS/admin-support/export-data",
+      payload,
+      "POST",
+      "blob",
+    );
+  },
 
-      {mainTab === 0 && (
-        <CommandPanel
-          query={query}
-          setQuery={setQuery}
-          onExecute={handleExecute}
-          loading={isPending}
-          onDangerousExecute={() => setConfirmOpen(true)}
-        />
-      )}
+  onSuccess: (response, variables) => {
+    console.log("Blob Response", response);
+    console.log("Variables", variables);
 
-      {mainTab === 1 && (
-        <UploadScript
-          onUpload={handleUpload}
-          loading={false}
-          showSnackbar={showSnackbar}
-        />
-      )}
+    let format = "csv";
 
-      {/* OUTPUT TABS */}
-      <Paper
-        elevation={0}
-        sx={{
-          flex: 1,
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
-          <Tab label="Data Grid" />
-          <Tab label="Live Logs" />
-        </Tabs>
+    switch (variables.exportType?.toUpperCase()) {
+      case "EXCEL":
+        format = "xlsx";
+        break;
 
-        {outputTab === 0 && (
-          <ResultGrid
-            results={results}
-            loading={isPending}
-            paginationModel={paginationModel}
-            setPaginationModel={handlePaginationChange}
-            onExport={handleExport}
-            exportLoading={exportLoading}
-          />
-        )}
+      case "JSON":
+        format = "json";
+        break;
 
-        {outputTab === 1 && (
-          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
-        )}
-      </Paper>
+      case "INSERT":
+        format = "sql";
+        break;
 
-      <ConfirmDialog
-        open={confirmOpen}
-        onClose={() => setConfirmOpen(false)}
-        onConfirm={() => {
-          setConfirmOpen(false);
-          handleExecute(true);
-        }}
-      />
-    </Box>
-  );
-};
+      case "CSV":
+      default:
+        format = "csv";
+        break;
+    }
 
-export default AdminSupport;
+    downloadFile(
+      response,
+      format,
+      `export_${Date.now()}`
+    );
+
+    showSnackbar(
+      "Export completed successfully",
+      "success",
+    );
+  },
+
+  onError: (e) => {
+    showSnackbar(
+      e?.message || "Export failed",
+      "error",
+    );
+  },
+});
