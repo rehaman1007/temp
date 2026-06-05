@@ -1,194 +1,63 @@
 @Override
-    public ResponseEntity<Resource> exportData(AdminSupportDTO dto, String userId, HttpServletRequest request) {
+public ResponseEntity<Resource> exportData(
+        AdminSupportDTO dto,
+        String userId,
+        HttpServletRequest request) {
 
-        String sql = dto.getSql().trim();
+    String sql = dto.getSql().trim();
 
-        if (!sql.toUpperCase().startsWith("SELECT")) {
+    log.info("""
+            
+            =====================================
+            EXPORT REQUEST RECEIVED
+            =====================================
+            User      : {}
+            Type      : {}
+            TableName : {}
+            SQL       : {}
+            =====================================
+            """,
+            userId,
+            dto.getExportType(),
+            dto.getTableName(),
+            sql
+    );
 
-            throw new RuntimeException("Only SELECT queries can be exported");
-        }
-
-        String exportType = dto.getExportType() == null ? "CSV" : dto.getExportType().toUpperCase();
-
-        return switch (exportType) {
-
-            case "INSERT" -> exportInsert(dto);
-
-            case "JSON" -> exportJson(sql);
-
-            case "EXCEL" -> exportExcel(sql);
-
-            default -> exportCsv(sql);
-        };
+    if (!sql.toUpperCase().startsWith("SELECT")) {
+        throw new RuntimeException(
+                "Only SELECT queries can be exported"
+        );
     }
 
-    private ResponseEntity<Resource> exportInsert(AdminSupportDTO dto) {
+    String exportType =
+            dto.getExportType() == null
+                    ? "CSV"
+                    : dto.getExportType()
+                    .trim()
+                    .toUpperCase();
 
-        String tableName = dto.getTableName();
+    log.info(
+            "Resolved Export Type = {}",
+            exportType
+    );
 
-        if (tableName == null || tableName.isBlank()) {
+    return switch (exportType) {
 
-            throw new RuntimeException("tableName is mandatory for INSERT export");
+        case "INSERT" -> exportInsert(dto);
+
+        case "JSON" -> exportJson(sql);
+
+        case "EXCEL" -> exportExcel(sql);
+
+        case "CSV" -> exportCsv(sql);
+
+        default -> {
+            log.warn(
+                    "Unknown export type {}, defaulting to CSV",
+                    exportType
+            );
+
+            yield exportCsv(sql);
         }
-
-        StringBuilder script = new StringBuilder();
-
-        jdbcTemplate.query(dto.getSql(), rs -> {
-
-            try {
-                script.append(buildInsertStatement(tableName, rs)).append("\n");
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
-
-        byte[] bytes = script.toString().getBytes(StandardCharsets.UTF_8);
-
-        return downloadFile(bytes, tableName + ".sql", MediaType.TEXT_PLAIN_VALUE);
-    }
-
-    private ResponseEntity<Resource> exportCsv(String sql) {
-
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
-
-        StringBuilder csv = new StringBuilder();
-
-        if (!rows.isEmpty()) {
-
-            csv.append(String.join(",", rows.get(0).keySet())).append("\n");
-        }
-
-        for (Map<String, Object> row : rows) {
-
-            boolean first = true;
-
-            for (Object value : row.values()) {
-
-                if (!first) {
-                    csv.append(",");
-                }
-
-                csv.append(value == null ? "" : value.toString());
-
-                first = false;
-            }
-
-            csv.append("\n");
-        }
-
-        return downloadFile(csv.toString().getBytes(), "export.csv", "text/csv");
-    }
-
-
-    private ResponseEntity<Resource> exportJson(String sql) {
-
-        try {
-
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
-
-            ObjectMapper mapper = new ObjectMapper();
-
-            byte[] bytes = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(rows);
-
-            return downloadFile(bytes, "export.json", MediaType.APPLICATION_JSON_VALUE);
-
-        } catch (Exception e) {
-
-            throw new RuntimeException(e);
-        }
-    }
-
-    private ResponseEntity<Resource> exportExcel(String sql) {
-
-        try (XSSFWorkbook workbook = new XSSFWorkbook(); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-
-            Sheet sheet = workbook.createSheet("Export");
-
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
-
-            if (!rows.isEmpty()) {
-
-                Row header = sheet.createRow(0);
-
-                int col = 0;
-
-                for (String key : rows.get(0).keySet()) {
-
-                    header.createCell(col++).setCellValue(key);
-                }
-
-                int rowNum = 1;
-
-                for (Map<String, Object> row : rows) {
-
-                    Row excelRow = sheet.createRow(rowNum++);
-
-                    col = 0;
-
-                    for (Object value : row.values()) {
-
-                        excelRow.createCell(col++).setCellValue(value == null ? "" : value.toString());
-                    }
-                }
-            }
-
-            workbook.write(bos);
-
-            return downloadFile(bos.toByteArray(), "export.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-
-        } catch (Exception e) {
-
-            throw new RuntimeException(e);
-        }
-    }
-
-    private ResponseEntity<Resource> downloadFile(byte[] data, String fileName, String contentType) {
-
-        ByteArrayResource resource = new ByteArrayResource(data);
-
-        return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName).contentLength(data.length).contentType(MediaType.parseMediaType(contentType)).body(resource);
-    }
-
-
-
-
-    private String buildInsertStatement(String tableName, ResultSet rs) throws Exception {
-
-        ResultSetMetaData meta = rs.getMetaData();
-
-        StringBuilder columns = new StringBuilder();
-
-        StringBuilder values = new StringBuilder();
-
-        int count = meta.getColumnCount();
-
-        for (int i = 1; i <= count; i++) {
-
-            String column = meta.getColumnName(i);
-
-            Object value = rs.getObject(i);
-
-            columns.append(column);
-
-            if (value == null) {
-
-                values.append("NULL");
-
-            } else if (value instanceof Number) {
-
-                values.append(value);
-
-            } else {
-
-                values.append("'").append(value.toString().replace("'", "''")).append("'");
-            }
-
-            if (i < count) {
-
-                columns.append(",");
-                values.append(",");
-            }
-        }
-
-        return "INSERT INTO " + tableName + " (" + columns + ") VALUES (" + values + ");";
-    }
+    };
+}
