@@ -1,176 +1,194 @@
-export default function downloadFile(
-  fileData,
-  format,
-  name,
-  isBase64 = false,
-) {
-  let fileType = "";
-  let fileExtension = "";
+@Override
+    public ResponseEntity<Resource> exportData(AdminSupportDTO dto, String userId, HttpServletRequest request) {
 
-  switch (format?.toLowerCase()) {
-    case "pdf":
-      fileType = "application/pdf";
-      fileExtension = "pdf";
-      break;
+        String sql = dto.getSql().trim();
 
-    case "xlsx":
-    case "excel":
-      fileType =
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-      fileExtension = "xlsx";
-      break;
+        if (!sql.toUpperCase().startsWith("SELECT")) {
 
-    case "zip":
-      fileType = "application/zip";
-      fileExtension = "zip";
-      break;
+            throw new RuntimeException("Only SELECT queries can be exported");
+        }
 
-    case "word":
-      fileType =
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      fileExtension = "docx";
-      break;
+        String exportType = dto.getExportType() == null ? "CSV" : dto.getExportType().toUpperCase();
 
-    case "txt":
-    case "text":
-      fileType = "text/plain";
-      fileExtension = "txt";
-      break;
+        return switch (exportType) {
 
-    case "csv":
-      fileType = "text/csv";
-      fileExtension = "csv";
-      break;
+            case "INSERT" -> exportInsert(dto);
 
-    case "json":
-      fileType = "application/json";
-      fileExtension = "json";
-      break;
+            case "JSON" -> exportJson(sql);
 
-    case "sql":
-      fileType = "text/plain";
-      fileExtension = "sql";
-      break;
+            case "EXCEL" -> exportExcel(sql);
 
-    case "psv":
-      fileType = "text/plain";
-      fileExtension = "psv";
-      break;
-
-    default:
-      console.error(
-        `Unsupported file format: ${format}`,
-      );
-      return;
-  }
-
-  try {
-    /**
-     * RESPONSE IS ALREADY A BLOB
-     */
-    if (fileData instanceof Blob) {
-      const url =
-        window.URL.createObjectURL(fileData);
-
-      const link =
-        document.createElement("a");
-
-      link.href = url;
-      link.download =
-        `${name}.${fileExtension}`;
-
-      document.body.appendChild(link);
-
-      setTimeout(() => {
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(url);
-      }, 100);
-
-      return;
+            default -> exportCsv(sql);
+        };
     }
 
-    let byteArray;
+    private ResponseEntity<Resource> exportInsert(AdminSupportDTO dto) {
 
-    /**
-     * BASE64
-     */
-    if (isBase64) {
-      const byteCharacters =
-        atob(fileData);
+        String tableName = dto.getTableName();
 
-      const byteNumbers =
-        new Array(
-          byteCharacters.length,
-        );
+        if (tableName == null || tableName.isBlank()) {
 
-      for (
-        let i = 0;
-        i < byteCharacters.length;
-        i++
-      ) {
-        byteNumbers[i] =
-          byteCharacters.charCodeAt(
-            i,
-          );
-      }
+            throw new RuntimeException("tableName is mandatory for INSERT export");
+        }
 
-      byteArray =
-        new Uint8Array(byteNumbers);
-    }
-    /**
-     * ARRAY BUFFER
-     */
-    else if (
-      fileData instanceof ArrayBuffer
-    ) {
-      byteArray =
-        new Uint8Array(fileData);
-    }
-    /**
-     * UINT8ARRAY
-     */
-    else if (
-      fileData instanceof Uint8Array
-    ) {
-      byteArray = fileData;
-    }
-    /**
-     * FALLBACK
-     */
-    else {
-      byteArray =
-        new Uint8Array(fileData);
+        StringBuilder script = new StringBuilder();
+
+        jdbcTemplate.query(dto.getSql(), rs -> {
+
+            try {
+                script.append(buildInsertStatement(tableName, rs)).append("\n");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        byte[] bytes = script.toString().getBytes(StandardCharsets.UTF_8);
+
+        return downloadFile(bytes, tableName + ".sql", MediaType.TEXT_PLAIN_VALUE);
     }
 
-    const blob = new Blob(
-      [byteArray],
-      {
-        type: fileType,
-      },
-    );
+    private ResponseEntity<Resource> exportCsv(String sql) {
 
-    const url =
-      window.URL.createObjectURL(blob);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
 
-    const link =
-      document.createElement("a");
+        StringBuilder csv = new StringBuilder();
 
-    link.href = url;
-    link.download =
-      `${name}.${fileExtension}`;
+        if (!rows.isEmpty()) {
 
-    document.body.appendChild(link);
+            csv.append(String.join(",", rows.get(0).keySet())).append("\n");
+        }
 
-    setTimeout(() => {
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-    }, 100);
-  } catch (error) {
-    console.error(
-      "File download failed",
-      error,
-    );
-  }
-}
+        for (Map<String, Object> row : rows) {
+
+            boolean first = true;
+
+            for (Object value : row.values()) {
+
+                if (!first) {
+                    csv.append(",");
+                }
+
+                csv.append(value == null ? "" : value.toString());
+
+                first = false;
+            }
+
+            csv.append("\n");
+        }
+
+        return downloadFile(csv.toString().getBytes(), "export.csv", "text/csv");
+    }
+
+
+    private ResponseEntity<Resource> exportJson(String sql) {
+
+        try {
+
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+
+            ObjectMapper mapper = new ObjectMapper();
+
+            byte[] bytes = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(rows);
+
+            return downloadFile(bytes, "export.json", MediaType.APPLICATION_JSON_VALUE);
+
+        } catch (Exception e) {
+
+            throw new RuntimeException(e);
+        }
+    }
+
+    private ResponseEntity<Resource> exportExcel(String sql) {
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+
+            Sheet sheet = workbook.createSheet("Export");
+
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+
+            if (!rows.isEmpty()) {
+
+                Row header = sheet.createRow(0);
+
+                int col = 0;
+
+                for (String key : rows.get(0).keySet()) {
+
+                    header.createCell(col++).setCellValue(key);
+                }
+
+                int rowNum = 1;
+
+                for (Map<String, Object> row : rows) {
+
+                    Row excelRow = sheet.createRow(rowNum++);
+
+                    col = 0;
+
+                    for (Object value : row.values()) {
+
+                        excelRow.createCell(col++).setCellValue(value == null ? "" : value.toString());
+                    }
+                }
+            }
+
+            workbook.write(bos);
+
+            return downloadFile(bos.toByteArray(), "export.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+
+        } catch (Exception e) {
+
+            throw new RuntimeException(e);
+        }
+    }
+
+    private ResponseEntity<Resource> downloadFile(byte[] data, String fileName, String contentType) {
+
+        ByteArrayResource resource = new ByteArrayResource(data);
+
+        return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName).contentLength(data.length).contentType(MediaType.parseMediaType(contentType)).body(resource);
+    }
+
+
+
+
+    private String buildInsertStatement(String tableName, ResultSet rs) throws Exception {
+
+        ResultSetMetaData meta = rs.getMetaData();
+
+        StringBuilder columns = new StringBuilder();
+
+        StringBuilder values = new StringBuilder();
+
+        int count = meta.getColumnCount();
+
+        for (int i = 1; i <= count; i++) {
+
+            String column = meta.getColumnName(i);
+
+            Object value = rs.getObject(i);
+
+            columns.append(column);
+
+            if (value == null) {
+
+                values.append("NULL");
+
+            } else if (value instanceof Number) {
+
+                values.append(value);
+
+            } else {
+
+                values.append("'").append(value.toString().replace("'", "''")).append("'");
+            }
+
+            if (i < count) {
+
+                columns.append(",");
+                values.append(",");
+            }
+        }
+
+        return "INSERT INTO " + tableName + " (" + columns + ") VALUES (" + values + ");";
+    }
