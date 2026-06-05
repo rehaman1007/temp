@@ -1,394 +1,550 @@
-package com.fincore.transactions_service.dto;
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  Paper,
+  Stack,
+  Tab,
+  Tabs,
+  Typography,
+  useTheme,
+} from "@mui/material";
+import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
+import { useMutation } from "@tanstack/react-query";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import CommandPanel from "./components/CommandPanel";
+import UploadScript from "./components/UploadScript";
+import ResultGrid from "./components/ResultGrid";
+import LogsPanel from "./components/LogsPanel";
+import ConfirmDialog from "./components/ConfirmDialog";
 
-import jakarta.validation.constraints.NotBlank;
-import lombok.Data;
+const AdminSupport = () => {
+  const theme = useTheme();
+  const { callApi } = useApi();
+  const showSnackbar = useCustomSnackbar();
 
-@Data
-public class AdminSupportDTO {
+  const [mainTab, setMainTab] = useState(0);
+  const [outputTab, setOutputTab] = useState(0);
 
-    @NotBlank(message = "SQL query cannot be empty")
-    private String sql;
+  const [query, setQuery] = useState("SELECT * FROM ADMIN_SUPPORT_LOG;");
+  const [lastExecutedQuery, setLastExecutedQuery] = useState("");
 
-    private Integer page;
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [jobId, setJobId] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
+  const [lastResponse, setLastResponse] = useState(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-    private Integer size;
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
 
-    /**
-     * Target table name for INSERT export
-     */
-    private String tableName;
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 10,
+  });
 
-    /**
-     * INSERT | CSV | EXCEL | JSON
-     */
-    private String exportType;
-}
+  const isSelect = useMemo(() => {
+    const q = query.trim().toUpperCase();
+    return q.startsWith("SELECT") || q.startsWith("WITH");
+  }, [query]);
 
+  const resetScreen = () => {
+    setQuery("");
+    setLastExecutedQuery("");
+    setSelectedFile(null);
+    setJobId(null);
+    setJobStatus(null);
+    setLastResponse(null);
+    setResults({ rows: [], columns: [], total: 0 });
+    setPaginationModel({ page: 0, pageSize: 10 });
+    setOutputTab(0);
+    showSnackbar("Workspace reset completed", "success");
+  };
 
-import org.springframework.core.io.Resource;
-import org.springframework.http.ResponseEntity;
+  const { mutate: executeSql, isPending } = useMutation({
+    mutationFn: async ({ sql, page, size }) => {
+      return await callApi(
+        "/TS/admin-support/admin-execute",
+        { sql, page, size },
+        "POST",
+      );
+    },
+    onSuccess: (data) => {
+      setLastResponse(data);
+      if (data?.error) {
+        setOutputTab(1);
+        return;
+      }
+      if (isSelect) {
+        const columns = (data?.columns || []).map((col) => ({
+          field: col.name,
+          headerName: col.name,
+          flex: 1,
+          minWidth: 180,
+        }));
+        setResults({
+          rows: data?.rows || [],
+          columns,
+          total: data?.total || 0,
+        });
+        setOutputTab(0);
+      } else {
+        setOutputTab(1);
+      }
+    },
+    onError: (e) => {
+      setLastResponse({
+        error: true,
+        message: e?.message || "Execution failed",
+      });
+      setOutputTab(1);
+    },
+  });
 
-@PostMapping("/export")
-public ResponseEntity<Resource> exportData(
-        @RequestHeader("Authorization") String token,
-        @RequestBody AdminSupportDTO dto,
-        HttpServletRequest request) {
+  const handleExecute = useCallback(
+    (reset = false, customSql = null) => {
+      const targetSql = customSql !== null ? customSql : query;
 
-    String userId = extractUserId(token);
+      if (!targetSql.trim()) {
+        showSnackbar("Enter SQL query to execute", "warning");
+        return;
+      }
 
-    return adminSupportService.exportData(
-            dto,
-            userId,
-            request
-    );
-}
+      setLastExecutedQuery(targetSql);
+      setSelectedFile(null);
+      setJobId(null);
+      setJobStatus(null);
+      setLastResponse(null);
 
-import org.springframework.core.io.Resource;
-import org.springframework.http.ResponseEntity;
+      const page = reset ? 0 : paginationModel.page;
+      if (reset) setPaginationModel((p) => ({ ...p, page: 0 }));
 
-ResponseEntity<Resource> exportData(
-        AdminSupportDTO dto,
-        String userId,
-        HttpServletRequest request
-);
+      executeSql({ sql: targetSql, page, size: paginationModel.pageSize });
+    },
+    [
+      executeSql,
+      paginationModel.page,
+      paginationModel.pageSize,
+      query,
+      showSnackbar,
+    ],
+  );
 
-<dependency>
-    <groupId>org.apache.poi</groupId>
-    <artifactId>poi</artifactId>
-    <version>5.4.1</version>
-</dependency>
+  const handlePaginationChange = (newModel) => {
+    setPaginationModel(newModel);
 
-<dependency>
-    <groupId>org.apache.poi</groupId>
-    <artifactId>poi-ooxml</artifactId>
-    <version>5.4.1</version>
-</dependency>
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.poi.ss.usermodel.Row;
-import org.apache.poi.ss.usermodel.Sheet;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-import org.springframework.core.io.ByteArrayResource;
-import org.springframework.core.io.Resource;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
-import java.util.List;
-import java.util.Map;
-
-@Override
-public ResponseEntity<Resource> exportData(
-        AdminSupportDTO dto,
-        String userId,
-        HttpServletRequest request) {
-
-    String sql = dto.getSql().trim();
-
-    if (!sql.toUpperCase().startsWith("SELECT")) {
-
-        throw new RuntimeException(
-                "Only SELECT queries can be exported"
-        );
+    const q = lastExecutedQuery.trim().toUpperCase();
+    if (lastExecutedQuery && (q.startsWith("SELECT") || q.startsWith("WITH"))) {
+      executeSql({
+        sql: lastExecutedQuery,
+        page: newModel.page,
+        size: newModel.pageSize,
+      });
     }
+  };
 
-    String exportType =
-            dto.getExportType() == null
-                    ? "CSV"
-                    : dto.getExportType().toUpperCase();
-
-    return switch (exportType) {
-
-        case "INSERT" -> exportInsert(dto);
-
-        case "JSON" -> exportJson(sql);
-
-        case "EXCEL" -> exportExcel(sql);
-
-        default -> exportCsv(sql);
-    };
-}
-
-private ResponseEntity<Resource> exportInsert(
-        AdminSupportDTO dto) {
-
-    String tableName =
-            dto.getTableName();
-
-    if (tableName == null || tableName.isBlank()) {
-
-        throw new RuntimeException(
-                "tableName is mandatory for INSERT export"
-        );
-    }
-
-    StringBuilder script =
-            new StringBuilder();
-
-    jdbcTemplate.query(
-            dto.getSql(),
-            rs -> {
-
-                script.append(
-                        buildInsertStatement(
-                                tableName,
-                                rs
-                        )
-                ).append("\n");
-            }
-    );
-
-    byte[] bytes =
-            script.toString()
-                    .getBytes(
-                            StandardCharsets.UTF_8
-                    );
-
-    return downloadFile(
-            bytes,
-            tableName + ".sql",
-            MediaType.TEXT_PLAIN_VALUE
-    );
-}
-
-private ResponseEntity<Resource> exportCsv(
-        String sql) {
-
-    List<Map<String, Object>> rows =
-            jdbcTemplate.queryForList(sql);
-
-    StringBuilder csv =
-            new StringBuilder();
-
-    if (!rows.isEmpty()) {
-
-        csv.append(
-                String.join(
-                        ",",
-                        rows.get(0).keySet()
-                )
-        ).append("\n");
-    }
-
-    for (Map<String, Object> row : rows) {
-
-        boolean first = true;
-
-        for (Object value : row.values()) {
-
-            if (!first) {
-                csv.append(",");
-            }
-
-            csv.append(
-                    value == null
-                            ? ""
-                            : value.toString()
-            );
-
-            first = false;
-        }
-
-        csv.append("\n");
-    }
-
-    return downloadFile(
-            csv.toString().getBytes(),
-            "export.csv",
-            "text/csv"
-    );
-}
-
-
-private ResponseEntity<Resource> exportJson(
-        String sql) {
-
+  const handleUpload = async (file) => {
     try {
+      if (!file) {
+        showSnackbar("Choose SQL file", "warning");
+        return;
+      }
+      const formData = new FormData();
+      formData.append("file", file);
+      const data = await callApi(
+        "/TS/admin-support/upload-script",
+        formData,
+        "POST",
+        "json",
+        "multipart/form-data",
+      );
+      if (data?.error) {
+        showSnackbar(data.message, "error");
+        return;
+      }
+      setJobId(data.jobId);
+      setOutputTab(1);
+      showSnackbar("Execution started", "success");
+    } catch (e) {
+      showSnackbar(e?.message || "Upload failed", "error");
+    }
+  };
 
-        List<Map<String, Object>> rows =
-                jdbcTemplate.queryForList(sql);
-
-        ObjectMapper mapper =
-                new ObjectMapper();
-
-        byte[] bytes =
-                mapper.writerWithDefaultPrettyPrinter()
-                        .writeValueAsBytes(rows);
-
-        return downloadFile(
-                bytes,
-                "export.json",
-                MediaType.APPLICATION_JSON_VALUE
+  useEffect(() => {
+    if (!jobId) return;
+    const interval = setInterval(async () => {
+      try {
+        const data = await callApi(
+          `/TS/admin-support/job-status/${jobId}`,
+          {},
+          "GET",
         );
-
-    } catch (Exception e) {
-
-        throw new RuntimeException(e);
-    }
-}
-
-private ResponseEntity<Resource> exportExcel(
-        String sql) {
-
-    try (
-            XSSFWorkbook workbook =
-                    new XSSFWorkbook();
-            ByteArrayOutputStream bos =
-                    new ByteArrayOutputStream()
-    ) {
-
-        Sheet sheet =
-                workbook.createSheet(
-                        "Export"
-                );
-
-        List<Map<String, Object>> rows =
-                jdbcTemplate.queryForList(sql);
-
-        if (!rows.isEmpty()) {
-
-            Row header =
-                    sheet.createRow(0);
-
-            int col = 0;
-
-            for (String key :
-                    rows.get(0).keySet()) {
-
-                header.createCell(col++)
-                        .setCellValue(key);
-            }
-
-            int rowNum = 1;
-
-            for (Map<String, Object> row :
-                    rows) {
-
-                Row excelRow =
-                        sheet.createRow(
-                                rowNum++
-                        );
-
-                col = 0;
-
-                for (Object value :
-                        row.values()) {
-
-                    excelRow.createCell(col++)
-                            .setCellValue(
-                                    value == null
-                                            ? ""
-                                            : value.toString()
-                            );
-                }
-            }
+        setJobStatus(data);
+        if (data.status === "COMPLETED" || data.status === "FAILED") {
+          clearInterval(interval);
         }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [callApi, jobId]);
 
-        workbook.write(bos);
+  useEffect(() => {
+    const active = jobStatus?.status === "RUNNING";
+    const beforeUnload = (e) => {
+      if (!active) return;
+      e.preventDefault();
+      e.returnValue = "SQL execution is still running.";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [jobStatus]);
 
-        return downloadFile(
-                bos.toByteArray(),
-                "export.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
+  return (
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        p: 2,
+        gap: 1.5,
+      }}
+    >
+      {/* HEADER */}
+      <Paper
+        elevation={0}
+        sx={{
+          px: 3,
+          py: 1,
+          borderBottom: `1px solid ${theme.palette.divider}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          borderRadius: 1,
+        }}
+      >
+        <Stack direction="row" spacing={2} alignItems="center">
+          <Storage color="primary" />
+          <Box>
+            <Typography
+              variant="subtitle2"
+              fontWeight={800}
+              sx={{ letterSpacing: 0.5 }}
+            >
+              FINCORE ADMIN SUPPORT
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Advanced SQL Console & Script Executor
+            </Typography>
+          </Box>
+        </Stack>
+        <Stack direction="row" spacing={2} flexWrap="wrap">
+          <Button
+            variant="outlined"
+            startIcon={<Refresh />}
+            onClick={resetScreen}
+          >
+            Reset Workspace
+          </Button>
+        </Stack>
+      </Paper>
 
-    } catch (Exception e) {
+      {/* INPUT TABS */}
+      <Paper
+        elevation={0}
+        sx={{
+          borderRadius: 1,
+          overflow: "hidden",
+          border: `1px solid ${theme.palette.divider}`,
+        }}
+      >
+        <Tabs
+          value={mainTab}
+          onChange={(e, v) => setMainTab(v)}
+          variant="fullWidth"
+        >
+          <Tab icon={<Terminal />} label="SQL Console" />
+          <Tab icon={<UploadFile />} label="Script Upload" />
+        </Tabs>
+      </Paper>
 
-        throw new RuntimeException(e);
-    }
-}
+      {mainTab === 0 && (
+        <CommandPanel
+          query={query}
+          setQuery={setQuery}
+          onExecute={handleExecute}
+          loading={isPending}
+          onDangerousExecute={() => setConfirmOpen(true)}
+        />
+      )}
 
-private ResponseEntity<Resource> downloadFile(
-        byte[] data,
-        String fileName,
-        String contentType) {
+      {mainTab === 1 && (
+        <UploadScript
+          onUpload={handleUpload}
+          loading={false}
+          showSnackbar={showSnackbar}
+        />
+      )}
 
-    ByteArrayResource resource =
-            new ByteArrayResource(data);
+      {/* OUTPUT TABS */}
+      <Paper
+        elevation={0}
+        sx={{
+          flex: 1,
+          borderRadius: 1,
+          overflow: "hidden",
+          border: `1px solid ${theme.palette.divider}`,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
+          <Tab label="Data Grid" />
+          <Tab label="Live Logs" />
+        </Tabs>
 
-    return ResponseEntity.ok()
-            .header(
-                    HttpHeaders.CONTENT_DISPOSITION,
-                    "attachment; filename=" + fileName
-            )
-            .contentLength(data.length)
-            .contentType(
-                    MediaType.parseMediaType(
-                            contentType
-                    )
-            )
-            .body(resource);
-}
+        {outputTab === 0 && (
+          <ResultGrid
+            results={results}
+            loading={isPending}
+            paginationModel={paginationModel}
+            setPaginationModel={handlePaginationChange}
+          />
+        )}
+
+        {outputTab === 1 && (
+          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
+        )}
+      </Paper>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        onConfirm={() => {
+          setConfirmOpen(false);
+          handleExecute(true);
+        }}
+      />
+    </Box>
+  );
+};
+
+export default AdminSupport;
 
 
+import React from "react";
+import {
+  alpha,
+  Box,
+  Chip,
+  Paper,
+  Stack,
+  Typography,
+  useTheme,
+} from "@mui/material";
+import { AutoAwesome, Storage, TableRows } from "@mui/icons-material";
+import { DataGrid, GridToolbar } from "@mui/x-data-grid";
 
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
+const ResultGrid = ({
+  results,
+  loading,
+  paginationModel,
+  setPaginationModel,
+}) => {
+  const theme = useTheme();
+  const rows = results?.rows || [];
+  const columns = results?.columns || [];
+  const total = results?.total || 0;
 
-private String buildInsertStatement(
-        String tableName,
-        ResultSet rs) throws Exception {
+  return (
+    <Paper
+      elevation={0}
+      sx={{
+        height: "100%",
+        borderRadius: 1,
+        overflow: "hidden",
+        border: `1px solid ${theme.palette.divider}`,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {/* HEADER */}
+      <Box
+        sx={{
+          px: 2.5,
+          py: 1.5,
+          background: "linear-gradient(135deg,#111827,#1f2937)",
+          color: "white",
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          flexWrap="wrap"
+          gap={1}
+        >
+          {/* LEFT */}
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Storage fontSize="small" />
+            <Typography fontWeight={800}>Query Result Grid</Typography>
+          </Stack>
 
-    ResultSetMetaData meta =
-            rs.getMetaData();
+          {/* RIGHT */}
+          <Stack direction="row" spacing={1} flexWrap="wrap">
+            <Chip
+              size="small"
+              icon={<TableRows />}
+              label={`${rows.length} Rows`}
+              sx={{
+                bgcolor: "rgba(255,255,255,0.08)",
+                color: "white",
+              }}
+            />
 
-    StringBuilder columns =
-            new StringBuilder();
+            <Chip
+              size="small"
+              icon={<AutoAwesome />}
+              label={`${columns.length} Columns`}
+              sx={{
+                bgcolor: "rgba(255,255,255,0.08)",
+                color: "white",
+              }}
+            />
 
-    StringBuilder values =
-            new StringBuilder();
+            <Chip
+              size="small"
+              label={`Total : ${total}`}
+              sx={{
+                bgcolor: "rgba(255,255,255,0.08)",
+                color: "white",
+              }}
+            />
+          </Stack>
+        </Stack>
+      </Box>
 
-    int count =
-            meta.getColumnCount();
+      {/* GRID */}
+      <Box
+        sx={{
+          flex: 1,
+          // minHeight: 500,
+        }}
+      >
+        <DataGrid
+          rows={rows}
+          columns={columns}
+          rowCount={total}
+          loading={loading}
+          disableRowSelectionOnClick
+          paginationMode="server"
+          paginationModel={paginationModel}
+          onPaginationModelChange={setPaginationModel}
+          pageSizeOptions={[10, 25, 50, 100]}
+          slots={{
+            toolbar: GridToolbar,
+          }}
+          getRowId={(row, index) =>
+            row.ID ?? row.id ?? row.RN ?? `${index}-${JSON.stringify(row)}`
+          }
+          sx={{
+            border: "none",
+            fontSize: 13,
+            bgcolor: "#ffffff",
 
-    for (int i = 1; i <= count; i++) {
+            /**
+             * HEADER
+             */
+            "& .MuiDataGrid-columnHeaders": {
+              bgcolor: "#f8fafc",
+              borderBottom: "1px solid #e5e7eb",
+              fontWeight: 700,
+              minHeight: "52px !important",
+            },
 
-        String column =
-                meta.getColumnName(i);
+            "& .MuiDataGrid-columnHeaderTitle": {
+              fontWeight: 800,
+              color: "#111827",
+            },
 
-        Object value =
-                rs.getObject(i);
+            /**
+             * ROWS
+             */
+            "& .MuiDataGrid-row": {
+              transition: "background-color .15s ease",
+            },
 
-        columns.append(column);
+            "& .MuiDataGrid-row:hover": {
+              bgcolor: alpha(theme.palette.primary.main, 0.04),
+            },
 
-        if (value == null) {
+            "& .MuiDataGrid-cell": {
+              borderBottom: "1px solid #f1f5f9",
 
-            values.append("NULL");
+              display: "flex",
+              alignItems: "center",
+            },
 
-        } else if (value instanceof Number) {
+            /**
+             * FOOTER
+             */
+            "& .MuiDataGrid-footerContainer": {
+              borderTop: "1px solid #e5e7eb",
+              bgcolor: "#fafafa",
+            },
 
-            values.append(value);
+            /**
+             * TOOLBAR
+             */
+            "& .MuiDataGrid-toolbarContainer": {
+              p: 1.2,
+              borderBottom: "1px solid #f1f5f9",
+              bgcolor: "#fcfcfc",
+            },
 
-        } else {
+            /**
+             * PAGINATION
+             */
+            "& .MuiTablePagination-root": {
+              color: "#374151",
+            },
 
-            values.append("'")
-                    .append(
-                            value.toString()
-                                    .replace(
-                                            "'",
-                                            "''"
-                                    )
-                    )
-                    .append("'");
-        }
+            /**
+             * REMOVE FOCUS BORDER
+             */
+            "& .MuiDataGrid-cell:focus, & .MuiDataGrid-columnHeader:focus": {
+              outline: "none",
+            },
 
-        if (i < count) {
+            "& .MuiDataGrid-cell:focus-within, & .MuiDataGrid-columnHeader:focus-within":
+              {
+                outline: "none",
+              },
 
-            columns.append(",");
-            values.append(",");
-        }
-    }
+            /**
+             * SCROLLBAR
+             */
+            "& ::-webkit-scrollbar": {
+              width: 8,
+              height: 8,
+            },
 
-    return "INSERT INTO "
-            + tableName
-            + " ("
-            + columns
-            + ") VALUES ("
-            + values
-            + ");";
-}
+            "& ::-webkit-scrollbar-thumb": {
+              background: "rgba(100,116,139,0.35)",
+              borderRadius: 20,
+            },
+          }}
+        />
+      </Box>
+    </Paper>
+  );
+};
 
+export default ResultGrid;
