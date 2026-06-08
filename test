@@ -1,206 +1,31 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useDispatch, useSelector } from "react-redux";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { logoutSuccess } from "../store/slices/authSlice";
-import api from "../utils/api"; // <-- your axios instance
+const getSuggestedTableName = (sql) => {
+  if (!sql) return "EXPORT_TABLE";
 
-const useStreamApi = () => {
-  const dispatch = useDispatch();
-  const token = useSelector((state) => state.auth.token);
+  const normalized = sql
+    .replace(/\s+/g, " ")
+    .trim();
 
-  const controllerRef = useRef(null);
-  const originalUrlRef = useRef(null);
-
-  const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState(null);
-
-  const startStream = useCallback(
-    async (url, handlers = {}) => {
-      const {
-        onOpen,
-        onMessage,
-        onTaskProgress,
-        onError,
-      } = handlers;
-
-      if (!token && !localStorage.getItem("token")) {
-        console.warn("No token available for SSE");
-        return;
-      }
-
-      originalUrlRef.current = url;
-
-      // Resolve microservice URL
-      const parts = url.split("/");
-      const service = parts[1];
-
-      parts[1] = resolveConfig(`/${service}`);
-
-      const finalUrl = parts.slice(1).join("/");
-
-      // Close existing stream
-      if (controllerRef.current) {
-        controllerRef.current.abort();
-      }
-
-      const controller = new AbortController();
-      controllerRef.current = controller;
-
-      await fetchEventSource(finalUrl, {
-        method: "GET",
-
-        headers: {
-          Authorization: `Bearer ${
-            localStorage.getItem("token") || token
-          }`,
-        },
-
-        signal: controller.signal,
-
-        async onopen(response) {
-          // Successful connection
-          if (response.ok) {
-            setConnected(true);
-            onOpen?.(response);
-            return;
-          }
-
-          // Handle auth failures
-          if (response.status === 401) {
-            let errorCode = "TOKEN_EXPIRED";
-
-            try {
-              const data = await response.clone().json();
-              errorCode =
-                data?.error ||
-                data?.code ||
-                "TOKEN_EXPIRED";
-            } catch (e) {
-              console.error(e);
-            }
-
-            // Token expired -> trigger Axios refresh mutex
-            if (errorCode === "TOKEN_EXPIRED") {
-              try {
-                await api.get(
-                  `${resolveConfig("/LS")}/auth/check-user`,
-                );
-
-                throw new Error(
-                  "TOKEN_ROTATED_RECONNECTING",
-                );
-              } catch (err) {
-                throw new Error("FATAL_AUTH_FAILURE");
-              }
-            }
-
-            // Hard logout scenarios
-            if (
-              errorCode === "SESSION_EXPIRED" ||
-              errorCode === "INVALID_TOKEN" ||
-              errorCode === "CONCURRENT_LOGIN"
-            ) {
-              throw new Error("FATAL_AUTH_FAILURE");
-            }
-          }
-
-          throw new Error(
-            `Unexpected response status: ${response.status}`,
-          );
-        },
-
-        onmessage(event) {
-          if (event.event === "connected") {
-            return;
-          }
-
-          try {
-            const data = JSON.parse(event.data);
-
-            switch (event.event) {
-              case "new_notification":
-                setLastMessage(data);
-                onMessage?.(data);
-                break;
-
-              case "task_progress":
-                onTaskProgress?.(data);
-                break;
-
-              default:
-                onMessage?.(data);
-            }
-          } catch (err) {
-            console.error("SSE parse error:", err);
-          }
-        },
-
-        onclose() {
-          setConnected(false);
-        },
-
-        onerror(err) {
-          setConnected(false);
-
-          // Token refreshed successfully via Axios
-          if (
-            err?.message ===
-            "TOKEN_ROTATED_RECONNECTING"
-          ) {
-            return 100;
-          }
-
-          // Refresh token expired / session invalid
-          if (
-            err?.message === "FATAL_AUTH_FAILURE"
-          ) {
-            dispatch(logoutSuccess());
-
-            window.dispatchEvent(
-              new CustomEvent(
-                "auth:session-expired",
-                {
-                  detail: {
-                    reason: "SESSION_EXPIRED",
-                  },
-                },
-              ),
-            );
-
-            throw err;
-          }
-
-          onError?.(err);
-
-          // Network retry
-          return 3000;
-        },
-      });
-    },
-    [token, dispatch],
+  /**
+   * FROM table_name
+   */
+  const match = normalized.match(
+    /\bFROM\s+([A-Z0-9_$.]+)/i,
   );
 
-  const stopStream = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
-      controllerRef.current = null;
-      setConnected(false);
-    }
-  }, []);
+  if (!match?.[1]) {
+    return "EXPORT_TABLE";
+  }
 
-  useEffect(() => {
-    return () => {
-      stopStream();
-    };
-  }, [stopStream]);
+  let tableName = match[1];
 
-  return {
-    connected,
-    lastMessage,
-    startStream,
-    stopStream,
-  };
+  /**
+   * Remove schema if present
+   * SCHEMA.EMP -> EMP
+   */
+  if (tableName.includes(".")) {
+    tableName =
+      tableName.split(".").pop();
+  }
+
+  return `${tableName}_BACKUP`;
 };
-
-export default useStreamApi;
