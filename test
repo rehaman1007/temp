@@ -1,170 +1,74 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { useDispatch, useSelector } from "react-redux";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { logoutSuccess } from "../store/slices/authSlice";
-import { refreshAccessToken } from "../utils/AuthHelpers";
-
-const useStreamApi = () => {
-  const dispatch = useDispatch();
-  const token = useSelector((state) => state.auth.token);
-
-  const controllerRef = useRef(null);
-  const retryingRef = useRef(false);
-
-  const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState(null);
-
-  const startStream = useCallback(
-    async (url, handlers = {}) => {
-      const {
-        onOpen,
-        onMessage,
-        onTaskProgress,
-        onError,
-        //onConnected,
-      } = handlers;
-
-      if (!token) {
-        console.warn("No token available for SSE");
-        return;
-      }
-
-      // Resolve microservice URL
-      const parts = url.split("/");
-      const service = parts[1];
-      parts[1] = resolveConfig(`/${service}`);
-      const finalUrl = parts.slice(1).join("/");
-
-      // Close old stream
-      if (controllerRef.current) {
-        controllerRef.current.abort();
-      }
-
-      const controller = new AbortController();
-      controllerRef.current = controller;
-
-      fetchEventSource(finalUrl, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        signal: controller.signal,
-
-        async onopen(response) {
-          // ======================
-          // HANDLE 401
-          // ======================
-          if (response.status === 401) {
-            let errorCode = "TOKEN_EXPIRED";
-
-            try {
-              const data = await response.clone().json();
-              errorCode = data?.error;
-            } catch (e) {
-              console.error(e);
-            }
-
-            // TOKEN EXPIRED → REFRESH
-            if (errorCode === "TOKEN_EXPIRED" && !retryingRef.current) {
-              retryingRef.current = true;
-              controller.abort();
-
-              try {
-                await refreshAccessToken(dispatch);
-                retryingRef.current = false;
-
-                // Restart stream with new token
-                startStream(finalUrl, handlers);
-              } catch (err) {
-                console.error(err);
-                dispatch(logoutSuccess());
-              }
-
-              return;
-            }
-
-            // Hard logout cases
-            if (
-              errorCode === "SESSION_EXPIRED" ||
-              errorCode === "INVALID_TOKEN" ||
-              errorCode === "CONCURRENT_LOGIN"
-            ) {
-              dispatch(logoutSuccess());
-
-              window.dispatchEvent(
-                new CustomEvent("auth:session-expired", {
-                  detail: { reason: errorCode },
-                }),
-              );
-
-              controller.abort();
-              return;
-            }
-          }
-
-          // ======================
-          // SUCCESS
-          // ======================
-          retryingRef.current = false;
-          setConnected(true);
-          onOpen?.(response);
-          //onConnected?.();
-        },
-
-        onmessage(event) {
-          if (event.event === "connected") return;
-
-          try {
-            const data = JSON.parse(event.data);
-
-            // Global event router
-            switch (event.event) {
-              case "new_notification":
-                setLastMessage(data);
-                onMessage?.(data);
-                break;
-
-              case "task_progress":
-                onTaskProgress?.(data);
-                break;
-
-              default:
-                onMessage?.(data);
-            }
-          } catch (err) {
-            console.error("SSE parse error:", err);
-          }
-        },
-
-        onerror(err) {
-          setConnected(false);
-          onError?.(err);
-        },
-      });
-    },
-    [token, dispatch],
-  );
-
-  const stopStream = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
-      controllerRef.current = null;
-      retryingRef.current = false;
-      setConnected(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    return () => stopStream();
-  }, [stopStream]);
-
-  return {
-    connected,
-    lastMessage,
-    startStream,
-    stopStream,
-  };
+import { createSlice } from "@reduxjs/toolkit";
+const initialState = {
+  user: null, // The decoded user object
+  token: null, // The Access Token string
+  isAuthenticated: false,
+  loading: false,
+  error: null,
 };
-
-export default useStreamApi;
+const authSlice = createSlice({
+  name: "auth",
+  initialState,
+  reducers: {
+    //Existing
+    setToken: (state, action) => {
+      state.token = action.payload;
+    },
+    setUser: (state, action) => {
+      state.user = action.payload;
+    },
+    logout: (state) => {
+      state.token = null;
+      state.user = null;
+    },
+    // Called immediately after Login API success
+    loginSuccess: (state, action) => {
+      state.user = action.payload.user;
+      state.token = action.payload.token;
+      state.isAuthenticated = true;
+      state.error = null;
+      state.loading = false;
+      // Persist to local storage for page reloads
+      localStorage.setItem("token", action.payload.token);
+      localStorage.setItem("user", JSON.stringify(action.payload.user));
+    },
+    // Called when the Refresh Token API returns a new Access Token
+    tokenRefreshed: (state, action) => {
+      state.token = action.payload.token;
+      if (action.payload.user) {
+        state.user = action.payload.user;
+        localStorage.setItem("user", JSON.stringify(action.payload.user));
+      }
+      localStorage.setItem("token", action.payload.token);
+    },
+    // Called on Logout or Session Expiry
+    logoutSuccess: (state) => {
+      state.user = null;
+      state.token = null;
+      state.isAuthenticated = false;
+      state.error = null;
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+    },
+    // Optional: Load state from LocalStorage on app startup
+    initializeAuth: (state) => {
+      const token = localStorage.getItem("token");
+      const userStr = localStorage.getItem("user");
+      if (token && userStr) {
+        state.token = token;
+        state.user = JSON.parse(userStr);
+        state.isAuthenticated = true;
+      }
+    },
+  },
+});
+export const {
+  setToken,
+  setUser,
+  logout,
+  loginSuccess,
+  tokenRefreshed,
+  logoutSuccess,
+  initializeAuth,
+} = authSlice.actions;
+export default authSlice.reducer;
