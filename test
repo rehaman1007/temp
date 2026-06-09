@@ -1,111 +1,124 @@
-String paginatedSql =
-        executableSelect +
-        """
-        
-        OFFSET ? ROWS
-        FETCH NEXT ? ROWS ONLY
-        """;
+const { mutate: exportData, isPending: exportLoading } = useMutation({
+    mutationFn: async ({ sql, exportType, tableName }) => {
+      const payload = {
+        sql,
+        exportType: exportType === "CLIPBOARD" ? "INSERT" : exportType,
+        tableName,
+      };
 
-String paginatedSql =
-        executableSelect.trim() +
-        " OFFSET ? ROWS FETCH NEXT ? ROWS ONLY";
+      console.log("Export Payload", payload);
 
+      return await callApi(
+        "/TS/admin-support/export-data",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {},
+        false,
+      );
+    },
 
-String executableSelect =
-        cleanStatements.get(0)
-                .trim()
-                .replaceAll(";\\s*$", "");
+    onSuccess: async (response, variables) => {
+      console.log("Blob Response", response);
+      console.log("Variables", variables);
 
-String paginatedSql =
-        executableSelect +
-        " OFFSET ? ROWS FETCH NEXT ? ROWS ONLY";
+      const exportType = variables.exportType?.toUpperCase();
 
+      /**
+       * CLIPBOARD EXPORT
+       */
+      if (exportType === "CLIPBOARD") {
+        try {
+          const text = await response.text();
 
-SELECT * FROM v$version;
-SELECT version FROM product_component_version;
+          if (!text?.trim()) {
+            showSnackbar("No data available to copy", "warning");
+            return;
+          }
 
+          // Optional safety limit (10 MB)
+          if (text.length > 100_000_000) {
+            showSnackbar(
+              "Clipboard content is too large. Use INSERT export instead.",
+              "warning",
+            );
+            return;
+          }
 
-private ResponseEntity<Resource> exportCsv(String sql) {
+          await navigator.clipboard.writeText(text);
 
-    StringBuilder csv = new StringBuilder(1024 * 1024);
+          showSnackbar("INSERT statements copied to clipboard", "success");
 
-    final boolean[] headerWritten = {false};
+          return;
+        } catch (err) {
+          console.error(err);
 
-    jdbcTemplate.query(
+          showSnackbar("Failed to copy to clipboard", "error");
 
-            connection -> {
+          return;
+        }
+      }
 
-                var ps = connection.prepareStatement(sql);
+      /**
+       * FILE EXPORT
+       */
+      let format = "csv";
 
-                ps.setFetchSize(FETCH_SIZE);
+      switch (exportType) {
+        case "EXCEL":
+          format = "xlsx";
+          break;
 
-                return ps;
-            },
+        case "JSON":
+          format = "json";
+          break;
 
-            rs -> {
+        case "INSERT":
+          format = "sql";
+          break;
 
-                ResultSetMetaData meta = rs.getMetaData();
+        case "CSV":
+        default:
+          format = "csv";
+          break;
+      }
 
-                int cols = meta.getColumnCount();
+      console.log(response);
+      console.log(response.headers);
 
-                /*
-                 * HEADER
-                 */
-                if (!headerWritten[0]) {
+      const contentDisposition =
+        response.headers["content-disposition"] ||
+        response.headers["Content-Disposition"];
 
-                    for (int i = 1; i <= cols; i++) {
+      console.log("contentDisposition >", contentDisposition);
+      let filename = `export_${Date.now()}`;
 
-                        if (i > 1) {
-                            csv.append(",");
-                        }
+      const filenameMatch = contentDisposition.match(
+        /filename\*=UTF-8''([^;]+)|filename="?([^";\n]+)"?/i,
+      );
+      console.log("filenameMatch >>", filenameMatch);
+      if (filenameMatch) {
+        // Group 1 is for filename*, Group 2 is for standard filename
+        const rawName = filenameMatch[1] || filenameMatch[2];
+        if (rawName) {
+          // Decode if it was URL encoded (common with filename*)
+          try {
+            filename = decodeURIComponent(rawName.trim());
+          } catch (e) {
+            filename = rawName.trim();
+          }
+        }
+      }
 
-                        csv.append(csvEscape(meta.getColumnLabel(i)));
-                    }
+      console.log("filename >>", filename);
 
-                    csv.append("\n");
+      downloadFile(response?.data, format, filename);
 
-                    headerWritten[0] = true;
-                }
+      showSnackbar("Export completed successfully", "success");
+    },
 
-                /*
-                 * DATA
-                 */
-                for (int i = 1; i <= cols; i++) {
-
-                    if (i > 1) {
-                        csv.append(",");
-                    }
-
-                    csv.append(csvEscape(rs.getObject(i)));
-                }
-
-                csv.append("\n");
-            });
-
-    return downloadFile(
-            csv.toString().getBytes(StandardCharsets.UTF_8),
-            "export.csv",
-            "text/csv"
-    );
-}
-
-private String csvEscape(Object value) {
-
-    if (value == null) {
-        return "";
-    }
-
-    String text = value.toString();
-
-    if (text.contains(",")
-            || text.contains("\"")
-            || text.contains("\n")
-            || text.contains("\r")) {
-
-        text = text.replace("\"", "\"\"");
-
-        return "\"" + text + "\"";
-    }
-
-    return text;
-}
+    onError: (e) => {
+      showSnackbar(e?.message || "Export failed", "error");
+    },
+  });
