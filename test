@@ -1,435 +1,328 @@
-import React, { useEffect, useRef, useState } from "react";
-import axios from "axios";
-import { Box, InputAdornment } from "@mui/material";
-import PersonIcon from "@mui/icons-material/Person";
-import LogoImg from "../../../assets/Logos/Fincore_transperent.svg";
-import LoginErrorDialog from "./LoginErrorDialog";
-import LoginWithPassword from "./LoginWithPassword";
-import fTitle from "../../../assets/Logos/Fincore_title.png";
-import UpdatePassword from "./UpdatePassword";
+{page === "PASSWORD" && (
+  <Box>
+    <LoginWithPassword
+      userId={userId}
+      publicKey={publicKey}
+      openLoginErrorDialog={openLoginErrorDialog}
+      onBackToHome={enableEditingBackToHome}
+      onOtpRequired={(data) => {
+        setOtpTxnId(data.otpTxnId);
+        setLoginResult(data.loginResult);
+        setPage("OTP");
+      }}
+    />
+  </Box>
+)}
+
+
+{page === "OTP" && (
+  <OtpVerification
+    userId={userId}
+    otpTxnId={otpTxnId}
+    loginResult={loginResult}
+    openLoginErrorDialog={openLoginErrorDialog}
+  />
+)}
+
+
+const LoginWithPassword = ({
+  userId,
+  publicKey,
+  openLoginErrorDialog,
+  onOtpRequired,
+}) => {
+
+
+if (result.validCredentials === true) {
+  if (result?.roleData?.root_menus?.length === 0) {
+    openLoginErrorDialog(
+      "Access Denied",
+      "You don't have enough permissions to access this application."
+    );
+    return;
+  }
+
+  const otpResponse = await api.post(
+    `${resolveConfig("/LS") || ""}/auth/send-otp`,
+    {
+      userId,
+    }
+  );
+
+  const otpResult = otpResponse?.data?.data || {};
+
+  onOtpRequired({
+    otpTxnId: otpResult.otpTxnId,
+    loginResult: result,
+  });
+
+  return;
+}
+
+
+import React, { useState, useRef, useEffect } from "react";
+import { useDispatch } from "react-redux";
+import { useNavigate } from "react-router-dom";
+import { Box } from "@mui/material";
+
+import api from "../../../config/axiosConfig";
+import { resolveConfig } from "../../../config/EnvironmentConfig";
+
+import { loginSuccess } from "../../../store/slices/authSlice";
 import {
-  Root,
-  ContainerInner,
-  Content,
-  LeftCol,
-  RightCol,
-  LogoWrap,
-  BrandTitle,
-  BrandSub,
-  BigHeading,
-  SubText,
-  FeatureList,
-  FeatureItem,
-  Bullet,
-  GlassCard,
-  FormTitle,
+  setMenus,
+  setSelectedMenuItem,
+} from "../../../store/slices/menuSlice";
+import { setTabId } from "../../../store/slices/tabSlice";
+
+import { parseJwt } from "../../../utils/EncryptionUtilities";
+
+import {
   StyledTextField,
   PrimaryButton,
-  SubHeadingText,
 } from "./LoginStyles";
-import { resolveConfig } from "../../../config/EnvironmentConfig";
-import Copyright from "../../../components/Copyright";
 
-export default function LoginPort() {
-  const [content, setContent] = useState(null);
-
-  useEffect(() => {
-    const loadContent = async () => {
-      try {
-        const res = await axios.get("/loginContent.json");
-        setContent(res.data);
-      } catch (err) {
-        console.error("Failed to load content JSON:", err);
-      }
-    };
-    loadContent();
-  }, []);
-
-  // === STATES ===
-  const [userId, setUserId] = useState("");
-  const [error, setError] = useState("");
-  const [page, setPage] = useState("HOME"); // HOME | PASSWORD | UPDATE
-  const [dialogHeading, setDialogHeading] = useState("");
-  const [dialogContent, setDialogContent] = useState("");
-  const [showErrorDialog, setShowErrorDialog] = useState(false);
+const OtpVerification = ({
+  userId,
+  otpTxnId,
+  loginResult,
+  openLoginErrorDialog,
+}) => {
+  const [otp, setOtp] = useState("");
   const [loading, setLoading] = useState(false);
-  const [userIdDisabled, setUserIdDisabled] = useState(false);
-  const [publicKey, setPublicKey] = useState(null);
-  const [otpTxnId, setOtpTxnId] = useState(null);
-  const [loginPayload, setLoginPayload] = useState(null);
 
-  const userIdInputRef = useRef(null);
+  const otpRef = useRef(null);
+
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (userIdInputRef.current) {
-        userIdInputRef.current.focus();
-      }
-    }, 100); // 100ms is usually safe and unnoticeable
-
-    return () => clearTimeout(timer);
+    otpRef.current?.focus();
   }, []);
 
-  // === DIALOG HANDLERS ===
-  const handleDialogClose = () => {
-    setShowErrorDialog(false);
-    setDialogHeading("");
-    setDialogContent("");
-  };
+  const completeLogin = (result) => {
+    try {
+      const user = parseJwt(result.accessToken);
 
-  const openLoginErrorDialog = (heading, content) => {
-    setDialogHeading(heading);
-    setDialogContent(content);
-    setShowErrorDialog(true);
-  };
+      const tabId = crypto.randomUUID();
 
-  // === VALIDATION ===
-  const validateId = (id) => {
-    if (!id) return false;
-    const v = id.trim().toLowerCase();
-    const regex = /^(?:\d{7}|v\d{7}|tcs\d{7}|tcsv\d{7})$/;
-    return regex.test(v);
-  };
+      dispatch(
+        loginSuccess({
+          token: result.accessToken,
+          user,
+        })
+      );
 
-  // === INPUT RESTRICTIONS ===
-  const handleUserIdChange = (raw) => {
-    if (userIdDisabled) return;
-    let val = (raw || "").replace(/\s+/g, "");
-    const m = val.match(/^([A-Za-z]*)(.*)$/);
-    let prefixCandidate = (m && m[1]) || "";
-    let rest = (m && m[2]) || "";
+      localStorage.setItem(
+        "payloadEncryptionKey",
+        result.payloadEncryptionKey
+      );
 
-    const prefixLow = prefixCandidate.toLowerCase();
-    const allowedPrefixList = ["", "t", "tc", "tcs", "tcsv", "v"];
-    if (
-      !allowedPrefixList.some((p) => prefixLow?.toLowerCase().startsWith(p))
-    ) {
-      prefixCandidate = "";
+      dispatch(setTabId(tabId));
+
+      dispatch(setMenus(result.roleData.root_menus));
+
+      dispatch(
+        setSelectedMenuItem(
+          result.roleData.root_menus[0]
+        )
+      );
+
+      const bc = new BroadcastChannel("auth");
+
+      setTimeout(() => {
+        bc.postMessage({
+          type: "USER_LOGGED_IN",
+          tabId,
+          userId: user.userId,
+        });
+      }, 1000);
+
+      const firstMenu = result.roleData.root_menus?.[0];
+
+      if (firstMenu?.route) {
+        if (firstMenu.hasChildren) {
+          navigate("/choose-option" + firstMenu.route);
+        } else {
+          navigate(firstMenu.route);
+        }
+      }
+    } catch (err) {
+      console.error("Complete login error:", err);
+
+      openLoginErrorDialog(
+        "Login Failed",
+        "Unable to complete login."
+      );
     }
-
-    const prefix = prefixCandidate;
-    let digitsPart = rest.replace(/\D/g, "");
-    if (digitsPart.length > 7) digitsPart = digitsPart.slice(0, 7);
-
-    const newVal = prefix + digitsPart;
-    if (
-      digitsPart.length < 8 &&
-      allowedPrefixList.some((p) => p.startsWith(prefix?.toLowerCase()))
-    ) {
-      setUserId(newVal);
-    }
-
-    if (error) setError("");
   };
 
-  const handleUserIdPaste = (e) => {
-    e.preventDefault();
-    const paste = (e.clipboardData || window.clipboardData).getData("text");
-    handleUserIdChange(paste);
-  };
-
-  // === API CALL: CHECK USER ===
-  const checkUser = async () => {
-    setError("");
-    if (!validateId(userId)) {
-      setError("Invalid User ID");
-      userIdInputRef.current?.focus();
+  const verifyOtp = async () => {
+    if (!otp || otp.trim() === "") {
+      openLoginErrorDialog(
+        "Validation Error",
+        "Please enter OTP."
+      );
+      otpRef.current?.focus();
       return;
     }
 
     try {
       setLoading(true);
-      const payloadUserId = userId.trim();
-      const res = await axios.post(`${resolveConfig("/LS")}/auth/check-user`, {
-        userId: payloadUserId,
-      });
 
-      const result = res?.data?.data || {};
-
-      if (result?.userStatus == "RESTRICTED") {
-        setError("");
-        openLoginErrorDialog(
-          "Access Restricted",
-          "This system is restricted to use FinCore, Please contact the administrator.",
-        );
-        return;
-      }
-      if (result?.userStatus === "INVALID") {
-        setError("User ID does not exist");
-        return;
-      }
-
-      if (result?.passwordLoginStatus === "INACTIVE") {
-        openLoginErrorDialog(
-          "Password Locked!",
-          "You cannot login using password currently. Please contact the administrator.",
-        );
-        return;
-      }
-
-      if (result?.updatePassword === true) {
-        setPublicKey(result?.publicKey);
-        setPage("UPDATE");
-        setUserIdDisabled(true);
-        return;
-      }
-
-      if (
-        result?.userStatus == "ACTIVE" &&
-        result?.passwordLoginStatus == "ACTIVE"
-      ) {
-        setPublicKey(result?.publicKey);
-        setPage("PASSWORD");
-        setUserIdDisabled(true);
-        return;
-      }
-
-      openLoginErrorDialog(
-        "Login Not Allowed",
-        result?.message || "Please contact the administrator.",
+      const response = await api.post(
+        `${resolveConfig("/LS") || ""}/auth/validate-otp`,
+        {
+          userId,
+          otp: otp.trim(),
+          otpTxnId,
+        }
       );
-    } catch (err) {
-      console.error("checkUser error:", err);
+
+      const result = response?.data?.data || {};
+
+      if (result.success === true) {
+        completeLogin(loginResult);
+      } else {
+        openLoginErrorDialog(
+          "OTP Verification Failed",
+          result.message || "Invalid OTP."
+        );
+      }
+    } catch (e) {
+      console.error("OTP Verification Error:", e);
+
       openLoginErrorDialog(
-        "Login Error",
-        "Something went wrong, please try again later.",
+        "OTP Verification Failed",
+        e?.response?.data?.message ||
+          "Unable to validate OTP."
       );
     } finally {
       setLoading(false);
     }
   };
 
-  // === FORM SUBMIT ===
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (page === "HOME") checkUser();
+  const resendOtp = async () => {
+    try {
+      await api.post(
+        `${resolveConfig("/LS") || ""}/auth/send-otp`,
+        {
+          userId,
+        }
+      );
+
+      openLoginErrorDialog(
+        "OTP Sent",
+        "A new OTP has been sent successfully."
+      );
+    } catch (e) {
+      console.error("Resend OTP Error:", e);
+
+      openLoginErrorDialog(
+        "Error",
+        e?.response?.data?.message ||
+          "Failed to resend OTP."
+      );
+    }
   };
 
-  // === CALLBACKS ===
-  const handlePasswordUpdateSuccess = () => {
-    setPage("PASSWORD");
+  const handleOtpKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
 
-    setUserIdDisabled(true);
+      if (!loading) {
+        verifyOtp();
+      }
+    }
   };
-
-  const enableEditingBackToHome = () => {
-    setPage("HOME");
-    setUserIdDisabled(false);
-    setError("");
-    setUserId("");
-  };
-
-  if (!content) return null;
 
   return (
-    <Root>
-      <ContainerInner>
-        <Content>
-          <LeftCol>
-            <LogoWrap>
-              {/* <img src={LogoImg} alt="FinCore Logo" width={100} height="auto" /> */}
-              <>
-                <Box
-                  component="img"
-                  src={LogoImg}
-                  alt="Logo Icon"
-                  sx={{ width: 150, height: 150, objectFit: "contain" }}
-                />
-                <div>
-                  <Box
-                    component="img"
-                    src={fTitle}
-                    alt="FinCore"
-                    sx={{
-                      height: 35, // Adjust height to match your icon's scale
-                      width: "auto",
-                      display: "block",
-                      mt: 5,
-                      mb: 1,
-                    }}
-                  />
-                  {/* <BrandTitle>{content?.brand?.title}</BrandTitle> */}
-                  <BrandSub>{content?.brand?.subtitle}</BrandSub>
-                </div>
-              </>
-            </LogoWrap>
-          </LeftCol>
-        </Content>
-        <Content>
-          {/* LEFT COLUMN */}
-          <LeftCol>
-            <Box sx={{ mb: 1 }}>
-              <BigHeading>
-                {(content?.hero?.welcomeTitle || "").split(" - ")[0]}
-              </BigHeading>
-
-              {content?.hero?.welcomeTitle?.includes(" - ") && (
-                <SubHeadingText>
-                  {content?.hero?.welcomeTitle.split(" - ")[1]}
-                </SubHeadingText>
-              )}
-            </Box>
-
-            <SubText>{content?.hero?.subText}</SubText>
-
-            <BigHeading>{content?.legal?.title}</BigHeading>
-            <FeatureList>
-              {content?.legal?.items.map((item, idx) => (
-                <FeatureItem key={idx}>
-                  <Bullet /> {item}
-                </FeatureItem>
-              ))}
-            </FeatureList>
-          </LeftCol>
-
-          {/* RIGHT COLUMN */}
-          <RightCol>
-            <GlassCard elevation={3}>
-              <FormTitle>{content?.form?.signIn}</FormTitle>
-
-              <form onSubmit={handleSubmit} noValidate>
-                <StyledTextField
-                  fullWidth
-                  inputRef={userIdInputRef}
-                  label="User ID"
-                  placeholder={content?.form?.userIdPlaceholder}
-                  margin="dense"
-                  value={userId}
-                  onChange={(e) => handleUserIdChange(e.target.value)}
-                  onPaste={handleUserIdPaste}
-                  error={Boolean(error)}
-                  helperText={error || " "}
-                  disabled={userIdDisabled}
-                  InputProps={{
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <PersonIcon />
-                      </InputAdornment>
-                    ),
-                  }}
-                />
-
-                {page === "HOME" && (
-                  <PrimaryButton
-                    type="submit"
-                    variant="contained"
-                    disabled={loading}
-                  >
-                    {loading
-                      ? content?.form?.checking
-                      : content?.form?.signInButton}
-                  </PrimaryButton>
-                )}
-
-                {page === "PASSWORD" && (
-                  <Box>
-                    <LoginWithPassword
-                      userId={userId}
-                      publicKey={publicKey}
-                      openLoginErrorDialog={openLoginErrorDialog}
-                      onBackToHome={enableEditingBackToHome}
-                    />
-                  </Box>
-                )}
-
-                {page === "UPDATE" && (
-                  <Box>
-                    <UpdatePassword
-                      userId={userId}
-                      publicKey={publicKey}
-                      openLoginErrorDialog={openLoginErrorDialog}
-                      onUpdateSuccess={handlePasswordUpdateSuccess}
-                    />
-                  </Box>
-                )}
-
-                {page === "OTP" && (
-                  <OtpVerification
-                    userId={userId}
-                    otpTxnId={otpTxnId}
-                    loginPayload={loginPayload}
-                    openLoginErrorDialog={openLoginErrorDialog}
-                  />
-                )}
-              </form>
-            </GlassCard>
-          </RightCol>
-        </Content>
-      </ContainerInner>
-
-      <LoginErrorDialog
-        showErrorDialog={showErrorDialog}
-        title={dialogHeading}
-        content={dialogContent}
-        onDialogClose={handleDialogClose}
+    <Box>
+      <StyledTextField
+        fullWidth
+        label="Enter OTP"
+        inputRef={otpRef}
+        value={otp}
+        onChange={(e) => {
+          const value = e.target.value.replace(/\D/g, "");
+          if (value.length <= 6) {
+            setOtp(value);
+          }
+        }}
+        onKeyDown={handleOtpKeyDown}
+        margin="normal"
+        inputProps={{
+          maxLength: 6,
+        }}
+        helperText="Enter the OTP sent to your registered mobile/email."
       />
-      <Box sx={{ position: "absolute", left: 0, bottom: 0, right: 0 }}>
-        <Copyright />
-      </Box>
-    </Root>
-  );
-}
 
+      <PrimaryButton
+        fullWidth
+        variant="contained"
+        onClick={verifyOtp}
+        disabled={loading}
+        sx={{ mt: 1 }}
+      >
+        {loading ? "Verifying OTP..." : "Verify OTP"}
+      </PrimaryButton>
+
+      <PrimaryButton
+        fullWidth
+        variant="outlined"
+        onClick={resendOtp}
+        disabled={loading}
+        sx={{ mt: 1 }}
+      >
+        Resend OTP
+      </PrimaryButton>
+    </Box>
+  );
+};
+
+export default OtpVerification;
 
 
 import React, { useEffect, useState, useRef } from "react";
-import { useDispatch, useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
 import { InputAdornment, IconButton } from "@mui/material";
 import LockIcon from "@mui/icons-material/Lock";
 import Visibility from "@mui/icons-material/Visibility";
 import VisibilityOff from "@mui/icons-material/VisibilityOff";
+
 import api from "../../../config/axiosConfig";
-import { parseJwt } from "../../../utils/EncryptionUtilities";
-import { loginSuccess } from "../../../store/slices/authSlice";
-import { setMenus, setSelectedMenuItem } from "../../../store/slices/menuSlice";
-import { setTabId } from "../../../store/slices/tabSlice";
 import { resolveConfig } from "../../../config/EnvironmentConfig";
 import JSEncrypt from "jsencrypt";
+
 import { StyledTextField, PrimaryButton } from "./LoginStyles";
 
-const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
-  // 1. Initialize with empty string to trigger validation correctly
+const LoginWithPassword = ({
+  userId,
+  publicKey,
+  openLoginErrorDialog,
+  onBackToHome,
+  onOtpRequired,
+}) => {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [passwordInvalidMessage, setPasswordInvalidMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  const navigate = useNavigate();
-  const dispatch = useDispatch();
-  const menus = useSelector((state) => state.menus.menus);
-
-  // 2. Ref for focusing the input
   const passwordInputRef = useRef(null);
 
-  // 3. Focus the password field whenever the component is loaded
   useEffect(() => {
-    if (passwordInputRef.current) {
-      passwordInputRef.current.focus();
-    }
+    passwordInputRef.current?.focus();
   }, []);
 
-  // Navigate after successful login
-  useEffect(() => {
-    if (menus && menus.length > 0 && menus[0]?.route) {
-      if (menus[0].hasChildren) {
-        navigate("/choose-option" + menus[0]?.route);
-      } else {
-        navigate(menus[0]?.route);
-      }
-    }
-  }, [menus, navigate]);
-
   const validateUserCredentials = async () => {
-    // 4. Basic Null/Empty Validation
     if (!password || password.trim() === "") {
       setPasswordInvalidMessage("Password cannot be empty.");
       passwordInputRef.current?.focus();
       return;
     }
 
-    setIsLoading(true);
     setPasswordInvalidMessage("");
+    setIsLoading(true);
 
     try {
       if (!publicKey) {
@@ -438,6 +331,7 @@ const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
 
       const encryptor = new JSEncrypt();
       encryptor.setPublicKey(publicKey);
+
       const encryptedPassword = encryptor.encrypt(password);
 
       if (!encryptedPassword) {
@@ -447,65 +341,81 @@ const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
       const response = await api.post(
         `${resolveConfig("/LS") || ""}/auth/login`,
         {
-          userId: userId,
+          userId,
           password: encryptedPassword,
-        },
+        }
       );
 
       const result = response?.data?.data || {};
 
       if (result.validCredentials === true) {
-        if (result?.roleData?.root_menus?.length === 0) {
+        if (
+          !result?.roleData?.root_menus ||
+          result.roleData.root_menus.length === 0
+        ) {
           openLoginErrorDialog(
             "Access Denied",
-            "You don't have enough permissions to access this application, kindly contact Support.",
+            "You don't have enough permissions to access this application. Kindly contact support."
           );
           return;
         }
 
-        const user = parseJwt(result.accessToken);
-        const tabId = crypto.randomUUID();
-
-        dispatch(loginSuccess({ token: result.accessToken, user: user }));
-         localStorage.setItem(
-        "payloadEncryptionKey",
-        result.payloadEncryptionKey
-      );
-        dispatch(setTabId(tabId));
-        dispatch(setMenus(result.roleData.root_menus));
-        dispatch(setSelectedMenuItem(result.roleData.root_menus[0]));
-
-        const bc = new BroadcastChannel("auth");
-        setTimeout(() => {
-          bc.postMessage({
-            type: "USER_LOGGED_IN",
-            tabId,
-            userId: user.userId,
-          });
-        }, 1000);
-      } else {
-        if (!result.validCredentials) {
-          openLoginErrorDialog("Login Failed", "Invalid credentials.");
-        }
-        if (result.userStatus === "ACTIVE" && result.loginMethod === "P") {
-          if (result.attemptsLeft > 0) {
-            setPasswordInvalidMessage(
-              `Invalid credentials. ${result.attemptsLeft} attempts left.`,
-            );
-            openLoginErrorDialog("Invalid password", "Password incorrect.");
-          } else {
-            openLoginErrorDialog(
-              "Account locked",
-              "Your account has been locked.",
-            );
+        // SAMPLE OTP SEND API
+        // Replace with actual API later
+        const otpResponse = await api.post(
+          `${resolveConfig("/LS") || ""}/auth/send-otp`,
+          {
+            userId,
           }
+        );
+
+        const otpResult = otpResponse?.data?.data || {};
+
+        onOtpRequired?.({
+          otpTxnId: otpResult?.otpTxnId,
+          loginResult: result,
+        });
+
+        return;
+      }
+
+      if (
+        result.userStatus === "ACTIVE" &&
+        result.loginMethod === "P"
+      ) {
+        if (result.attemptsLeft > 0) {
+          setPasswordInvalidMessage(
+            `Invalid credentials. ${result.attemptsLeft} attempts left.`
+          );
+
+          openLoginErrorDialog(
+            "Invalid Password",
+            "Password incorrect."
+          );
+        } else {
+          openLoginErrorDialog(
+            "Account Locked",
+            "Your account has been locked."
+          );
         }
+      } else {
+        openLoginErrorDialog(
+          "Login Failed",
+          result.message || "Invalid credentials."
+        );
       }
     } catch (e) {
       console.error("Login Error:", e);
+
       const msg =
-        e.response?.data?.message || e.message || "Failed to log into FinCore";
-      openLoginErrorDialog("Login Failed", msg);
+        e?.response?.data?.message ||
+        e?.message ||
+        "Failed to log into FinCore";
+
+      openLoginErrorDialog(
+        "Login Failed",
+        msg
+      );
     } finally {
       setIsLoading(false);
     }
@@ -515,11 +425,9 @@ const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
     if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
-      // Added basic check here as well
-      if (!isLoading && password && password.trim() !== "") {
+
+      if (!isLoading) {
         validateUserCredentials();
-      } else if (!password || password.trim() === "") {
-        setPasswordInvalidMessage("Password cannot be empty.");
       }
     }
   };
@@ -528,20 +436,23 @@ const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
     <>
       <StyledTextField
         fullWidth
-        inputRef={passwordInputRef} // 5. Attach focus ref
+        inputRef={passwordInputRef}
         label="Password"
         type={showPassword ? "text" : "password"}
         value={password}
         onChange={(e) => {
           setPassword(e.target.value);
-          if (passwordInvalidMessage) setPasswordInvalidMessage(""); // Clear error while typing
+
+          if (passwordInvalidMessage) {
+            setPasswordInvalidMessage("");
+          }
         }}
         onKeyDown={handlePasswordKeyDown}
         variant="outlined"
+        margin="normal"
+        autoComplete="current-password"
         error={!!passwordInvalidMessage}
         helperText={passwordInvalidMessage}
-        margin="normal"
-        autoComplete="current-password" // Good practice for password fields
         InputProps={{
           startAdornment: (
             <InputAdornment position="start">
@@ -551,22 +462,27 @@ const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
           endAdornment: (
             <InputAdornment position="end">
               <IconButton
-                onClick={() => setShowPassword(!showPassword)}
                 edge="end"
+                onClick={() => setShowPassword((prev) => !prev)}
               >
-                {showPassword ? <Visibility /> : <VisibilityOff />}
+                {showPassword ? (
+                  <Visibility />
+                ) : (
+                  <VisibilityOff />
+                )}
               </IconButton>
             </InputAdornment>
           ),
         }}
       />
+
       <PrimaryButton
         fullWidth
         variant="contained"
         onClick={validateUserCredentials}
         disabled={!userId || isLoading}
       >
-        {isLoading ? "Signing in..." : "Sign In"}
+        {isLoading ? "Validating..." : "Continue"}
       </PrimaryButton>
     </>
   );
@@ -575,86 +491,38 @@ const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
 export default LoginWithPassword;
 
 
-
-import React, { useState, useRef, useEffect } from "react";
-import axios from "axios";
-import { Box } from "@mui/material";
-import { StyledTextField, PrimaryButton } from "./LoginStyles";
-
-const OtpVerification = ({
-  userId,
-  otpTxnId,
-  loginPayload,
-  openLoginErrorDialog,
-}) => {
-  const [otp, setOtp] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const otpRef = useRef(null);
-
-  useEffect(() => {
-    otpRef.current?.focus();
-  }, []);
-
-  const verifyOtp = async () => {
-    if (!otp) {
-      return;
-    }
-
-    try {
-      setLoading(true);
-
-      const response = await axios.post("/api/auth/validate-otp", {
-        userId,
-        otp,
-        otpTxnId,
-      });
-
-      const result = response.data;
-
-      if (result.success) {
-        loginPayload();
-      } else {
-        openLoginErrorDialog("OTP Verification Failed", "Invalid OTP");
-      }
-    } catch (err) {
-      openLoginErrorDialog("OTP Verification Failed", "Unable to validate OTP");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const resendOtp = async () => {
-    try {
-      await axios.post("/api/auth/send-otp", {
-        userId,
-      });
-
-      openLoginErrorDialog("OTP Sent", "A new OTP has been sent");
-    } catch (err) {
-      openLoginErrorDialog("Failed", "Unable to resend OTP");
-    }
-  };
-
-  return (
-    <>
-      <StyledTextField
-        fullWidth
-        label="Enter OTP"
-        inputRef={otpRef}
-        value={otp}
-        onChange={(e) => setOtp(e.target.value)}
-      />
-
-      <PrimaryButton fullWidth onClick={verifyOtp} disabled={loading}>
-        {loading ? "Verifying..." : "Verify OTP"}
-      </PrimaryButton>
-
-      <PrimaryButton fullWidth variant="outlined" onClick={resendOtp}>
-        Resend OTP
-      </PrimaryButton>
-    </>
-  );
+const enableEditingBackToHome = () => {
+  setPage("HOME");
+  setUserIdDisabled(false);
+  setError("");
+  setUserId("");
+  setOtpTxnId(null);
+  setLoginResult(null);
 };
 
-export default OtpVerification;
+{page === "PASSWORD" && (
+  <Box>
+    <LoginWithPassword
+      userId={userId}
+      publicKey={publicKey}
+      openLoginErrorDialog={openLoginErrorDialog}
+      onBackToHome={enableEditingBackToHome}
+      onOtpRequired={({ otpTxnId, loginResult }) => {
+        setOtpTxnId(otpTxnId);
+        setLoginResult(loginResult);
+        setPage("OTP");
+      }}
+    />
+  </Box>
+)}
+
+{page === "OTP" && (
+  <Box>
+    <OtpVerification
+      userId={userId}
+      otpTxnId={otpTxnId}
+      loginResult={loginResult}
+      openLoginErrorDialog={openLoginErrorDialog}
+    />
+  </Box>
+)}
