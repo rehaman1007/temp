@@ -1,14 +1,579 @@
-const [otpTxnId, setOtpTxnId] = useState(null);
-const [loginPayload, setLoginPayload] = useState(null);
+import React, { useEffect, useRef, useState } from "react";
+import axios from "axios";
+import { Box, InputAdornment } from "@mui/material";
+import PersonIcon from "@mui/icons-material/Person";
+import LogoImg from "../../../assets/Logos/Fincore_transperent.svg";
+import LoginErrorDialog from "./LoginErrorDialog";
+import LoginWithPassword from "./LoginWithPassword";
+import fTitle from "../../../assets/Logos/Fincore_title.png";
+import UpdatePassword from "./UpdatePassword";
+import {
+  Root,
+  ContainerInner,
+  Content,
+  LeftCol,
+  RightCol,
+  LogoWrap,
+  BrandTitle,
+  BrandSub,
+  BigHeading,
+  SubText,
+  FeatureList,
+  FeatureItem,
+  Bullet,
+  GlassCard,
+  FormTitle,
+  StyledTextField,
+  PrimaryButton,
+  SubHeadingText,
+} from "./LoginStyles";
+import { resolveConfig } from "../../../config/EnvironmentConfig";
+import Copyright from "../../../components/Copyright";
 
-{page === "OTP" && (
-  <OtpVerification
-    userId={userId}
-    otpTxnId={otpTxnId}
-    loginPayload={loginPayload}
-    openLoginErrorDialog={openLoginErrorDialog}
-  />
-)}
+export default function LoginPort() {
+  const [content, setContent] = useState(null);
+
+  useEffect(() => {
+    const loadContent = async () => {
+      try {
+        const res = await axios.get("/loginContent.json");
+        setContent(res.data);
+      } catch (err) {
+        console.error("Failed to load content JSON:", err);
+      }
+    };
+    loadContent();
+  }, []);
+
+  // === STATES ===
+  const [userId, setUserId] = useState("");
+  const [error, setError] = useState("");
+  const [page, setPage] = useState("HOME"); // HOME | PASSWORD | UPDATE
+  const [dialogHeading, setDialogHeading] = useState("");
+  const [dialogContent, setDialogContent] = useState("");
+  const [showErrorDialog, setShowErrorDialog] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [userIdDisabled, setUserIdDisabled] = useState(false);
+  const [publicKey, setPublicKey] = useState(null);
+  const [otpTxnId, setOtpTxnId] = useState(null);
+  const [loginPayload, setLoginPayload] = useState(null);
+
+  const userIdInputRef = useRef(null);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (userIdInputRef.current) {
+        userIdInputRef.current.focus();
+      }
+    }, 100); // 100ms is usually safe and unnoticeable
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // === DIALOG HANDLERS ===
+  const handleDialogClose = () => {
+    setShowErrorDialog(false);
+    setDialogHeading("");
+    setDialogContent("");
+  };
+
+  const openLoginErrorDialog = (heading, content) => {
+    setDialogHeading(heading);
+    setDialogContent(content);
+    setShowErrorDialog(true);
+  };
+
+  // === VALIDATION ===
+  const validateId = (id) => {
+    if (!id) return false;
+    const v = id.trim().toLowerCase();
+    const regex = /^(?:\d{7}|v\d{7}|tcs\d{7}|tcsv\d{7})$/;
+    return regex.test(v);
+  };
+
+  // === INPUT RESTRICTIONS ===
+  const handleUserIdChange = (raw) => {
+    if (userIdDisabled) return;
+    let val = (raw || "").replace(/\s+/g, "");
+    const m = val.match(/^([A-Za-z]*)(.*)$/);
+    let prefixCandidate = (m && m[1]) || "";
+    let rest = (m && m[2]) || "";
+
+    const prefixLow = prefixCandidate.toLowerCase();
+    const allowedPrefixList = ["", "t", "tc", "tcs", "tcsv", "v"];
+    if (
+      !allowedPrefixList.some((p) => prefixLow?.toLowerCase().startsWith(p))
+    ) {
+      prefixCandidate = "";
+    }
+
+    const prefix = prefixCandidate;
+    let digitsPart = rest.replace(/\D/g, "");
+    if (digitsPart.length > 7) digitsPart = digitsPart.slice(0, 7);
+
+    const newVal = prefix + digitsPart;
+    if (
+      digitsPart.length < 8 &&
+      allowedPrefixList.some((p) => p.startsWith(prefix?.toLowerCase()))
+    ) {
+      setUserId(newVal);
+    }
+
+    if (error) setError("");
+  };
+
+  const handleUserIdPaste = (e) => {
+    e.preventDefault();
+    const paste = (e.clipboardData || window.clipboardData).getData("text");
+    handleUserIdChange(paste);
+  };
+
+  // === API CALL: CHECK USER ===
+  const checkUser = async () => {
+    setError("");
+    if (!validateId(userId)) {
+      setError("Invalid User ID");
+      userIdInputRef.current?.focus();
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const payloadUserId = userId.trim();
+      const res = await axios.post(`${resolveConfig("/LS")}/auth/check-user`, {
+        userId: payloadUserId,
+      });
+
+      const result = res?.data?.data || {};
+
+      if (result?.userStatus == "RESTRICTED") {
+        setError("");
+        openLoginErrorDialog(
+          "Access Restricted",
+          "This system is restricted to use FinCore, Please contact the administrator.",
+        );
+        return;
+      }
+      if (result?.userStatus === "INVALID") {
+        setError("User ID does not exist");
+        return;
+      }
+
+      if (result?.passwordLoginStatus === "INACTIVE") {
+        openLoginErrorDialog(
+          "Password Locked!",
+          "You cannot login using password currently. Please contact the administrator.",
+        );
+        return;
+      }
+
+      if (result?.updatePassword === true) {
+        setPublicKey(result?.publicKey);
+        setPage("UPDATE");
+        setUserIdDisabled(true);
+        return;
+      }
+
+      if (
+        result?.userStatus == "ACTIVE" &&
+        result?.passwordLoginStatus == "ACTIVE"
+      ) {
+        setPublicKey(result?.publicKey);
+        setPage("PASSWORD");
+        setUserIdDisabled(true);
+        return;
+      }
+
+      openLoginErrorDialog(
+        "Login Not Allowed",
+        result?.message || "Please contact the administrator.",
+      );
+    } catch (err) {
+      console.error("checkUser error:", err);
+      openLoginErrorDialog(
+        "Login Error",
+        "Something went wrong, please try again later.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // === FORM SUBMIT ===
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (page === "HOME") checkUser();
+  };
+
+  // === CALLBACKS ===
+  const handlePasswordUpdateSuccess = () => {
+    setPage("PASSWORD");
+
+    setUserIdDisabled(true);
+  };
+
+  const enableEditingBackToHome = () => {
+    setPage("HOME");
+    setUserIdDisabled(false);
+    setError("");
+    setUserId("");
+  };
+
+  if (!content) return null;
+
+  return (
+    <Root>
+      <ContainerInner>
+        <Content>
+          <LeftCol>
+            <LogoWrap>
+              {/* <img src={LogoImg} alt="FinCore Logo" width={100} height="auto" /> */}
+              <>
+                <Box
+                  component="img"
+                  src={LogoImg}
+                  alt="Logo Icon"
+                  sx={{ width: 150, height: 150, objectFit: "contain" }}
+                />
+                <div>
+                  <Box
+                    component="img"
+                    src={fTitle}
+                    alt="FinCore"
+                    sx={{
+                      height: 35, // Adjust height to match your icon's scale
+                      width: "auto",
+                      display: "block",
+                      mt: 5,
+                      mb: 1,
+                    }}
+                  />
+                  {/* <BrandTitle>{content?.brand?.title}</BrandTitle> */}
+                  <BrandSub>{content?.brand?.subtitle}</BrandSub>
+                </div>
+              </>
+            </LogoWrap>
+          </LeftCol>
+        </Content>
+        <Content>
+          {/* LEFT COLUMN */}
+          <LeftCol>
+            <Box sx={{ mb: 1 }}>
+              <BigHeading>
+                {(content?.hero?.welcomeTitle || "").split(" - ")[0]}
+              </BigHeading>
+
+              {content?.hero?.welcomeTitle?.includes(" - ") && (
+                <SubHeadingText>
+                  {content?.hero?.welcomeTitle.split(" - ")[1]}
+                </SubHeadingText>
+              )}
+            </Box>
+
+            <SubText>{content?.hero?.subText}</SubText>
+
+            <BigHeading>{content?.legal?.title}</BigHeading>
+            <FeatureList>
+              {content?.legal?.items.map((item, idx) => (
+                <FeatureItem key={idx}>
+                  <Bullet /> {item}
+                </FeatureItem>
+              ))}
+            </FeatureList>
+          </LeftCol>
+
+          {/* RIGHT COLUMN */}
+          <RightCol>
+            <GlassCard elevation={3}>
+              <FormTitle>{content?.form?.signIn}</FormTitle>
+
+              <form onSubmit={handleSubmit} noValidate>
+                <StyledTextField
+                  fullWidth
+                  inputRef={userIdInputRef}
+                  label="User ID"
+                  placeholder={content?.form?.userIdPlaceholder}
+                  margin="dense"
+                  value={userId}
+                  onChange={(e) => handleUserIdChange(e.target.value)}
+                  onPaste={handleUserIdPaste}
+                  error={Boolean(error)}
+                  helperText={error || " "}
+                  disabled={userIdDisabled}
+                  InputProps={{
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <PersonIcon />
+                      </InputAdornment>
+                    ),
+                  }}
+                />
+
+                {page === "HOME" && (
+                  <PrimaryButton
+                    type="submit"
+                    variant="contained"
+                    disabled={loading}
+                  >
+                    {loading
+                      ? content?.form?.checking
+                      : content?.form?.signInButton}
+                  </PrimaryButton>
+                )}
+
+                {page === "PASSWORD" && (
+                  <Box>
+                    <LoginWithPassword
+                      userId={userId}
+                      publicKey={publicKey}
+                      openLoginErrorDialog={openLoginErrorDialog}
+                      onBackToHome={enableEditingBackToHome}
+                    />
+                  </Box>
+                )}
+
+                {page === "UPDATE" && (
+                  <Box>
+                    <UpdatePassword
+                      userId={userId}
+                      publicKey={publicKey}
+                      openLoginErrorDialog={openLoginErrorDialog}
+                      onUpdateSuccess={handlePasswordUpdateSuccess}
+                    />
+                  </Box>
+                )}
+
+                {page === "OTP" && (
+                  <OtpVerification
+                    userId={userId}
+                    otpTxnId={otpTxnId}
+                    loginPayload={loginPayload}
+                    openLoginErrorDialog={openLoginErrorDialog}
+                  />
+                )}
+              </form>
+            </GlassCard>
+          </RightCol>
+        </Content>
+      </ContainerInner>
+
+      <LoginErrorDialog
+        showErrorDialog={showErrorDialog}
+        title={dialogHeading}
+        content={dialogContent}
+        onDialogClose={handleDialogClose}
+      />
+      <Box sx={{ position: "absolute", left: 0, bottom: 0, right: 0 }}>
+        <Copyright />
+      </Box>
+    </Root>
+  );
+}
+
+
+
+import React, { useEffect, useState, useRef } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { useNavigate } from "react-router-dom";
+import { InputAdornment, IconButton } from "@mui/material";
+import LockIcon from "@mui/icons-material/Lock";
+import Visibility from "@mui/icons-material/Visibility";
+import VisibilityOff from "@mui/icons-material/VisibilityOff";
+import api from "../../../config/axiosConfig";
+import { parseJwt } from "../../../utils/EncryptionUtilities";
+import { loginSuccess } from "../../../store/slices/authSlice";
+import { setMenus, setSelectedMenuItem } from "../../../store/slices/menuSlice";
+import { setTabId } from "../../../store/slices/tabSlice";
+import { resolveConfig } from "../../../config/EnvironmentConfig";
+import JSEncrypt from "jsencrypt";
+import { StyledTextField, PrimaryButton } from "./LoginStyles";
+
+const LoginWithPassword = ({ userId, publicKey, openLoginErrorDialog }) => {
+  // 1. Initialize with empty string to trigger validation correctly
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [passwordInvalidMessage, setPasswordInvalidMessage] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  const navigate = useNavigate();
+  const dispatch = useDispatch();
+  const menus = useSelector((state) => state.menus.menus);
+
+  // 2. Ref for focusing the input
+  const passwordInputRef = useRef(null);
+
+  // 3. Focus the password field whenever the component is loaded
+  useEffect(() => {
+    if (passwordInputRef.current) {
+      passwordInputRef.current.focus();
+    }
+  }, []);
+
+  // Navigate after successful login
+  useEffect(() => {
+    if (menus && menus.length > 0 && menus[0]?.route) {
+      if (menus[0].hasChildren) {
+        navigate("/choose-option" + menus[0]?.route);
+      } else {
+        navigate(menus[0]?.route);
+      }
+    }
+  }, [menus, navigate]);
+
+  const validateUserCredentials = async () => {
+    // 4. Basic Null/Empty Validation
+    if (!password || password.trim() === "") {
+      setPasswordInvalidMessage("Password cannot be empty.");
+      passwordInputRef.current?.focus();
+      return;
+    }
+
+    setIsLoading(true);
+    setPasswordInvalidMessage("");
+
+    try {
+      if (!publicKey) {
+        throw new Error("Could not retrieve encryption key.");
+      }
+
+      const encryptor = new JSEncrypt();
+      encryptor.setPublicKey(publicKey);
+      const encryptedPassword = encryptor.encrypt(password);
+
+      if (!encryptedPassword) {
+        throw new Error("Encryption failed.");
+      }
+
+      const response = await api.post(
+        `${resolveConfig("/LS") || ""}/auth/login`,
+        {
+          userId: userId,
+          password: encryptedPassword,
+        },
+      );
+
+      const result = response?.data?.data || {};
+
+      if (result.validCredentials === true) {
+        if (result?.roleData?.root_menus?.length === 0) {
+          openLoginErrorDialog(
+            "Access Denied",
+            "You don't have enough permissions to access this application, kindly contact Support.",
+          );
+          return;
+        }
+
+        const user = parseJwt(result.accessToken);
+        const tabId = crypto.randomUUID();
+
+        dispatch(loginSuccess({ token: result.accessToken, user: user }));
+         localStorage.setItem(
+        "payloadEncryptionKey",
+        result.payloadEncryptionKey
+      );
+        dispatch(setTabId(tabId));
+        dispatch(setMenus(result.roleData.root_menus));
+        dispatch(setSelectedMenuItem(result.roleData.root_menus[0]));
+
+        const bc = new BroadcastChannel("auth");
+        setTimeout(() => {
+          bc.postMessage({
+            type: "USER_LOGGED_IN",
+            tabId,
+            userId: user.userId,
+          });
+        }, 1000);
+      } else {
+        if (!result.validCredentials) {
+          openLoginErrorDialog("Login Failed", "Invalid credentials.");
+        }
+        if (result.userStatus === "ACTIVE" && result.loginMethod === "P") {
+          if (result.attemptsLeft > 0) {
+            setPasswordInvalidMessage(
+              `Invalid credentials. ${result.attemptsLeft} attempts left.`,
+            );
+            openLoginErrorDialog("Invalid password", "Password incorrect.");
+          } else {
+            openLoginErrorDialog(
+              "Account locked",
+              "Your account has been locked.",
+            );
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Login Error:", e);
+      const msg =
+        e.response?.data?.message || e.message || "Failed to log into FinCore";
+      openLoginErrorDialog("Login Failed", msg);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handlePasswordKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      // Added basic check here as well
+      if (!isLoading && password && password.trim() !== "") {
+        validateUserCredentials();
+      } else if (!password || password.trim() === "") {
+        setPasswordInvalidMessage("Password cannot be empty.");
+      }
+    }
+  };
+
+  return (
+    <>
+      <StyledTextField
+        fullWidth
+        inputRef={passwordInputRef} // 5. Attach focus ref
+        label="Password"
+        type={showPassword ? "text" : "password"}
+        value={password}
+        onChange={(e) => {
+          setPassword(e.target.value);
+          if (passwordInvalidMessage) setPasswordInvalidMessage(""); // Clear error while typing
+        }}
+        onKeyDown={handlePasswordKeyDown}
+        variant="outlined"
+        error={!!passwordInvalidMessage}
+        helperText={passwordInvalidMessage}
+        margin="normal"
+        autoComplete="current-password" // Good practice for password fields
+        InputProps={{
+          startAdornment: (
+            <InputAdornment position="start">
+              <LockIcon />
+            </InputAdornment>
+          ),
+          endAdornment: (
+            <InputAdornment position="end">
+              <IconButton
+                onClick={() => setShowPassword(!showPassword)}
+                edge="end"
+              >
+                {showPassword ? <Visibility /> : <VisibilityOff />}
+              </IconButton>
+            </InputAdornment>
+          ),
+        }}
+      />
+      <PrimaryButton
+        fullWidth
+        variant="contained"
+        onClick={validateUserCredentials}
+        disabled={!userId || isLoading}
+      >
+        {isLoading ? "Signing in..." : "Sign In"}
+      </PrimaryButton>
+    </>
+  );
+};
+
+export default LoginWithPassword;
+
 
 
 import React, { useState, useRef, useEffect } from "react";
@@ -39,30 +604,21 @@ const OtpVerification = ({
     try {
       setLoading(true);
 
-      const response = await axios.post(
-        "/api/auth/validate-otp",
-        {
-          userId,
-          otp,
-          otpTxnId,
-        }
-      );
+      const response = await axios.post("/api/auth/validate-otp", {
+        userId,
+        otp,
+        otpTxnId,
+      });
 
       const result = response.data;
 
       if (result.success) {
         loginPayload();
       } else {
-        openLoginErrorDialog(
-          "OTP Verification Failed",
-          "Invalid OTP"
-        );
+        openLoginErrorDialog("OTP Verification Failed", "Invalid OTP");
       }
     } catch (err) {
-      openLoginErrorDialog(
-        "OTP Verification Failed",
-        "Unable to validate OTP"
-      );
+      openLoginErrorDialog("OTP Verification Failed", "Unable to validate OTP");
     } finally {
       setLoading(false);
     }
@@ -74,15 +630,9 @@ const OtpVerification = ({
         userId,
       });
 
-      openLoginErrorDialog(
-        "OTP Sent",
-        "A new OTP has been sent"
-      );
+      openLoginErrorDialog("OTP Sent", "A new OTP has been sent");
     } catch (err) {
-      openLoginErrorDialog(
-        "Failed",
-        "Unable to resend OTP"
-      );
+      openLoginErrorDialog("Failed", "Unable to resend OTP");
     }
   };
 
@@ -96,19 +646,11 @@ const OtpVerification = ({
         onChange={(e) => setOtp(e.target.value)}
       />
 
-      <PrimaryButton
-        fullWidth
-        onClick={verifyOtp}
-        disabled={loading}
-      >
+      <PrimaryButton fullWidth onClick={verifyOtp} disabled={loading}>
         {loading ? "Verifying..." : "Verify OTP"}
       </PrimaryButton>
 
-      <PrimaryButton
-        fullWidth
-        variant="outlined"
-        onClick={resendOtp}
-      >
+      <PrimaryButton fullWidth variant="outlined" onClick={resendOtp}>
         Resend OTP
       </PrimaryButton>
     </>
@@ -116,79 +658,3 @@ const OtpVerification = ({
 };
 
 export default OtpVerification;
-
-
-const completeLogin = (result) => {
-  const user = parseJwt(result.accessToken);
-
-  const tabId = crypto.randomUUID();
-
-  dispatch(
-    loginSuccess({
-      token: result.accessToken,
-      user,
-    })
-  );
-
-  localStorage.setItem(
-    "payloadEncryptionKey",
-    result.payloadEncryptionKey
-  );
-
-  dispatch(setTabId(tabId));
-  dispatch(setMenus(result.roleData.root_menus));
-  dispatch(setSelectedMenuItem(result.roleData.root_menus[0]));
-
-  const bc = new BroadcastChannel("auth");
-
-  setTimeout(() => {
-    bc.postMessage({
-      type: "USER_LOGGED_IN",
-      tabId,
-      userId: user.userId,
-    });
-  }, 1000);
-};
-
-
-const LoginWithPassword = ({
-  userId,
-  publicKey,
-  openLoginErrorDialog,
-  onOtpRequired,
-})
-
-
-if (result.validCredentials === true) {
-  const otpResponse = await axios.post(
-    "/api/auth/send-otp",
-    {
-      userId,
-    }
-  );
-
-  const otpResult = otpResponse.data;
-
-  onOtpRequired({
-    otpTxnId: otpResult.otpTxnId,
-    loginResult: result,
-  });
-
-  return;
-}
-
-<LoginWithPassword
-  userId={userId}
-  publicKey={publicKey}
-  openLoginErrorDialog={openLoginErrorDialog}
-  onOtpRequired={({ otpTxnId, loginResult }) => {
-    setOtpTxnId(otpTxnId);
-
-    setLoginPayload(() => () => {
-      // actual login success code
-      completeLogin(loginResult);
-    });
-
-    setPage("OTP");
-  }}
-/>
