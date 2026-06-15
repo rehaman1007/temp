@@ -1,282 +1,1001 @@
-package com.fincore.transactions_service.service;
+// **************************************************************************** ReportAnalysisScreen ****************************************************************************** //
 
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.IOUtils;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-import org.springframework.web.multipart.MultipartFile;
+import {
+  useState,
+  useMemo,
+  useCallback,
+  useEffect,
+  memo,
+  forwardRef,
+  useRef,
+} from "react";
+import { useSelector, useDispatch } from "react-redux";
+import {
+  Box,
+  Paper,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Typography,
+  IconButton,
+  CircularProgress,
+  MenuItem,
+  Select,
+  FormControl,
+  InputLabel,
+} from "@mui/material";
+import AnalyticsIcon from "@mui/icons-material/Analytics";
+import DatasetIcon from "@mui/icons-material/Dataset";
+import { useTheme } from "@mui/material/styles";
+import { motion, AnimatePresence } from "framer-motion";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.*;
+// Assume these are available in your project structure
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class AdminSupportServiceImpl implements AdminSupportService {
+// --- MOTION WRAPPERS ---
+// Kept ONLY for the upper UI dashboard elements. Removed MotionTableRow to fix lag.
+const MotionBox = motion(Box);
 
-    private final JdbcTemplate jdbcTemplate;
-    private final AdminSupportExecutor adminSupportExecutor;
-    private final FileSystem hdfsFileSystem;
+// --- CONFIGURATION & CONSTANTS ---
+const formatCurrency = (value) => {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "INR",
+  }).format(value || 0);
+};
 
-    /**
-     * =========================================================
-     * EXECUTE ADMIN SQL (COMMAND CONSOLE)
-     * =========================================================
-     */
-    @Override
-    public Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request) {
+// Stable fallback reference to prevent infinite render loops
+const DEFAULT_CONFIG = { hierarchy: [], availableMetrics: [] };
 
-        Instant start = Instant.now();
-        String clientIp = getClientIp(request);
-        String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
-        Map<String, Object> response = new HashMap<>();
+// --- ACTUAL API LOGIC ---
+const fetchAnalyticsData = async (callApi, showSnackBar, payload) => {
+  try {
+    const responseData = await callApi(
+      "/AS/analytics/drill-down",
+      payload,
+      "POST",
+    );
+    return responseData?.data || [];
+  } catch (error) {
+    console.error("Error fetching analytics data:", error);
+    showSnackBar("Failed to fetch analytics data", "error");
+  }
+};
 
-        try {
-            log.info("""
-                    
-                    ==================================================
-                    ADMIN SQL EXECUTION STARTED
-                    ==================================================
-                    userId={}
-                    clientIp={}
-                    page={}
-                    size={}
-                    ==================================================
-                    """, userId, clientIp, dto.getPage(), dto.getSize());
+const fetchInitialData = async (
+  callApi,
+  showSnackBar,
+  viewCode,
+  hierarchy,
+  metrics,
+) => {
+  const rootDimension = hierarchy[0];
+  const payload = {
+    viewCode: viewCode,
+    dimensions: [rootDimension],
+    metrics: metrics.map((m) => m.logicalName),
+    filters: [],
+  };
+  const apiData = await fetchAnalyticsData(callApi, showSnackBar, payload);
 
-            /**
-             * CLEAN SQL
-             */
-            rawSql = rawSql.replaceAll(";\\s*$", "").trim();
-            String[] statements = rawSql.split(";");
-            List<String> cleanStatements = new ArrayList<>();
+  return (apiData || []).map((row) => ({
+    ...row,
+    level: 0,
+    nodeFilters: [],
+  }));
+};
 
-            for (String stmt : statements) {
-                String clean = stmt.replaceAll("(?m)^--.*", "").trim();
-                if (!clean.isEmpty()) {
-                    cleanStatements.add(clean);
-                }
+const fetchChildrenData = async (
+  callApi,
+  showSnackBar,
+  parentNode,
+  viewCode,
+  hierarchy,
+  metrics,
+) => {
+  const childLevel = parentNode.level + 1;
+  const nextDimension = hierarchy[childLevel];
+
+  const currentFilters = [
+    ...(parentNode.nodeFilters || []),
+    {
+      logicalField: hierarchy[parentNode.level],
+      operator: "EQUALS",
+      value: parentNode.name,
+    },
+  ];
+  const payload = {
+    viewCode: viewCode,
+    dimensions: [nextDimension],
+    metrics: metrics.map((m) => m.logicalName),
+    filters: currentFilters,
+  };
+  const apiData = await fetchAnalyticsData(callApi, showSnackBar, payload);
+
+  return (apiData || []).map((row) => ({
+    ...row,
+    level: childLevel,
+    nodeFilters: currentFilters,
+  }));
+};
+
+// --- COMPONENTS ---
+
+const ActualTreeTableRow = memo(
+  forwardRef(
+    (
+      {
+        node,
+        isExpanded,
+        isLoading,
+        onToggle,
+        maxVisibleLevel,
+        index,
+        activeMetrics,
+        ...props // Passes the virtualizer data-index safely
+      },
+      ref,
+    ) => {
+      return (
+        <TableRow
+          ref={ref}
+          hover
+          sx={{
+            bgcolor: isExpanded ? "#D8CCFF" : "inherit",
+            borderLeft: isExpanded ? "4px solid" : "4px solid transparent",
+            borderLeftColor: isExpanded ? "primary.main" : "transparent",
+            // Switched to CSS transitions to prevent virtualizer DOM thrashing
+            transition: "background-color 0.2s ease-in-out, border-color 0.2s ease-in-out",
+          }}
+          {...props}
+        >
+          {/* Hierarchy Depth Columns */}
+          {Array.from({ length: maxVisibleLevel + 1 }).map((_, colIndex) => {
+            if (colIndex === node.level) {
+              return (
+                <TableCell
+                  key={colIndex}
+                  sx={{
+                    borderRight: 1,
+                    borderColor: "divider",
+                    minWidth: 260,
+                    bgcolor: "transparent",
+                    p: 1,
+                    verticalAlign: "middle",
+                  }}
+                >
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      pl: node.level * 2.5 + 1,
+                      pr: 1.5,
+                      py: 0.5,
+                      position: "relative",
+                      width: "100%",
+                      boxSizing: "border-box",
+                      transition: "transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease",
+                      "&:hover": {
+                        transform: "scale(1.02)",
+                        zIndex: 10,
+                        boxShadow: "0px 4px 12px rgba(0,0,0,0.08)",
+                        backgroundColor: "background.paper",
+                      }
+                    }}
+                  >
+                    {node.hasChildren ? (
+                      <IconButton
+                        size="small"
+                        color="primary"
+                        onClick={() => onToggle(node)}
+                        disabled={isLoading}
+                        sx={{
+                          mr: 1,
+                          border: 1,
+                          borderColor: isExpanded ? "primary.dark" : "divider",
+                          borderRadius: "50%",
+                          height: 20,
+                          width: 20,
+                          p: 0,
+                          bgcolor: "action.hover",
+                          transition: "transform 0.1s ease",
+                          "&:hover": {
+                            transform: "scale(1.15)",
+                          },
+                          "&:active": {
+                            transform: "scale(0.85)",
+                          },
+                          "&.Mui-focusVisible": {
+                            bgcolor: "action.selected",
+                          },
+                        }}
+                      >
+                        {isLoading ? (
+                          <CircularProgress size={12} color={isExpanded ? "primary.dark" : "inherit"} />
+                        ) : isExpanded ? (
+                          "-"
+                        ) : (
+                          "+"
+                        )}
+                      </IconButton>
+                    ) : (
+                      <Box sx={{ width: 20, mr: 1 }} />
+                    )}
+                    <Typography
+                      variant="body2"
+                      color={isExpanded ? "primary.main" : "text.primary"}
+                      sx={{
+                        fontWeight: isExpanded ? 700 : node.level === 0 ? 600 : 400,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {node.name}
+                    </Typography>
+                  </Box>
+                </TableCell>
+              );
             }
+            return (
+              <TableCell
+                key={colIndex}
+                sx={{
+                  borderRight: 1,
+                  borderColor: "divider",
+                  width: 80,
+                  minWidth: 80,
+                  bgcolor: "background.default",
+                  p: 0,
+                }}
+              />
+            );
+          })}
 
-            if (cleanStatements.isEmpty()) {
-                response.put("error", true);
-                response.put("message", "SQL cannot be empty");
-                return response;
-            }
-
-            /**
-             * SINGLE SELECT EVALUATION
-             */
-            boolean isSingleSelect = cleanStatements.size() == 1 && cleanStatements.get(0).trim().toUpperCase().startsWith("SELECT");
-            int page = dto.getPage() != null ? dto.getPage() : 0;
-            int size = dto.getSize() != null ? dto.getSize() : 10;
-
-            /**
-             * EXECUTE SELECT QUERY
-             */
-            if (isSingleSelect) {
-                String executableSelect = cleanStatements.get(0);
-                String countSql = "SELECT COUNT(*) FROM (" + executableSelect + ")";
-                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
-
-                if (total == null) total = 0;
-
-                int startRow = page * size;
-                int endRow = startRow + size;
-
-                // Pagination Query for Oracle
-                String paginatedSql = """
-                        SELECT * FROM
-                        (
-                            SELECT A.*, ROWNUM RN FROM
-                            (
-                        """ + executableSelect + """
-                            ) A
-                            WHERE ROWNUM <= ?
-                        )
-                        WHERE RN > ?
-                        """;
-
-                List<Map<String, Object>> rawRows = jdbcTemplate.queryForList(paginatedSql, endRow, startRow);
-                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
-
-                List<Map<String, String>> columns = new ArrayList<>();
-                if (!rows.isEmpty()) {
-                    for (String key : rows.get(0).keySet()) {
-                        columns.add(Map.of("name", key));
+          {/* Dynamic Metrics Columns */}
+          {activeMetrics.map((metric, mIdx) => {
+            const isLastColumn = mIdx === activeMetrics.length - 1;
+            return (
+              <TableCell
+                key={metric.logicalName}
+                align="right"
+                sx={{
+                  borderRight: 1,
+                  borderColor: "divider",
+                  p: 0,
+                  verticalAlign: "middle",
+                }}
+              >
+                <Box
+                  sx={{
+                    p: "8px 16px",
+                    color: node[metric.logicalName] < 0 ? "error.main" : "success.main",
+                    position: "relative",
+                    fontWeight: 500,
+                    transformOrigin: isLastColumn ? "right center" : "center center",
+                    whiteSpace: "nowrap",
+                    transition: "transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease",
+                    "&:hover": {
+                      transform: "scale(1.03)",
+                      zIndex: 20,
+                      boxShadow: "-4px 4px 15px rgba(0,0,0,0.1)",
+                      backgroundColor: "background.paper",
+                      borderRadius: "4px",
                     }
-                }
-
-                response.put("error", false);
-                response.put("columns", columns);
-                response.put("rows", rows);
-                response.put("total", total);
-                response.put("page", page);
-                response.put("size", size);
-
-                adminSupportExecutor.insertExecutionLog(
-                        UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS",
-                        1, 1, 1, 0, 0, 0, 1, null, null, null, null, 1, 
-                        Duration.between(start, Instant.now()).toSeconds(), rawSql
-                );
-
-                return response;
-            }
-
-            /**
-             * EXECUTE DML/DDL COMMANDS
-             */
-            int successCount = 0;
-            int insertCount = 0, updateCount = 0, deleteCount = 0, otherCount = 0;
-
-            for (int i = 0; i < cleanStatements.size(); i++) {
-                String sql = cleanStatements.get(i);
-
-                try {
-                    jdbcTemplate.execute(sql);
-                    successCount++;
-                    String upperSql = sql.toUpperCase();
-
-                    if (upperSql.startsWith("INSERT")) insertCount++;
-                    else if (upperSql.startsWith("UPDATE")) updateCount++;
-                    else if (upperSql.startsWith("DELETE")) deleteCount++;
-                    else otherCount++;
-
-                } catch (Exception e) {
-                    adminSupportExecutor.insertExecutionLog(
-                            UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED",
-                            cleanStatements.size(), successCount, successCount, insertCount, updateCount, deleteCount, otherCount, 
-                            i + 1, sql, e.getClass().getSimpleName(), e.getMessage(), 0, 
-                            Duration.between(start, Instant.now()).toSeconds(), rawSql
-                    );
-
-                    response.put("error", true);
-                    response.put("message", "Error at statement " + (i + 1) + " : " + e.getMessage());
-                    response.put("failedSql", sql);
-                    return response;
-                }
-            }
-
-            response.put("error", false);
-            response.put("message", "Script executed successfully");
-            response.put("rows", List.of(Map.of("RESULT", successCount + " statements executed successfully")));
-            response.put("columns", List.of(Map.of("name", "RESULT")));
-            response.put("total", 1);
-
-            adminSupportExecutor.insertExecutionLog(
-                    UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", 
-                    successCount, successCount, successCount, insertCount, updateCount, deleteCount, otherCount, 
-                    null, null, null, null, successCount, Duration.between(start, Instant.now()).toSeconds(), rawSql
+                  }}
+                >
+                  {formatCurrency(node[metric.logicalName])}
+                </Box>
+              </TableCell>
             );
+          })}
+        </TableRow>
+      );
+    },
+  ),
+);
+ActualTreeTableRow.displayName = "ActualTreeTableRow";
 
-            return response;
+export default function ReportAnalysisScreen() {
+  const { callApi } = useApi();
+  const dispatch = useDispatch();
+  const user = useSelector((state) => state.auth.user);
+  
+  // Safe extraction of cache (assumes you registered it in root reducer as "analyticsCache")
+  const cachedNodes = useSelector((state) => state.analyticsCache?.nodes || {});
+  const showSnackBar = useCustomSnackbar();
 
-        } catch (Exception e) {
-            log.error("ADMIN SQL EXECUTION FAILED", e);
-            adminSupportExecutor.insertExecutionLog(
-                    UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", 
-                    0, 0, 0, 0, 0, 0, 0, null, rawSql, e.getClass().getSimpleName(), e.getMessage(), 
-                    0, Duration.between(start, Instant.now()).toSeconds(), rawSql
+  const [reportsConfig, setReportsConfig] = useState([]);
+  const [selectedReportCode, setSelectedReportCode] = useState("");
+  const [selectedViewCode, setSelectedViewCode] = useState("");
+
+  const [data, setData] = useState([]);
+  const [expandedIds, setExpandedIds] = useState(new Map());
+  const [loadingIds, setLoadingIds] = useState(new Set());
+  const [isInitializing, setIsInitializing] = useState(false);
+
+  const theme = useTheme();
+  
+  // Virtualization Scroll Container Ref
+  const tableContainerRef = useRef(null);
+
+  const activeReport = useMemo(() => {
+    return (
+      reportsConfig.find((r) => r.reportCode === selectedReportCode) || null
+    );
+  }, [reportsConfig, selectedReportCode]);
+
+  const activeView = useMemo(() => {
+    return (
+      activeReport?.views?.find((v) => v.viewCode === selectedViewCode) || null
+    );
+  }, [activeReport, selectedViewCode]);
+
+  const activeHierarchyConfig = activeView || DEFAULT_CONFIG;
+
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const response = await callApi("/AS/analytics/config", {}, "GET");
+        const configData = Array.isArray(response)
+          ? response
+          : response?.data || [];
+        setReportsConfig(configData);
+      } catch (error) {
+        console.error("Failed to fetch analytics configurations", error);
+        showSnackBar("Failed to fetch analytics configurations", "error");
+      }
+    };
+    if (user) fetchConfig();
+  }, [callApi, user, showSnackBar]);
+
+  useEffect(() => {
+    const loadRoot = async () => {
+      if (!selectedReportCode || !selectedViewCode) {
+        setData((prev) => (prev.length === 0 ? prev : []));
+        return;
+      }
+      setIsInitializing(true);
+      setData([]);
+      setExpandedIds(new Map());
+
+      try {
+        const rootData = await fetchInitialData(
+          callApi,
+          showSnackBar,
+          selectedViewCode,
+          activeHierarchyConfig.hierarchy,
+          activeHierarchyConfig.availableMetrics,
+        );
+        setData(rootData);
+      } catch (error) {
+        console.error("Failed to load initial data", error);
+      } finally {
+        setIsInitializing(false);
+      }
+    };
+    loadRoot();
+  }, [
+    selectedReportCode,
+    selectedViewCode,
+    activeHierarchyConfig,
+    callApi,
+    showSnackBar,
+  ]);
+
+  const appendChildrenToTree = useCallback((nodes, parentId, newChildren) => {
+    return nodes.map((node) => {
+      if (node.id === parentId) return { ...node, children: newChildren };
+      if (node.children)
+        return {
+          ...node,
+          children: appendChildrenToTree(node.children, parentId, newChildren),
+        };
+      return node;
+    });
+  }, []);
+
+  const handleToggle = useCallback(
+    async (node) => {
+      const isExpanded = expandedIds.has(node.id);
+
+      if (isExpanded) {
+        // Manual Collapse
+        setExpandedIds((prev) => {
+          const next = new Map(prev);
+          next.delete(node.id);
+
+          const removeDescendants = (currentNode) => {
+            if (currentNode.children) {
+              currentNode.children.forEach((child) => {
+                next.delete(child.id);
+                removeDescendants(child);
+              });
+            }
+          };
+          removeDescendants(node);
+          return next;
+        });
+      } else {
+        // Expansion (Auto-Collapse Sibling Mode)
+        if (!node.children && node.hasChildren) {
+          
+          // --- REDUX CACHE LOGIC START ---
+          const cacheKey = `${selectedViewCode}_${node.id}`;
+          const cachedEntry = cachedNodes[cacheKey];
+          // 15 minutes TTL check (15 * 60 * 1000 = 900000 ms)
+          const isCacheValid = cachedEntry && (Date.now() - cachedEntry.timestamp < 900000);
+
+          if (isCacheValid) {
+            // CACHE HIT: Instantly load data from Redux
+            setData((prevData) =>
+              appendChildrenToTree(prevData, node.id, cachedEntry.data)
             );
-
-            response.put("error", true);
-            response.put("message", e.getMessage());
-            return response;
+          } else {
+            // CACHE MISS: Fetch from API
+            setLoadingIds((prev) => new Set(prev).add(node.id));
+            try {
+              const children = await fetchChildrenData(
+                callApi,
+                showSnackBar,
+                node,
+                selectedViewCode,
+                activeHierarchyConfig.hierarchy,
+                activeHierarchyConfig.availableMetrics,
+              );
+              setData((prevData) =>
+                appendChildrenToTree(prevData, node.id, children),
+              );
+              // Dispatch the new data to Redux cache
+              dispatch({
+                type: "analyticsCache/cacheNode", 
+                payload: { key: cacheKey, data: children, timestamp: Date.now() }
+              });
+            } catch (error) {
+              console.error("Failed to fetch children", error);
+            } finally {
+              setLoadingIds((prev) => {
+                const next = new Set(prev);
+                next.delete(node.id);
+                return next;
+              });
+            }
+          }
+          // --- REDUX CACHE LOGIC END ---
         }
-    }
-
-    /**
-     * =========================================================
-     * UPLOAD & EXECUTE SQL FILE
-     * =========================================================
-     */
-    @Override
-    public Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request) {
-
-        Map<String, Object> response = new HashMap<>();
-        String basePathStr = "/admin-support";
-        Path basePath = new Path(basePathStr);
         
-        try {
-            String jobId = UUID.randomUUID().toString();
-            String originalFilename = file.getOriginalFilename();
-            log.info("Receiving SQL Script: {}", originalFilename);
-            
-            String baseName = originalFilename.substring(0, originalFilename.lastIndexOf('.'));
-            String extension = originalFilename.substring(originalFilename.lastIndexOf('.'));
-            
-            File tempFile = File.createTempFile(baseName, extension);
-            String hdfsFilename = baseName + "_" + jobId + extension;
-            Path filePath = new Path(basePath, hdfsFilename);
-            
-            // Transfer multipart payload to physical temp file
-            file.transferTo(tempFile);
-
-            // 1. BACKUP TO HDFS SYNCHRONOUSLY FIRST
-            if (!hdfsFileSystem.exists(basePath)) {
-                hdfsFileSystem.mkdirs(basePath);
+        // ACCORDION LOGIC
+        setExpandedIds((prev) => {
+          const next = new Map();
+          // Loop through all currently expanded nodes
+          prev.forEach((level, id) => {
+            // Keep the node ONLY if it is at a higher depth level (meaning it's a direct ancestor)
+            if (level < node.level) {
+              next.set(id, level);
             }
-            try (InputStream in = new FileInputStream(tempFile);
-                 FSDataOutputStream out = hdfsFileSystem.create(filePath)) {
-                IOUtils.copyBytes(in, out, 4096, true);
-            } catch (Exception hdfsEx) {
-                log.error("HDFS Backup failed, but proceeding with execution", hdfsEx);
-            }
+          });
+          // Add the newly clicked node
+          next.set(node.id, node.level);
+          return next;
+        });
+      }
+    },
+    [
+      expandedIds,
+      appendChildrenToTree,
+      activeHierarchyConfig.hierarchy,
+      activeHierarchyConfig.availableMetrics,
+      selectedViewCode,
+      callApi,
+      showSnackBar,
+      cachedNodes,
+      dispatch
+    ],
+  );
 
-            // 2. PASS TO ASYNC EXECUTOR
-            // We NO LONGER delete the file in a finally block here.
-            // The AdminSupportExecutor is now responsible for deleting it after processing completes.
-            adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, getClientIp(request), hdfsFilename);
+  const visibleRows = useMemo(() => {
+    const rows = [];
+    const traverse = (nodes) => {
+      for (const node of nodes) {
+        rows.push(node);
+        if (expandedIds.has(node.id) && node.children) traverse(node.children);
+      }
+    };
+    traverse(data);
+    return rows;
+  }, [data, expandedIds]);
 
-            response.put("jobId", jobId);
-            response.put("status", "STARTED");
+  const maxVisibleLevel = useMemo(() => {
+    if (visibleRows.length === 0) return 0;
+    return Math.max(...visibleRows.map((row) => row.level));
+  }, [visibleRows]);
 
-            return response;
+  const visibleHierarchyLevels = activeHierarchyConfig.hierarchy.slice(
+    0,
+    maxVisibleLevel + 1,
+  );
 
-        } catch (Exception e) {
-            log.error("Failed to initialize script upload process", e);
-            response.put("error", true);
-            response.put("message", e.getMessage());
-            return response;
-        }
-    }
+  // --- VIRTUALIZATION ENGINE ---
+  const virtualizer = useVirtualizer({
+    count: visibleRows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 50, // Approximation for smooth scroll calculation
+    overscan: 10,
+  });
 
-    /**
-     * =========================================================
-     * GET LIVE JOB STATUS
-     * =========================================================
-     */
-    @Override
-    public Map<String, Object> getJobStatus(String jobId) {
-        Map<String, Object> status = AdminSupportExecutor.JOB_STATUS.get(jobId);
-        if (status == null) {
-            return Map.of("status", "NOT_FOUND");
-        }
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.putAll(status);
-        return response;
-    }
+  const virtualItems = virtualizer.getVirtualItems();
+  const totalColumnsCount = visibleHierarchyLevels.length + activeHierarchyConfig.availableMetrics.length;
+  
+  // Padding elements to perfectly preserve scroll height without breaking the HTML table layout
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? virtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
-    /**
-     * =========================================================
-     * EXTRACT CLIENT IP
-     * =========================================================
-     */
-    private String getClientIp(HttpServletRequest request) {
-        String xfHeader = request.getHeader("X-Forwarded-For");
-        if (xfHeader == null || xfHeader.isEmpty() || "unknown".equalsIgnoreCase(xfHeader)) {
-            return request.getRemoteAddr();
-        }
-        return xfHeader.split(",")[0];
-    }
+  const isSetupComplete = selectedReportCode && selectedViewCode;
+
+  const pathContainerVariants = {
+    hidden: { opacity: 0 },
+    show: {
+      opacity: 1,
+      transition: { staggerChildren: 0.05 },
+    },
+    exit: { opacity: 0, transition: { duration: 0.1 } },
+  };
+
+  const pathChipVariants = {
+    hidden: { opacity: 0, x: -20 },
+    show: {
+      opacity: 1,
+      x: 0,
+      transition: { type: "spring", stiffness: 350, damping: 25 },
+    },
+  };
+
+  return (
+    <Box
+      sx={{
+        height: "calc(100vh - 220px)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 1.5,
+      }}
+    >
+      {/* ================= UPPER BOX ================= */}
+      <Paper
+        elevation={0}
+        sx={{
+          p: 3,
+          borderRadius: 2,
+          boxShadow: "0 5px 10px rgba(0,0,0,0.2)",
+          border: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: 'space-between',
+          flexDirection: "row",
+        }}
+      >
+        <Box display="flex" alignItems="center" gap={2}>
+          <MotionBox
+            initial={{ scale: 0, rotate: -180 }}
+            animate={{ scale: 1, rotate: 0 }}
+            transition={{ type: "spring", stiffness: 260, damping: 20 }}
+            sx={{
+              backgroundColor: "primary.main",
+              borderRadius: "10px",
+              width: 44,
+              height: 44,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <AnalyticsIcon
+              sx={{ color: "primary.contrastText", fontSize: 24 }}
+            />
+          </MotionBox>
+
+          <Box sx={{ overflow: "hidden" }}>
+            <AnimatePresence mode="wait">
+              <MotionBox
+                key={activeReport?.displayName || "Analytics"}
+                initial={{ opacity: 0, x: -30 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 30 }}
+                transition={{ duration: 0.3 }}
+              >
+                <Typography
+                  variant="h6"
+                  sx={{ fontWeight: 700, color: "text.primary" }}
+                >
+                  {activeReport?.displayName || "Financial Analytics"}
+                </Typography>
+              </MotionBox>
+            </AnimatePresence>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.primary", }}
+            >
+              Dynamic Drill-Down Matrix
+            </Typography>
+          </Box>
+        </Box>
+
+        <Box display="flex" alignItems="center" gap={2}>
+          <FormControl
+            size="small"
+            sx={{
+              minWidth: 400,
+              maxWidth: 500,
+              bgcolor: "background.paper",
+              borderRadius: 1,
+              "& .MuiOutlinedInput-root.Mui-focused fieldset": {
+                boxShadow: `0 0 8px ${theme.palette.primary.light}`,
+              },
+            }}
+          >
+            <InputLabel id="report-source-label" shrink>
+              Database Report
+            </InputLabel>
+            <Select
+              labelId="report-source-label"
+              value={selectedReportCode}
+              label="Database Report"
+              onChange={(e) => {
+                setSelectedReportCode(e.target.value);
+                setSelectedViewCode("");
+              }}
+              displayEmpty
+              notched
+            >
+              <MenuItem value="" disabled >
+                <Typography sx={{fontSize: '14px'}}> Please select a report</Typography>
+              </MenuItem>
+              {reportsConfig.map((report) => (
+                <MenuItem key={report.reportCode} value={report.reportCode}>
+                  <Typography sx={{fontSize: '14px'}}>{report.displayName}</Typography>
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+
+          <FormControl
+            size="small"
+            sx={{
+              minWidth: 300,
+              maxWidth: 350,
+              bgcolor: "background.paper",
+              borderRadius: 1,
+              "& .MuiOutlinedInput-root.Mui-focused fieldset": {
+                boxShadow: `0 0 8px ${theme.palette.primary.light}`,
+              },
+            }}
+          >
+            <InputLabel id="hierarchy-view-label" shrink>
+              Hierarchy View
+            </InputLabel>
+            <Select
+              labelId="hierarchy-view-label"
+              value={selectedViewCode}
+              label="Hierarchy View"
+              onChange={(e) => setSelectedViewCode(e.target.value)}
+              displayEmpty
+              notched
+              disabled={!activeReport}
+            >
+              <MenuItem value="" disabled>
+                <Typography sx={{fontSize: '14px'}}>Please select a view hierarchy</Typography>
+              </MenuItem>
+              {activeReport?.views?.map((view) => (
+                <MenuItem key={view.viewCode} value={view.viewCode}>
+                  <Typography sx={{fontSize: '14px'}}>{view.displayName}</Typography>
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Box>
+      </Paper>
+
+      {/* ================= LOWER BOX ================= */}
+      <Paper
+        elevation={0}
+        sx={{
+          flexGrow: 1,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          borderRadius: 1,
+          boxShadow: "0 2px 10px rgba(0,0,0,0.03)",
+          border: 1,
+          borderColor: "divider",
+        }}
+      >
+        <Box
+          sx={{
+            borderBottom: 1,
+            borderColor: "divider",
+            px: 2,
+            py: 2,
+            minHeight: 44,
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          {isSetupComplete && (
+            <MotionBox
+              variants={pathContainerVariants}
+              initial="hidden"
+              animate="show"
+              exit="hidden"
+              display="flex"
+              alignItems="center"
+              gap={0.5}
+            >
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mr: 1, fontWeight: 500 }}
+              >
+                Path:
+              </Typography>
+              {activeHierarchyConfig.hierarchy.map((item, index) => {
+                const isActive = index <= maxVisibleLevel;
+                const isCurrent = index === maxVisibleLevel;
+                return (
+                  <Box key={index} display="flex" alignItems="center">
+                    <MotionBox
+                      variants={pathChipVariants}
+                      display="flex"
+                      alignItems="center"
+                      gap={1}
+                    >
+                      <MotionBox
+                        animate={
+                          isActive
+                            ? isCurrent
+                              ? {
+                                  scale: [1, 1.2, 1],
+                                  boxShadow: `0px 0px 8px ${theme.palette.primary.main}`,
+                                }
+                              : { scale: 1, boxShadow: "none" }
+                            : { scale: 0.8, boxShadow: "none" }
+                        }
+                        transition={
+                          isCurrent
+                            ? {
+                                repeat: Infinity,
+                                duration: 1.5,
+                                ease: "easeInOut",
+                              }
+                            : { duration: 0.2 }
+                        }
+                        sx={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          bgcolor: isActive
+                            ? "primary.main"
+                            : "background.paper",
+                          border: "2px solid",
+                          borderColor: isActive ? "primary.main" : "divider",
+                        }}
+                      />
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          fontWeight: isActive ? 600 : 500,
+                          color: isActive ? "text.primary" : "text.disabled",
+                          textTransform: "capitalize",
+                        }}
+                      >
+                        {item.replace("_", " ")}
+                      </Typography>
+                    </MotionBox>
+
+                    {index < activeHierarchyConfig.hierarchy.length - 1 && (
+                      <MotionBox
+                        variants={pathChipVariants}
+                        animate={{
+                          backgroundColor:
+                            index < maxVisibleLevel
+                              ? theme.palette.primary.main
+                              : theme.palette.divider,
+                        }}
+                        sx={{ width: 24, height: 2, mx: 1, borderRadius: 1 }}
+                      />
+                    )}
+                  </Box>
+                );
+              })}
+            </MotionBox>
+          )}
+        </Box>
+
+        <TableContainer
+          ref={tableContainerRef}
+          sx={{
+            flexGrow: 1,
+            bgcolor: "background.default",
+            position: "relative",
+            overflow: "auto", // Essential for Virtualizer to read scrolling
+          }}
+        >
+          {!isSetupComplete && (
+            <Box
+              sx={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 10,
+              }}
+            >
+              <MotionBox
+                animate={{ y: [0, -15, 0] }}
+                transition={{
+                  repeat: Infinity,
+                  duration: 2.5,
+                  ease: "easeInOut",
+                }}
+              >
+                <DatasetIcon
+                  sx={{ fontSize: 64, color: "action.disabled", mb: 1 }}
+                />
+              </MotionBox>
+              <Typography variant="h6" color="text.secondary">
+                No Data to Display
+              </Typography>
+              <Typography variant="body2" color="text.disabled">
+                Please select both a database report and a hierarchy view above.
+              </Typography>
+            </Box>
+          )}
+
+          {isInitializing ? (
+            <Box
+              sx={{
+                height: "100%",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <CircularProgress size={32} color="primary" sx={{ mb: 1 }} />
+              <Typography variant="body2" color="text.secondary">
+                Executing Query ...
+              </Typography>
+            </Box>
+          ) : isSetupComplete ? (
+            <Table
+              stickyHeader
+              size="small"
+              sx={{ minWidth: 1000, tableLayout: "auto" }}
+            >
+              <TableHead>
+                <TableRow>
+                  {visibleHierarchyLevels.map((levelName, index) => (
+                    <TableCell
+                      key={levelName}
+                      sx={{
+                        backgroundColor: theme.palette.purple[100],
+                        color: "text.primary",
+                        fontWeight: 700,
+                        borderRight: 1,
+                        borderColor: "divider",
+                        borderBottom: 2,
+                        py: 1,
+                        width: index === 0 ? 280 : "auto",
+                      }}
+                    >
+                      {levelName.replace("_", " ").toUpperCase()}
+                    </TableCell>
+                  ))}
+                  {activeHierarchyConfig.availableMetrics.map((metric) => (
+                    <TableCell
+                      key={metric.logicalName}
+                      align="right"
+                      sx={{
+                        backgroundColor: theme.palette.purple
+                          ? theme.palette.purple[200]
+                          : "#eeeeee",
+                        color: "text.primary",
+                        fontWeight: 700,
+                        borderRight: 1,
+                        borderColor: "divider",
+                        borderBottom: 2,
+                        py: 1,
+                      }}
+                    >
+                      {metric.displayName}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {/* Top Padding Row */}
+                {paddingTop > 0 && (
+                  <TableRow>
+                    <TableCell colSpan={totalColumnsCount} sx={{ height: `${paddingTop}px`, p: 0, border: "none" }} />
+                  </TableRow>
+                )}
+
+                {/* Removed AnimatePresence Wrapper here */}
+                {virtualItems.map((virtualRow) => {
+                  const row = visibleRows[virtualRow.index];
+                  return (
+                    <ActualTreeTableRow
+                      key={row.id}
+                      node={row}
+                      index={virtualRow.index}
+                      isExpanded={expandedIds.has(row.id)}
+                      isLoading={loadingIds.has(row.id)}
+                      onToggle={handleToggle}
+                      maxVisibleLevel={maxVisibleLevel}
+                      activeMetrics={activeHierarchyConfig.availableMetrics}
+                      ref={virtualizer.measureElement}
+                      data-index={virtualRow.index}
+                    />
+                  );
+                })}
+
+                {/* Bottom Padding Row */}
+                {paddingBottom > 0 && (
+                  <TableRow>
+                    <TableCell colSpan={totalColumnsCount} sx={{ height: `${paddingBottom}px`, p: 0, border: "none" }} />
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          ) : null}
+        </TableContainer>
+
+        <Box
+          sx={{
+            bgcolor: "background.paper",
+            borderTop: 1,
+            borderColor: "divider",
+            px: 2,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            minHeight: 40,
+          }}
+        >
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Box
+              sx={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                bgcolor: isSetupComplete ? "success.main" : "action.disabled",
+              }}
+            />
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              fontWeight={500}
+            >
+              {isSetupComplete ? "Connected & Synced" : "No Connection"}
+            </Typography>
+          </Box>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            fontWeight={500}
+          >
+            Showing {visibleRows.length} rows
+          </Typography>
+        </Box>
+      </Paper>
+    </Box>
+  );
 }
