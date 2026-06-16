@@ -1,217 +1,426 @@
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+} from "react";
+import { useSelector } from "react-redux";
 import {
   Box,
-  Drawer,
-  LinearProgress,
-  Stack,
+  Fab,
+  Tooltip,
+  Fade,
   Typography,
-  IconButton,
-  Collapse,
+  Drawer,
+  Paper,
+  DialogTitle,
+  DialogContent,
+  Button,
+  FormControlLabel,
+  Switch,
+  DialogActions,
+  Dialog,
+  Divider,
 } from "@mui/material";
-import {
-  Close,
-  AccessTime,
-  CheckCircleOutline,
-  ErrorOutline,
-  Help,
-} from "@mui/icons-material";
-import { useState, useMemo } from "react";
-import CustomChip from "../utils/CustomChip";
-import { toPascalKebabCase } from "../utils/CommonUtilities";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 
-const statusColor = {
-  PROCESSING: "warning",
-  COMPLETED: "success",
-  FAILED: "error",
-};
+// Separated Components
+import ChatAnimations from "./ChatAnimations";
+import ChatHeader from "./ChatHeader";
+import ChatInput from "./ChatInput";
+import TypingIndicator from "./TypingIndicator";
+import ChatBubble from "./ChatBubble";
+import WelcomeScreen from "./WelcomeScreen";
 
-const statusIcon = {
-  PROCESSING: <AccessTime fontSize="small" />,
-  COMPLETED: <CheckCircleOutline fontSize="small" />,
-  FAILED: <ErrorOutline fontSize="small" />,
-  default: <Help fontSize="small" />,
-};
+// Services & Utilities
+import { generateId } from "../lib/chatUtils";
+import { sendMessageSSE } from "../lib/chatApiService";
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 
-// OPTIMIZATION: Extracted the task calculations to keep the render clean
-const calculateTaskMetrics = (task) => {
-  const isDone = task.percentage === 100;
-  
-  const elapsed = task.startedAt
-    ? Math.floor((Date.now() - task.startedAt) / 1000)
-    : null;
+const ChatWidget = ({ isOpen, setIsOpen, hasLaunched }) => {
+  const [messages, setMessages] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
+  const [streamingMessageId, setStreamingMessageId] = useState(null);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
 
-  const speed =
-    task.lastUpdated && task.startedAt && elapsed > 0
-      ? task.percentage / elapsed
-      : null;
+  const scrollRef = useRef(null);
+  const abortRef = useRef(null);
+  const token = useSelector((state) => state.auth.token);
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
+  const [isDialogOpen, setIsDialogOpen] = React.useState(false);
 
-  const eta =
-    speed && task.percentage < 100
-      ? Math.ceil((100 - task.percentage) / speed)
-      : null;
+  const openDialog = () => setIsDialogOpen(true);
+  const closeDialog = () => setIsDialogOpen(false);
 
-  // Format taskId to Title Case string
-  const formattedTaskId = task.taskId
-    ?.replace(/_/g, " ")
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const currentScreenName = useMemo(
+    () => selectedMenuItem?.title || "Dashboard",
+    [selectedMenuItem],
+  );
 
-  const statusKey = task.status?.toUpperCase() || "DEFAULT";
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    setIsScrolledUp(
+      scrollRef.current.scrollHeight -
+        scrollRef.current.scrollTop -
+        scrollRef.current.clientHeight >
+        60,
+    );
+  };
 
-  return { isDone, elapsed, eta, formattedTaskId, statusKey };
-};
+  const scrollToBottom = useCallback(
+    (force = false) => {
+      if (scrollRef.current && (force || !isScrolledUp)) {
+        scrollRef.current.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior: "smooth",
+        });
+      }
+    },
+    [isScrolledUp],
+  );
 
-const TaskProgressDrawer = ({ open, onClose, tasks }) => {
-  const [expanded, setExpanded] = useState(null);
+  useEffect(
+    () => scrollToBottom(false),
+    [messages, isLoading, streamingMessageId, scrollToBottom],
+  );
 
-  // OPTIMIZATION: Memoize the task list object values so we don't recalculate on every render
-  const taskList = useMemo(() => Object.values(tasks), [tasks]);
+  const handleStreamMessage = useCallback(
+    async (apiMessage, displayMessage) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: generateId(),
+          role: "user",
+          content: displayMessage || apiMessage,
+          timestamp: new Date(),
+          feedback: null,
+        },
+      ]);
+      setIsLoading(true);
+      scrollToBottom(true);
+
+      if (abortRef.current) abortRef.current.abort();
+      abortRef.current = new AbortController();
+      const botId = generateId();
+
+      const pushOrUpdateBotMessage = (token, isStream, responseData = null) => {
+        setMessages((prev) => {
+          const exists = prev.some((msg) => msg.id === botId);
+          if (exists)
+            return prev.map((msg) => {
+              if (msg.id === botId && msg.interrupted) return msg;
+
+              return msg.id === botId
+                ? {
+                    ...msg,
+                    content: msg.content + (token || ""),
+                    isStreaming: isStream,
+                    response: responseData || msg.response,
+                  }
+                : msg;
+            });
+          return [
+            ...prev,
+            {
+              id: botId,
+              role: "bot",
+              content: token || "",
+              timestamp: new Date(),
+              feedback: null,
+              isStreaming: isStream,
+              response: responseData,
+            },
+          ];
+        });
+      };
+
+      const handlers = {
+        onStart: () => {},
+        onToken: (token) => {
+          setIsLoading(false);
+          setStreamingMessageId(botId);
+          pushOrUpdateBotMessage(token, true);
+        },
+        onEnd: (data) => {
+          setStreamingMessageId(null);
+          setIsLoading(false);
+          pushOrUpdateBotMessage("", false, {
+            responseType: "TEXT_REPLY",
+            logId: data.logId,
+            navigationLink: data.navigationLink,
+            navigationLabel: data.navigationLabel,
+          });
+        },
+        onSuggestion: (data) => {
+          setIsLoading(false);
+          setStreamingMessageId(null);
+          pushOrUpdateBotMessage(data.botReply, false, {
+            responseType: "SUGGESTION",
+            items: data.items,
+            logId: data.logId,
+          });
+        },
+        onTextReply: (data) => {
+          setIsLoading(false);
+          setStreamingMessageId(null);
+          pushOrUpdateBotMessage(data.botReply, false, {
+            responseType: "TEXT_REPLY",
+            logId: data.logId,
+          });
+        },
+        onEscalation: (data) => {
+          setIsLoading(false);
+          setStreamingMessageId(null);
+          pushOrUpdateBotMessage(data.botReply, false, {
+            responseType: "ESCALATION_OFFER",
+            logId: data.logId,
+          });
+        },
+        onError: (err) => {
+          setIsLoading(false);
+          setStreamingMessageId(null);
+          pushOrUpdateBotMessage(err || "Error connecting.", false);
+        },
+      };
+
+      try {
+        await sendMessageSSE(
+          { userMessage: apiMessage, currentScreen: currentScreenName, token },
+          handlers,
+          abortRef.current,
+        );
+      } catch (e) {
+        console.error(e);
+      }
+    },
+    [token, scrollToBottom, currentScreenName],
+  );
+
+  const handleQuickAction = (label, slashCommand) => {
+    let apiMessage = label;
+    if (slashCommand) {
+      if (slashCommand === "/action module")
+        apiMessage = `${slashCommand} ${label}`;
+      else apiMessage = slashCommand;
+    }
+    if (!slashCommand || slashCommand === "/action faq") trackFaqClick(label);
+    handleStreamMessage(apiMessage, label);
+  };
+
+  const handleStopStreaming = () => {
+    if (abortRef.current) abortRef.current.abort();
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === streamingMessageId || (msg.role === "bot" && msg.isStreaming)
+          ? { ...msg, isStreaming: false, interrupted: true }
+          : msg,
+      ),
+    );
+
+    setStreamingMessageId(null);
+    setIsLoading(false);
+  };
+
+  const handleIngest = async () => {
+    try {
+      const res = await callApi("/HS/help/ingest", null, "POST");
+      console.log(res);
+      snackbar("Background document ingestion started.", "success");
+    } catch (error) {
+      snackbar(
+        error.response?.data || "Error while starting document ingestion",
+        "error",
+      );
+    }
+  };
+
+  const trackFaqClick = async (questionText) => {
+    if (!questionText) return;
+    try {
+      const res = await callApi(
+        "/HS/help/faqs/track",
+        { questionText },
+        "POST",
+      );
+      console.log(res);
+    } catch (err) {
+      console.error("[FAQ Track] Failed:", err.message || err);
+    }
+  };
 
   return (
-    <Drawer
-      anchor="right"
-      open={open}
-      onClose={onClose}
-      sx={{
-        "& .MuiDrawer-paper": {
-          // FIXED: Responsive width (Full width on mobile, 380px fixed on desktop)
-          width: { xs: "100%", sm: 380 },
-          maxWidth: "100vw",
-          boxSizing: "border-box",
-          display: "flex",
-          flexDirection: "column",
-        },
-      }}
-    >
-      {/* HEADER */}
-      <Box
+    <>
+      <ChatAnimations />
+      <Drawer
+        className={isClosing ? "animate-chat-close" : "animate-chat-open"}
+        anchor="right"
+        open={isOpen}
+        onClose={() => isOpen(false)}
         sx={{
-          p: { xs: 2, sm: 3 }, // FIXED: Responsive padding
-          borderBottom: "1px solid #E2E8F0",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
+          "& .MuiDrawer-paper": {
+            width: 400,
+            p: 0,
+            position: "fixed",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: 44,
+            border: "1px solid",
+            borderColor: "divider",
+            bgcolor: "background.paper",
+            backdropFilter: "blur(20px)",
+          },
         }}
       >
-        <Typography variant="h6" fontWeight={700}>
-          Running Tasks
-        </Typography>
-        <IconButton size="small" onClick={onClose} sx={{ ml: 1 }}>
-          <Close />
-        </IconButton>
-      </Box>
-
-      {/* CONTENT */}
-      {/* FIXED: Removed fixed width, enabled vertical scroll, hid horizontal scroll */}
-      <Box sx={{ flex: 1, overflowY: "auto", overflowX: "hidden", p: { xs: 2, sm: 3 } }}>
-        <Stack spacing={2}>
-          {taskList.length === 0 ? (
-             <Box sx={{ textAlign: "center", mt: 4, opacity: 0.6 }}>
-               <Typography>No active tasks</Typography>
-             </Box>
+        <ChatHeader
+          onMinimize={() => {
+            setIsClosing(true);
+            setTimeout(() => {
+              setIsOpen(false);
+              setIsClosing(false);
+            }, 250);
+          }}
+          onClearChat={() => {
+            abortRef.current?.abort();
+            setIsScrolledUp(false);
+            setMessages([]);
+          }}
+          onOpenSettings={openDialog}
+        />
+        <Box
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="chat-scrollbar"
+          sx={{
+            flex: 1,
+            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "flex-start",
+            position: "relative",
+          }}
+        >
+          {messages.length === 0 ? (
+            <Box sx={{ width: "100%" }}>
+              <WelcomeScreen
+                onQuickAction={handleQuickAction}
+                showTypewriter={hasLaunched}
+              />
+            </Box>
           ) : (
-            taskList.map((task) => {
-              const { isDone, elapsed, eta, formattedTaskId, statusKey } = calculateTaskMetrics(task);
-
-              return (
-                <Box
-                  key={task.taskId}
-                  sx={{
-                    p: 2,
-                    borderRadius: 2,
-                    bgcolor: "background.paper",
-                    boxShadow: 1,
-                    cursor: "pointer",
-                    transition: "box-shadow 0.2s",
-                    "&:hover": {
-                      boxShadow: 3,
-                    }
-                  }}
-                  onClick={() =>
-                    setExpanded(expanded === task.taskId ? null : task.taskId)
+            <Box sx={{ px: 2, py: 2, pb: 8 }}>
+              {messages.map((msg) => (
+                <ChatBubble
+                  key={msg.id}
+                  message={msg}
+                  onSuggestionClick={handleStreamMessage}
+                  onFeedback={(id, f) =>
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === id
+                          ? { ...m, feedback: m.feedback === f ? null : f }
+                          : m,
+                      ),
+                    )
                   }
-                >
-                  {/* HEADER ROW */}
-                  <Stack
-                    direction="row"
-                    justifyContent="space-between"
-                    alignItems="flex-start"
-                    spacing={1}
-                  >
-                    <Typography
-                      variant="body2"
-                      fontWeight={600}
-                      sx={{
-                        flex: 1,
-                        minWidth: 0,
-                        wordBreak: "break-word",
-                        overflowWrap: "anywhere",
-                        pr: 1, // Add slight padding right to separate from chip
-                      }}
-                    >
-                      {formattedTaskId}
-                    </Typography>
-
-                    {/* FIXED: Wrapped chip in Box with shrink 0 so it never squishes on mobile */}
-                    <Box sx={{ flexShrink: 0 }}>
-                      <CustomChip
-                        size="sm"
-                        variant="outlined"
-                        color={statusColor[statusKey] || "default"}
-                        label={toPascalKebabCase(task.status)}
-                        icon={statusIcon[statusKey] || statusIcon.default}
-                      />
-                    </Box>
-                  </Stack>
-
-                  {/* META / PROGRESS BAR */}
-                  <Stack direction="row" alignItems="center" spacing={2} mt={1.5}>
-                    <Box sx={{ flexGrow: 1 }}>
-                      <LinearProgress
-                        variant="determinate"
-                        value={task.percentage}
-                        sx={{
-                          height: 8.5,
-                          borderRadius: 5,
-                          transition: "all 0.4s ease",
-                        }}
-                        color={isDone ? "success" : "primary"}
-                      />
-                    </Box>
-
-                    <Typography variant="caption" sx={{ minWidth: "35px", textAlign: "right" }}>
-                      {task.percentage}%
-                    </Typography>
-                  </Stack>
-
-                  <Box>
-                    {eta && (
-                      <Typography variant="caption" color="text.secondary">
-                        ETA: ~{eta}s
-                      </Typography>
-                    )}
-                  </Box>
-
-                  {/* DETAILS */}
-                  <Collapse in={expanded === task.taskId}>
-                    <Box mt={1} sx={{ p: 1, bgcolor: "action.hover", borderRadius: 1 }}>
-                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", wordBreak: "break-word" }}>
-                        {task.message}
-                      </Typography>
-                      {elapsed !== null && (
-                        <Typography variant="caption" display="block" color="text.secondary" mt={0.5}>
-                          Elapsed Time: {elapsed}s
-                        </Typography>
-                      )}
-                    </Box>
-                  </Collapse>
-                </Box>
-              );
-            })
+                />
+              ))}
+              {isLoading && <TypingIndicator />}
+            </Box>
           )}
-        </Stack>
-      </Box>
-    </Drawer>
+          <Box
+            sx={{
+              position: "sticky",
+              bottom: 10,
+              left: 0,
+              right: 0,
+              display: "flex",
+              justifyContent: "center",
+              gap: 1,
+              pointerEvents: "none",
+            }}
+          >
+            <Fade in={isScrolledUp}>
+              <Tooltip title="Scroll to bottom">
+                <Fab
+                  size="small"
+                  color="primary"
+                  onClick={() => scrollToBottom(true)}
+                  sx={{
+                    pointerEvents: "auto",
+                    width: 36,
+                    height: 36,
+                    minHeight: 36,
+                  }}
+                >
+                  <KeyboardArrowDownIcon />
+                </Fab>
+              </Tooltip>
+            </Fade>
+          </Box>
+        </Box>
+
+        <Box
+          component={Paper}
+          sx={{
+            background:
+              "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
+            p: 1.5,
+          }}
+        >
+          <ChatInput
+            onSend={handleStreamMessage}
+            onStop={handleStopStreaming}
+            isLoading={isLoading || !!streamingMessageId}
+          />
+
+          <Typography
+            variant="caption"
+            align="center"
+            display="block"
+            sx={{
+              mt: 1,
+              color: "text.primary",
+              fontSize: "0.75rem",
+            }}
+          >
+            AI can make mistakes. Verify important info.
+          </Typography>
+        </Box>
+      </Drawer>
+
+      {/* Admin Settings Dialog */}
+      <Dialog open={isDialogOpen} onClose={closeDialog} maxWidth="sm" fullWidth>
+        <DialogTitle>Finny Admin Settings</DialogTitle>
+        <Divider />
+        <DialogContent>
+          <Button
+            variant="contained"
+            // color="secondary"
+            fullWidth
+            onClick={handleIngest}
+            sx={{ mt: 2 }}
+          >
+            🔄 Trigger Vector DB Ingestion
+          </Button>
+          <Typography sx={{ py: 2, fontSize: "12px" }}>
+            ★ Data ingestion will be in the background. It may take a few
+            minutes to reflect in chats
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeDialog} color="primary">
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
   );
 };
 
-export default TaskProgressDrawer;
+export default ChatWidget;
