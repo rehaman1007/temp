@@ -1,333 +1,266 @@
+import React, { useState, useEffect, useCallback } from "react";
 import {
-  AccountTree,
-  Business,
-  Close,
-  Email,
-  Help,
-  Logout,
-  Phone,
-  SmartScreen,
-} from "@mui/icons-material";
-import {
-  Avatar,
-  Box,
-  Card,
-  CardContent,
-  Chip,
-  Divider,
   Drawer,
-  IconButton,
   List,
-  ListItem,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
-  Stack,
   Typography,
-  useTheme,
-  useMediaQuery,
+  Box,
+  Divider,
+  IconButton,
+  CircularProgress,
+  Tooltip,
+  Paper,
+  Stack,
 } from "@mui/material";
+import {
+  GetApp as DownloadIcon,
+  Close as CloseIcon,
+  AccessTime as AccessTimeIcon,
+  FilterList as FilterIcon,
+  FileDownloadOff,
+} from "@mui/icons-material";
+import dayjs from "dayjs";
+import duration from "dayjs/plugin/duration";
+import useApi from "../../hooks/useApi";
+import {
+  DownloadItem,
+  DownloadSkeleton,
+  EmptyStateView,
+} from "../downloads/components/DownloadComponents";
+import { toPascalKebabCase } from "../../utils/CommonUtilities";
 import { useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
-import { userAvatarCreator } from "../utils/userUtilities";
-import { useContext, useEffect } from "react";
-import { AuthContext } from "../context/AuthContext";
+import downloadFile from "../../utils/DownloadUtils";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-const ProfileDrawer = ({ profileDrawerOpen, setProfileDrawerOpen }) => {
-  const user = useSelector((state) => state.auth.user);
-  const navigate = useNavigate();
-  const { logout } = useContext(AuthContext);
+dayjs.extend(duration);
 
-  // ADDED: Theme and media query to detect mobile and iPad devices
-  const theme = useTheme();
-  // 'md' breakpoint covers typical tablets (iPad portrait) and mobile phones
-  const isMobileOrTablet = useMediaQuery(theme.breakpoints.down("md"));
+/**
+ * Optimised Parameter Formatter
+ * Memoized via usage inside memo components to prevent unnecessary re-parsing.
+ */
+const formatParams = (params) => {
+  if (!params)
+    return <Typography variant="caption">No filters applied</Typography>;
 
-  // Helper to handle padding and "N/A" cases
-  const formatCode = (code, length) => {
-    if (code === undefined || code === null || code === "") return "N/A";
-    return String(code).padStart(length, "0");
-  };
+  try {
+    let data;
+    if (typeof params === "string") {
+      // 1. Wrap keys in quotes: branch: -> "branch":
+      let fixedString = params.replace(
+        /([{,])\s*([^,{}:"\s]+)\s*:/g,
+        '$1"$2":',
+      );
 
-  const branchDisplay = user?.branchName
-    ? `${user.branchName} (${formatCode(user.branch, 5)})`
-    : "N/A";
+      // 2. Wrap unquoted values (like 00001) in quotes to keep leading zeros
+      // This looks for values that aren't already quoted and aren't objects/arrays
+      fixedString = fixedString.replace(/:\s*([^,"{}[\]\s][^,}]*)/g, ': "$1"');
 
-  const circleDisplay = user?.circleName
-    ? `${user.circleName} (${formatCode(user.circleCode, 3)})`
-    : "N/A";
+      // 3. Clean up any double-quoting that might have happened to already-quoted dates
+      fixedString = fixedString.replace(/"\s*"/g, '"');
 
-  // --- Keyboard Shortcut Logic ---
+      data = JSON.parse(fixedString);
+    } else {
+      data = params;
+    }
+
+    const entries = Object.entries(data);
+    return entries.map(([key, value], index) => (
+      <React.Fragment key={key}>
+        <Box component="span" sx={{ fontWeight: 700, color: "text.primary" }}>
+          {toPascalKebabCase(key)}:
+        </Box>
+        <Box
+          component="span"
+          sx={{ fontWeight: 400, color: "text.secondary", ml: 0.5 }}
+        >
+          {String(value).trim()}{" "}
+        </Box>
+        {index < entries.length - 1 && (
+          <Box component="span" sx={{ color: "divider", fontWeight: 900 }}>
+            {" | "}
+          </Box>
+        )}
+      </React.Fragment>
+    ));
+  } catch (e) {
+    console.error("Format Error:", e);
+    return (
+      <Typography variant="caption">
+        {String(params).replace(/[{}]/g, "")}
+      </Typography>
+    );
+  }
+};
+
+const getMenuNames = (menuId, menuList) => {
+  // 1. Safety check for the list
+  if (!Array.isArray(menuList) || menuList.length === 0) {
+    return { primary: "System Report", secondary: null };
+  }
+
+  const targetId = Number(menuId);
+
+  // 2. Iterate to find Submenu FIRST (to handle duplicate IDs correctly)
+  for (const menu of menuList) {
+    if (menu.children && Array.isArray(menu.children)) {
+      const child = menu.children.find((c) => Number(c.id) === targetId);
+      if (child) {
+        return {
+          primary: child.title, // Submenu Name (e.g., Template Requests)
+          secondary: menu.title, // Parent Name (e.g., Template Management)
+        };
+      }
+    }
+  }
+
+  // 3. If not found in children, check Top-Level Menus
+  for (const menu of menuList) {
+    if (Number(menu.id) === targetId) {
+      return {
+        primary: menu.title, // Parent Name (e.g., View Template Reports)
+        secondary: null,
+      };
+    }
+  }
+
+  // 4. Final fallback
+  return { primary: "Report Builder", secondary: "System" };
+};
+
+const MyDownloadsDrawer = ({ open, onClose }) => {
+  const FETCH_URL = "/ES/my-downloads/get-downloads";
+  const DOWNLOAD_URL = "/ES/my-downloads/download";
+  const [downloads, setDownloads] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const menuItems = useSelector((state) => state.menus.menus || []);
+  const { callApi } = useApi();
+  const showSnackbar = useCustomSnackbar();
+  const [activeDownloadId, setActiveDownloadId] = useState(null);
+
+  // Stable fetch function prevents unnecessary effect triggers
+  const fetchDownloads = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await callApi(FETCH_URL, null, "GET");
+      setDownloads(response?.data || []);
+    } catch (error) {
+      console.error("Fetch Error:", error);
+      showSnackbar(
+        error.message || "Something went wrong, kindly try again.",
+        "error",
+      );
+      setDownloads([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [callApi, showSnackbar]);
+
   useEffect(() => {
-    const handleKeyDown = (event) => {
-      // FIXED: Only trigger Alt + L shortcut if NOT on mobile/tablet
-      if (!isMobileOrTablet && event.altKey && event.key.toLowerCase() === "l") {
-        event.preventDefault();
-        logout();
-      }
-      
-      if (event.key === "Escape" && profileDrawerOpen) {
-        setProfileDrawerOpen(false);
-      }
-    };
+    if (open) fetchDownloads();
+  }, [open, fetchDownloads]);
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [logout, profileDrawerOpen, setProfileDrawerOpen, isMobileOrTablet]);
+  const handleDownload = async (file) => {
+    setActiveDownloadId(file.id);
+    try {
+      const response = await callApi(DOWNLOAD_URL, { id: file.id }, "POST");
+
+      if (response?.success && response?.data) {
+        const fullFileName = file.fileName || "report.xlsx";
+
+        const extension = fullFileName.includes(".")
+          ? fullFileName.split(".").pop().toLowerCase()
+          : "xlsx";
+
+        const baseName =
+          fullFileName.substring(0, fullFileName.lastIndexOf(".")) || "report";
+
+        downloadFile(response.data, extension, baseName, true);
+      }
+    } catch (e) {
+      console.error("Download Error:", e);
+      showSnackbar(
+        e.message ||
+          "Something went wrong while downloading file, Kindly try again",
+        "error",
+      );
+    } finally {
+      setActiveDownloadId(null);
+    }
+  };
 
   return (
     <Drawer
       anchor="right"
-      open={profileDrawerOpen}
-      onClose={() => setProfileDrawerOpen(false)}
-      sx={{
-        "& .MuiDrawer-paper": {
-          // FIXED: Responsive width (100% on mobile, fixed 380px on larger screens)
-          width: { xs: "100%", sm: 380 },
-          maxWidth: "100vw",
-          boxSizing: "border-box",
-          p: 0,
-          display: "flex",
-          flexDirection: "column",
-        },
-      }}
+      open={open}
+      onClose={onClose}
+      sx={{ "& .MuiDrawer-paper": { width: 400, border: "none" } }}
     >
-      {/* Header */}
-      <Box sx={{ p: { xs: 2, sm: 3 }, borderBottom: "1px solid #E2E8F0" }}>
+      <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+        {/* HEADER */}
         <Box
           sx={{
+            m: 0,
+            pr: 2,
+            pl: 2,
+            pt: 3,
+            pb: 1.5,
+            borderBottom: "1px solid",
+            borderColor: "divider",
             display: "flex",
-            justifyContent: "space-between",
             alignItems: "center",
+            justifyContent: "space-between",
           }}
         >
-          <Typography variant="h6" sx={{ fontWeight: 600 }}>
-            Profile
-          </Typography>
-          <IconButton onClick={() => setProfileDrawerOpen(false)} size="small">
-            <Close />
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
+              My Downloads
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Files are available for 24 hours after generation
+            </Typography>
+          </Box>
+          <IconButton size="small" onClick={onClose}>
+            <CloseIcon fontSize="small" />
           </IconButton>
         </Box>
-      </Box>
 
-      {/* FIXED: Added overflowY auto to make content scrollable on small screens */}
-      <Box sx={{ p: { xs: 2, sm: 3 }, overflowY: "auto", overflowX: "hidden", flex: 1 }}>
-        {/* User Identity Section */}
-        <Box sx={{ textAlign: "center", mb: 3 }}>
-          <Avatar
-            sx={{
-              width: 80,
-              height: 80,
-              mx: "auto",
-              mb: 2,
-              color: "primary.contrastText",
-              backgroundColor: "primary.main",
-              fontSize: "2rem",
-            }}
-          >
-            {userAvatarCreator(user)}
-          </Avatar>
-          <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>
-            {`${user.firstName} ${user.middleName ? user.middleName + " " : ""}${user.lastName}`}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            User ID: {user.userId}
-          </Typography>
-          <Chip
-            label={user.roleName}
-            size="small"
-            sx={{
-              backgroundColor: "#10B981",
-              color: "white",
-              fontWeight: 500,
-            }}
-          />
+        <Divider />
+
+        {/* CONTENT */}
+        <Box sx={{ flexGrow: 1, overflowY: "auto", p: 2 }}>
+          {loading ? (
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                mt: 5,
+                gap: 2,
+              }}
+            >
+              {[1, 2, 3].map((i) => (
+                <DownloadSkeleton key={i} />
+              ))}
+            </Box>
+          ) : downloads.length > 0 ? (
+            <List sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {downloads.map((file) => (
+                <DownloadItem
+                  key={file.id}
+                  file={file}
+                  isDownloading={activeDownloadId === file.id}
+                  onDownload={handleDownload}
+                  menuInfo={getMenuNames(file.menuId, menuItems)} // Pass search results as props
+                  formattedParams={formatParams(file.searchCriteria)}
+                />
+              ))}
+            </List>
+          ) : (
+            <EmptyStateView />
+          )}
         </Box>
-
-        {/* Organizational Information */}
-        <Card sx={{ mb: 2 }}>
-          <CardContent>
-            <Typography
-              variant="subtitle2"
-              color="primary"
-              sx={{
-                fontWeight: 700,
-                mb: 1,
-                fontSize: "0.7rem",
-                letterSpacing: "1px",
-              }}
-            >
-              Service Information
-            </Typography>
-            <Divider sx={{ mb: 1 }} />
-            <Stack spacing={2}>
-              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2 }}>
-                <Business sx={{ color: "text.secondary", fontSize: 20, mt: 0.5 }} />
-                <Box>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    Branch
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                    {branchDisplay}
-                  </Typography>
-                </Box>
-              </Box>
-              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2 }}>
-                <AccountTree sx={{ color: "text.secondary", fontSize: 20, mt: 0.5 }} />
-                <Box>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    Circle
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                    {circleDisplay}
-                  </Typography>
-                </Box>
-              </Box>
-              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2 }}>
-                <SmartScreen sx={{ color: "text.secondary", fontSize: 20, mt: 0.5 }} />
-                <Box>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    Access
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                    {user.isCircle ? "Circle Level" : "Branch Level"}
-                  </Typography>
-                </Box>
-              </Box>
-            </Stack>
-          </CardContent>
-        </Card>
-
-        {/* Contact Information */}
-        <Card sx={{ mb: 3 }}>
-          <CardContent>
-            <Typography
-              variant="subtitle2"
-              color="primary"
-              sx={{
-                fontWeight: 700,
-                mb: 1,
-                fontSize: "0.7rem",
-                letterSpacing: "1px",
-              }}
-            >
-              Contact Information
-            </Typography>
-            <Divider sx={{ mb: 1 }} />
-            <Stack spacing={2}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <Email sx={{ color: "text.secondary" }} />
-                <Box sx={{ minWidth: 0 }}>
-                  <Typography variant="body2" color="text.secondary">
-                    Email
-                  </Typography>
-                  <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
-                    {user.email}
-                  </Typography>
-                </Box>
-              </Box>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <Phone sx={{ color: "text.secondary" }} />
-                <Box>
-                  <Typography variant="body2" color="text.secondary">
-                    Contact No
-                  </Typography>
-                  <Typography variant="body2">{user.phoneNumber}</Typography>
-                </Box>
-              </Box>
-            </Stack>
-          </CardContent>
-        </Card>
-
-        {/* Footer Actions */}
-        <List sx={{ p: 0 }}>
-          <ListItem disablePadding>
-            <ListItemButton onClick={() => navigate("/help")}>
-              <ListItemIcon>
-                <Help />
-              </ListItemIcon>
-              <ListItemText primary="Help & Support" />
-            </ListItemButton>
-          </ListItem>
-
-          <Divider sx={{ my: 1 }} />
-
-          <ListItem disablePadding sx={{ mt: 1, px: 1 }}>
-            <ListItemButton
-              onClick={logout}
-              sx={{
-                borderRadius: "12px",
-                py: 1.5,
-                transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-                borderLeft: "4px solid transparent",
-                position: "relative",
-                overflow: "hidden",
-                color: "error.main",
-                "&:hover": {
-                  backgroundColor: "rgba(211, 47, 47, 0.04)",
-                  borderLeftColor: "error.main",
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
-                  "& .logout-icon": {
-                    transform: "translateX(5px)",
-                    color: "error.dark",
-                  },
-                  "& .shortcut-hint": {
-                    opacity: 1,
-                    transform: "scale(1.05)",
-                    backgroundColor: "error.main",
-                    color: "white",
-                  },
-                },
-              }}
-            >
-              <ListItemIcon
-                className="logout-icon"
-                sx={{
-                  color: "error.light",
-                  minWidth: "40px",
-                  transition: "transform 0.3s ease",
-                }}
-              >
-                <Logout fontSize="small" />
-              </ListItemIcon>
-
-              <ListItemText
-                primary={
-                  <Typography
-                    variant="body2"
-                    sx={{ fontWeight: 700, letterSpacing: "0.3px" }}
-                  >
-                    Sign Out
-                  </Typography>
-                }
-              />
-
-              {/* FIXED: Conditionally render the UI hint based on screen size */}
-              {!isMobileOrTablet && (
-                <Box
-                  className="shortcut-hint"
-                  sx={{
-                    fontSize: "9px",
-                    fontWeight: 800,
-                    px: 1,
-                    py: 0.3,
-                    borderRadius: "6px",
-                    border: "1px solid",
-                    borderColor: "divider",
-                    opacity: 0.6,
-                    transition: "all 0.3s ease",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  Alt + L
-                </Box>
-              )}
-            </ListItemButton>
-          </ListItem>
-        </List>
       </Box>
     </Drawer>
   );
 };
 
-export default ProfileDrawer;
+export default MyDownloadsDrawer;
