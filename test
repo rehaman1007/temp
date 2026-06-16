@@ -1,274 +1,166 @@
-import React, { useState, useEffect, useCallback } from "react";
 import {
-  Drawer,
-  List,
-  Typography,
   Box,
-  Divider,
-  IconButton,
-  CircularProgress,
-  Tooltip,
-  Paper,
+  Drawer,
+  LinearProgress,    
   Stack,
+  Typography,
+  IconButton,
+  Collapse,
 } from "@mui/material";
 import {
-  GetApp as DownloadIcon,
-  Close as CloseIcon,
-  AccessTime as AccessTimeIcon,
-  FilterList as FilterIcon,
-  FileDownloadOff,
+  Close,
+  AccessTime,
+  CheckCircleOutline,
+  ErrorOutline,
+  Help,
 } from "@mui/icons-material";
-import dayjs from "dayjs";
-import duration from "dayjs/plugin/duration";
-import useApi from "../../hooks/useApi";
-import {
-  DownloadItem,
-  DownloadSkeleton,
-  EmptyStateView,
-} from "../downloads/components/DownloadComponents";
-import { toPascalKebabCase } from "../../utils/CommonUtilities";
-import { useSelector } from "react-redux";
-import downloadFile from "../../utils/DownloadUtils";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { useState } from "react";
+import CustomChip from "../utils/CustomChip";
+import { toPascalKebabCase } from "../utils/CommonUtilities";
 
-dayjs.extend(duration);
-
-/**
- * Optimised Parameter Formatter
- * Memoized via usage inside memo components to prevent unnecessary re-parsing.
- */
-const formatParams = (params) => {
-  if (!params)
-    return <Typography variant="caption">No filters applied</Typography>;
-
-  try {
-    let data;
-    if (typeof params === "string") {
-      // 1. Wrap keys in quotes: branch: -> "branch":
-      let fixedString = params.replace(
-        /([{,])\s*([^,{}:"\s]+)\s*:/g,
-        '$1"$2":',
-      );
-
-      // 2. Wrap unquoted values (like 00001) in quotes to keep leading zeros
-      // This looks for values that aren't already quoted and aren't objects/arrays
-      fixedString = fixedString.replace(/:\s*([^,"{}[\]\s][^,}]*)/g, ': "$1"');
-
-      // 3. Clean up any double-quoting that might have happened to already-quoted dates
-      fixedString = fixedString.replace(/"\s*"/g, '"');
-
-      data = JSON.parse(fixedString);
-    } else {
-      data = params;
-    }
-
-    const entries = Object.entries(data);
-    return entries.map(([key, value], index) => (
-      <React.Fragment key={key}>
-        <Box component="span" sx={{ fontWeight: 700, color: "text.primary" }}>
-          {toPascalKebabCase(key)}:
-        </Box>
-        <Box
-          component="span"
-          sx={{ fontWeight: 400, color: "text.secondary", ml: 0.5 }}
-        >
-          {String(value).trim()}{" "}
-        </Box>
-        {index < entries.length - 1 && (
-          <Box component="span" sx={{ color: "divider", fontWeight: 900 }}>
-            {" | "}
-          </Box>
-        )}
-      </React.Fragment>
-    ));
-  } catch (e) {
-    console.error("Format Error:", e);
-    return (
-      <Typography variant="caption" sx={{ wordBreak: "break-word" }}>
-        {String(params).replace(/[{}]/g, "")}
-      </Typography>
-    );
-  }
+const statusColor = {
+  PROCESSING: "warning",
+  COMPLETED: "success",
+  FAILED: "error",
 };
 
-const getMenuNames = (menuId, menuList) => {
-  // 1. Safety check for the list
-  if (!Array.isArray(menuList) || menuList.length === 0) {
-    return { primary: "System Report", secondary: null };
-  }
-
-  const targetId = Number(menuId);
-
-  // 2. Iterate to find Submenu FIRST (to handle duplicate IDs correctly)
-  for (const menu of menuList) {
-    if (menu.children && Array.isArray(menu.children)) {
-      const child = menu.children.find((c) => Number(c.id) === targetId);
-      if (child) {
-        return {
-          primary: child.title, // Submenu Name (e.g., Template Requests)
-          secondary: menu.title, // Parent Name (e.g., Template Management)
-        };
-      }
-    }
-  }
-
-  // 3. If not found in children, check Top-Level Menus
-  for (const menu of menuList) {
-    if (Number(menu.id) === targetId) {
-      return {
-        primary: menu.title, // Parent Name (e.g., View Template Reports)
-        secondary: null,
-      };
-    }
-  }
-
-  // 4. Final fallback
-  return { primary: "Report Builder", secondary: "System" };
+const statusIcon = {
+  PROCESSING: <AccessTime fontSize="small" />,
+  COMPLETED: <CheckCircleOutline fontSize="small" />,
+  FAILED: <ErrorOutline fontSize="small" />,
+  default: <Help fontSize="small" />,
 };
 
-const MyDownloadsDrawer = ({ open, onClose }) => {
-  const FETCH_URL = "/ES/my-downloads/get-downloads";
-  const DOWNLOAD_URL = "/ES/my-downloads/download";
-  const [downloads, setDownloads] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const menuItems = useSelector((state) => state.menus.menus || []);
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
-  const [activeDownloadId, setActiveDownloadId] = useState(null);
-
-  // Stable fetch function prevents unnecessary effect triggers
-  const fetchDownloads = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await callApi(FETCH_URL, null, "GET");
-      setDownloads(response?.data || []);
-    } catch (error) {
-      console.error("Fetch Error:", error);
-      showSnackbar(
-        error.message || "Something went wrong, kindly try again.",
-        "error",
-      );
-      setDownloads([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [callApi, showSnackbar]);
-
-  useEffect(() => {
-    if (open) fetchDownloads();
-  }, [open, fetchDownloads]);
-
-  const handleDownload = async (file) => {
-    setActiveDownloadId(file.id);
-    try {
-      const response = await callApi(DOWNLOAD_URL, { id: file.id }, "POST");
-
-      if (response?.success && response?.data) {
-        const fullFileName = file.fileName || "report.xlsx";
-
-        const extension = fullFileName.includes(".")
-          ? fullFileName.split(".").pop().toLowerCase()
-          : "xlsx";
-
-        const baseName =
-          fullFileName.substring(0, fullFileName.lastIndexOf(".")) || "report";
-
-        downloadFile(response.data, extension, baseName, true);
-      }
-    } catch (e) {
-      console.error("Download Error:", e);
-      showSnackbar(
-        e.message ||
-          "Something went wrong while downloading file, Kindly try again",
-        "error",
-      );
-    } finally {
-      setActiveDownloadId(null);
-    }
-  };
+const TaskProgressDrawer = ({ open, onClose, tasks }) => {
+  const [expanded, setExpanded] = useState(null);
 
   return (
-    <Drawer
-      anchor="right"
-      open={open}
-      onClose={onClose}
-      sx={{
-        "& .MuiDrawer-paper": {
-          // FIXED: Responsive width layout
-          width: { xs: "100%", sm: 350, md: 400 },
-          maxWidth: "100vw",
-          boxSizing: "border-box",
-          border: "none",
-        },
-      }}
-    >
-      <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-        {/* HEADER */}
-        <Box
-          sx={{
-            m: 0,
-            px: { xs: 2, sm: 3 }, // FIXED: Responsive padding
-            pt: { xs: 2, sm: 3 },
-            pb: 1.5,
-            borderBottom: "1px solid",
-            borderColor: "divider",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
-              My Downloads
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              Files are available for 24 hours after generation
-            </Typography>
-          </Box>
-          <IconButton size="small" onClick={onClose} sx={{ ml: 1 }}>
-            <CloseIcon fontSize="small" />
-          </IconButton>
-        </Box>
+    <Drawer anchor="right" open={open} onClose={onClose}>
+      {/* HEADER */}
+      <Box
+        sx={{
+          p: 3,
+          borderBottom: "1px solid #E2E8F0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <Typography variant="h6" fontWeight={700}>
+          Running Tasks
+        </Typography>
+        <IconButton size="small" onClick={onClose}>
+          <Close />
+        </IconButton>
+      </Box>
 
-        <Divider />
+      {/* CONTENT */}
+      <Box sx={{ width: 380, p: 2 }}>
+        <Stack spacing={2}>
+          {Object.values(tasks).map((task) => {
+            const isDone = task.percentage === 100;
+            const elapsed = task.startedAt
+              ? Math.floor((Date.now() - task.startedAt) / 1000)
+              : null;
 
-        {/* CONTENT */}
-        {/* FIXED: Added overflowX: "hidden" and responsive padding */}
-        <Box sx={{ flexGrow: 1, overflowY: "auto", overflowX: "hidden", p: { xs: 2, sm: 3 } }}>
-          {loading ? (
-            <Box
-              sx={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                mt: 5,
-                gap: 2,
-              }}
-            >
-              {[1, 2, 3].map((i) => (
-                <DownloadSkeleton key={i} />
-              ))}
-            </Box>
-          ) : downloads.length > 0 ? (
-            <List sx={{ display: "flex", flexDirection: "column", gap: 2, p: 0 }}>
-              {downloads.map((file) => (
-                <DownloadItem
-                  key={file.id}
-                  file={file}
-                  isDownloading={activeDownloadId === file.id}
-                  onDownload={handleDownload}
-                  menuInfo={getMenuNames(file.menuId, menuItems)}
-                  formattedParams={formatParams(file.searchCriteria)}
-                />
-              ))}
-            </List>
-          ) : (
-            <EmptyStateView />
-          )}
-        </Box>
+            const speed =
+              task.lastUpdated && task.startedAt
+                ? task.percentage / elapsed
+                : null;
+
+            const eta =
+              speed && task.percentage < 100
+                ? Math.ceil((100 - task.percentage) / speed)
+                : null;
+
+            return (
+              <Box
+                key={task.taskId}
+                sx={{
+                  p: 2,
+                  borderRadius: 2,
+                  bgcolor: "background.paper",
+                  boxShadow: 1,
+                  cursor: "pointer",
+                  wordBreak:"break-word",
+                }}
+                onClick={() =>
+                  setExpanded(expanded === task.taskId ? null : task.taskId)
+                }
+              >
+                {/* HEADER ROW */}
+                <Stack direction="row" justifyContent="space-between" alignItems="flex-start" sx={{minWidth:0}}>
+                  <Typography variant="body2" fontWeight={600} 
+                    sx={{
+                      flex:1,
+                      minWidth:0,
+                      wordBreak:"break-word",
+                      whiteSpace:"normal",
+                      overflowWrap:"anywhere",
+                    }}>
+                    {task.taskId?.replace(/_/g," ").toLowerCase().replace(/\b\w/g,(c)=>c.toUpperCase())}
+                  </Typography>
+
+                   <CustomChip
+                    size="sm"
+                    variant="outlined"
+                    sx={{ height: "100%" , whiteSapce:"nowrap"}}
+                    color={statusColor[task.status?.toUpperCase()] || "default"}
+                    label={toPascalKebabCase(task.status)}
+                    icon={statusIcon[task.status?.toUpperCase()] || "default"}
+                  />
+                </Stack>
+
+                {/* META */}
+                <Stack direction="row" justifyContent="space-between" mt={1.5}>
+                  {/* PROGRESS */}
+                  <LinearProgress
+                    variant="determinate"
+                    value={task.percentage}
+                    sx={{
+                      width: "87%",
+                      mt: 0.8,
+                      height: 8.5,
+                      borderRadius: 5,
+                      transition: "all 0.4s ease",
+                    }}
+                    color={isDone ? "success" : "primary"}
+                  />
+
+                  {/* PROGRESS PERCENTAGE */}
+                  <Typography variant="caption">{task.percentage}%</Typography>
+                </Stack>
+
+                <Box>
+                  {eta && (
+                    <Typography variant="caption">ETA: ~{eta}s</Typography>
+                  )}
+                </Box>
+
+                {/* DETAILS */}
+                <Collapse in={expanded === task.taskId}>
+                  <Box mt={1}>
+                    <Typography variant="caption" color="text.secondary">
+                      {task.message}
+                    </Typography>
+                    {elapsed && (
+                      <Typography variant="caption" display="block">
+                        Elapsed: {elapsed}s
+                      </Typography>
+                    )}
+                  </Box>
+                </Collapse>
+              </Box>
+            );
+          })}
+        </Stack>
       </Box>
     </Drawer>
   );
 };
 
-export default MyDownloadsDrawer;
+export default TaskProgressDrawer;
+
+
+
+
