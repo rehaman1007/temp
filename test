@@ -1,441 +1,226 @@
-import React, { useState } from "react";
-import {
-  Avatar,
-  Badge,
-  Box,
-  IconButton,
-  Toolbar,
-  Typography,
-  useTheme,
-  useMediaQuery,
-  CircularProgress,
-  Fab,
-  Tooltip,
-  Menu,
-  MenuItem,
-} from "@mui/material";
-import {
-  Notifications,
-  Download,
-  Menu as MenuIcon,
-  Cached,
-  MoreVert as MoreVertIcon,
-} from "@mui/icons-material";
+import React, { useEffect, useState, useCallback } from "react";
+import { Box } from "@mui/material";
+import useApi from "../../../hooks/useApi";
+import ApprovalTable from "../components/ApprovalTable";
+import ApproveRejectDialog from "../components/ApproveRejectDialog";
+import UserRequestView from "../components/UserRequestView";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 import { useSelector } from "react-redux";
-import { userAvatarCreator } from "../utils/userUtilities";
-import NotificationDrawer from "./NotificationDrawer";
-import ProfileDrawer from "./ProfileDrawer";
-import SearchBar from "./search/SearchBar";
-import fLogo from "../assets/Logos/Fincore_transperent.svg";
-import useNotifications from "../hooks/useNotifications";
-import NotificationPopup from "./NotificationPopup";
-import AutorenewIcon from "@mui/icons-material/Autorenew";
-import TaskProgressDrawer from "./TaskProgressDrawer";
-import MyDownloadsDrawer from "./downloads/MyDownloadsDrawer";
-import FinCoreIcon from "./ai-assistant/chat/FinCoreIcon";
-import ChatWidget from "./ai-assistant/chat/ChatWidget";
-import useApi from "../hooks/useApi";
-import useCustomSnackbar from "../utils/useCustomSnackbar";
+import RequestAnalytics from "../../common/RequestAnalytics";
 
-const MENUS_AVAILABLE_FOR_DOWNLOADS = [33, 34, 49, 50, 51, 52];
+const LIST_API = "/UM/user/pending-user-requests";
+const ACT_API = "/UM/user/accept-request";
+const REQ_API = "/UM/user/my-requests";
 
-const LayoutHeader = ({ drawerWidth, navigateToPage, handleDrawerToggle }) => {
-  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
-  const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
-  const [myDownloadsDrawerOpen, setMyDownloadsDrawer] = useState(false);
-  const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
-  const [hasLaunched, setHasLaunched] = useState(false);
-  const [isOpen, setIsOpen] = useState(false);
+/* ----------------------------- small utilities ----------------------------- */
 
-  // State for the Mobile Overflow Menu
-  const [mobileMoreAnchorEl, setMobileMoreAnchorEl] = useState(null);
-  const isMobileMenuOpen = Boolean(mobileMoreAnchorEl);
+/** Safely stringify-like: always returns a string */
+const customStringify = (v) => (v ?? "").toString();
 
-  const userInfo = useSelector((state) => state.auth.user);
+/** Convert raw server rows to flat, grid-friendly rows */
+function normalize(items = []) {
+  return items.map((u, idx) => {
+    const payload = u?.requestPayload ? JSON.parse(u?.requestPayload) : {};
+    const USERID = payload?.userId ?? u?.targetUserId ?? u?.userId ?? "";
 
-  const {
-    notifications,
-    markAsRead,
-    markAllAsRead,
-    loadMore,
-    hasMore,
-    unreadCount,
-    popNotification,
-    setPopNotification,
-    tasks,
-    activeCount,
-  } = useNotifications();
+    const first = customStringify(payload?.firstName).trim();
+    const middle = customStringify(payload?.middleName).trim();
+    const last = customStringify(payload?.lastName).trim();
+    const name = [first, middle, last].filter(Boolean).join(" ");
 
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
+    return {
+      // DataGrid id (stable)
+      id: u?.requestId ?? String(idx + 1),
+
+      // request metadata
+      REQUEST_ID: u?.requestId ?? `${USERID}-${idx + 1}`,
+      REQUEST_TYPE: u?.requestType ?? "CREATE",
+      REQUESTED_AT: u?.requestDate ?? "",
+      STATUS: u?.requestStatus ?? "PENDING",
+      REQUESTOR_USERID: u?.requestorUserId ?? "",
+      TARGET_USERID: u?.targetUserId ?? "",
+
+      // flattened payload
+      USERID: USERID,
+      FIRST_NAME: first,
+      MIDDLE_NAME: middle,
+      LAST_NAME: last,
+      EMAIL: payload?.email ?? "",
+      PHONE_NUMBER: payload?.phoneNumber ?? "",
+      ROLE_ID: payload?.roleId ?? "",
+      ROLE_NAME: customStringify(payload?.roleName).trim(),
+      BRANCH: payload?.branch ?? "",
+
+      __name: name || USERID || "(unknown)",
+      _raw: { ...u, ...payload },
+    };
+  });
+}
+
+/* --------------------------------- component -------------------------------- */
+
+export default function UserApprovals() {
+  const { callApi, loading } = useApi();
   const user = useSelector((state) => state.auth.user);
-  const menuItems = useSelector((state) => state.menus.menus);
-  const [syncing, setSyncing] = useState(false);
-  const isAdmin =
-    userInfo && userInfo.role === 10 && userInfo.roleName === "ADMIN";
-  const showDownloads = menuItems?.some(
-    (item) =>
-      MENUS_AVAILABLE_FOR_DOWNLOADS.includes(item.id) ||
-      item.children?.some((child) =>
-        MENUS_AVAILABLE_FOR_DOWNLOADS.includes(child.id),
-      ),
+
+  // ---- server data ----
+  const [rows, setRows] = useState([]);
+
+  // ---- dialogs ----
+  const [actOpen, setActOpen] = useState(false);
+  const [actType, setActType] = useState("APPROVE"); // APPROVE | REJECT
+  const [actTarget, setActTarget] = useState(null);
+  const [AnalysisData, setAnalysisData] = useState(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsRow, setDetailsRow] = useState(null);
+  const showSnackBar = useCustomSnackbar();
+
+  /* --------------------------------- helpers --------------------------------- */
+
+  /**
+   * makePayload
+   * Builds a minimal payload for server calls; memoized on userId
+   */
+  const makePayload = useCallback(
+    () => ({ userId: user?.userId }),
+    [user?.userId],
   );
 
-  const theme = useTheme();
-  // We use md (Medium/Laptop) as the breaking point
-  const isSmallScreen = useMediaQuery(theme.breakpoints.down("sm"));
+  /**
+   * fetchList
+   * Generic fetcher that chooses endpoint based on status.
+   * - For PENDING -> LIST_API
+   * - For others   -> REQ_API (or fallback to LIST_API if the backend doesn’t support per-status endpoints)
+   * Normalizes the result and guards against stale responses (AbortController).
+   */
+  const fetchList = useCallback(
+    async (status) => {
+      const endpoint = status === "PENDING" ? LIST_API : REQ_API;
 
-  const handleRBACSync = async () => {
-    setSyncing(true);
+      try {
+        const data = await callApi(endpoint, makePayload(), "GET");
+
+        const list =
+          data?.result?.pendingRequests ??
+          data?.result?.requests ??
+          data?.result?.users ??
+          [];
+
+        setRows(normalize(list));
+
+        const processedResult = data?.result?.pendingRequests?.map((row) => {
+          // const parsed = JSON.parse(row.requestPayload) || {};
+          return {
+            ...row,
+            // ...parsed,
+            changeType:
+              row.requestType === "CREATE"
+                ? "ADD"
+                : row.requestType === "MODIFY"
+                  ? "UPDATE"
+                  : row.requestType,
+            reqDate: row.requestDate,
+          };
+        });
+        setAnalysisData(processedResult);
+      } catch (e) {
+        console.error(e);
+        setRows([]);
+      }
+    },
+    [callApi, makePayload],
+  );
+
+  /**
+   * UI helpers: openApprove, openReject, openDetails
+   * Stable handlers to open respective dialogs with the selected row.
+   */
+  const openApprove = useCallback((row) => {
+    setActType("APPROVE");
+    setActTarget(row);
+    setActOpen(true);
+  }, []);
+  const openReject = useCallback((row) => {
+    setActType("REJECT");
+    setActTarget(row);
+    setActOpen(true);
+  }, []);
+
+  const openDetails = useCallback((row) => {
+    setDetailsRow(row);
+    setDetailsOpen(true);
+  }, []);
+
+  /**
+   * Initial load: fetch pending approvals + roles
+   */
+  useEffect(() => {
+    fetchList("PENDING");
+  }, [fetchList]);
+
+  const handleConfirm = async (reason) => {
+    setActOpen(false);
+    setActTarget(null);
     try {
-      const response = await callApi("/UM/role/force-sync-rbac", null, "POST");
-      showSnackbar(
-        response.message || "RBAC permissions Syncing Successfull",
-        "success",
+      const response = await callApi(
+        ACT_API,
+        {
+          requestId: actTarget.REQUEST_ID,
+          action: actType,
+          reason: reason || "No Remarks",
+        },
+        "POST",
       );
+      if (response?.result?.status) {
+        showSnackBar(
+          `Request Id  ${actTarget.REQUEST_ID} ${
+            actType === "APPROVE" ? "Approved" : "Rejected"
+          } successfully`,
+          "success",
+        );
+      }
     } catch (error) {
+      showSnackBar(error?.message || "Something went wrong", "error");
       console.error(error);
-      showSnackbar(error.message || "Failed to Sync permissions", "error");
     } finally {
-      setSyncing(false);
+      setActOpen(false);
+      setActTarget(null);
+      fetchList("PENDING");
     }
   };
 
-  const handleMobileMenuClose = () => {
-    setMobileMoreAnchorEl(null);
-  };
-
-  const handleMobileMenuOpen = (event) => {
-    setMobileMoreAnchorEl(event.currentTarget);
-  };
-
-  // The dropdown menu that renders on Mobile/Tablets
-  const renderMobileMenu = (
-    <Menu
-      anchorEl={mobileMoreAnchorEl}
-      anchorOrigin={{
-        vertical: "top",
-        horizontal: "right",
-      }}
-      keepMounted
-      transformOrigin={{
-        vertical: "top",
-        horizontal: "right",
-      }}
-      open={isMobileMenuOpen}
-      onClose={handleMobileMenuClose}
-    >
-      {isAdmin && (
-        <MenuItem
-          onClick={() => {
-            setIsOpen(true);
-            setHasLaunched(true);
-            handleMobileMenuClose();
-          }}
-        >
-          <IconButton size="large" color="primary" sx={{ mr: 1.5 }}>
-            <FinCoreIcon size={24} glow />
-          </IconButton>
-          FinCore Assistant
-        </MenuItem>
-      )}
-
-      {isAdmin && (
-        <MenuItem
-          onClick={() => {
-            handleRBACSync();
-            handleMobileMenuClose();
-          }}
-        >
-          <IconButton size="large" color="inherit" sx={{ mr: 1.5 }}>
-            {syncing ? <CircularProgress size={24} /> : <Cached />}
-          </IconButton>
-          Sync Permissions
-        </MenuItem>
-      )}
-
-      {activeCount > 0 && (
-        <MenuItem
-          onClick={() => {
-            setTaskDrawerOpen(true);
-            handleMobileMenuClose();
-          }}
-        >
-          <IconButton size="large" color="inherit" sx={{ mr: 1.5 }}>
-            <Badge badgeContent={activeCount} color="warning">
-              <AutorenewIcon sx={{ animation: "spin 1.2s linear infinite" }} />
-            </Badge>
-          </IconButton>
-          Active Tasks
-        </MenuItem>
-      )}
-
-      <MenuItem
-        onClick={() => {
-          setMyDownloadsDrawer(true);
-          handleMobileMenuClose();
-        }}
-      >
-        <IconButton size="large" color="inherit" sx={{ mr: 1.5 }}>
-          <Download />
-        </IconButton>
-        My Downloads
-      </MenuItem>
-
-      <MenuItem
-        onClick={() => {
-          setNotificationDrawerOpen(true);
-          handleMobileMenuClose();
-        }}
-      >
-        <IconButton size="large" color="inherit" sx={{ mr: 1.5 }}>
-          <Badge badgeContent={unreadCount || ""} color="error">
-            <Notifications />
-          </Badge>
-        </IconButton>
-        Notifications
-      </MenuItem>
-
-      <MenuItem
-        onClick={() => {
-          setProfileDrawerOpen(true);
-          handleMobileMenuClose();
-        }}
-      >
-        <IconButton size="large" color="inherit" sx={{ mr: 1.5 }}>
-          <Avatar
-            sx={{
-              width: 28,
-              height: 28,
-              color: "primary.contrastText",
-              backgroundColor: "primary.main",
-              fontSize: "0.9rem",
-            }}
-          >
-            {userAvatarCreator(user)}
-          </Avatar>
-        </IconButton>
-        Profile
-      </MenuItem>
-    </Menu>
-  );
-
   return (
-    <Box
-      position="fixed"
-      sx={{
-        width: { xs: "100%", md: `calc(100% - ${drawerWidth}px)` },
-        right: 0,
-        top: 0,
-        zIndex: 1200,
-        background:
-          "linear-gradient(90deg, rgba(162,141,240,0.3), rgba(93,63,211,0.8))",
-      }}
-    >
-      <Toolbar
-        sx={{
-          display: "flex",
-          justifyContent: "space-between",
-          px: { xs: 1, sm: 2 },
+    <Box sx={{ p: { xs: 2, md: 3 } }}>
+      <RequestAnalytics data={AnalysisData || []} showDeleteRequest={true} />
+
+      <ApprovalTable
+        rows={rows}
+        loading={loading}
+        onViewDetails={openDetails}
+        onApprove={openApprove}
+        onReject={openReject}
+      />
+
+      <ApproveRejectDialog
+        open={actOpen}
+        type={actType}
+        target={actTarget}
+        loading={loading}
+        onClose={() => {
+          setActOpen(false);
+          setActTarget(null);
         }}
-      >
-        {/* Left side section (Navigation Menu + Logo) */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          {isSmallScreen && (
-            <IconButton
-              onClick={handleDrawerToggle}
-              sx={{ color: "text.primary" }}
-            >
-              <MenuIcon />
-            </IconButton>
-          )}
-
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-            <img src={fLogo} alt="Logo" style={{ width: 35, height: 35 }} />
-            {/* Kept text always visible since we now have plenty of space! */}
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              FinCore
-            </Typography>
-          </Box>
-        </Box>
-
-        {/* Right side section (Search + Actions/Overflow Menu) */}
-        <Box
-          sx={{ display: "flex", alignItems: "center", gap: { xs: 0, sm: 1 } }}
-        >
-          <SearchBar
-            navigateToPage={navigateToPage}
-            hideShortcut={isSmallScreen}
-          />
-
-          {/* DESKTOP VIEW: Show all icons inline (Hidden on small screens) */}
-          <Box
-            sx={{
-              display: { xs: "none", md: "flex" },
-              alignItems: "center",
-              gap: 1,
-            }}
-          >
-            {isAdmin && (
-              <Tooltip title="FinCore Assistant">
-                <Fab
-                  onClick={() => {
-                    setIsOpen(true);
-                    setHasLaunched(true);
-                  }}
-                  className="fab-pulse"
-                  color="primary"
-                  size="medium"
-                  sx={{ m: 1, p: 1, minHeight: 40, width: 40 }}
-                >
-                  <FinCoreIcon size={31} glow animated />
-                </Fab>
-              </Tooltip>
-            )}
-
-            {isAdmin && (
-              <Tooltip title="Sync Permissions">
-                <IconButton
-                  color="inherit"
-                  onClick={handleRBACSync}
-                  disabled={syncing}
-                >
-                  {syncing ? <CircularProgress size={24} /> : <Cached />}
-                </IconButton>
-              </Tooltip>
-            )}
-
-            {activeCount > 0 && (
-              <IconButton onClick={() => setTaskDrawerOpen(true)}>
-                <Badge badgeContent={activeCount} color="warning">
-                  <Box sx={{ position: "relative" }}>
-                    <AutorenewIcon
-                      sx={{ animation: "spin 1.2s linear infinite" }}
-                    />
-                    <CircularProgress
-                      size={36}
-                      sx={{
-                        position: "absolute",
-                        top: -6,
-                        left: -6,
-                        zIndex: -1,
-                      }}
-                    />
-                  </Box>
-                </Badge>
-              </IconButton>
-            )}
-
-            <Tooltip title="My Downloads">
-              <IconButton
-                color="inherit"
-                onClick={() => setMyDownloadsDrawer(true)}
-              >
-                <Download />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title="Show Notifications">
-              <IconButton
-                color="inherit"
-                onClick={() => setNotificationDrawerOpen(true)}
-              >
-                <Badge badgeContent={unreadCount || ""} color="error">
-                  <Notifications />
-                </Badge>
-              </IconButton>
-            </Tooltip>
-
-            <Avatar
-              onClick={() => setProfileDrawerOpen(true)}
-              sx={{
-                width: 32,
-                height: 32,
-                color: "primary.contrastText",
-                backgroundColor: "primary.main",
-                cursor: "pointer",
-                ml: 1,
-              }}
-            >
-              {userAvatarCreator(user)}
-            </Avatar>
-          </Box>
-
-          {/* MOBILE VIEW: Show Kebab (Vertical Dots) Menu Icon */}
-          <Box sx={{ display: { xs: "flex", md: "none" } }}>
-            <IconButton
-              size="large"
-              aria-label="show more"
-              aria-controls="primary-search-account-menu-mobile"
-              aria-haspopup="true"
-              onClick={handleMobileMenuOpen}
-              color="inherit"
-            >
-              <MoreVertIcon />
-            </IconButton>
-          </Box>
-        </Box>
-      </Toolbar>
-
-      {/* Render the Mobile Dropdown Menu */}
-      {renderMobileMenu}
-
-      <style>{`@keyframes spin { 100% { transform: rotate(360deg); } }`}</style>
-
-      {/* Drawers and Modals */}
-      {taskDrawerOpen && (
-        <TaskProgressDrawer
-          open={taskDrawerOpen}
-          onClose={() => setTaskDrawerOpen(false)}
-          tasks={tasks}
-        />
-      )}
-
-      <NotificationDrawer
-        notificationDrawerOpen={notificationDrawerOpen}
-        setNotificationDrawerOpen={setNotificationDrawerOpen}
-        notifications={notifications}
-        markAsRead={markAsRead}
-        markAllAsRead={markAllAsRead}
-        loadMore={loadMore}
-        hasMore={hasMore}
+        onConfirm={handleConfirm}
       />
 
-      {showDownloads && (
-        <MyDownloadsDrawer
-          open={myDownloadsDrawerOpen}
-          onClose={() => setMyDownloadsDrawer(false)}
-        />
-      )}
-
-      <ProfileDrawer
-        profileDrawerOpen={profileDrawerOpen}
-        setProfileDrawerOpen={setProfileDrawerOpen}
+      <UserRequestView
+        open={detailsOpen}
+        data={detailsRow}
+        handleClose={() => {
+          setDetailsOpen(false);
+          setDetailsRow(null);
+        }}
       />
-
-      {isAdmin && (
-        <ChatWidget
-          isOpen={isOpen}
-          setIsOpen={setIsOpen}
-          hasLaunched={hasLaunched}
-          setHasLaunched={setHasLaunched}
-        />
-      )}
-
-      {popNotification && (
-        <NotificationPopup
-          popup={popNotification}
-          handleNotificationClick={() => {
-            setNotificationDrawerOpen(true);
-            setPopNotification(null);
-          }}
-          onClose={() => {
-            setPopNotification(null);
-          }}
-        />
-      )}
     </Box>
   );
-};
-
-export default React.memo(LayoutHeader);
+}
