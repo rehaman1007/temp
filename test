@@ -7,6 +7,8 @@ import {
   IconButton,
   Box,
   Typography,
+  useTheme,
+  useMediaQuery,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
@@ -45,6 +47,10 @@ const ProcessDetailsDialog = ({
   onStop,
   permissions = {},
 }) => {
+  const theme = useTheme();
+  // md breakpoint usually covers iPads in portrait and mobile devices
+  const isDesktop = useMediaQuery(theme.breakpoints.up("md")); 
+
   const stages = useMemo(() => process?.stages || [], [process]);
   const [activeStep, setActiveStep] = useState(0);
 
@@ -65,19 +71,18 @@ const ProcessDetailsDialog = ({
       onClose={onClose}
       fullWidth
       maxWidth="lg"
+      fullScreen={!isDesktop} // Full screen on mobile/tablet
       PaperProps={{
-        sx: { height: "74vh" },
+        sx: { height: isDesktop ? "74vh" : "100%" },
       }}
     >
       {/* ---------- HEADER ---------- */}
       <DialogTitle sx={{ pr: 6 }}>
         <Box>
-          {/* Main Title */}
           <Typography variant="h6" component="div">
             {process.type} – Process Details
           </Typography>
 
-          {/* Remarks Sub-header */}
           {process.remarks && (
             <Typography
               variant="caption"
@@ -91,7 +96,7 @@ const ProcessDetailsDialog = ({
 
         <IconButton
           onClick={onClose}
-          sx={{ position: "absolute", right: 12, top: 12 }} // Adjusted top slightly for better centering
+          sx={{ position: "absolute", right: 12, top: 12 }}
         >
           <CloseIcon />
         </IconButton>
@@ -102,43 +107,52 @@ const ProcessDetailsDialog = ({
         dividers
         sx={{
           p: 0,
-          display: "grid",
-          gridTemplateColumns: "280px 1fr",
+          display: isDesktop ? "grid" : "block",
+          gridTemplateColumns: isDesktop ? "280px 1fr" : "none",
           height: "100%",
         }}
       >
-        {/* LEFT – SCROLLABLE STEPPER */}
+        {/* LEFT / MAIN – SCROLLABLE STEPPER */}
         <Box
           sx={{
-            borderRight: "1px solid",
+            borderRight: isDesktop ? "1px solid" : "none",
             borderColor: "divider",
             overflowY: "auto",
             px: 2,
-            py: 1,
+            py: isDesktop ? 1 : 3,
+            height: "100%",
           }}
         >
           <ProgressStepper
             stageDetails={stages}
             activeStep={activeStep}
             onStageClick={setActiveStep}
+            isDesktop={isDesktop}
+            // Pass a render prop to avoid circular dependencies
+            renderMobileDetails={(stage) => (
+              <StageDetails stage={stage} isMobile={!isDesktop} />
+            )}
           />
         </Box>
 
-        {/* RIGHT – FIXED CONTENT */}
-        <Box sx={{ p: 3 }}>
-          <StageDetails stage={stages[activeStep]} />
-        </Box>
+        {/* RIGHT – FIXED CONTENT (Desktop Only) */}
+        {isDesktop && (
+          <Box sx={{ p: 3, overflowY: "auto" }}>
+            <StageDetails stage={stages[activeStep]} isMobile={false} />
+          </Box>
+        )}
       </DialogContent>
 
       {/* ---------- FOOTER ---------- */}
       {isCurrentDate && (permissions.start || permissions.stop) && (
-        <DialogActions>
+        <DialogActions sx={{ p: isDesktop ? 1 : 2 }}>
           {permissions.start &&
             lastStatus !== StageStatus.STARTED &&
             !nonActionableProcess && (
               <Button
                 startIcon={<RestartAltIcon />}
                 onClick={() => onStart(process)}
+                fullWidth={!isDesktop}
               >
                 Restart
               </Button>
@@ -155,6 +169,7 @@ const ProcessDetailsDialog = ({
                 color="error"
                 startIcon={<StopIcon />}
                 onClick={() => onStop(process)}
+                fullWidth={!isDesktop}
               >
                 Stop
               </Button>
@@ -171,7 +186,11 @@ const ProcessDetailsDialog = ({
                 (process.processId == 3 &&
                   process.status == StageStatus.WAITING_FOR_APPROVAL)
               ))
-          ) && <Button onClick={onClose}>Close</Button>}
+          ) && (
+            <Button fullWidth={!isDesktop} onClick={onClose}>
+              Close
+            </Button>
+          )}
         </DialogActions>
       )}
     </Dialog>
@@ -179,7 +198,11 @@ const ProcessDetailsDialog = ({
 };
 
 export default ProcessDetailsDialog;
-=================================================================================================================
+
+
+
+
+
 
 import {
   Stepper,
@@ -196,7 +219,7 @@ import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { useEffect, useRef } from "react";
 
 /* ------------------ Step Label Content ------------------ */
-const ProcessStepContent = ({ stage, active, onClick }) => {
+const ProcessStepContent = ({ stage, active, onClick, isDesktop, renderMobileDetails }) => {
   const notStarted =
     !stage.stageStatus || stage.stageStatus === StageStatus.NOT_STARTED;
   const started = stage.stageStatus === StageStatus.STARTED;
@@ -242,11 +265,19 @@ const ProcessStepContent = ({ stage, active, onClick }) => {
       </StepLabel>
 
       <StepContent>
+        {/* Default View Details button for inactive steps */}
         {!notStarted && !active && (
-          <Button size="small" o variant="contained" onClick={onClick}>
+          <Button size="small" variant="contained" onClick={onClick} sx={{ mt: 1 }}>
             <VisibilityOutlinedIcon fontSize="small" sx={{ mr: 1 }} />
             View Details
           </Button>
+        )}
+        
+        {/* Mobile View: Render StageDetails inline if active */}
+        {!isDesktop && active && (
+          <Box sx={{ mt: 2, mb: 1 }}>
+            {renderMobileDetails(stage)}
+          </Box>
         )}
       </StepContent>
     </>
@@ -254,11 +285,11 @@ const ProcessStepContent = ({ stage, active, onClick }) => {
 };
 
 /* ------------------ Progress Stepper ------------------ */
-const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
+const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick, isDesktop, renderMobileDetails }) => {
   const stepperRef = useRef(null);
 
   useEffect(() => {
-    // Small delay ensures the Dialog transition is finished and DOM is ready
+    // Increased delay slightly to allow inline details to expand fully before scrolling
     const timer = setTimeout(() => {
       const activeElement = stepperRef.current?.querySelector(
         `[data-step="${activeStep}"]`,
@@ -266,13 +297,14 @@ const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
       if (activeElement) {
         activeElement.scrollIntoView({
           behavior: "smooth",
-          block: "center", // Focuses the item in the middle of the scrollable area
+          block: "center",
         });
       }
-    }, 200);
+    }, 300);
 
     return () => clearTimeout(timer);
   }, [activeStep]);
+
   return (
     <Box ref={stepperRef}>
       <Stepper orientation="vertical" nonLinear>
@@ -285,7 +317,7 @@ const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
               active
               data-step={index}
               sx={(theme) =>
-                active
+                active && isDesktop
                   ? {
                       backgroundImage: `linear-gradient(to right, transparent, ${theme.palette.divider})`,
                       position: "relative",
@@ -304,7 +336,7 @@ const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
             >
               <Box
                 sx={(theme) =>
-                  active
+                  active && isDesktop
                     ? {
                         backgroundImage: `linear-gradient(to right, transparent, ${theme.palette.divider})`,
                         position: "relative",
@@ -325,6 +357,8 @@ const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
                   stage={stage}
                   active={active}
                   onClick={() => onStageClick(index)}
+                  isDesktop={isDesktop}
+                  renderMobileDetails={renderMobileDetails}
                 />
               </Box>
             </Step>
@@ -336,7 +370,8 @@ const ProgressStepper = ({ stageDetails = [], activeStep, onStageClick }) => {
 };
 
 export default ProgressStepper;
-================================================================================================================
+
+
 
 import {
   Stack,
@@ -386,7 +421,7 @@ const InfoItem = ({ icon, label, value }) =>
   ) : null;
 
 /* ================= MAIN COMPONENT ================= */
-const StageDetails = ({ stage }) => {
+const StageDetails = ({ stage, isMobile }) => {
   if (!stage) return null;
 
   const remarks = stage.stageRemarks || "No Remarks";
@@ -398,11 +433,13 @@ const StageDetails = ({ stage }) => {
   return (
     <Stack
       flex={2}
-      p={2}
-      spacing={3}
+      p={isMobile ? 1 : 2}
+      spacing={isMobile ? 2 : 3}
       sx={(theme) => ({
-        backgroundColor: theme.palette.action.hover,
-        borderLeft: `1px solid ${theme.palette.divider}`,
+        // Simplify background and borders if rendering inline on mobile
+        backgroundColor: isMobile ? "transparent" : theme.palette.action.hover,
+        borderLeft: isMobile ? "none" : `1px solid ${theme.palette.divider}`,
+        borderRadius: isMobile ? 2 : 0,
       })}
     >
       {/* ================= STAGE HEADER ================= */}
@@ -417,8 +454,8 @@ const StageDetails = ({ stage }) => {
         >
           <StageIcon
             sx={{
-              height: 50,
-              width: 50,
+              height: isMobile ? 35 : 50,
+              width: isMobile ? 35 : 50,
               transition: "transform 0.3s ease-in-out",
               "&:hover": {
                 transform: "translateY(-5px)",
@@ -431,13 +468,14 @@ const StageDetails = ({ stage }) => {
           <Typography variant="subtitle2" color="text.secondary">
             Stage
           </Typography>
-          <Typography variant="h6" fontWeight={600}>
+          <Typography variant={isMobile ? "subtitle1" : "h6"} fontWeight={600}>
             {stage.stageTitle || "Unknown"}
           </Typography>
         </Stack>
       </Stack>
 
-      <Divider />
+      {/* Conditionally hide divider on mobile to keep inline view cleaner */}
+      {!isMobile && <Divider />}
 
       {/* ================= ROW 2: START / END ================= */}
       <Grid container spacing={2}>
@@ -531,3 +569,5 @@ const StageDetails = ({ stage }) => {
 };
 
 export default StageDetails;
+
+
