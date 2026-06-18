@@ -1,388 +1,181 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { Box, Card, Divider } from "@mui/material";
-import { useSelector } from "react-redux";
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  IconButton,
+  Box,
+  Typography,
+} from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import { useEffect, useState, useMemo } from "react";
 
-import useApi from "../../../hooks/useApi";
-import ApprovalTable from "../components/ApprovalTable";
-import ApproveRejectDialog from "../components/ApproveRejectDialog";
-import UserRequestView from "../components/UserRequestView";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
-import RequestAnalytics from "../../common/RequestAnalytics";
+import ProgressStepper from "./ProgressStepper";
+import StageDetails from "./StageDetails";
+import { StageStatus } from "../util/StageStatus";
 
-const LIST_API = "/UM/user/pending-user-requests";
-const ACT_API = "/UM/user/accept-request";
-const REQ_API = "/UM/user/my-requests";
+/* ------------------ INITIAL STEP RESOLVER ------------------ */
+const resolveInitialActiveStep = (stages = []) => {
+  if (!stages.length) return 0;
 
-/* ----------------------------- small utilities ----------------------------- */
-
-/** Safely stringify-like: always returns a string */
-const customStringify = (v) => (v ?? "").toString();
-
-/** Convert raw server rows to flat, grid-friendly rows */
-function normalize(items = []) {
-  return items.map((u, idx) => {
-    const payload = u?.requestPayload ? JSON.parse(u?.requestPayload) : {};
-    const USERID = payload?.userId ?? u?.targetUserId ?? u?.userId ?? "";
-
-    const first = customStringify(payload?.firstName).trim();
-    const middle = customStringify(payload?.middleName).trim();
-    const last = customStringify(payload?.lastName).trim();
-    const name = [first, middle, last].filter(Boolean).join(" ");
-
-    return {
-      id: u?.requestId ?? String(idx + 1),
-      REQUEST_ID: u?.requestId ?? `${USERID}-${idx + 1}`,
-      REQUEST_TYPE: u?.requestType ?? "CREATE",
-      REQUESTED_AT: u?.requestDate ?? "",
-      STATUS: u?.requestStatus ?? "PENDING",
-      REQUESTOR_USERID: u?.requestorUserId ?? "",
-      TARGET_USERID: u?.targetUserId ?? "",
-      USERID: USERID,
-      FIRST_NAME: first,
-      MIDDLE_NAME: middle,
-      LAST_NAME: last,
-      EMAIL: payload?.email ?? "",
-      PHONE_NUMBER: payload?.phoneNumber ?? "",
-      ROLE_ID: payload?.roleId ?? "",
-      ROLE_NAME: customStringify(payload?.roleName).trim(),
-      BRANCH: payload?.branch ?? "",
-      __name: name || USERID || "(unknown)",
-      _raw: { ...u, ...payload },
-    };
-  });
-}
-
-/* --------------------------------- component -------------------------------- */
-
-export default function UserApprovals() {
-  const { callApi, loading } = useApi();
-  const user = useSelector((state) => state.auth.user);
-
-  const [rows, setRows] = useState([]);
-  const [actOpen, setActOpen] = useState(false);
-  const [actType, setActType] = useState("APPROVE"); // APPROVE | REJECT
-  const [actTarget, setActTarget] = useState(null);
-  const [AnalysisData, setAnalysisData] = useState(null);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [detailsRow, setDetailsRow] = useState(null);
-  const showSnackBar = useCustomSnackbar();
-
-  const makePayload = useCallback(
-    () => ({ userId: user?.userId }),
-    [user?.userId]
+  const started = stages.findIndex(
+    (s) => s.stageStatus === StageStatus.STARTED,
   );
+  if (started !== -1) return started;
 
-  const fetchList = useCallback(
-    async (status) => {
-      const endpoint = status === "PENDING" ? LIST_API : REQ_API;
+  const error = stages.findIndex((s) => s.stageStatus === StageStatus.ERROR);
+  if (error !== -1) return error;
 
-      try {
-        const data = await callApi(endpoint, makePayload(), "GET");
+  const completed = stages
+    .map((s, i) => (s.stageStatus === StageStatus.COMPLETED ? i : -1))
+    .filter((i) => i !== -1);
 
-        const list =
-          data?.result?.pendingRequests ??
-          data?.result?.requests ??
-          data?.result?.users ??
-          [];
+  return completed.length ? completed[completed.length - 1] : 0;
+};
 
-        setRows(normalize(list));
-
-        const processedResult = data?.result?.pendingRequests?.map((row) => {
-          return {
-            ...row,
-            changeType:
-              row.requestType === "CREATE"
-                ? "ADD"
-                : row.requestType === "MODIFY"
-                  ? "UPDATE"
-                  : row.requestType,
-            reqDate: row.requestDate,
-          };
-        });
-        setAnalysisData(processedResult);
-      } catch (e) {
-        console.error(e);
-        setRows([]);
-      }
-    },
-    [callApi, makePayload]
-  );
-
-  const openApprove = useCallback((row) => {
-    setActType("APPROVE");
-    setActTarget(row);
-    setActOpen(true);
-  }, []);
-
-  const openReject = useCallback((row) => {
-    setActType("REJECT");
-    setActTarget(row);
-    setActOpen(true);
-  }, []);
-
-  const openDetails = useCallback((row) => {
-    setDetailsRow(row);
-    setDetailsOpen(true);
-  }, []);
+/* ------------------ MAIN DIALOG ------------------ */
+const ProcessDetailsDialog = ({
+  process,
+  isCurrentDate,
+  onClose,
+  onStart,
+  onStop,
+  permissions = {},
+}) => {
+  const stages = useMemo(() => process?.stages || [], [process]);
+  const [activeStep, setActiveStep] = useState(0);
 
   useEffect(() => {
-    fetchList("PENDING");
-  }, [fetchList]);
+    setActiveStep(resolveInitialActiveStep(stages));
+  }, [stages]);
 
-  const handleConfirm = async (reason) => {
-    setActOpen(false);
-    setActTarget(null);
-    try {
-      const response = await callApi(
-        ACT_API,
-        {
-          requestId: actTarget.REQUEST_ID,
-          action: actType,
-          reason: reason || "No Remarks",
-        },
-        "POST"
-      );
-      if (response?.result?.status) {
-        showSnackBar(
-          `Request Id ${actTarget.REQUEST_ID} ${
-            actType === "APPROVE" ? "Approved" : "Rejected"
-          } successfully`,
-          "success"
-        );
-      }
-    } catch (error) {
-      showSnackBar(error?.message || "Something went wrong", "error");
-      console.error(error);
-    } finally {
-      setActOpen(false);
-      setActTarget(null);
-      fetchList("PENDING");
-    }
-  };
+  if (!process) return null;
+
+  const lastStatus = stages[stages.length - 1]?.stageStatus;
+
+  const nonActionableProcess =
+    process.processId == 7 || process.processId == 12;
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 } }}>
-      {/* Unified Card Container */}
-      <Card
+    <Dialog
+      open={!!process}
+      onClose={onClose}
+      fullWidth
+      maxWidth="lg"
+      PaperProps={{
+        sx: { height: "74vh" },
+      }}
+    >
+      {/* ---------- HEADER ---------- */}
+      <DialogTitle sx={{ pr: 6 }}>
+        <Box>
+          {/* Main Title */}
+          <Typography variant="h6" component="div">
+            {process.type} – Process Details
+          </Typography>
+
+          {/* Remarks Sub-header */}
+          {process.remarks && (
+            <Typography
+              variant="caption"
+              display="block"
+              sx={{ color: "text.secondary", fontWeight: 400, mt: 0.5 }}
+            >
+              Remarks: {process.remarks}
+            </Typography>
+          )}
+        </Box>
+
+        <IconButton
+          onClick={onClose}
+          sx={{ position: "absolute", right: 12, top: 12 }} // Adjusted top slightly for better centering
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+
+      {/* ---------- BODY ---------- */}
+      <DialogContent
+        dividers
         sx={{
-          width: "100%",
-          boxShadow: 3,
-          borderRadius: 2,
-          bgcolor: "background.paper",
-          overflow: "hidden", // Prevents DataGrid from spilling over
+          p: 0,
+          display: "grid",
+          gridTemplateColumns: "280px 1fr",
+          height: "100%",
         }}
       >
-        <RequestAnalytics data={AnalysisData || []} showDeleteRequest={true} />
-
-        {/* Clean separation between charts and grid */}
-        <Divider />
-
-        <ApprovalTable
-          rows={rows}
-          loading={loading}
-          onViewDetails={openDetails}
-          onApprove={openApprove}
-          onReject={openReject}
-        />
-      </Card>
-
-      <ApproveRejectDialog
-        open={actOpen}
-        type={actType}
-        target={actTarget}
-        loading={loading}
-        onClose={() => {
-          setActOpen(false);
-          setActTarget(null);
-        }}
-        onConfirm={handleConfirm}
-      />
-
-      <UserRequestView
-        open={detailsOpen}
-        data={detailsRow}
-        handleClose={() => {
-          setDetailsOpen(false);
-          setDetailsRow(null);
-        }}
-      />
-    </Box>
-  );
-}
-
-
-
-import React, { useMemo } from "react";
-import { IconButton, Stack, Tooltip, Typography } from "@mui/material";
-import { DataGrid } from "@mui/x-data-grid";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import AddBoxIcon from "@mui/icons-material/AddBox";
-import InfoIcon from "@mui/icons-material/Info";
-import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
-import CheckIcon from "@mui/icons-material/Check";
-import CloseIcon from "@mui/icons-material/Close";
-import EditDocumentIcon from "@mui/icons-material/EditDocument";
-import { toPascalKebabCase } from "../../../utils/CommonUtilities";
-import CustomChip from "../../../utils/CustomChip";
-
-export default function ApprovalTable({
-  rows = [],
-  loading = false,
-  onSelectionChange,
-  onViewDetails,
-  onApprove,
-  onReject,
-}) {
-  // Memoized columns with strict minWidth for mobile responsiveness
-  const columns = useMemo(() => [
-    { field: "REQUEST_ID", headerName: "Request Id", flex: 0.5, minWidth: 130 },
-    { field: "USERID", headerName: "User ID", flex: 0.5, minWidth: 130 },
-    { field: "__name", headerName: "User Name", flex: 1.2, minWidth: 200 },
-    {
-      field: "ROLE_NAME",
-      headerName: "Role",
-      flex: 0.5,
-      minWidth: 150,
-      sortable: true,
-      valueGetter: (p) => p,
-    },
-    {
-      field: "REQUEST_TYPE",
-      headerName: "Request Type",
-      flex: 0.6,
-      minWidth: 140,
-      align: "center",
-      headerAlign: "center",
-      filterable: false,
-      sortable: false,
-      disableColumnMenu: true,
-      renderCell: (params) => {
-        const val = params.value;
-        return (
-          <CustomChip
-            icon={
-              val === "CREATE" ? (
-                <AddBoxIcon />
-              ) : val === "DELETE" ? (
-                <AutoDeleteIcon />
-              ) : (
-                <EditDocumentIcon />
-              )
-            }
-            label={toPascalKebabCase(val)}
-            color={
-              val === "CREATE"
-                ? "success"
-                : val === "DELETE"
-                ? "error"
-                : "warning"
-            }
-            size="small"
-            variant="outlined"
-          />
-        );
-      },
-    },
-    {
-      field: "REQUESTED_AT",
-      headerName: "Requested Date",
-      flex: 1,
-      minWidth: 180,
-      disableColumnMenu: true,
-      renderCell: (p) => {
-        const isoString = p.value;
-        if (!isoString) return null;
-        const date = new Date(isoString);
-        return (
-          <Typography
-            variant="body1"
-            component="span"
-            sx={{ fontSize: "0.9rem" }}
-          >
-            {date.toLocaleString("en-IN", {
-              year: "numeric",
-              month: "short",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-              hour12: true,
-            })}
-          </Typography>
-        );
-      },
-    },
-    {
-      field: "action",
-      headerName: "Action",
-      sortable: false,
-      flex: 0.9,
-      minWidth: 150,
-      headerAlign: "center",
-      filterable: false,
-      disableColumnMenu: true,
-      renderCell: (params) => (
-        <Stack
-          direction="row"
-          spacing={0.5}
-          alignItems="center"
-          justifyContent="center"
-          sx={{ height: "100%" }}
+        {/* LEFT – SCROLLABLE STEPPER */}
+        <Box
+          sx={{
+            borderRight: "1px solid",
+            borderColor: "divider",
+            overflowY: "auto",
+            px: 2,
+            py: 1,
+          }}
         >
-          <Tooltip title="View details">
-            <IconButton onClick={() => onViewDetails?.(params.row)}>
-              <VisibilityIcon fontSize="inherit" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Approve">
-            <IconButton color="success" onClick={() => onApprove?.(params.row)}>
-              <CheckIcon fontSize="inherit" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Reject">
-            <IconButton color="error" onClick={() => onReject?.(params.row)}>
-              <CloseIcon fontSize="inherit" />
-            </IconButton>
-          </Tooltip>
-        </Stack>
-      ),
-    },
-  ], [onViewDetails, onApprove, onReject]);
+          <ProgressStepper
+            stageDetails={stages}
+            activeStep={activeStep}
+            onStageClick={setActiveStep}
+          />
+        </Box>
 
-  return (
-    <DataGrid
-      rows={rows}
-      columns={columns}
-      getRowId={(row) =>
-        row.id ??
-        row.REQUEST_ID ??
-        `${row.USERID ?? "unknown"}-${row.REQUEST_TYPE ?? "TYPE"}-${
-          row.REQUESTED_AT ?? "NA"
-        }`
-      }
-      disableRowSelectionOnClick
-      onRowSelectionModelChange={(model) => onSelectionChange?.(model)}
-      pageSizeOptions={[5, 10, 25, 50]}
-      loading={loading}
-      initialState={{
-        pagination: { paginationModel: { pageSize: 5 } },
-        sorting: { sortModel: [{ field: "REQUESTED_AT", sort: "desc" }] },
-      }}
-      sx={{
-        border: "none", // Remove standard borders to blend with parent Card
-        "& .MuiDataGrid-columnHeaders": {
-          borderTop: "none",
-        },
-      }}
-      slots={{
-        noRowsOverlay: () => (
-          <Stack height="100%" alignItems="center" justifyContent="center">
-            <InfoIcon sx={{ fontSize: 48, color: "text.secondary", mb: 2 }} />
-            <Typography variant="h6">No Pending Requests Found</Typography>
-            <Typography>All user requests have been processed.</Typography>
-          </Stack>
-        ),
-      }}
-    />
+        {/* RIGHT – FIXED CONTENT */}
+        <Box sx={{ p: 3 }}>
+          <StageDetails stage={stages[activeStep]} />
+        </Box>
+      </DialogContent>
+
+      {/* ---------- FOOTER ---------- */}
+      {isCurrentDate && (permissions.start || permissions.stop) && (
+        <DialogActions>
+          {permissions.start &&
+            lastStatus !== StageStatus.STARTED &&
+            !nonActionableProcess && (
+              <Button
+                startIcon={<RestartAltIcon />}
+                onClick={() => onStart(process)}
+              >
+                Restart
+              </Button>
+            )}
+
+          {permissions.stop &&
+            lastStatus === StageStatus.STARTED &&
+            !(
+              nonActionableProcess ||
+              (process.processId == 3 &&
+                process.status == StageStatus.WAITING_FOR_APPROVAL)
+            ) && (
+              <Button
+                color="error"
+                startIcon={<StopIcon />}
+                onClick={() => onStop(process)}
+              >
+                Stop
+              </Button>
+            )}
+
+          {!(
+            (permissions.start &&
+              lastStatus !== StageStatus.STARTED &&
+              !nonActionableProcess) ||
+            (permissions.stop &&
+              lastStatus === StageStatus.STARTED &&
+              !(
+                nonActionableProcess ||
+                (process.processId == 3 &&
+                  process.status == StageStatus.WAITING_FOR_APPROVAL)
+              ))
+          ) && <Button onClick={onClose}>Close</Button>}
+        </DialogActions>
+      )}
+    </Dialog>
   );
-}
+};
+
+export default ProcessDetailsDialog;
