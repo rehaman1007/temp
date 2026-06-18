@@ -1,774 +1,481 @@
-import {
-  Dialog,
-  DialogContent,
-  Button,
-  Paper,
-  Typography,
-  Box,
-  Stack,
-  IconButton,
-  Tooltip,
-  RadioGroup,
-  FormControlLabel,
-  Radio,
-  useTheme,
-  useMediaQuery,
-} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import { Box, IconButton, Stack, Tooltip, Typography } from "@mui/material";
+import InfoIcon from "@mui/icons-material/Info";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import StopIcon from "@mui/icons-material/Stop";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
+import TableRowsIcon from "@mui/icons-material/TableRows";
+import MemoryIcon from "@mui/icons-material/Memory";
+import AnalyticsIcon from "@mui/icons-material/Analytics";
+import ApprovalIcon from "@mui/icons-material/Approval";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+import AppRegistrationIcon from "@mui/icons-material/AppRegistration";
+import { StageStatus, StageStatusConfig } from "../util/StageStatus";
+import { useEffect, useMemo, useState } from "react";
+import { timeStampFormatter } from "../../../utils/CommonUtilities";
+import CustomChip from "../../../utils/CustomChip";
+import { getIconComponent } from "../../../utils/IconUtils";
 
-import GppBadIcon from "@mui/icons-material/GppBad";
-import GppGoodIcon from "@mui/icons-material/GppGood";
-import CloseIcon from "@mui/icons-material/Close";
-import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
+/* =====================================================
+   MAIN COMPONENT
+===================================================== */
 
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { toPng } from "html-to-image";
-import { useRef, useState, useEffect, useMemo } from "react";
-import { TABLE_CONFIG } from "../util/ProcessSummaryTableConfig";
-import DynamicSummaryTable from "./ProcessDynamicSummaryTable";
-import ProcessReportDownloadProgress from "./ProcessReportDownloadProgress";
-import { StageStatus } from "../util/StageStatus";
-
-/* ================= FORMAT ================= */
-
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : "—";
-
-/* ================= SUMMARY → FILE MAP ================= */
-
-const SUMMARY_FILE_MAP = {
-  BALANCE: "balance_compare_report",
-  CIBA: "intr_report",
-  SUSPENSE: "cntr_report",
-};
-
-/* ====================================================== */
-
-const ProcessSummaryDialog = ({
-  open,
-  data,
+const ProcessStatusTable = ({
+  processes = [],
   isCurrentDate,
-  onClose,
-  onAccept,
-  onReject,
-  onDownload,
-  downloadProgress,
+  actions,
+  loading,
   permissions = {},
 }) => {
-  const theme = useTheme();
-  // md breakpoint usually covers iPads in portrait and mobile devices
-  const isDesktop = useMediaQuery(theme.breakpoints.up("md"));
+  const SUMMARY_STAGES = new Set([
+    "cntr_summary_calculated",
+    "intr_summary_calculated",
+    "balance_Compare_generated",
+  ]);
 
-  const reportRef = useRef(null);
-  const copyTimeoutRef = useRef(null);
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 5,
+  });
 
-  const [copied, setCopied] = useState(false);
-  const [summaryType, setSummaryType] = useState("BALANCE");
+  /* =====================================================
+     FIND LATEST RUN FOR EACH PROCESS
+  ===================================================== */
 
-  const safeData = data || {};
-  /* ================= DATA ================= */
+  const latestRunMap = useMemo(() => {
+    const map = new Map();
 
-  const {
-    process = {},
-    processRunId,
-    RECON_RUN_DATE,
-    differenceSummary = [],
-    cibaSummary = [],
-    suspenseSummary = [],
-    stages = [],
-  } = safeData;
+    processes.forEach((p) => {
+      const type = p.processType;
+      const runId = Number(p.runId) || 0;
 
-  /* ================= STAGE CHECK ================= */
-
-  const balanceDone = stages.some(
-    (s) => s.stageId === "balance_Compare_generated" && s.stageStatus === 2,
-  );
-
-  const cibaDone = stages.some(
-    (s) => s.stageId === "intr_summary_calculated" && s.stageStatus === 2,
-  );
-
-  const suspenseDone = stages.some(
-    (s) => s.stageId === "cntr_summary_calculated" && s.stageStatus === 2,
-  );
-
-  const stageWaiting = process?.status == StageStatus.WAITING_FOR_APPROVAL;
-
-  /* ================= AVAILABLE TYPES ================= */
-
-  const availableSummaryTypes = useMemo(() => {
-    const arr = [];
-
-    if (balanceDone) arr.push("BALANCE");
-    if (cibaDone) arr.push("CIBA");
-    if (suspenseDone) arr.push("SUSPENSE");
-
-    return arr;
-  }, [balanceDone, cibaDone, suspenseDone]);
-
-  /* ================= AUTO FIX SELECTED TYPE ================= */
-
-  useEffect(() => {
-    if (!availableSummaryTypes.includes(summaryType)) {
-      setSummaryType(availableSummaryTypes[0] || "BALANCE");
-    }
-  }, [availableSummaryTypes, summaryType]);
-
-  /* ================= ACTIVE SUMMARY ================= */
-
-  const activeSummary = useMemo(() => {
-    switch (summaryType) {
-      case "BALANCE":
-        return differenceSummary || [];
-
-      case "CIBA":
-        return cibaSummary || [];
-
-      case "SUSPENSE":
-        return suspenseSummary || [];
-
-      default:
-        return [];
-    }
-  }, [summaryType, differenceSummary, cibaSummary, suspenseSummary]);
-
-  /* ================= EXPORT PDF ================= */
-
-  const exportPDF = () => {
-    const config = TABLE_CONFIG[summaryType];
-
-    if (!config) return;
-
-    const doc = new jsPDF("p", "pt");
-
-    doc.setFontSize(14);
-    doc.text(`${summaryType} Summary Report`, 40, 40);
-
-    doc.setFontSize(10);
-    doc.text(`Reconciliation Date: ${RECON_RUN_DATE}`, 40, 58);
-
-    /* ================= HEADERS ================= */
-
-    const headers = config.columns.map((col) => col.label);
-
-    /* ================= BODY ================= */
-
-    const body = activeSummary.map((row) =>
-      config.columns.map((col) =>
-        col.align === "right"
-          ? formatAmount(row[col.field]) || row[col.field]
-          : row[col.field] || "—",
-      ),
-    );
-
-    /* ================= TOTAL ROW ================= */
-
-    if (config.totalFields?.length) {
-      const totals = {};
-
-      config.totalFields.forEach((field) => {
-        totals[field] = activeSummary.reduce(
-          (sum, r) => sum + (Number(r[field]) || 0),
-          0,
-        );
-      });
-
-      const totalRow = config.columns.map((col, index) => {
-        if (index === 0) return "TOTAL";
-
-        if (totals[col.field] !== undefined)
-          return formatAmount(totals[col.field]);
-
-        return "";
-      });
-
-      body.push(totalRow);
-    }
-
-    /* ================= GENERATE TABLE ================= */
-
-    autoTable(doc, {
-      startY: 80,
-      head: [headers],
-      body,
-      styles: {
-        fontSize: 9,
-        halign: "right",
-      },
-      columnStyles: {
-        0: { halign: "left" },
-      },
-      didParseCell: (data) => {
-        if (data.row.index === body.length - 1) {
-          data.cell.styles.fontStyle = "bold";
-        }
-      },
+      if (!map.has(type) || runId > map.get(type)) {
+        map.set(type, runId);
+      }
     });
 
-    doc.save(`${summaryType}_Summary_${RECON_RUN_DATE}.pdf`);
-  };
+    return map;
+  }, [processes]);
 
-  /* ================= COPY PNG ================= */
-  const copyPNGToClipboard = async () => {
-    if (!reportRef.current) return;
+  /* =====================================================
+     ROWS
+  ===================================================== */
 
-    const element = reportRef.current;
+  const rows = useMemo(() => {
+    return processes
+      .map((p) => {
+        const lastStage = p.stages?.at(-1);
 
-    try {
-      const dataUrl = await toPng(element, {
-        cacheBust: true,
-        backgroundColor: "#ffffff",
-        pixelRatio: 2,
+        const runId = Number(p.runId) || 1;
+        const latestRunId = latestRunMap.get(p.processType);
 
-        /* fixes font/css errors */
-        skipFonts: true,
+        const isLatestRun = runId === latestRunId;
+
+        const hasSummary =
+          p.processType?.toUpperCase() === "DIFFERENCE" &&
+          p.stages?.some(
+            (s) =>
+              s.stageStatus === StageStatus.COMPLETED &&
+              SUMMARY_STAGES.has(s.stageId),
+          );
+
+        return {
+          id: `${p.processType}_${p.processId}_${runId}`, // UNIQUE KEY
+
+          processId: p.processId,
+          processRunId: p.processRunId,
+          processType: p.processType,
+
+          runId,
+          isLatestRun,
+
+          status: p.status,
+
+          stageTitle: lastStage?.stageTitle ?? "Unknown",
+          stageIcon: lastStage?.stageIcon ?? "AccessTime",
+
+          startTime: p.processStartTime,
+          endTime: p.processEndTime,
+
+          hasSummary,
+
+          raw: p,
+        };
+      })
+      .sort((a, b) => {
+        // Convert to Date objects to compare (handles ISO strings, timestamps, etc.)
+        const dateA = new Date(a.startTime);
+        const dateB = new Date(b.startTime);
+
+        // Sort Descending (latest date first)
+        return dateB - dateA;
       });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processes, latestRunMap]);
 
-      const blob = await (await fetch(dataUrl)).blob();
-
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          "image/png": blob,
-        }),
-      ]);
-
-      setCopied(true);
-
-      clearTimeout(copyTimeoutRef.current);
-
-      copyTimeoutRef.current = setTimeout(() => {
-        setCopied(false);
-      }, 2000);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  /* ====================================================== */
-
-  return (
-    <>
-      <Dialog 
-        open={open} 
-        fullWidth 
-        maxWidth="md"
-        fullScreen={!isDesktop} // Added fullscreen for mobile
-      >
-        {/* HEADER */}
-
-        <Box
-          sx={{
-            px: isDesktop ? 3 : 2,
-            py: 2,
-            borderBottom: 1,
-            borderColor: "divider",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: isDesktop ? "center" : "flex-start",
-            flexDirection: isDesktop ? "row" : "column", // Stack on mobile
-            gap: isDesktop ? 0 : 2,
-            position: "relative"
-          }}
-        >
-          <Box pr={isDesktop ? 0 : 5}>
-            <Typography variant={isDesktop ? "h6" : "subtitle1"} fontWeight={700}>
-              {summaryType} Summary Report
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Reconciliation Date: {RECON_RUN_DATE}
-            </Typography>
-          </Box>
-
-          <Stack direction="row" spacing={1} sx={{ alignSelf: isDesktop ? "auto" : "flex-end" }}>
-            <Tooltip title="Export summary to PDF">
-              <IconButton onClick={exportPDF}>
-                <PictureAsPdfOutlinedIcon />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title={copied ? "Copied!" : "Copy summary as image"}>
-              <IconButton
-                onClick={copyPNGToClipboard}
-                sx={{ color: copied ? "success.main" : "inherit" }}
-              >
-                {copied ? <CheckCircleOutlineIcon /> : <ImageOutlinedIcon />}
-              </IconButton>
-            </Tooltip>
-
-            {/* If Mobile, absolutely position close button to top right */}
-            <IconButton 
-              onClick={onClose}
-              sx={{
-                ...( !isDesktop && { position: "absolute", top: 8, right: 8 } )
-              }}
-            >
-              <CloseIcon />
-            </IconButton>
-          </Stack>
-        </Box>
-
-        {/* BODY */}
-
-        <DialogContent sx={{ p: isDesktop ? 3 : 2 }}>
-          {/* RADIO */}
-          {permissions.download && availableSummaryTypes.length > 0 && (
-            <Paper sx={{ p: 2, mb: 2 }}>
-              <Stack
-                direction={isDesktop ? "row" : "column"} // Stack inputs on mobile
-                justifyContent="space-between"
-                alignItems={isDesktop ? "center" : "stretch"}
-                flexWrap="wrap"
-                gap={2}
-              >
-                <RadioGroup
-                  row={isDesktop} // Only display in row for desktop
-                  value={summaryType}
-                  onChange={(e) => {
-                    setSummaryType(e.target.value);
-                  }}
-                >
-                  {availableSummaryTypes.includes("BALANCE") && (
-                    <FormControlLabel
-                      value="BALANCE"
-                      control={<Radio />}
-                      label="Balance Compare"
-                      disabled={downloadProgress?.inProgress}
-                    />
-                  )}
-
-                  {availableSummaryTypes.includes("CIBA") && (
-                    <FormControlLabel
-                      value="CIBA"
-                      control={<Radio />}
-                      label="CIBA"
-                      disabled={downloadProgress?.inProgress}
-                    />
-                  )}
-
-                  {availableSummaryTypes.includes("SUSPENSE") && (
-                    <FormControlLabel
-                      value="SUSPENSE"
-                      control={<Radio />}
-                      label="Suspense"
-                      disabled={downloadProgress?.inProgress}
-                    />
-                  )}
-                </RadioGroup>
-
-                <Button
-                  startIcon={<CloudDownloadTwoToneIcon />}
-                  variant="contained"
-                  fullWidth={!isDesktop} // Full width on mobile
-                  onClick={() =>
-                    onDownload(
-                      SUMMARY_FILE_MAP[summaryType],
-                      RECON_RUN_DATE,
-                      processRunId,
-                    )
-                  }
-                  disabled={downloadProgress?.inProgress}
-                >
-                  Download Full Report
-                </Button>
-              </Stack>
-
-              {/* DOWNLOAD PROGRESS */}
-
-              <ProcessReportDownloadProgress
-                downloadProgress={downloadProgress}
-              />
-            </Paper>
-          )}
-
-          {/* TABLE */}
-
-          <Box ref={reportRef}>
-            <DynamicSummaryTable
-              summaryType={summaryType}
-              data={activeSummary}
-            />
-          </Box>
-        </DialogContent>
-
-        {/* FOOTER */}
-
-        {isCurrentDate && safeData && stageWaiting && (
-          <Box
-            sx={{
-              px: isDesktop ? 3 : 2,
-              py: 2,
-              borderTop: 1,
-              borderColor: "divider",
-              display: "flex",
-              flexDirection: isDesktop ? "row" : "column", // Stack buttons vertically on mobile
-              justifyContent: "center",
-              gap: 2,
-            }}
-          >
-            {permissions.reject && (
-              <Button
-                color="error"
-                variant="outlined"
-                startIcon={<GppBadIcon />}
-                onClick={onReject}
-                fullWidth={!isDesktop}
-              >
-                Reject
-              </Button>
-            )}
-
-            {permissions.approve && (
-              <Button
-                color="success"
-                variant="contained"
-                startIcon={<GppGoodIcon />}
-                onClick={onAccept}
-                fullWidth={!isDesktop}
-              >
-                Accept
-              </Button>
-            )}
-          </Box>
-        )}
-      </Dialog>
-    </>
+  const statusOptions = Object.entries(StageStatusConfig).map(
+    ([value, details]) => ({
+      value: Number(value),
+      label: details.label,
+    }),
   );
-};
 
-export default ProcessSummaryDialog;
+  /* =====================================================
+     COLUMNS
+  ===================================================== */
 
-
-
-import React, { useMemo, forwardRef, useState, useEffect } from "react";
-import {
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  TableSortLabel,
-} from "@mui/material";
-import { TABLE_CONFIG } from "../util/ProcessSummaryTableConfig";
-import AssignmentLateOutlinedIcon from "@mui/icons-material/AssignmentLateOutlined";
-import { visuallyHidden } from "@mui/utils";
-
-/* ================= FORMATTERS ================= */
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : num || "—";
-
-/* ================= COMPONENT ================= */
-const DynamicSummaryTable = forwardRef(
-  ({ summaryType = "BALANCE", data }, ref) => {
-    /* ================= SORTING STATE ================= */
-    const [order, setOrder] = useState("asc");
-    const [orderBy, setOrderBy] = useState("");
-
-    /* ================= RESET SORT ON SUMMARY CHANGE ================= */
-    useEffect(() => {
-      setOrder("asc");
-      setOrderBy(summaryType === "BALANCE" ? "HEAD" : "count");
-    }, [summaryType]);
-
-    const config = useMemo(() => {
-      return TABLE_CONFIG[summaryType] || { columns: [], totalFields: [] };
-    }, [summaryType]);
-
-    const handleRequestSort = (property) => {
-      const isAsc = orderBy === property && order === "asc";
-      setOrder(isAsc ? "desc" : "asc");
-      setOrderBy(property);
-    };
-
-    /* ================= MULTI-COLUMN SORTING (1, 2, 3) ================= */
-    const sortedData = useMemo(() => {
-      if (!data || data.length === 0) return [];
-
-      return [...data].sort((a, b) => {
-        for (let i = 0; i < Math.min(config.columns.length, 3); i++) {
-          const colField = config.columns[i].field;
-          const currentOrder = colField === orderBy ? order : "asc";
-
-          let valA = a[colField];
-          let valB = b[colField];
-
-          if (valA === valB) continue;
-
-          const numA = parseFloat(valA);
-          const numB = parseFloat(valB);
-          if (!isNaN(numA) && !isNaN(numB)) {
-            return currentOrder === "asc" ? numA - numB : numB - numA;
-          }
-
-          const strA = String(valA || "").toLowerCase();
-          const strB = String(valB || "").toLowerCase();
-          if (strA < strB) return currentOrder === "asc" ? -1 : 1;
-          if (strA > strB) return currentOrder === "asc" ? 1 : -1;
-        }
-        return 0;
-      });
-    }, [data, order, orderBy, config]);
-
-    /* ================= TOTAL CALCULATION ================= */
-    const totals = useMemo(() => {
-      const result = {};
-      config?.totalFields.forEach((field) => {
-        result[field] =
-          data?.reduce((sum, row) => sum + (Number(row[field]) || 0), 0) || 0;
-      });
-      return result;
-    }, [data, config]);
-
-    if (!config?.columns || config.columns.length === 0) {
-      return (
-        <Box p={2}>
-          <Typography color="text.secondary">No configuration found</Typography>
-        </Box>
-      );
-    }
-
-    return (
-      <TableContainer 
-        component={Paper} 
-        ref={ref} 
-        sx={{ width: "100%", overflowX: "auto" }} // Ensures clean scrollability on mobile
-      >
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              {config.columns.map((col) => (
-                <TableCell
-                  key={col.field}
-                  align={col.align}
-                  sx={{ fontWeight: 700, whiteSpace: "nowrap" }}
-                  sortDirection={orderBy === col.field ? order : false}
-                >
-                  <TableSortLabel
-                    active={orderBy === col.field}
-                    direction={orderBy === col.field ? order : "asc"}
-                    onClick={() => handleRequestSort(col.field)}
-                  >
-                    {col.label}
-                    {orderBy === col.field ? (
-                      <Box component="span" sx={visuallyHidden}>
-                        {order === "desc"
-                          ? "sorted descending"
-                          : "sorted ascending"}
-                      </Box>
-                    ) : null}
-                  </TableSortLabel>
-                </TableCell>
-              ))}
-            </TableRow>
-          </TableHead>
-
-          <TableBody>
-            {sortedData.length > 0 ? (
-              <>
-                {sortedData.map((row, index) => (
-                  <TableRow key={index} hover>
-                    {config.columns.map((col) => (
-                      <TableCell
-                        key={col.field}
-                        align={col.align}
-                        sx={{
-                          whiteSpace: "nowrap", // Prevents text wrap crowding in narrow viewports
-                          ...(col.style || {}),
-                          ...(col.field !== "HEAD" &&
-                            !col.style && {
-                              fontFamily: "monospace",
-                              fontWeight: "bold",
-                            }),
-                        }}
-                      >
-                        {col.align === "right"
-                          ? formatAmount(row[col.field])
-                          : row[col.field] || "—"}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))}
-
-                {config.totalFields.length > 0 && (
-                  <TableRow sx={{ bgcolor: "#f5f5f5" }}>
-                    {config.columns.map((col, index) => {
-                      if (index === 0)
-                        return (
-                          <TableCell key="label" sx={{ whiteSpace: "nowrap" }}>
-                            <b>TOTAL</b>
-                          </TableCell>
-                        );
-                      return (
-                        <TableCell key={col.field} align={col.align} sx={{ whiteSpace: "nowrap" }}>
-                          {totals[col.field] !== undefined ? (
-                            <b>{formatAmount(totals[col.field])}</b>
-                          ) : null}
-                        </TableCell>
-                      );
-                    })}
-                  </TableRow>
-                )}
-              </>
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={config.columns.length}
-                  sx={{ py: 6, textAlign: "center" }}
-                >
-                  <Box
-                    sx={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      opacity: 0.7,
-                    }}
-                  >
-                    <AssignmentLateOutlinedIcon
-                      sx={{
-                        fontSize: 56,
-                        mb: 2,
-                        color: "primary.main",
-                        opacity: 0.4,
-                      }}
-                    />
-                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                      NO SUMMARY DATA
-                    </Typography>
-                  </Box>
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </TableContainer>
-    );
-  },
-);
-
-export default DynamicSummaryTable;
-
-
-import React from "react";
-import {
-  Box,
-  Typography,
-  Fade,
-  LinearProgress,
-  useTheme,
-} from "@mui/material";
-import CloudDownloadTwoToneIcon from "@mui/icons-material/CloudDownloadTwoTone";
-import CustomChip from "../../../utils/CustomChip";
-
-const ProcessReportDownloadProgress = ({ downloadProgress }) => {
-  const theme = useTheme();
-
-  const downloadedMB =
-    downloadProgress?.loadedBytes > 0
-      ? (downloadProgress.loadedBytes / (1024 * 1024)).toFixed(2)
-      : null;
-
-  return (
-    <Fade in={downloadProgress?.inProgress} unmountOnExit>
-      <Box sx={{ mt: 2 }}>
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            flexWrap: "wrap", // Allows wrap on extremely thin phones
-            gap: 2,
-            p: 1.5,
-            mb: 1.5,
-            borderRadius: 2,
-            bgcolor: theme.palette.mode === "light" ? "grey.50" : "grey.800",
-            border: "1px solid",
-            borderColor: "divider",
-          }}
-        >
-          {/* Pulsing Icon Wrapper */}
-          <Box
-            sx={{
-              p: 1,
-              borderRadius: "50%",
-              bgcolor: "primary.main",
-              color: "common.white",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0, // Prevent icon from shrinking
-              boxShadow: `0 0 0 0 ${theme.palette.primary.main}44`,
-              animation: downloadProgress?.inProgress
-                ? "pulse 2s infinite"
-                : "none",
-              "@keyframes pulse": {
-                "0%": {
-                  boxShadow: `0 0 0 0 ${theme.palette.primary.main}66`,
-                },
-                "70%": {
-                  boxShadow: `0 0 0 10px ${theme.palette.primary.main}00`,
-                },
-                "100%": {
-                  boxShadow: `0 0 0 0 ${theme.palette.primary.main}00`,
-                },
-              },
-            }}
-          >
-            <CloudDownloadTwoToneIcon
-              sx={{
-                fontSize: 22,
-                transform: "translateY(1px)",
-              }}
-            />
+  const columns = useMemo(
+    () => [
+      {
+        field: "processType",
+        flex: 1.5,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <MemoryIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Process Name</Typography>
           </Box>
+        ),
+        renderCell: (params) => {
+          const name = params.row.processType;
+          const runId = params.row.runId;
 
-          <Box sx={{ flex: 1, minWidth: "150px" }}>
-            <Typography variant="body2" fontWeight={600} color="text.primary">
-              Downloading Report
+          /* ordinal helper */
+          const getOrdinal = (n) => {
+            const s = ["th", "st", "nd", "rd"];
+            const v = n % 100;
+            return n + (s[(v - 20) % 10] || s[v] || s[0]);
+          };
+
+          return (
+            <Typography variant="body1" component="span">
+              {runId > 1 ? `${name} (${getOrdinal(runId)} run)` : name}
             </Typography>
+          );
+        },
+      },
 
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block" }}
-            >
-              {downloadedMB > 0
-                ? `Streaming content… ${downloadedMB} MB received`
-                : "Establishing connection to report server…"}
+      {
+        field: "status",
+        headerName: "Status",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        type: "singleSelect",
+        valueOptions: statusOptions,
+
+        // Sort logic: alphabetical by Label
+        sortComparator: (v1, v2) => {
+          const label1 = StageStatusConfig[v1]?.label || "";
+          const label2 = StageStatusConfig[v2]?.label || "";
+          return label1.localeCompare(label2);
+        },
+
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AnalyticsIcon sx={{ mr: 0.5, fontSize: "1.1rem" }} />
+            <Typography variant="subtitle2" fontWeight="600">
+              Status
             </Typography>
           </Box>
+        ),
 
-          {downloadedMB > 0 && (
+        // Inline Chip Rendering (No separate component needed)
+        renderCell: (params) => {
+          const config = StageStatusConfig[params.value];
+          if (!config) return null;
+          const Icon = getIconComponent(config.icon);
+          return (
             <CustomChip
-              color="error"
-              label={`${downloadedMB} MB`}
-              variant="filled"
-              sx={{ alignSelf: "center" }}
+              icon={<Icon />}
+              label={config.label}
+              color={config.color}
+              variant="contained"
+              sx={{
+                maxWidth: "100%",
+              }}
             />
-          )}
-        </Box>
+          );
+        },
+      },
 
-        <LinearProgress
-          variant="indeterminate"
-          sx={{
-            height: 8,
-            borderRadius: 4,
-            overflow: "hidden",
-            bgcolor: theme.palette.mode === "light" ? "grey.200" : "grey.800",
-            "& .MuiLinearProgress-bar": {
-              borderRadius: 4,
-              backgroundImage:
-                "linear-gradient(90deg, #42a5f5 0%, #7e57c2 50%, #ffb300 100%)",
-            },
-          }}
-        />
-      </Box>
-    </Fade>
+      {
+        field: "stageTitle",
+        headerName: "Stage",
+        flex: 1.5,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <ApprovalIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Stage</Typography>
+          </Box>
+        ),
+        renderCell: (params) => {
+          const Icon = getIconComponent(params.row?.stageIcon);
+
+          return (
+            <CustomChip
+              label={params.row?.stageTitle}
+              icon={<Icon />}
+              variant="outlined"
+              sx={{
+                maxWidth: "100%",
+                overflow: "hidden",
+                textOverFlow: "ellipsis",
+              }}
+            />
+          );
+        },
+      },
+
+      {
+        field: "startTime",
+        headerName: "Started",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Started</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value)}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "endTime",
+        headerName: "Ended",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <CalendarMonthIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Ended</Typography>
+          </Box>
+        ),
+        renderCell: (p) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{
+              fontSize: "0.9rem",
+            }}
+          >
+            {timeStampFormatter(p.value) || "-"}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.8,
+        headerAlign: "center",
+        align: "center",
+        sortable: false,
+        filterable: false,
+        disableColumnMenu: true,
+        renderHeader: () => (
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            <AppRegistrationIcon sx={{ mr: 0.5 }} />
+            <Typography variant="subtitle1">Actions</Typography>
+          </Box>
+        ),
+
+        renderCell: (params) => {
+          const row = params.row.raw;
+          const isLatest = params.row.isLatestRun;
+
+          const showRestart = isLatest && row.status !== StageStatus.STARTED;
+
+          const showStop = isLatest && row.status === StageStatus.STARTED;
+
+          const nonActionableProcess =
+            row.processId == 7 || row.processId == 12;
+
+          return (
+            <Stack
+              direction="row"
+              spacing={0.5}
+              alignItems="center"
+              justifyContent="center"
+              sx={{ height: "100%", width: "100%" }}
+            >
+              {(permissions.restart || permissions.start) &&
+                isCurrentDate &&
+                showRestart &&
+                !nonActionableProcess && (
+                  <Tooltip title="Restart">
+                    <IconButton
+                      size="small"
+                      onClick={() => actions.onStart(row)}
+                    >
+                      <RestartAltIcon />
+                    </IconButton>
+                  </Tooltip>
+                )}
+
+              {permissions.stop &&
+                isCurrentDate &&
+                showStop &&
+                !nonActionableProcess && (
+                  <Tooltip title="Stop">
+                    <IconButton
+                      size="small"
+                      onClick={() => actions.onStop(row)}
+                      sx={{ p: { xs: 0.5, md: 1 } }}
+                    >
+                      <StopIcon />
+                    </IconButton>
+                  </Tooltip>
+                )}
+
+              {permissions.view && (
+                <Tooltip title="View">
+                  <IconButton
+                    size="small"
+                    onClick={() => actions.onView(row)}
+                    sx={{ p: { xs: 0.5, md: 1 } }}
+                  >
+                    <VisibilityIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
+
+              {permissions.view && params.row.hasSummary && (
+                <Tooltip title="Summary">
+                  <IconButton
+                    size="small"
+                    onClick={() => actions.onSummary(row)}
+                    sx={{ p: { xs: 0.5, md: 1 } }}
+                  >
+                    <SummarizeOutlinedIcon />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </Stack>
+          );
+        },
+      },
+    ],
+    [
+      actions,
+      isCurrentDate,
+      permissions.restart,
+      permissions.start,
+      permissions.stop,
+      permissions.view,
+      statusOptions,
+    ],
+  );
+
+  const filteredColumns = useMemo(() => {
+    if (
+      permissions.start ||
+      permissions.stop ||
+      permissions.restart ||
+      permissions.view
+    ) {
+      return columns;
+    }
+    return columns.filter((c) => c.field !== "actions");
+  }, [columns, permissions]);
+
+  // Reset to page 0 whenever loading changes
+  useEffect(() => {
+    if (loading) {
+      setPaginationModel((prev) => ({
+        ...prev,
+        page: 0,
+      }));
+    }
+  }, [processes, loading]);
+
+  /* =====================================================
+     FINAL RENDER
+  ===================================================== */
+
+  return (
+    <Box
+      sx={{
+        width: "100%",
+        overflowX: "auto",
+
+        "& .MuiDataGrid-root": {
+          minWidth: {
+            xs: 1200,
+            sm: 1200,
+            md: "100%",
+          },
+        },
+
+        "& .MuiDataGrid-columnHeaders": {
+          backgroundColor: "#b4a7d6",
+          fontWeight: 600,
+        },
+
+        "& .MuiDataGrid-row:hover": {
+          backgroundColor: "action.hover",
+        },
+      }}
+    >
+      <DataGrid
+        rows={rows}
+        columns={filteredColumns}
+        pageSizeOptions={[5, 10, 25, 50]}
+        paginationModel={paginationModel}
+        onPaginationModelChange={setPaginationModel}
+        loading={loading}
+        getRowId={(p) => p.id}
+        disableRowSelectionOnClick
+        slots={{
+          noRowsOverlay: () => (
+            <Stack
+              height="100%"
+              alignItems="center"
+              justifyContent="center"
+              spacing={1}
+            >
+              <InfoIcon
+                sx={{
+                  fontSize: 48,
+                  color: "text.secondary",
+                }}
+              />
+
+              <Typography variant="h6">No processes available</Typography>
+
+              <Typography variant="body2">
+                Processes not found for the ETL date.
+              </Typography>
+            </Stack>
+          ),
+        }}
+      />
+    </Box>
   );
 };
 
-export default ProcessReportDownloadProgress;
+export default ProcessStatusTable;
