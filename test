@@ -1,273 +1,1076 @@
-// ProcessSummaryTableConfig.js
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  Paper,
+  Stack,
+  Tab,
+  Tabs,
+  Typography,
+  useTheme,
+} from "@mui/material";
+import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
+import { useMutation } from "@tanstack/react-query";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import CommandPanel from "./components/CommandPanel";
+import UploadScript from "./components/UploadScript";
+import ResultGrid from "./components/ResultGrid";
+import LogsPanel from "./components/LogsPanel";
+import ConfirmDialog from "./components/ConfirmDialog";
+import downloadFile from "../../utils/DownloadUtils";
 
-export const TABLE_CONFIG = {
-  BALANCE: {
-    columns: [
-      { field: "HEAD", label: "HEAD", align: "left" },
-      {
-        field: "Total_no_of_entries",
-        label: "TOTAL ENTRIES",
-        align: "right",
-      },
-      {
-        field: "new_entry",
-        label: "NEW ENTRIES",
-        align: "right",
-      },
-    ],
-    totalFields: ["Total_no_of_entries", "new_entry"],
-  },
+const getSuggestedTableName = (sql) => {
+  if (!sql) return "EXPORT_TABLE";
 
-  CIBA: {
-    columns: [
-      {
-        field: "cgl",
-        label: "CGL",
-        align: "left",
-        style: {
-          fontFamily: "Monospace",
-          letterSpacing: "0.08em",
-          fontWeight: 700,
-        },
-      },
-      { field: "currency", label: "CURRENCY", align: "left" },
-      { field: "amount", label: "AMOUNT", align: "right" },
-    ],
-    totalFields: ["amount"],
-  },
+  const normalized = sql.replace(/\s+/g, " ").trim();
 
-  SUSPENSE: {
-    columns: [
-      {
-        field: "cgl",
-        label: "CGL",
-        align: "left",
-        style: {
-          fontFamily: "Monospace",
-          letterSpacing: "0.08em",
-          fontWeight: 700,
-        },
-      },
-      { field: "currency", label: "CURRENCY", align: "left" },
-      { field: "count", label: "COUNT", align: "right" },
-    ],
-    totalFields: ["count"],
-  },
+  /** FROM table_name */
+  const match = normalized.match(/\bFROM\s+([A-Z0-9_$.]+)/i);
+
+  if (!match?.[1]) {
+    return "EXPORT_TABLE";
+  }
+
+  let tableName = match[1];
+
+  /** Remove schema if present SCHEMA.EMP -> EMP */
+  if (tableName.includes(".")) {
+    tableName = tableName.split(".").pop();
+  }
+
+  return tableName || "EXPORT_TABLE";
 };
 
+const AdminSupport = () => {
+  const theme = useTheme();
+  const { callApi } = useApi();
+  const showSnackbar = useCustomSnackbar();
 
+  const [mainTab, setMainTab] = useState(0);
+  const [outputTab, setOutputTab] = useState(0);
 
-import React, { useMemo, forwardRef, useState, useEffect } from "react";
-import {
-  Table,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableBody,
-  TableContainer,
-  Paper,
-  Typography,
-  Box,
-  TableSortLabel,
-} from "@mui/material";
-import { TABLE_CONFIG } from "../util/ProcessSummaryTableConfig";
-import AssignmentLateOutlinedIcon from "@mui/icons-material/AssignmentLateOutlined";
-import { visuallyHidden } from "@mui/utils";
+  const [query, setQuery] = useState("SELECT * FROM FINCORE_DATE;");
+  const [lastExecutedQuery, setLastExecutedQuery] = useState("");
+  const [jobId, setJobId] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
+  const [lastResponse, setLastResponse] = useState(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-/* ================= FORMATTERS ================= */
-const formatAmount = (num) =>
-  typeof num === "number" ? num.toLocaleString("en-IN") : num || "—";
+  const suggestedTableName = useMemo(
+    () => getSuggestedTableName(lastExecutedQuery),
+    [lastExecutedQuery],
+  );
 
-/* ================= COMPONENT ================= */
-const DynamicSummaryTable = forwardRef(
-  ({ summaryType = "BALANCE", data }, ref) => {
-    /* ================= SORTING STATE ================= */
-    const [order, setOrder] = useState("asc");
-    const [orderBy, setOrderBy] = useState("");
+  const [results, setResults] = useState({
+    rows: [],
+    columns: [],
+    total: 0,
+  });
 
-    /* ================= RESET SORT ON SUMMARY CHANGE ================= */
-    useEffect(() => {
-      setOrder("asc");
-      setOrderBy(summaryType === "BALANCE" ? "HEAD" : "count");
-    }, [summaryType]);
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 10,
+  });
 
-    const config = useMemo(() => {
-      return TABLE_CONFIG[summaryType] || { columns: [], totalFields: [] };
-    }, [summaryType]);
+  const isSelect = useMemo(() => {
+    const q = query.trim().toUpperCase();
+    return q.startsWith("SELECT") || q.startsWith("WITH");
+  }, [query]);
 
-    const handleRequestSort = (property) => {
-      const isAsc = orderBy === property && order === "asc";
-      setOrder(isAsc ? "desc" : "asc");
-      setOrderBy(property);
-    };
+  const resetScreen = () => {
+    setQuery("");
+    setLastExecutedQuery("");
+    setJobId(null);
+    setJobStatus(null);
+    setLastResponse(null);
+    setResults({ rows: [], columns: [], total: 0 });
+    setPaginationModel({ page: 0, pageSize: 10 });
+    setOutputTab(0);
+    showSnackbar("Workspace reset completed", "success");
+  };
 
-    /* ================= MULTI-COLUMN SORTING (1, 2, 3) ================= */
-    const sortedData = useMemo(() => {
-      if (!data || data.length === 0) return [];
+  const { mutate: executeSql, isPending } = useMutation({
+    mutationFn: async ({ sql, page, size }) => {
+      return await callApi(
+        "/TS/admin-support/admin-execute",
+        { sql, page, size },
+        "POST",
+      );
+    },
+    onSuccess: (data) => {
+      setLastResponse(data);
+      if (data?.error) {
+        setOutputTab(1);
+        return;
+      }
+      if (isSelect) {
+        const columns = (data?.columns || []).map((col) => ({
+          field: col.name,
+          headerName: col.name,
+          flex: 1,
+          minWidth: 180,
+        }));
+        setResults({
+          rows: data?.rows || [],
+          columns,
+          total: data?.total || 0,
+        });
+        setOutputTab(0);
+      } else {
+        setOutputTab(1);
+      }
+    },
+    onError: (e) => {
+      setLastResponse({
+        error: true,
+        message: e?.message || "Execution failed",
+      });
+      setOutputTab(1);
+    },
+  });
 
-      return [...data].sort((a, b) => {
-        for (let i = 0; i < Math.min(config.columns.length, 3); i++) {
-          const colField = config.columns[i].field;
-          const currentOrder = colField === orderBy ? order : "asc";
+  const handleExecute = useCallback(
+    (reset = false, customSql = null) => {
+      const targetSql = customSql !== null ? customSql : query;
 
-          let valA = a[colField];
-          let valB = b[colField];
+      if (!targetSql.trim()) {
+        showSnackbar("Enter SQL query to execute", "warning");
+        return;
+      }
 
-          if (valA === valB) continue;
+      setLastExecutedQuery(targetSql);
+      setJobId(null);
+      setJobStatus(null);
+      setLastResponse(null);
 
-          const numA = parseFloat(valA);
-          const numB = parseFloat(valB);
-          if (!isNaN(numA) && !isNaN(numB)) {
-            return currentOrder === "asc" ? numA - numB : numB - numA;
+      const page = reset ? 0 : paginationModel.page;
+      if (reset) setPaginationModel((p) => ({ ...p, page: 0 }));
+
+      executeSql({ sql: targetSql, page, size: paginationModel.pageSize });
+    },
+    [
+      executeSql,
+      paginationModel.page,
+      paginationModel.pageSize,
+      query,
+      showSnackbar,
+    ],
+  );
+
+  const { mutate: exportData, isPending: exportLoading } = useMutation({
+    mutationFn: async ({ sql, exportType, tableName }) => {
+      const payload = {
+        sql,
+        exportType: exportType === "CLIPBOARD" ? "INSERT" : exportType,
+        tableName,
+      };
+
+      return await callApi(
+        "/TS/admin-support/export-data",
+        payload,
+        "POST",
+        "blob",
+      );
+    },
+
+    onSuccess: async (response, variables) => {
+      const exportType = variables.exportType?.toUpperCase();
+
+      /** CLIPBOARD EXPORT */
+      if (exportType === "CLIPBOARD") {
+        try {
+          const text = await response.text();
+
+          if (!text?.trim()) {
+            showSnackbar("No data available to copy", "warning");
+            return;
           }
 
-          const strA = String(valA || "").toLowerCase();
-          const strB = String(valB || "").toLowerCase();
-          if (strA < strB) return currentOrder === "asc" ? -1 : 1;
-          if (strA > strB) return currentOrder === "asc" ? 1 : -1;
+          // Optional safety limit (100 MB)
+          if (text.length > 100_000_000) {
+            showSnackbar(
+              "Clipboard content is too large. Use INSERT export instead.",
+              "warning",
+            );
+            return;
+          }
+
+          await navigator.clipboard.writeText(text);
+
+          showSnackbar("INSERT statements copied to clipboard", "success");
+
+          return;
+        } catch (err) {
+          console.error(err);
+
+          showSnackbar("Failed to copy to clipboard", "error");
+
+          return;
         }
-        return 0;
-      });
-    }, [data, order, orderBy, config]);
+      }
 
-    /* ================= TOTAL CALCULATION ================= */
-    const totals = useMemo(() => {
-      const result = {};
-      config?.totalFields.forEach((field) => {
-        result[field] =
-          data?.reduce((sum, row) => sum + (Number(row[field]) || 0), 0) || 0;
-      });
-      return result;
-    }, [data, config]);
+      /* FILE EXPORT */
+      let format = "csv";
 
-    if (!config?.columns || config.columns.length === 0) {
-      return (
-        <Box p={2}>
-          <Typography color="text.secondary">No configuration found</Typography>
-        </Box>
-      );
+      switch (exportType) {
+        case "EXCEL":
+          format = "xlsx";
+          break;
+
+        case "JSON":
+          format = "json";
+          break;
+
+        case "INSERT":
+          format = "sql";
+          break;
+
+        case "CSV":
+        default:
+          format = "csv";
+          break;
+      }
+
+      console.log("variables >", variables);
+      const filename =
+        variables.tableName?.trim() || getSuggestedTableName(variables.sql);
+
+      console.log("FileName >", filename);
+
+      downloadFile(response, format, filename);
+
+      showSnackbar("Export completed successfully", "success");
+    },
+
+    onError: (e) => {
+      showSnackbar(e?.message || "Export failed", "error");
+    },
+  });
+
+  const handleExport = (exportParams) => {
+    const sql = lastExecutedQuery;
+
+    const exportType = exportParams.exportType;
+
+    const tableName = exportParams.tableName;
+
+    if (!lastExecutedQuery) {
+      showSnackbar("Execute a SELECT query first", "warning");
+      return;
     }
 
-    return (
-      <TableContainer
-        component={Paper}
-        ref={ref}
-        sx={{ width: "100%" }} // Ensures clean scrollability on mobile
+    if (["INSERT", "CLIPBOARD"].includes(exportType) && !tableName?.trim()) {
+      showSnackbar("Table name required", "warning");
+      return;
+    }
+
+    exportData({
+      sql,
+      exportType,
+      tableName,
+    });
+  };
+
+  const handlePaginationChange = (newModel) => {
+    setPaginationModel(newModel);
+
+    const q = lastExecutedQuery.trim().toUpperCase();
+    if (lastExecutedQuery && (q.startsWith("SELECT") || q.startsWith("WITH"))) {
+      executeSql({
+        sql: lastExecutedQuery,
+        page: newModel.page,
+        size: newModel.pageSize,
+      });
+    }
+  };
+
+  const handleUpload = async (file) => {
+    try {
+      if (!file) {
+        showSnackbar("Choose SQL file", "warning");
+        return;
+      }
+      const formData = new FormData();
+      formData.append("file", file);
+      const data = await callApi(
+        "/TS/admin-support/upload-script",
+        formData,
+        "POST",
+        "json",
+        "multipart/form-data",
+      );
+      if (data?.error) {
+        showSnackbar(data.message, "error");
+        return;
+      }
+      setJobId(data.jobId);
+      setOutputTab(1);
+      showSnackbar("Execution started", "success");
+    } catch (e) {
+      showSnackbar(e?.message || "Upload failed", "error");
+    }
+  };
+
+  useEffect(() => {
+    if (!jobId) return;
+    const interval = setInterval(async () => {
+      try {
+        const data = await callApi(
+          `/TS/admin-support/job-status/${jobId}`,
+          {},
+          "GET",
+        );
+        setJobStatus(data);
+        if (data.status === "COMPLETED" || data.status === "FAILED") {
+          clearInterval(interval);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [callApi, jobId]);
+
+  useEffect(() => {
+    const active = jobStatus?.status === "RUNNING";
+    const beforeUnload = (e) => {
+      if (!active) return;
+      e.preventDefault();
+      e.returnValue = "SQL execution is still running.";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [jobStatus]);
+
+  return (
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        p: 2,
+        gap: 1.5,
+      }}
+    >
+      {/* HEADER */}
+      <Paper
+        elevation={0}
+        sx={{
+          px: 3,
+          py: 1,
+          borderBottom: `1px solid ${theme.palette.divider}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          borderRadius: 1,
+        }}
       >
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              {config.columns.map((col) => (
-                <TableCell
-                  key={col.field}
-                  align={col.align}
-                  sx={{ fontWeight: 700, whiteSpace: "nowrap" }}
-                  sortDirection={orderBy === col.field ? order : false}
-                >
-                  <TableSortLabel
-                    active={orderBy === col.field}
-                    direction={orderBy === col.field ? order : "asc"}
-                    onClick={() => handleRequestSort(col.field)}
-                  >
-                    {col.label}
-                    {orderBy === col.field ? (
-                      <Box component="span" sx={visuallyHidden}>
-                        {order === "desc"
-                          ? "sorted descending"
-                          : "sorted ascending"}
-                      </Box>
-                    ) : null}
-                  </TableSortLabel>
-                </TableCell>
-              ))}
-            </TableRow>
-          </TableHead>
+        <Stack direction="row" spacing={2} alignItems="center">
+          <Storage color="primary" />
+          <Box>
+            <Typography
+              variant="subtitle2"
+              fontWeight={800}
+              sx={{ letterSpacing: 0.5 }}
+            >
+              FINCORE ADMIN SUPPORT
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Advanced SQL Console & Script Executor
+            </Typography>
+          </Box>
+        </Stack>
+        <Stack direction="row" spacing={2} flexWrap="wrap">
+          <Button
+            variant="outlined"
+            startIcon={<Refresh />}
+            onClick={resetScreen}
+          >
+            Reset Workspace
+          </Button>
+        </Stack>
+      </Paper>
 
-          <TableBody>
-            {sortedData.length > 0 ? (
-              <>
-                {sortedData.map((row, index) => (
-                  <TableRow key={index} hover>
-                    {config.columns.map((col) => (
-                      <TableCell
-                        key={col.field}
-                        align={col.align}
-                        sx={{
-                          whiteSpace: "nowrap", // Prevents text wrap crowding in narrow viewports
-                          ...(col.style || {}),
-                          ...(col.field !== "HEAD" &&
-                            !col.style && {
-                              fontFamily: "monospace",
-                              fontWeight: "bold",
-                            }),
-                        }}
-                      >
-                        {col.align === "right"
-                          ? formatAmount(row[col.field])
-                          : row[col.field] || "—"}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))}
+      {/* INPUT TABS */}
+      <Paper
+        elevation={0}
+        sx={{
+          borderRadius: 1,
+          overflow: "hidden",
+          border: `1px solid ${theme.palette.divider}`,
+        }}
+      >
+        <Tabs
+          value={mainTab}
+          onChange={(e, v) => {
+            setMainTab(v);
+            setOutputTab(v);
+          }}
+          variant="fullWidth"
+        >
+          <Tab icon={<Terminal />} label="SQL Console" />
+          <Tab icon={<UploadFile />} label="Script Upload" />
+        </Tabs>
+      </Paper>
 
-                {config.totalFields.length > 0 && (
-                  <TableRow sx={{ bgcolor: "#f5f5f5" }}>
-                    {config.columns.map((col, index) => {
-                      if (index === 0)
-                        return (
-                          <TableCell key="label" sx={{ whiteSpace: "nowrap" }}>
-                            <b>TOTAL</b>
-                          </TableCell>
-                        );
-                      return (
-                        <TableCell
-                          key={col.field}
-                          align={col.align}
-                          sx={{ whiteSpace: "nowrap" }}
-                        >
-                          {totals[col.field] !== undefined ? (
-                            <b>{formatAmount(totals[col.field])}</b>
-                          ) : null}
-                        </TableCell>
-                      );
-                    })}
-                  </TableRow>
-                )}
-              </>
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={config.columns.length}
-                  sx={{ py: 6, textAlign: "center" }}
-                >
-                  <Box
-                    sx={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      opacity: 0.7,
-                    }}
-                  >
-                    <AssignmentLateOutlinedIcon
-                      sx={{
-                        fontSize: 56,
-                        mb: 2,
-                        color: "primary.main",
-                        opacity: 0.4,
-                      }}
-                    />
-                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                      NO SUMMARY DATA
-                    </Typography>
-                  </Box>
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </TableContainer>
+      {mainTab === 0 && (
+        <CommandPanel
+          query={query}
+          setQuery={setQuery}
+          onExecute={handleExecute}
+          loading={isPending}
+          onDangerousExecute={() => setConfirmOpen(true)}
+        />
+      )}
+
+      {mainTab === 1 && (
+        <UploadScript
+          onUpload={handleUpload}
+          loading={false}
+          showSnackbar={showSnackbar}
+        />
+      )}
+
+      {/* OUTPUT TABS */}
+      <Paper
+        elevation={0}
+        sx={{
+          flex: 1,
+          borderRadius: 1,
+          overflow: "hidden",
+          border: `1px solid ${theme.palette.divider}`,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
+          <Tab label="Data" />
+          <Tab label="Logs" />
+        </Tabs>
+
+        {outputTab === 0 && (
+          <ResultGrid
+            results={results}
+            loading={isPending}
+            paginationModel={paginationModel}
+            setPaginationModel={handlePaginationChange}
+            onExport={handleExport}
+            exportLoading={exportLoading}
+            suggestedTableName={suggestedTableName}
+          />
+        )}
+
+        {outputTab === 1 && (
+          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
+        )}
+      </Paper>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        onConfirm={() => {
+          setConfirmOpen(false);
+          handleExecute(true);
+        }}
+      />
+    </Box>
+  );
+};
+
+export default AdminSupport;
+=============================================================================================================================
+
+import React, { useMemo, useRef } from "react";
+import {
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  Divider,
+  IconButton,
+  Stack,
+  Tooltip,
+  Typography,
+  useTheme,
+} from "@mui/material";
+import {
+  CleaningServices,
+  ContentCopy,
+  PlayArrow,
+  PlaylistPlay,
+  Terminal,
+  Timer,
+} from "@mui/icons-material";
+import CustomChip from "../../../utils/CustomChip";
+
+const quickCommands = [
+  "SELECT * FROM USERS;",
+  "SELECT * FROM ADMIN_SUPPORT_LOG;",
+  "SELECT * FROM PERMISSIONS;",
+  "SELECT * FROM ROLES;",
+  "SELECT * FROM USER_ROLES;",
+  "SELECT * FROM ROLE_PERMISSIONS;",
+  "SELECT * FROM GL_BALANCE WHERE BALANCE_DATE = TO_DATE('01/04/2026','DD/MM/YYYY');",
+  "SELECT * FROM GL_TRANSACTIONS WHERE TRANSACTION_DATE = TO_DATE('01/04/2026','DD/MM/YYYY');",
+];
+
+const CommandPanel = ({
+  query,
+  setQuery,
+  onExecute,
+  loading,
+  onDangerousExecute,
+}) => {
+  const theme = useTheme();
+
+  // Ref to track the cursor position in the native textarea
+  const inputRef = useRef(null);
+
+  /**
+   * =========================================================
+   * EXTRACT STATEMENT (SQL DEVELOPER LOGIC)
+   * =========================================================
+   */
+  const getStatementAtCursor = () => {
+    if (!inputRef.current || !query) return null;
+
+    const start = inputRef.current.selectionStart;
+    const end = inputRef.current.selectionEnd;
+
+    // 1. If user highlighted specific text, run ONLY the highlighted text
+    if (start !== end) {
+      const selected = query.substring(start, end).trim();
+      if (selected) return selected;
+    }
+
+    // 2. If it's a standard blinking cursor, find the surrounding statement
+    let pos = start;
+
+    // Step backwards past trailing spaces and semicolons to ensure we are "inside" the statement
+    while (
+      pos > 0 &&
+      (query.charAt(pos - 1).match(/\s/) || query.charAt(pos - 1) === ";")
+    ) {
+      pos--;
+    }
+
+    const beforeCursor = query.substring(0, pos);
+    const afterCursor = query.substring(pos);
+
+    const startIdx = beforeCursor.lastIndexOf(";");
+    const endIdx = afterCursor.indexOf(";");
+
+    const startIndex = startIdx === -1 ? 0 : startIdx + 1;
+    const endIndex = endIdx === -1 ? query.length : pos + endIdx;
+
+    const extractedStatement = query.substring(startIndex, endIndex).trim();
+
+    return extractedStatement || null;
+  };
+
+  /**
+   * =========================================================
+   * EXECUTION HANDLERS
+   * =========================================================
+   */
+  const handleRunStatement = () => {
+    const statement = getStatementAtCursor();
+
+    if (!statement) {
+      // Pass empty string to trigger parent's validation warning, preventing full-script fallback
+      onExecute?.(false, "");
+      return;
+    }
+    checkAndExecute(statement);
+  };
+
+  const handleRunScript = () => {
+    if (!query.trim()) {
+      onExecute?.(false, "");
+      return;
+    }
+    checkAndExecute(query);
+  };
+
+  const checkAndExecute = (sqlToRun) => {
+    const q = sqlToRun.trim().toUpperCase();
+    const dangerous = ["DELETE", "DROP", "TRUNCATE", "ALTER"].some((x) =>
+      q.startsWith(x),
     );
-  },
+
+    if (dangerous) {
+      onDangerousExecute?.(sqlToRun);
+    } else {
+      onExecute?.(false, sqlToRun); // Pass the specific extracted SQL
+    }
+  };
+
+  /**
+   * KEYBOARD SHORTCUTS
+   */
+  const handleKeyDown = (e) => {
+    if (e.ctrlKey && e.key === "Enter") {
+      e.preventDefault();
+      handleRunStatement();
+    }
+    if (e.key === "F5") {
+      e.preventDefault();
+      handleRunScript();
+    }
+  };
+
+  const isSelect = useMemo(() => {
+    const q = query.trim().toUpperCase();
+    return q.startsWith("SELECT") || q.startsWith("WITH");
+  }, [query]);
+
+  return (
+    <Box
+      sx={{
+        borderRadius: 3,
+        overflow: "hidden",
+        border: `1px solid ${theme.palette.divider}`,
+        bgcolor: "#0b1120",
+        display: "flex",
+        flexDirection: "column",
+        flex: 1,
+      }}
+    >
+      {/* HEADER BAR */}
+      <Box
+        sx={{
+          px: 2,
+          py: 1.2,
+          bgcolor: "#111827",
+          color: "white",
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          flexWrap="wrap"
+          gap={1}
+        >
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Box
+              sx={{
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                bgcolor: "#22c55e",
+                boxShadow: "0 0 12px #22c55e",
+                animation: "pulse 1.5s infinite",
+                "@keyframes pulse": {
+                  "0%": { opacity: 0.5 },
+                  "50%": { opacity: 1 },
+                  "100%": { opacity: 0.5 },
+                },
+              }}
+            />
+            <Terminal fontSize="small" />
+            <Typography fontWeight={800}>SQL Worksheet</Typography>
+            <Typography
+              variant="caption"
+              sx={{ opacity: 0.7, ml: 2, display: { xs: "none", md: "block" } }}
+            >
+              Ctrl+Enter: Statement | F5: Script
+            </Typography>
+          </Stack>
+
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Tooltip title="Copy SQL">
+              <IconButton
+                size="small"
+                onClick={() => navigator.clipboard.writeText(query)}
+              >
+                <ContentCopy sx={{ color: "white" }} />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title="Clear">
+              <IconButton size="small" onClick={() => setQuery("")}>
+                <CleaningServices sx={{ color: "white" }} />
+              </IconButton>
+            </Tooltip>
+
+            <Divider
+              orientation="vertical"
+              flexItem
+              sx={{ borderColor: "rgba(255,255,255,0.08)", mx: 1 }}
+            />
+
+            <Tooltip title="Run statement at cursor or highlighted text (Ctrl+Enter)">
+              <Button
+                variant="contained"
+                disableElevation
+                startIcon={
+                  loading ? (
+                    <CircularProgress size={16} color="inherit" />
+                  ) : (
+                    <PlayArrow />
+                  )
+                }
+                onClick={handleRunStatement}
+                sx={{
+                  borderRadius: 2,
+                  px: 2,
+                  fontWeight: 700,
+                  background: "linear-gradient(135deg,#10b981,#059669)",
+                  boxShadow: "0 4px 15px rgba(16,185,129,0.25)",
+                  "&:hover": { transform: "translateY(-1px)" },
+                }}
+              >
+                Statement
+              </Button>
+            </Tooltip>
+
+            <Tooltip title="Run entire script (F5)">
+              <Button
+                variant="contained"
+                disableElevation
+                startIcon={
+                  loading ? (
+                    <CircularProgress size={16} color="inherit" />
+                  ) : (
+                    <PlaylistPlay />
+                  )
+                }
+                onClick={handleRunScript}
+                sx={{
+                  borderRadius: 2,
+                  px: 2,
+                  fontWeight: 700,
+                  background: "linear-gradient(135deg,#2563eb,#3b82f6)",
+                  boxShadow: "0 4px 15px rgba(37,99,235,0.25)",
+                  "&:hover": { transform: "translateY(-1px)" },
+                }}
+              >
+                Script
+              </Button>
+            </Tooltip>
+          </Stack>
+        </Stack>
+      </Box>
+
+      {/* QUICK COMMANDS - Fixed visual layout */}
+      <Box
+        sx={{
+          px: 2,
+          py: 1.5,
+          bgcolor: "#0f172a",
+          borderBottom: "1px solid rgba(255,255,255,0.05)",
+        }}
+      >
+        <Stack direction="row" useFlexGap flexWrap="wrap" sx={{ gap: 1 }}>
+          {quickCommands.map((cmd) => (
+            <Chip
+              key={cmd}
+              label={cmd}
+              clickable
+              onClick={() => setQuery(query ? query + "\n\n" + cmd : cmd)}
+              sx={{
+                bgcolor: "rgba(255,255,255,0.06)",
+                color: "white",
+                border: "1px solid rgba(255,255,255,0.1)",
+                "&:hover": { bgcolor: "rgba(255,255,255,0.15)" },
+              }}
+            />
+          ))}
+        </Stack>
+      </Box>
+
+      {/* NATIVE TEXTAREA - Bulletproof rendering */}
+      <Box sx={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <textarea
+          ref={inputRef}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleKeyDown}
+          spellCheck="false"
+          placeholder={`-- Write SQL queries here... \nSELECT * FROM USERS;\nSELECT SYSDATE FROM DUAL;`}
+          style={{
+            flex: 1,
+            width: "100%",
+            minHeight: "350px",
+            padding: "24px",
+            backgroundColor: "#0d1117",
+            color: "#e2e8f0", // Light grey text, guaranteed visible
+            fontFamily: "'Fira Code', 'Courier New', monospace",
+            fontSize: "14px",
+            lineHeight: "1.7",
+            border: "none",
+            outline: "none",
+            resize: "none",
+          }}
+        />
+      </Box>
+
+      {/* FOOTER STATUS */}
+      <Box
+        sx={{
+          px: 2,
+          py: 1,
+          borderTop: "1px solid rgba(255,255,255,0.06)",
+          bgcolor: "#111827",
+        }}
+      >
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          flexWrap="wrap"
+          sx={{ gap: 1 }}
+        >
+          <CustomChip
+            size="small"
+            variant="outlined"
+            label={isSelect ? "Read Mode" : "Mixed Mode"}
+            color={isSelect ? "success" : "info"}
+          />
+          <CustomChip
+            size="small"
+            variant="outlined"
+            label={`${query.length} chars`}
+            sx={{ color: "white", borderColor: "rgba(255,255,255,0.2)" }}
+          />
+          <CustomChip
+            size="small"
+            variant="outlined"
+            label={`${query.split(";").filter((x) => x.trim() && !x.trim().startsWith("--")).length} statements`}
+            sx={{ color: "white", borderColor: "rgba(255,255,255,0.2)" }}
+          />
+          <CustomChip
+            size="small"
+            variant="outlined"
+            icon={<Timer />}
+            label={loading ? "Executing..." : "Ready"}
+            color={loading ? "warning" : "success"}
+          />
+        </Stack>
+      </Box>
+    </Box>
+  );
+};
+
+export default CommandPanel;
+========================================================================================================================================
+import React, { useMemo, useState } from "react";
+import {
+  alpha,
+  Box,
+  Chip,
+  Paper,
+  Stack,
+  Typography,
+  useTheme,
+  Button,
+} from "@mui/material";
+import { AutoAwesome, Storage, TableRows, Download } from "@mui/icons-material";
+import { DataGrid, GridToolbarQuickFilter } from "@mui/x-data-grid";
+
+import ExportDialog from "./ExportDialog";
+
+const CustomToolbar = () => (
+  <Box
+    sx={{
+      p: 1,
+      display: "flex",
+      justifyContent: "flex-end",
+    }}
+  >
+    <GridToolbarQuickFilter />
+  </Box>
 );
 
-export default DynamicSummaryTable;
+const ResultGrid = ({
+  results,
+  loading,
+  paginationModel,
+  setPaginationModel,
+  onExport,
+  exportLoading,
+  suggestedTableName,
+}) => {
+  const theme = useTheme();
+
+  const [exportOpen, setExportOpen] = useState(false);
+
+  const rows = results?.rows || [];
+  const columns = results?.columns || [];
+  const total = results?.total || 0;
+
+  const processedRows = useMemo(() => {
+    return rows.map((row, index) => ({
+      __rowId: row.ID ?? row.id ?? row.RN ?? `${paginationModel.page}-${index}`,
+      ...row,
+    }));
+  }, [rows, paginationModel.page]);
+
+  return (
+    <>
+      <Paper
+        elevation={0}
+        sx={{
+          height: "100%",
+          borderRadius: 1,
+          overflow: "hidden",
+          border: `1px solid ${theme.palette.divider}`,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {/* HEADER */}
+        <Box
+          sx={{
+            px: 2.5,
+            py: 1.5,
+            background: "linear-gradient(135deg,#111827,#1f2937)",
+            color: "white",
+            borderBottom: "1px solid rgba(255,255,255,0.06)",
+          }}
+        >
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            alignItems="center"
+            flexWrap="wrap"
+            gap={1}
+          >
+            <Stack direction="row" spacing={1.5} alignItems="center">
+              <Storage fontSize="small" />
+              <Typography fontWeight={800}>Query Result Grid</Typography>
+            </Stack>
+
+            <Stack
+              direction="row"
+              spacing={1}
+              alignItems="center"
+              flexWrap="wrap"
+            >
+              <Chip
+                size="small"
+                icon={<TableRows color="white" />}
+                label={`${rows.length} Rows`}
+                sx={{
+                  bgcolor: "rgba(255,255,255,0.08)",
+                  color: "white",
+                }}
+              />
+
+              <Chip
+                size="small"
+                icon={<AutoAwesome color="white" />}
+                label={`${columns.length} Columns`}
+                sx={{
+                  bgcolor: "rgba(255,255,255,0.08)",
+                  color: "white",
+                }}
+              />
+
+              <Chip
+                size="small"
+                label={`Total : ${total}`}
+                sx={{
+                  bgcolor: "rgba(255,255,255,0.08)",
+                  color: "white",
+                }}
+              />
+
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={<Download />}
+                disabled={loading || exportLoading || !rows.length}
+                onClick={() => setExportOpen(true)}
+              >
+                Export
+              </Button>
+            </Stack>
+          </Stack>
+        </Box>
+
+        {/* GRID */}
+        <Box
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            overflow: "hidden",
+          }}
+        >
+          <DataGrid
+            rows={processedRows}
+            columns={columns}
+            rowCount={total}
+            loading={loading}
+            disableRowSelectionOnClick
+            paginationMode="server"
+            paginationModel={paginationModel}
+            onPaginationModelChange={setPaginationModel}
+            pageSizeOptions={[10, 25, 50, 100]}
+            getRowId={(row) => row.__rowId}
+            rowHeight={38}
+            columnHeaderHeight={48}
+            slots={{
+              toolbar: CustomToolbar,
+            }}
+            sx={{
+              border: "none",
+              fontSize: 13,
+              bgcolor: "#ffffff",
+
+              "& .MuiDataGrid-columnHeaders": {
+                bgcolor: "#f8fafc",
+                borderBottom: "1px solid #e5e7eb",
+              },
+
+              "& .MuiDataGrid-columnHeaderTitle": {
+                fontWeight: 800,
+                color: "#111827",
+              },
+
+              "& .MuiDataGrid-row:hover": {
+                bgcolor: alpha(theme.palette.primary.main, 0.04),
+              },
+
+              "& .MuiDataGrid-cell": {
+                borderBottom: "1px solid #f1f5f9",
+              },
+
+              "& .MuiDataGrid-footerContainer": {
+                borderTop: "1px solid #e5e7eb",
+                bgcolor: "#fafafa",
+              },
+
+              "& .MuiDataGrid-toolbarContainer": {
+                borderBottom: "1px solid #f1f5f9",
+              },
+
+              "& .MuiDataGrid-cell:focus, & .MuiDataGrid-columnHeader:focus": {
+                outline: "none",
+              },
+
+              "& .MuiDataGrid-cell:focus-within, & .MuiDataGrid-columnHeader:focus-within":
+                {
+                  outline: "none",
+                },
+            }}
+          />
+        </Box>
+      </Paper>
+
+      <ExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        onExport={onExport}
+        loading={exportLoading}
+        suggestedTableName={suggestedTableName}
+      />
+    </>
+  );
+};
+
+export default ResultGrid;
