@@ -1,1004 +1,554 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
+  Alert,
+  AlertTitle,
   Box,
-  Button,
+  Chip,
+  Divider,
+  LinearProgress,
   Paper,
   Stack,
-  Tab,
-  Tabs,
-  Typography,
-  useTheme,
-} from "@mui/material";
-import { Refresh, Storage, Terminal, UploadFile } from "@mui/icons-material";
-import { useMutation } from "@tanstack/react-query";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import CommandPanel from "./components/CommandPanel";
-import UploadScript from "./components/UploadScript";
-import ResultGrid from "./components/ResultGrid";
-import LogsPanel from "./components/LogsPanel";
-import ConfirmDialog from "./components/ConfirmDialog";
-import downloadFile from "../../utils/DownloadUtils";
-
-const getSuggestedTableName = (sql) => {
-  if (!sql) return "EXPORT_TABLE";
-  const normalized = sql.replace(/\s+/g, " ").trim();
-  const match = normalized.match(/\bFROM\s+([A-Z0-9_$.]+)/i);
-
-  if (!match?.[1]) return "EXPORT_TABLE";
-
-  let tableName = match[1];
-  if (tableName.includes(".")) {
-    tableName = tableName.split(".").pop();
-  }
-  return tableName || "EXPORT_TABLE";
-};
-
-const AdminSupport = () => {
-  const theme = useTheme();
-  const { callApi } = useApi();
-  const showSnackbar = useCustomSnackbar();
-
-  const [mainTab, setMainTab] = useState(0);
-  const [outputTab, setOutputTab] = useState(0);
-
-  const [query, setQuery] = useState("SELECT * FROM FINCORE_DATE;");
-  const [lastExecutedQuery, setLastExecutedQuery] = useState("");
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [lastResponse, setLastResponse] = useState(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const suggestedTableName = useMemo(
-    () => getSuggestedTableName(lastExecutedQuery),
-    [lastExecutedQuery],
-  );
-
-  const [results, setResults] = useState({
-    rows: [],
-    columns: [],
-    total: 0,
-  });
-
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 10,
-  });
-
-  const isSelect = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    return q.startsWith("SELECT") || q.startsWith("WITH");
-  }, [query]);
-
-  const resetScreen = () => {
-    setQuery("");
-    setLastExecutedQuery("");
-    setJobId(null);
-    setJobStatus(null);
-    setLastResponse(null);
-    setResults({ rows: [], columns: [], total: 0 });
-    setPaginationModel({ page: 0, pageSize: 10 });
-    setOutputTab(0);
-    showSnackbar("Workspace reset completed", "success");
-  };
-
-  const { mutate: executeSql, isPending } = useMutation({
-    mutationFn: async ({ sql, page, size }) => {
-      return await callApi(
-        "/TS/admin-support/admin-execute",
-        { sql, page, size },
-        "POST",
-      );
-    },
-    onSuccess: (data) => {
-      setLastResponse(data);
-      if (data?.error) {
-        setOutputTab(1);
-        return;
-      }
-      if (isSelect) {
-        const columns = (data?.columns || []).map((col) => ({
-          field: col.name,
-          headerName: col.name,
-          flex: 1,
-          minWidth: 180,
-        }));
-        setResults({
-          rows: data?.rows || [],
-          columns,
-          total: data?.total || 0,
-        });
-        setOutputTab(0);
-      } else {
-        setOutputTab(1);
-      }
-    },
-    onError: (e) => {
-      setLastResponse({
-        error: true,
-        message: e?.message || "Execution failed",
-      });
-      setOutputTab(1);
-    },
-  });
-
-  const handleExecute = useCallback(
-    (reset = false, customSql = null) => {
-      const targetSql = customSql !== null ? customSql : query;
-
-      if (!targetSql.trim()) {
-        showSnackbar("Enter SQL query to execute", "warning");
-        return;
-      }
-
-      setLastExecutedQuery(targetSql);
-      setJobId(null);
-      setJobStatus(null);
-      setLastResponse(null);
-
-      const page = reset ? 0 : paginationModel.page;
-      if (reset) setPaginationModel((p) => ({ ...p, page: 0 }));
-
-      executeSql({ sql: targetSql, page, size: paginationModel.pageSize });
-    },
-    [executeSql, paginationModel, query, showSnackbar],
-  );
-
-  const { mutate: exportData, isPending: exportLoading } = useMutation({
-    mutationFn: async ({ sql, exportType, tableName }) => {
-      const payload = {
-        sql,
-        exportType: exportType === "CLIPBOARD" ? "INSERT" : exportType,
-        tableName,
-      };
-
-      return await callApi(
-        "/TS/admin-support/export-data",
-        payload,
-        "POST",
-        "blob",
-      );
-    },
-    onSuccess: async (response, variables) => {
-      const exportType = variables.exportType?.toUpperCase();
-
-      if (exportType === "CLIPBOARD") {
-        try {
-          const text = await response.text();
-          if (!text?.trim()) {
-            showSnackbar("No data available to copy", "warning");
-            return;
-          }
-          if (text.length > 100_000_000) {
-            showSnackbar(
-              "Clipboard content is too large. Use INSERT export instead.",
-              "warning",
-            );
-            return;
-          }
-          await navigator.clipboard.writeText(text);
-          showSnackbar("INSERT statements copied to clipboard", "success");
-          return;
-        } catch (err) {
-          console.error(err);
-          showSnackbar("Failed to copy to clipboard", "error");
-          return;
-        }
-      }
-
-      let format = "csv";
-      switch (exportType) {
-        case "EXCEL":
-          format = "xlsx";
-          break;
-        case "JSON":
-          format = "json";
-          break;
-        case "INSERT":
-          format = "sql";
-          break;
-        case "CSV":
-        default:
-          format = "csv";
-          break;
-      }
-
-      const filename =
-        variables.tableName?.trim() || getSuggestedTableName(variables.sql);
-
-      downloadFile(response, format, filename);
-      showSnackbar("Export completed successfully", "success");
-    },
-    onError: (e) => {
-      showSnackbar(e?.message || "Export failed", "error");
-    },
-  });
-
-  const handleExport = (exportParams) => {
-    const { exportType, tableName } = exportParams;
-    if (!lastExecutedQuery) {
-      showSnackbar("Execute a SELECT query first", "warning");
-      return;
-    }
-    if (["INSERT", "CLIPBOARD"].includes(exportType) && !tableName?.trim()) {
-      showSnackbar("Table name required", "warning");
-      return;
-    }
-    exportData({ sql: lastExecutedQuery, exportType, tableName });
-  };
-
-  const handlePaginationChange = (newModel) => {
-    setPaginationModel(newModel);
-    const q = lastExecutedQuery.trim().toUpperCase();
-    if (lastExecutedQuery && (q.startsWith("SELECT") || q.startsWith("WITH"))) {
-      executeSql({
-        sql: lastExecutedQuery,
-        page: newModel.page,
-        size: newModel.pageSize,
-      });
-    }
-  };
-
-  const handleUpload = async (file) => {
-    try {
-      if (!file) {
-        showSnackbar("Choose SQL file", "warning");
-        return;
-      }
-      const formData = new FormData();
-      formData.append("file", file);
-      const data = await callApi(
-        "/TS/admin-support/upload-script",
-        formData,
-        "POST",
-        "json",
-        "multipart/form-data",
-      );
-      if (data?.error) {
-        showSnackbar(data.message, "error");
-        return;
-      }
-      setJobId(data.jobId);
-      setOutputTab(1);
-      showSnackbar("Execution started", "success");
-    } catch (e) {
-      showSnackbar(e?.message || "Upload failed", "error");
-    }
-  };
-
-  useEffect(() => {
-    if (!jobId) return;
-    const interval = setInterval(async () => {
-      try {
-        const data = await callApi(
-          `/TS/admin-support/job-status/${jobId}`,
-          {},
-          "GET",
-        );
-        setJobStatus(data);
-        if (data.status === "COMPLETED" || data.status === "FAILED") {
-          clearInterval(interval);
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [callApi, jobId]);
-
-  useEffect(() => {
-    const active = jobStatus?.status === "RUNNING";
-    const beforeUnload = (e) => {
-      if (!active) return;
-      e.preventDefault();
-      e.returnValue = "SQL execution is still running.";
-    };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [jobStatus]);
-
-  return (
-    <Box
-      sx={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden", // Prevents whole-page scrolling, lets inner panels scroll
-        p: { xs: 1, sm: 2 },
-        gap: 1.5,
-      }}
-    >
-      {/* HEADER */}
-      <Paper
-        elevation={0}
-        sx={{
-          px: { xs: 2, md: 3 },
-          py: { xs: 1.5, md: 1 },
-          borderBottom: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          flexDirection: { xs: "column", sm: "row" }, // Responsive stack
-          alignItems: { xs: "flex-start", sm: "center" },
-          justifyContent: "space-between",
-          borderRadius: 1,
-          gap: 1.5,
-        }}
-      >
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Storage color="primary" />
-          <Box>
-            <Typography
-              variant="subtitle2"
-              fontWeight={800}
-              sx={{ letterSpacing: 0.5 }}
-            >
-              FINCORE ADMIN SUPPORT
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              Advanced SQL Console & Script Executor
-            </Typography>
-          </Box>
-        </Stack>
-        <Button
-          variant="outlined"
-          startIcon={<Refresh />}
-          onClick={resetScreen}
-          fullWidth={false} // Allows button to stretch only if needed on mobile
-          sx={{ alignSelf: { xs: "stretch", sm: "auto" } }}
-        >
-          Reset Workspace
-        </Button>
-      </Paper>
-
-      {/* INPUT TABS */}
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-        }}
-      >
-        <Tabs
-          value={mainTab}
-          onChange={(e, v) => {
-            setMainTab(v);
-            setOutputTab(v);
-          }}
-          variant="fullWidth"
-          sx={{
-            "& .MuiTab-root": { minHeight: { xs: 48, md: 56 } },
-          }}
-        >
-          <Tab icon={<Terminal />} iconPosition="start" label="SQL Console" />
-          <Tab icon={<UploadFile />} iconPosition="start" label="Script Upload" />
-        </Tabs>
-      </Paper>
-
-      {mainTab === 0 && (
-        <CommandPanel
-          query={query}
-          setQuery={setQuery}
-          onExecute={handleExecute}
-          loading={isPending}
-          onDangerousExecute={() => setConfirmOpen(true)}
-        />
-      )}
-
-      {mainTab === 1 && (
-        <UploadScript
-          onUpload={handleUpload}
-          loading={false}
-          showSnackbar={showSnackbar}
-        />
-      )}
-
-      {/* OUTPUT TABS */}
-      <Paper
-        elevation={0}
-        sx={{
-          flex: 1,
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          flexDirection: "column",
-          minHeight: { xs: "300px", md: "0" }, // Ensures it doesn't vanish on small screens
-        }}
-      >
-        <Tabs value={outputTab} onChange={(e, v) => setOutputTab(v)}>
-          <Tab label="Data" />
-          <Tab label="Logs" />
-        </Tabs>
-
-        {outputTab === 0 && (
-          <ResultGrid
-            results={results}
-            loading={isPending}
-            paginationModel={paginationModel}
-            setPaginationModel={handlePaginationChange}
-            onExport={handleExport}
-            exportLoading={exportLoading}
-            suggestedTableName={suggestedTableName}
-          />
-        )}
-
-        {outputTab === 1 && (
-          <LogsPanel lastResponse={lastResponse} jobStatus={jobStatus} />
-        )}
-      </Paper>
-
-      <ConfirmDialog
-        open={confirmOpen}
-        onClose={() => setConfirmOpen(false)}
-        onConfirm={() => {
-          setConfirmOpen(false);
-          handleExecute(true);
-        }}
-      />
-    </Box>
-  );
-};
-
-export default AdminSupport;
-
-
-
-
-import React, { useMemo, useRef } from "react";
-import {
-  Box,
-  Button,
-  Chip,
-  CircularProgress,
-  Divider,
-  IconButton,
-  Stack,
-  Tooltip,
   Typography,
   useTheme,
 } from "@mui/material";
 import {
-  CleaningServices,
-  ContentCopy,
-  PlayArrow,
-  PlaylistPlay,
+  CheckCircle,
+  ErrorOutline,
+  Info,
   Terminal,
-  Timer,
+  WarningAmber,
 } from "@mui/icons-material";
 import CustomChip from "../../../utils/CustomChip";
 
-const quickCommands = [
-  "SELECT * FROM USERS;",
-  "SELECT * FROM ADMIN_SUPPORT_LOG;",
-  "SELECT * FROM PERMISSIONS;",
-  "SELECT * FROM ROLES;",
-  "SELECT * FROM USER_ROLES;",
-  "SELECT * FROM ROLE_PERMISSIONS;",
-  "SELECT * FROM GL_BALANCE WHERE BALANCE_DATE = TO_DATE('01/04/2026','DD/MM/YYYY');",
-  "SELECT * FROM GL_TRANSACTIONS WHERE TRANSACTION_DATE = TO_DATE('01/04/2026','DD/MM/YYYY');",
-];
-
-const CommandPanel = ({
-  query,
-  setQuery,
-  onExecute,
-  loading,
-  onDangerousExecute,
-}) => {
+const LogsPanel = ({ lastResponse, jobStatus }) => {
   const theme = useTheme();
-  const inputRef = useRef(null);
+  const [elapsed, setElapsed] = useState(0);
 
-  const getStatementAtCursor = () => {
-    if (!inputRef.current || !query) return null;
+  useEffect(() => {
+    if (!jobStatus?.startedAt) return;
 
-    const start = inputRef.current.selectionStart;
-    const end = inputRef.current.selectionEnd;
-
-    if (start !== end) {
-      const selected = query.substring(start, end).trim();
-      if (selected) return selected;
-    }
-
-    let pos = start;
-    while (
-      pos > 0 &&
-      (query.charAt(pos - 1).match(/\s/) || query.charAt(pos - 1) === ";")
-    ) {
-      pos--;
-    }
-
-    const beforeCursor = query.substring(0, pos);
-    const afterCursor = query.substring(pos);
-
-    const startIdx = beforeCursor.lastIndexOf(";");
-    const endIdx = afterCursor.indexOf(";");
-
-    const startIndex = startIdx === -1 ? 0 : startIdx + 1;
-    const endIndex = endIdx === -1 ? query.length : pos + endIdx;
-
-    const extractedStatement = query.substring(startIndex, endIndex).trim();
-
-    return extractedStatement || null;
-  };
-
-  const handleRunStatement = () => {
-    const statement = getStatementAtCursor();
-    if (!statement) {
-      onExecute?.(false, "");
+    if (jobStatus.status === "COMPLETED" || jobStatus.status === "FAILED") {
+      setElapsed(Number(jobStatus?.elapsedSeconds || 0));
       return;
     }
-    checkAndExecute(statement);
-  };
 
-  const handleRunScript = () => {
-    if (!query.trim()) {
-      onExecute?.(false, "");
-      return;
-    }
-    checkAndExecute(query);
-  };
+    const updateElapsed = () => {
+      const seconds = Math.floor(
+        (Date.now() - Number(jobStatus.startedAt)) / 1000,
+      );
+      setElapsed(seconds > 0 ? seconds : 0);
+    };
 
-  const checkAndExecute = (sqlToRun) => {
-    const q = sqlToRun.trim().toUpperCase();
-    const dangerous = ["DELETE", "DROP", "TRUNCATE", "ALTER"].some((x) =>
-      q.startsWith(x),
-    );
+    updateElapsed();
+    const interval = setInterval(updateElapsed, 1000);
+    return () => clearInterval(interval);
+  }, [
+    jobStatus?.startedAt,
+    jobStatus?.completedAt,
+    jobStatus?.status,
+    jobStatus?.elapsedSeconds,
+  ]);
 
-    if (dangerous) {
-      onDangerousExecute?.(sqlToRun);
-    } else {
-      onExecute?.(false, sqlToRun);
-    }
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.ctrlKey && e.key === "Enter") {
-      e.preventDefault();
-      handleRunStatement();
-    }
-    if (e.key === "F5") {
-      e.preventDefault();
-      handleRunScript();
-    }
-  };
-
-  const isSelect = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    return q.startsWith("SELECT") || q.startsWith("WITH");
-  }, [query]);
-
-  return (
-    <Box
+  const SectionTitle = ({ title }) => (
+    <Typography
+      variant="subtitle2"
       sx={{
-        borderRadius: { xs: 2, md: 3 },
-        overflow: "hidden",
-        border: `1px solid ${theme.palette.divider}`,
-        bgcolor: "#0b1120",
-        display: "flex",
-        flexDirection: "column",
-        flex: 1,
+        fontWeight: 700,
+        mb: 1.5,
+        color: "text.primary",
+        borderLeft: `4px solid ${theme.palette.primary.main}`,
+        pl: 1.2,
       }}
     >
-      {/* HEADER BAR */}
-      <Box
-        sx={{
-          px: { xs: 1.5, md: 2 },
-          py: 1.2,
-          bgcolor: "#111827",
-          color: "white",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-        }}
-      >
-        <Stack
-          direction={{ xs: "column", sm: "row" }}
-          justifyContent="space-between"
-          alignItems={{ xs: "flex-start", sm: "center" }}
-          gap={1.5}
-        >
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Box
-              sx={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                bgcolor: "#22c55e",
-                boxShadow: "0 0 12px #22c55e",
-                animation: "pulse 1.5s infinite",
-                "@keyframes pulse": {
-                  "0%": { opacity: 0.5 },
-                  "50%": { opacity: 1 },
-                  "100%": { opacity: 0.5 },
-                },
-              }}
-            />
-            <Terminal fontSize="small" />
-            <Typography fontWeight={800}>SQL Worksheet</Typography>
-            <Typography
-              variant="caption"
-              sx={{ opacity: 0.7, ml: 2, display: { xs: "none", md: "block" } }}
-            >
-              Ctrl+Enter: Statement | F5: Script
-            </Typography>
-          </Stack>
-
-          <Stack
-            direction="row"
-            spacing={1}
-            alignItems="center"
-            sx={{ width: { xs: "100%", sm: "auto" }, justifyContent: "flex-end" }}
-          >
-            <Tooltip title="Copy SQL">
-              <IconButton
-                size="small"
-                onClick={() => navigator.clipboard.writeText(query)}
-              >
-                <ContentCopy sx={{ color: "white" }} />
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title="Clear">
-              <IconButton size="small" onClick={() => setQuery("")}>
-                <CleaningServices sx={{ color: "white" }} />
-              </IconButton>
-            </Tooltip>
-
-            <Divider
-              orientation="vertical"
-              flexItem
-              sx={{ borderColor: "rgba(255,255,255,0.08)", mx: 1 }}
-            />
-
-            <Tooltip title="Run statement (Ctrl+Enter)">
-              <Button
-                variant="contained"
-                disableElevation
-                startIcon={
-                  loading ? (
-                    <CircularProgress size={16} color="inherit" />
-                  ) : (
-                    <PlayArrow />
-                  )
-                }
-                onClick={handleRunStatement}
-                sx={{
-                  borderRadius: 2,
-                  px: { xs: 1, sm: 2 },
-                  minWidth: { xs: 'auto', sm: 100 },
-                  fontWeight: 700,
-                  background: "linear-gradient(135deg,#10b981,#059669)",
-                  boxShadow: "0 4px 15px rgba(16,185,129,0.25)",
-                  "&:hover": { transform: "translateY(-1px)" },
-                }}
-              >
-                {/* Hide text on very small screens to save space */}
-                <Box component="span" sx={{ display: { xs: 'none', sm: 'block' } }}>Statement</Box>
-              </Button>
-            </Tooltip>
-
-            <Tooltip title="Run script (F5)">
-              <Button
-                variant="contained"
-                disableElevation
-                startIcon={
-                  loading ? (
-                    <CircularProgress size={16} color="inherit" />
-                  ) : (
-                    <PlaylistPlay />
-                  )
-                }
-                onClick={handleRunScript}
-                sx={{
-                  borderRadius: 2,
-                  px: { xs: 1, sm: 2 },
-                  minWidth: { xs: 'auto', sm: 100 },
-                  fontWeight: 700,
-                  background: "linear-gradient(135deg,#2563eb,#3b82f6)",
-                  boxShadow: "0 4px 15px rgba(37,99,235,0.25)",
-                  "&:hover": { transform: "translateY(-1px)" },
-                }}
-              >
-                <Box component="span" sx={{ display: { xs: 'none', sm: 'block' } }}>Script</Box>
-              </Button>
-            </Tooltip>
-          </Stack>
-        </Stack>
-      </Box>
-
-      {/* QUICK COMMANDS */}
-      <Box
-        sx={{
-          px: { xs: 1.5, md: 2 },
-          py: 1.5,
-          bgcolor: "#0f172a",
-          borderBottom: "1px solid rgba(255,255,255,0.05)",
-        }}
-      >
-        <Stack direction="row" useFlexGap flexWrap="wrap" sx={{ gap: 1 }}>
-          {quickCommands.map((cmd) => (
-            <Chip
-              key={cmd}
-              label={cmd}
-              clickable
-              onClick={() => setQuery(query ? query + "\n\n" + cmd : cmd)}
-              sx={{
-                bgcolor: "rgba(255,255,255,0.06)",
-                color: "white",
-                border: "1px solid rgba(255,255,255,0.1)",
-                "&:hover": { bgcolor: "rgba(255,255,255,0.15)" },
-                maxWidth: "100%", // Prevent long chips from breaking layout
-              }}
-            />
-          ))}
-        </Stack>
-      </Box>
-
-      {/* TEXTAREA - Replaced native tag with Box component for easy SX responsive styling */}
-      <Box
-        sx={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          minHeight: { xs: "200px", sm: "250px", md: "350px" },
-        }}
-      >
-        <Box
-          component="textarea"
-          ref={inputRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={handleKeyDown}
-          spellCheck="false"
-          placeholder={`-- Write SQL queries here... \nSELECT * FROM USERS;\nSELECT SYSDATE FROM DUAL;`}
-          sx={{
-            flex: 1,
-            width: "100%",
-            height: "100%",
-            padding: { xs: 2, md: 3 },
-            backgroundColor: "#0d1117",
-            color: "#e2e8f0",
-            fontFamily: "'Fira Code', 'Courier New', monospace",
-            fontSize: { xs: "12px", sm: "14px" },
-            lineHeight: "1.7",
-            border: "none",
-            outline: "none",
-            resize: "none",
-          }}
-        />
-      </Box>
-
-      {/* FOOTER STATUS */}
-      <Box
-        sx={{
-          px: { xs: 1.5, md: 2 },
-          py: 1,
-          borderTop: "1px solid rgba(255,255,255,0.06)",
-          bgcolor: "#111827",
-        }}
-      >
-        <Stack
-          direction="row"
-          alignItems="center"
-          useFlexGap
-          flexWrap="wrap"
-          sx={{ gap: 1 }}
-        >
-          <CustomChip
-            size="small"
-            variant="outlined"
-            label={isSelect ? "Read Mode" : "Mixed Mode"}
-            color={isSelect ? "success" : "info"}
-          />
-          <CustomChip
-            size="small"
-            variant="outlined"
-            label={`${query.length} chars`}
-            sx={{ color: "white", borderColor: "rgba(255,255,255,0.2)" }}
-          />
-          <CustomChip
-            size="small"
-            variant="outlined"
-            label={`${query.split(";").filter((x) => x.trim() && !x.trim().startsWith("--")).length} stmt(s)`}
-            sx={{ color: "white", borderColor: "rgba(255,255,255,0.2)" }}
-          />
-          <CustomChip
-            size="small"
-            variant="outlined"
-            icon={<Timer />}
-            label={loading ? "Executing..." : "Ready"}
-            color={loading ? "warning" : "success"}
-          />
-        </Stack>
-      </Box>
-    </Box>
+      {title}
+    </Typography>
   );
-};
 
-export default CommandPanel;
+  const InfoRow = ({ label, value }) => (
+    <Stack direction="row" justifyContent="space-between">
+      <Typography variant="body2" color="text.secondary">
+        {label}
+      </Typography>
+      <Typography variant="body2" fontWeight={600}>
+        {value}
+      </Typography>
+    </Stack>
+  );
 
-
-
-
-import React, { useMemo, useState } from "react";
-import {
-  alpha,
-  Box,
-  Chip,
-  Paper,
-  Stack,
-  Typography,
-  useTheme,
-  Button,
-} from "@mui/material";
-import { AutoAwesome, Storage, TableRows, Download } from "@mui/icons-material";
-import { DataGrid, GridToolbarQuickFilter } from "@mui/x-data-grid";
-
-import ExportDialog from "./ExportDialog";
-
-const CustomToolbar = () => (
-  <Box sx={{ p: 1, display: "flex", justifyContent: "flex-end" }}>
-    <GridToolbarQuickFilter />
-  </Box>
-);
-
-const ResultGrid = ({
-  results,
-  loading,
-  paginationModel,
-  setPaginationModel,
-  onExport,
-  exportLoading,
-  suggestedTableName,
-}) => {
-  const theme = useTheme();
-  const [exportOpen, setExportOpen] = useState(false);
-
-  const rows = results?.rows || [];
-  const columns = results?.columns || [];
-  const total = results?.total || 0;
-
-  const processedRows = useMemo(() => {
-    return rows.map((row, index) => ({
-      __rowId: row.ID ?? row.id ?? row.RN ?? `${paginationModel.page}-${index}`,
-      ...row,
-    }));
-  }, [rows, paginationModel.page]);
-
-  return (
-    <>
-      <Paper
-        elevation={0}
-        sx={{
-          height: "100%",
-          borderRadius: 1,
-          overflow: "hidden",
-          border: `1px solid ${theme.palette.divider}`,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        {/* HEADER */}
-        <Box
-          sx={{
-            px: { xs: 1.5, md: 2.5 },
-            py: 1.5,
-            background: "linear-gradient(135deg,#111827,#1f2937)",
-            color: "white",
-            borderBottom: "1px solid rgba(255,255,255,0.06)",
-          }}
-        >
-          <Stack
-            direction={{ xs: "column", sm: "row" }}
-            justifyContent="space-between"
-            alignItems={{ xs: "flex-start", sm: "center" }}
-            gap={1.5}
-          >
-            <Stack direction="row" spacing={1.5} alignItems="center">
-              <Storage fontSize="small" />
-              <Typography fontWeight={800}>Query Result Grid</Typography>
-            </Stack>
-
-            <Stack
-              direction="row"
-              spacing={1}
-              alignItems="center"
-              flexWrap="wrap"
-              useFlexGap
-            >
-              <Chip
-                size="small"
-                icon={<TableRows color="white" />}
-                label={`${rows.length} Rows`}
-                sx={{ bgcolor: "rgba(255,255,255,0.08)", color: "white" }}
-              />
-
-              <Chip
-                size="small"
-                icon={<AutoAwesome color="white" />}
-                label={`${columns.length} Cols`}
-                sx={{ bgcolor: "rgba(255,255,255,0.08)", color: "white" }}
-              />
-
-              <Chip
-                size="small"
-                label={`Total: ${total}`}
-                sx={{ bgcolor: "rgba(255,255,255,0.08)", color: "white" }}
-              />
-
-              <Button
-                size="small"
-                variant="contained"
-                startIcon={<Download />}
-                disabled={loading || exportLoading || !rows.length}
-                onClick={() => setExportOpen(true)}
-              >
-                Export
-              </Button>
-            </Stack>
-          </Stack>
-        </Box>
-
-        {/* GRID */}
-        <Box sx={{ flex: 1, minHeight: 400, overflow: "hidden" }}>
-          <DataGrid
-            rows={processedRows}
-            columns={columns}
-            rowCount={total}
-            loading={loading}
-            disableRowSelectionOnClick
-            paginationMode="server"
-            paginationModel={paginationModel}
-            onPaginationModelChange={setPaginationModel}
-            pageSizeOptions={[10, 25, 50, 100]}
-            getRowId={(row) => row.__rowId}
-            rowHeight={38}
-            columnHeaderHeight={48}
-            slots={{ toolbar: CustomToolbar }}
-            sx={{
-              border: "none",
-              fontSize: { xs: 12, sm: 13 },
-              bgcolor: "#ffffff",
-
-              "& .MuiDataGrid-columnHeaders": {
-                bgcolor: "#f8fafc",
-                borderBottom: "1px solid #e5e7eb",
-              },
-
-              "& .MuiDataGrid-columnHeaderTitle": {
-                fontWeight: 800,
-                color: "#111827",
-              },
-
-              "& .MuiDataGrid-row:hover": {
-                bgcolor: alpha(theme.palette.primary.main, 0.04),
-              },
-
-              "& .MuiDataGrid-cell": {
-                borderBottom: "1px solid #f1f5f9",
-              },
-
-              "& .MuiDataGrid-footerContainer": {
-                borderTop: "1px solid #e5e7eb",
-                bgcolor: "#fafafa",
-              },
-
-              "& .MuiDataGrid-toolbarContainer": {
-                borderBottom: "1px solid #f1f5f9",
-                padding: { xs: 0.5, md: 1 }
-              },
-            }}
-          />
+  if (!lastResponse && !jobStatus) {
+    return (
+      <Paper elevation={0}>
+        <Box p={3}>
+          <Alert severity="info">
+            <AlertTitle>Waiting for execution</AlertTitle>
+            Execute SQL query or upload script to view logs.
+          </Alert>
         </Box>
       </Paper>
+    );
+  }
 
-      <ExportDialog
-        open={exportOpen}
-        onClose={() => setExportOpen(false)}
-        onExport={onExport}
-        loading={exportLoading}
-        suggestedTableName={suggestedTableName}
-      />
-    </>
+  const processed = Number(jobStatus?.processedCount || 0);
+  const executed = Number(jobStatus?.executedCount || 0);
+  const total = Number(jobStatus?.totalStatements || 0);
+  const progress = Number(jobStatus?.progress || 0);
+  const pending = Math.max(total - executed, 0);
+  const currentSpeed = Number(jobStatus?.executionSpeed || 0);
+
+  return (
+    <Paper elevation={0} sx={{ borderRadius: 1, overflow: "hidden" }}>
+      <Box
+        sx={{
+          px: 2.5,
+          py: 1.5,
+          background: "linear-gradient(135deg,#111827,#1f2937)",
+          color: "white",
+        }}
+      >
+        <Stack direction="row" justifyContent="space-between">
+          <Stack direction="row" spacing={1}>
+            <Terminal fontSize="small" />
+            <Typography fontWeight={800}>Execution Logs</Typography>
+          </Stack>
+
+          {jobStatus?.status && (
+            <CustomChip
+              size="small"
+              label={jobStatus.status}
+              color={
+                jobStatus.status === "COMPLETED"
+                  ? "success"
+                  : jobStatus.status === "FAILED"
+                    ? "error"
+                    : "warning"
+              }
+            />
+          )}
+        </Stack>
+      </Box>
+
+      <Box
+        sx={{
+          p: 3,
+          bgcolor: theme.palette.background.default,
+          flex: 1,
+          overflow: "auto",
+          minHeight: 400,
+        }}
+      >
+        {jobStatus && (
+          <>
+            <SectionTitle title="Live Execution Status" />
+
+            <Box
+              sx={{
+                mb: 3,
+                p: 2,
+                borderRadius: 2,
+                bgcolor: theme.palette.background.paper,
+                border: `1px solid ${theme.palette.divider}`,
+              }}
+            >
+              <Stack spacing={2}>
+                {/* TOP */}
+                <Stack
+                  direction="row"
+                  justifyContent="space-between"
+                  alignItems="center"
+                  flexWrap="wrap"
+                >
+                  <Typography fontWeight={700}>
+                    Job ID : {jobStatus.jobId}
+                  </Typography>
+
+                  <Chip
+                    size="small"
+                    label={jobStatus.status}
+                    color={
+                      jobStatus.status === "COMPLETED"
+                        ? "success"
+                        : jobStatus.status === "FAILED"
+                          ? "error"
+                          : "warning"
+                    }
+                  />
+                </Stack>
+
+                {/* METRICS */}
+                <Box
+                  sx={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))",
+                    gap: 1.5,
+                  }}
+                >
+                  <Paper variant="outlined" sx={{ p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Processed
+                    </Typography>
+
+                    <Typography fontWeight={700}>
+                      {processed.toLocaleString()}
+                    </Typography>
+                  </Paper>
+
+                  <Paper variant="outlined" sx={{ p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Executed
+                    </Typography>
+
+                    <Typography fontWeight={700}>
+                      {executed.toLocaleString()}
+                    </Typography>
+                  </Paper>
+
+                  <Paper variant="outlined" sx={{ p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Pending
+                    </Typography>
+
+                    <Typography fontWeight={700}>
+                      {pending.toLocaleString()}
+                    </Typography>
+                  </Paper>
+
+                  <Paper variant="outlined" sx={{ p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Speed
+                    </Typography>
+
+                    <Typography fontWeight={700}>{currentSpeed}/sec</Typography>
+                  </Paper>
+
+                  <Paper variant="outlined" sx={{ p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      ETA
+                    </Typography>
+
+                    <Typography fontWeight={700}>
+                      {jobStatus.status === "COMPLETED"
+                        ? "0 sec"
+                        : `${jobStatus.etaSeconds || 0} sec`}
+                    </Typography>
+                  </Paper>
+
+                  <Paper variant="outlined" sx={{ p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Elapsed
+                    </Typography>
+
+                    <Typography fontWeight={700}>{elapsed} sec</Typography>
+                  </Paper>
+                </Box>
+
+                {/* PROGRESS */}
+                <Box mt={1}>
+                  <Stack
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    mb={1}
+                  >
+                    <Typography
+                      variant="body2"
+                      fontWeight={600}
+                      color="text.secondary"
+                    >
+                      Execution Progress
+                    </Typography>
+
+                    <Chip
+                      size="small"
+                      color={
+                        progress === 100
+                          ? "success"
+                          : progress > 70
+                            ? "primary"
+                            : "warning"
+                      }
+                      label={`${progress}%`}
+                      sx={{
+                        fontWeight: 700,
+                      }}
+                    />
+                  </Stack>
+
+                  <Box
+                    sx={{
+                      position: "relative",
+                      height: 14,
+                      borderRadius: 20,
+                      overflow: "hidden",
+                      bgcolor: theme.palette.grey[200],
+                      border: `1px solid ${theme.palette.divider}`,
+                    }}
+                  >
+                    <LinearProgress
+                      variant="determinate"
+                      value={progress}
+                      sx={{
+                        height: "100%",
+                        borderRadius: 20,
+                        bgcolor: "transparent",
+
+                        "& .MuiLinearProgress-bar": {
+                          borderRadius: 20,
+                          background:
+                            progress === 100
+                              ? "linear-gradient(90deg,#22c55e,#16a34a)"
+                              : "linear-gradient(90deg,#2563eb,#3b82f6,#60a5fa)",
+                          transition: "transform .5s ease",
+                        },
+                      }}
+                    />
+
+                    <Box
+                      sx={{
+                        position: "absolute",
+                        inset: 0,
+                        background:
+                          "linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent)",
+                        animation: "progressShine 2s linear infinite",
+                        pointerEvents: "none",
+
+                        "@keyframes progressShine": {
+                          "0%": {
+                            transform: "translateX(-100%)",
+                          },
+                          "100%": {
+                            transform: "translateX(100%)",
+                          },
+                        },
+                      }}
+                    />
+                  </Box>
+
+                  <Stack direction="row" justifyContent="space-between" mt={1}>
+                    <Typography variant="caption" color="text.secondary">
+                      {executed.toLocaleString()} Executed
+                    </Typography>
+
+                    <Typography variant="caption" color="text.secondary">
+                      {pending.toLocaleString()} Pending
+                    </Typography>
+                  </Stack>
+                </Box>
+              </Stack>
+            </Box>
+          </>
+        )}
+
+        {(lastResponse?.error || jobStatus?.status === "FAILED") && (
+          <>
+            <SectionTitle title="Error Log" />
+            <Alert severity="error" variant="outlined" sx={{ mb: 3 }}>
+              <AlertTitle>Execution Failed</AlertTitle>
+              {lastResponse?.message || jobStatus?.message || "Unknown error"}
+
+              {jobStatus?.failedLine && (
+                <>
+                  <Divider sx={{ my: 1 }} />
+                  Failed Line : {jobStatus.failedLine}
+                </>
+              )}
+            </Alert>
+          </>
+        )}
+
+        {jobStatus?.failedSql && (
+          <>
+            <SectionTitle title="Failed SQL Statement" />
+            <Box
+              sx={{
+                p: 2,
+                mb: 3,
+                borderRadius: 2,
+                bgcolor: theme.palette.grey[100],
+              }}
+            >
+              <Typography
+                sx={{
+                  whiteSpace: "pre-wrap",
+                  fontFamily: "Consolas, monospace",
+                  color: theme.palette.error.main,
+                }}
+              >
+                {jobStatus.failedSql}
+              </Typography>
+            </Box>
+          </>
+        )}
+
+        {lastResponse && !lastResponse.error && (
+          <>
+            <SectionTitle title="Execution Result" />
+            <Alert severity="success" variant="outlined" sx={{ mb: 3 }}>
+              <AlertTitle>SQL Executed Successfully</AlertTitle>
+              {lastResponse?.rows?.[0]?.RESULT ||
+                "Execution completed successfully"}
+            </Alert>
+          </>
+        )}
+
+        {jobStatus && (
+          <>
+            <SectionTitle title="Execution Summary" />
+
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <CustomChip
+                color="success"
+                label={`INSERT ${jobStatus.insertCount || 0}`}
+              />
+              <CustomChip
+                color="info"
+                label={`UPDATE ${jobStatus.updateCount || 0}`}
+              />
+              <CustomChip
+                color="error"
+                label={`DELETE ${jobStatus.deleteCount || 0}`}
+              />
+              <CustomChip
+                color="warning"
+                label={`OTHERS ${jobStatus.otherCount || 0}`}
+              />
+            </Stack>
+          </>
+        )}
+
+        {jobStatus?.status === "RUNNING" && (
+          <Alert severity="warning" variant="outlined" sx={{ mt: 3 }}>
+            <AlertTitle>Execution In Progress</AlertTitle>
+            Pending statements : {pending.toLocaleString()}
+          </Alert>
+        )}
+      </Box>
+    </Paper>
   );
 };
 
-export default ResultGrid;
+export default LogsPanel;
+==============================================================================================
+
+import React from "react";
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  Typography,
+} from "@mui/material";
+import { DeleteSweep, WarningAmber } from "@mui/icons-material";
+
+const ConfirmDialog = ({ open, onClose, onConfirm }) => {
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="xs"
+      fullWidth
+      PaperProps={{
+        sx: {
+          borderRadius: 4,
+          overflow: "hidden",
+        },
+      }}
+    >
+      {/* HEADER */}
+      <DialogTitle
+        sx={{
+          p: 0,
+        }}
+      >
+        <Box
+          sx={{
+            px: 3,
+            py: 2,
+            background: "linear-gradient(135deg,#991b1b,#dc2626)",
+            color: "white",
+          }}
+        >
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <WarningAmber />
+            <Typography variant="h6" fontWeight={800}>
+              Dangerous SQL Detected
+            </Typography>
+          </Stack>
+        </Box>
+      </DialogTitle>
+
+      {/* CONTENT */}
+      <DialogContent
+        sx={{
+          pt: "24px !important",
+          pb: 2,
+        }}
+      >
+        <Typography
+          variant="body1"
+          sx={{
+            lineHeight: 1.8,
+          }}
+        >
+          This SQL statement can modify or permanently delete data.
+        </Typography>
+
+        <Box
+          sx={{
+            mt: 2,
+            p: 2,
+            borderRadius: 3,
+            bgcolor: "rgba(239,68,68,0.08)",
+            border: "1px solid rgba(239,68,68,0.2)",
+          }}
+        >
+          <Typography variant="body2" fontWeight={700} color="error">
+            Please verify the query before continuing.
+          </Typography>
+        </Box>
+      </DialogContent>
+
+      {/* ACTIONS */}
+      <DialogActions
+        sx={{
+          px: 3,
+          pb: 3,
+        }}
+      >
+        <Button
+          variant="outlined"
+          onClick={onClose}
+          sx={{
+            borderRadius: 3,
+            px: 3,
+          }}
+        >
+          Cancel
+        </Button>
+
+        <Button
+          variant="contained"
+          color="error"
+          disableElevation
+          startIcon={<DeleteSweep />}
+          onClick={onConfirm}
+          sx={{
+            borderRadius: 3,
+            px: 3,
+            background: "linear-gradient(135deg,#dc2626,#ef4444)",
+            boxShadow: "0 8px 24px rgba(239,68,68,0.35)",
+            "&:hover": {
+              transform: "translateY(-1px)",
+            },
+          }}
+        >
+          Execute Anyway
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default ConfirmDialog;
