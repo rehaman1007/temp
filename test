@@ -1,436 +1,672 @@
--- ==============================================================================
--- DROP PROCEDURES
--- ==============================================================================
-DROP PROCEDURE PROCESS_JOURNAL_BATCH;
-DROP PROCEDURE PURGE_JOURNAL_BATCH;
-DROP PROCEDURE VD_VALIDATE_VOUCHER_DATA;
+package com.fincore.transactions_service.service;
 
--- ==============================================================================
--- DROP TABLES (With Cascade to ignore FK dependencies during drop)
--- ==============================================================================
-DROP TABLE REQUEST_VOUCHER_ISSUE_CATEGORY CASCADE CONSTRAINTS;
-DROP TABLE ISSUE_CATEGORY CASCADE CONSTRAINTS;
-DROP TABLE VOUCHER_WORKFLOW CASCADE CONSTRAINTS;
-DROP TABLE VOUCHER_CATEGORY CASCADE CONSTRAINTS;
-DROP TABLE VOUCHER_POSTING CASCADE CONSTRAINTS;
-DROP TABLE VOUCHER_POSTING_DATA CASCADE CONSTRAINTS;
-DROP TABLE VOUCHER_TRANSACTIONS CASCADE CONSTRAINTS;
-DROP TABLE WORKFLOW_TRANSITIONS CASCADE CONSTRAINTS;
-DROP TABLE REQUEST_VOUCHER CASCADE CONSTRAINTS;
-DROP TABLE SCHEDULED_BATCH_RETRY CASCADE CONSTRAINTS;
-DROP TABLE HDFS_SYNC_RETRY_QUEUE CASCADE CONSTRAINTS;
-DROP TABLE JS_EOD_MASTER CASCADE CONSTRAINTS;
+import com.fincore.transactions_service.dto.AdminSupportDTO;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.IOUtils;
+import org.apache.poi.xssf.streaming.SXSSFSheet;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 
--- ==============================================================================
--- DROP SEQUENCES
--- ==============================================================================
-DROP SEQUENCE JOURNAL_REQUEST_SEQ;
-DROP SEQUENCE VOUCHER_POSTING_DATA_SEQ;
-DROP SEQUENCE WORKFLOWID_SEQ;
-DROP SEQUENCE JRNL_SEQ;
-DROP SEQUENCE REQUEST_VOUCHER_SEQ;
+import java.io.*;
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.poi.ss.usermodel.Row;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AdminSupportServiceImpl implements AdminSupportService {
+
+    private static final int FETCH_SIZE = 20000;
+    private static final int EXCEL_WINDOW_SIZE = 1000;
+    private static final long MAX_EXPORT_LIMIT = 1_000_000;
+
+    private final JdbcTemplate jdbcTemplate;
+    private final AdminSupportExecutor adminSupportExecutor;
+    private final FileSystem hdfsFileSystem;
+
+
+
+    /**
+     * =========================================================
+     * EXECUTE ADMIN SQL (COMMAND CONSOLE)
+     * =========================================================
+     */
+    @Override
+    public Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request) {
+
+        Instant start = Instant.now();
+        String clientIp = getClientIp(request);
+        String rawSql = dto.getSql() == null ? "" : dto.getSql().trim();
+        Map<String, Object> response = new HashMap<>();
+
+        try {
+            log.info("""
+                    
+                    ==================================================
+                    ADMIN SQL EXECUTION STARTED
+                    ==================================================
+                    userId={}
+                    clientIp={}
+                    page={}
+                    size={}
+                    ==================================================
+                    """, userId, clientIp, dto.getPage(), dto.getSize());
+
+            /* CLEAN SQL */
+            rawSql = rawSql.replaceAll(";\\s*$", "").trim();
+
+            List<String> cleanStatements = new ArrayList<>();
+
+            if (isSelectQuery(rawSql)) {
+
+                cleanStatements.add(rawSql);
+
+            } else {
+
+                String[] statements = rawSql.split(";");
+
+                for (String stmt : statements) {
+
+                    String clean = stmt.replaceAll("(?m)^--.*", "").trim();
+
+                    if (!clean.isEmpty()) {
+                        cleanStatements.add(clean);
+                    }
+                }
+            }
+
+            if (cleanStatements.isEmpty()) {
+                response.put("error", true);
+                response.put("message", "SQL cannot be empty");
+                return response;
+            }
+
+            /**
+             * SINGLE SELECT EVALUATION
+             */
+
+            boolean isSingleSelect = cleanStatements.size() == 1 && isSelectQuery(cleanStatements.get(0));
+            int page = dto.getPage() != null ? dto.getPage() : 0;
+            int size = dto.getSize() != null ? dto.getSize() : 10;
+
+            /**
+             * EXECUTE SELECT QUERY
+             */
+            if (isSingleSelect) {
+                String executableSelect = cleanStatements.get(0);
+
+                String countSql = """
+                        SELECT COUNT(*)
+                        FROM (
+                        """ + executableSelect + """
+                        ) CNT
+                        """;
+                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
+
+                if (total == null) total = 0;
+
+                int startRow = page * size;
+                int endRow = startRow + size;
+
+
+                String paginatedSql = executableSelect.trim() +
+                        " OFFSET ? ROWS FETCH NEXT ? ROWS ONLY";
+
+                List<Map<String, String>> columns = new ArrayList<>();
+                List<Map<String, Object>> rawRows = new ArrayList<>();
+
+                jdbcTemplate.query(paginatedSql, rs -> {
+
+                    ResultSetMetaData metaData = rs.getMetaData();
+                    int columnCount = metaData.getColumnCount();
+
+                    if (columns.isEmpty()) {
+
+                        for (int i = 1; i <= columnCount; i++) {
+                            columns.add(Map.of("name", metaData.getColumnLabel(i)));
+                        }
+                    }
+
+                    while (rs.next()) {
+
+                        Map<String, Object> row = new LinkedHashMap<>();
+
+                        for (int i = 1; i <= columnCount; i++) {
+                            row.put(metaData.getColumnLabel(i), rs.getObject(i));
+                        }
+
+                        rawRows.add(row);
+                    }
+
+                    return null;
+                }, startRow, size);
+
+                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
+
+                response.put("error", false);
+                response.put("columns", columns);
+                response.put("rows", rows);
+                response.put("total", total);
+                response.put("page", page);
+                response.put("size", size);
+
+                adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", 1, 1, 1, 0, 0, 0, 1, null, null, null, null, 1, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+                return response;
+            }
+
+
+            /**
+             * EXECUTE DML/DDL COMMANDS
+             */
+            int successCount = 0;
+            int insertCount = 0, updateCount = 0, deleteCount = 0, otherCount = 0;
+
+            for (int i = 0; i < cleanStatements.size(); i++) {
+                String sql = cleanStatements.get(i);
+
+                try {
+                    jdbcTemplate.execute(sql);
+                    successCount++;
+                    String upperSql = sql.toUpperCase();
+
+                    if (upperSql.startsWith("INSERT")) insertCount++;
+                    else if (upperSql.startsWith("UPDATE")) updateCount++;
+                    else if (upperSql.startsWith("DELETE")) deleteCount++;
+                    else otherCount++;
+
+                } catch (Exception e) {
+                    adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", cleanStatements.size(), successCount, successCount, insertCount, updateCount, deleteCount, otherCount, i + 1, sql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+                    response.put("error", true);
+                    response.put("message", "Error at statement " + (i + 1) + " : " + e.getMessage());
+                    response.put("failedSql", sql);
+                    return response;
+                }
+            }
+
+            response.put("error", false);
+            response.put("message", "Script executed successfully");
+            response.put("rows", List.of(Map.of("RESULT", successCount + " statements executed successfully")));
+            response.put("columns", List.of(Map.of("name", "RESULT")));
+            response.put("total", 1);
+
+            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", successCount, successCount, successCount, insertCount, updateCount, deleteCount, otherCount, null, null, null, null, successCount, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("ADMIN SQL EXECUTION FAILED", e);
+            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", 0, 0, 0, 0, 0, 0, 0, null, rawSql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+
+            response.put("error", true);
+            response.put("message", e.getMessage());
+            return response;
+        }
+    }
+
+
+    /**
+     * =========================================================
+     * EXPORT EXECUTED SQL COMMAND
+     * =========================================================
+     */
+    @Override
+    public ResponseEntity<Resource> exportData(AdminSupportDTO dto, String userId, HttpServletRequest request) {
+
+        String sql = dto.getSql().trim();
+
+        if (!isSelectQuery(sql)) {
+            throw new RuntimeException("Only SELECT/CTE queries can be exported");
+        }
+
+        long count = validateExportLimit(sql);
+
+        log.info("""
+                ==================================
+                EXPORT STARTED
+                ==================================
+                user={}
+                type={}
+                rows={}
+                ==================================
+                """, userId, dto.getExportType(), count);
+
+        return switch (dto.getExportType().toUpperCase()) {
+
+            case "EXCEL" -> exportExcel(sql);
+
+            case "JSON" -> exportJson(sql);
+
+            case "INSERT" -> exportInsert(dto);
+
+            default -> exportCsv(sql);
+        };
+    }
+
+
+
+    /**
+     * =========================================================
+     * UPLOAD & EXECUTE SQL FILE
+     * =========================================================
+     */
+    @Override
+    public Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request) {
+
+        Map<String, Object> response = new HashMap<>();
+        String basePathStr = "/admin-support";
+        Path basePath = new Path(basePathStr);
+
+        try {
+            String jobId = UUID.randomUUID().toString();
+            String originalFilename = file.getOriginalFilename();
+            log.info("Receiving SQL Script: {}", originalFilename);
+
+            String baseName = originalFilename.substring(0, originalFilename.lastIndexOf('.'));
+            String extension = originalFilename.substring(originalFilename.lastIndexOf('.'));
+
+            File tempFile = File.createTempFile(baseName, extension);
+            String hdfsFilename = baseName + "_" + jobId + extension;
+            Path filePath = new Path(basePath, hdfsFilename);
+
+            // Transfer multipart payload to physical temp file
+            file.transferTo(tempFile);
+
+            // 1. BACKUP TO HDFS SYNCHRONOUSLY FIRST
+            if (!hdfsFileSystem.exists(basePath)) {
+                hdfsFileSystem.mkdirs(basePath);
+            }
+            try (InputStream in = new FileInputStream(tempFile); FSDataOutputStream out = hdfsFileSystem.create(filePath)) {
+                IOUtils.copyBytes(in, out, 4096, true);
+            } catch (Exception hdfsEx) {
+                log.error("HDFS Backup failed, but proceeding with execution", hdfsEx);
+            }
+
+
+            log.info("HDFS Backup Success and proceeding with execution");
+            log.info("HDFS Filename: {}", hdfsFilename);
+            log.info("HDFS filePath: {}", filePath);
+
+            // 2. PASS TO ASYNC EXECUTOR
+            // We NO LONGER delete the file in a finally block here.
+            // The AdminSupportExecutor is now responsible for deleting it after processing completes.
+            adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, getClientIp(request), hdfsFilename);
+
+            response.put("jobId", jobId);
+            response.put("status", "STARTED");
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("Failed to initialize script upload process", e);
+            response.put("error", true);
+            response.put("message", e.getMessage());
+            return response;
+        }
+    }
+
+    /**
+     * =========================================================
+     * GET LIVE JOB STATUS
+     * =========================================================
+     */
+    @Override
+    public Map<String, Object> getJobStatus(String jobId) {
+        Map<String, Object> status = AdminSupportExecutor.JOB_STATUS.get(jobId);
+        if (status == null) {
+            return Map.of("status", "NOT_FOUND");
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.putAll(status);
+        return response;
+    }
+
+    /**
+     * =========================================================
+     * EXTRACT CLIENT IP
+     * =========================================================
+     */
+    private String getClientIp(HttpServletRequest request) {
+        String xfHeader = request.getHeader("X-Forwarded-For");
+        if (xfHeader == null || xfHeader.isEmpty() || "unknown".equalsIgnoreCase(xfHeader)) {
+            return request.getRemoteAddr();
+        }
+        return xfHeader.split(",")[0];
+    }
+
+    /**
+     * =========================================================
+     * Check SELECT Query
+     * =========================================================
+     */
+    private boolean isSelectQuery(String sql) {
+        if (sql == null || sql.isBlank()) {
+            return false;
+        }
+        String normalized = sql.trim().toUpperCase();
+        return normalized.startsWith("SELECT") || normalized.startsWith("WITH");
+    }
+
+    /**
+     * =========================================================
+     * Validating Export Limit
+     * =========================================================
+     */
+    private long validateExportLimit(String sql) {
+
+        String countSql = """
+                SELECT COUNT(*)
+                FROM (
+                """ + sql + """
+                ) CNT
+                """;
+        Long count = jdbcTemplate.queryForObject(countSql, Long.class);
+
+        if (count == null) {
+            count = 0L;
+        }
+
+        if (count > MAX_EXPORT_LIMIT) {
+            throw new RuntimeException("Export limit exceeded. Maximum " + MAX_EXPORT_LIMIT + " rows allowed.");
+        }
+
+        return count;
+    }
+
+    /**
+     * =========================================================
+     * Build INSERT statements
+     * =========================================================
+     */
+    private String buildInsertStatement(String tableName, ResultSet rs) throws Exception {
+
+        ResultSetMetaData meta = rs.getMetaData();
+        StringBuilder columns = new StringBuilder();
+        StringBuilder values = new StringBuilder();
+
+        int count = meta.getColumnCount();
+
+        for (int i = 1; i <= count; i++) {
+            String column = meta.getColumnName(i);
+            String columnType = meta.getColumnTypeName(i);
+
+            Object value = rs.getObject(i);
+            columns.append(column);
+
+            if (value == null) {
+                values.append("NULL");
+            } else if (columnType.equalsIgnoreCase("NUMBER") ||
+                    columnType.equalsIgnoreCase("INTEGER") ||
+                    columnType.equalsIgnoreCase("FLOAT") ||
+                    columnType.equalsIgnoreCase("BINARY_FLOAT") ||
+                    columnType.equalsIgnoreCase("BINARY_DOUBLE")) {
+
+                values.append(value.toString());
+
+            } else if (columnType.contains("TIMESTAMP")) {
+
+                Timestamp ts = rs.getTimestamp(i);
+                String formatted = ts.toLocalDateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+                values.append("TO_TIMESTAMP('").append(formatted).append("','YYYY-MM-DD HH24:MI:SS')");
+
+            } else if ("DATE".equalsIgnoreCase(columnType)) {
+
+                Date date = rs.getDate(i);
+                values.append("TO_DATE('").append(date).append("','YYYY-MM-DD')");
+
+            } else {
+
+                values.append("'").append(value.toString().replace("'", "''")).append("'");
+            }
+
+            if (i < count) {
+                columns.append(",");
+                values.append(",");
+            }
+        }
+        return "INSERT INTO " + tableName + " (" + columns + ") VALUES (" + values + ");";
+    }
+
+
+    /**
+     * =========================================================
+     * Exporting data to INSERT (.sql File)
+     * =========================================================
+     */
+    private ResponseEntity<Resource> exportInsert(AdminSupportDTO dto) {
+
+        String tableName = dto.getTableName();
+
+        if (tableName == null || tableName.isBlank()) {
+            throw new RuntimeException("tableName is mandatory for INSERT export");
+        }
+
+        StringBuilder script = new StringBuilder();
+
+        jdbcTemplate.query(
+
+                connection -> {
+                    var ps = connection.prepareStatement(dto.getSql());
+                    ps.setFetchSize(FETCH_SIZE);
+                    return ps;
+                },
+
+                rs -> {
+                    try {
+                        script.append(buildInsertStatement(tableName, rs)).append("\n");
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+        byte[] bytes = script.toString().getBytes(StandardCharsets.UTF_8);
+
+        return downloadFile(bytes, tableName + ".sql", MediaType.TEXT_PLAIN_VALUE);
+    }
+
+
+    /**
+     * =========================================================
+     * Exporting data to Excel
+     * =========================================================
+     */
+    private ResponseEntity<Resource> exportExcel(String sql) {
+
+        try (
+                SXSSFWorkbook workbook = new SXSSFWorkbook(EXCEL_WINDOW_SIZE);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()
+        ) {
+
+            workbook.setCompressTempFiles(true);
+            SXSSFSheet sheet = workbook.createSheet("Export");
+            AtomicInteger rowNum = new AtomicInteger(0);
+
+            jdbcTemplate.query(
+
+                    connection -> {
+                        var ps = connection.prepareStatement(sql);
+                        ps.setFetchSize(FETCH_SIZE);
+                        return ps;
+                    },
+
+                    rs -> {
+                        ResultSetMetaData meta = rs.getMetaData();
+                        int cols = meta.getColumnCount();
+
+                        if (rowNum.get() == 0) {
+                            Row header = sheet.createRow(0);
+                            for (int i = 1; i <= cols; i++) {
+                                header.createCell(i - 1).setCellValue(meta.getColumnLabel(i));
+                            }
+                            rowNum.incrementAndGet();
+                        }
+
+                        Row row = sheet.createRow(rowNum.getAndIncrement());
+
+                        for (int i = 1; i <= cols; i++) {
+                            Object value = rs.getObject(i);
+                            row.createCell(i - 1).setCellValue(value == null ? "" : value.toString());
+                        }
+
+                        if (rowNum.get() % 5000 == 0) {
+                            try {
+                                sheet.flushRows(500);
+                            } catch (IOException e) {
+                                throw new RuntimeException(e);
+                            }
+                        }
+                    });
+
+            workbook.write(out);
+            workbook.dispose();
+
+            return downloadFile(out.toByteArray(), "export.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+
+        } catch (Exception e) {
+            throw new RuntimeException("Excel export failed", e);
+        }
+    }
+
+
+    /**
+     * =========================================================
+     * Exporting data to JSON
+     * =========================================================
+     */
+    private ResponseEntity<Resource> exportJson(String sql) {
+
+        try {
+
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+
+            ObjectMapper mapper = new ObjectMapper();
+
+            byte[] bytes = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(rows);
+
+            return downloadFile(bytes, "export.json", MediaType.APPLICATION_JSON_VALUE);
+
+        } catch (Exception e) {
+
+            throw new RuntimeException(e);
+        }
+    }
+
+
+    /**
+     * =========================================================
+     * Exporting data to CSV
+     * =========================================================
+     */
+    private ResponseEntity<Resource> exportCsv(String sql) {
+
+        StringBuilder csv = new StringBuilder(1024 * 1024);
+        final boolean[] headerWritten = {false};
+
+        jdbcTemplate.query(
+
+                connection -> {
+                    var ps = connection.prepareStatement(sql);
+                    ps.setFetchSize(FETCH_SIZE);
+                    return ps;
+                },
+
+                rs -> {
+
+                    ResultSetMetaData meta = rs.getMetaData();
+                    int cols = meta.getColumnCount();
+
+                    /* HEADER */
+                    if (!headerWritten[0]) {
+                        for (int i = 1; i <= cols; i++) {
+                            if (i > 1) {
+                                csv.append(",");
+                            }
+                            csv.append(csvEscape(meta.getColumnLabel(i)));
+                        }
+                        csv.append("\n");
+                        headerWritten[0] = true;
+                    }
+
+                    /* DATA */
+                    for (int i = 1; i <= cols; i++) {
+                        if (i > 1) {
+                            csv.append(",");
+                        }
+                        csv.append(csvEscape(rs.getObject(i)));
+                    }
+
+                    csv.append("\n");
+                });
+
+        return downloadFile(csv.toString().getBytes(StandardCharsets.UTF_8), "export.csv", "text/csv");
+    }
+
+
+    /**
+     * =========================================================
+     * Helper Method for Exporting data to CSV
+     * =========================================================
+     */
+    private String csvEscape(Object value) {
+
+        if (value == null) {
+            return "";
+        }
+
+        String text = value.toString();
+
+        if (text.contains(",")
+                || text.contains("\"")
+                || text.contains("\n")
+                || text.contains("\r")) {
+
+            text = text.replace("\"", "\"\"");
+
+            return "\"" + text + "\"";
+        }
+
+        return text;
+    }
+
+
+    /**
+     * =========================================================
+     * Download File Helper
+     * =========================================================
+     */
+    private ResponseEntity<Resource> downloadFile(byte[] data, String fileName, String contentType) {
+        ByteArrayResource resource = new ByteArrayResource(data);
+        return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName).contentLength(data.length).contentType(MediaType.parseMediaType(contentType)).body(resource);
+    }
 
 
 
 
-SET DEFINE OFF;
 
--- ==============================================================================
--- 1. SEQUENCES
--- ==============================================================================
-CREATE SEQUENCE "JOURNAL_REQUEST_SEQ" MINVALUE 1 MAXVALUE 999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 1000 NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
-CREATE SEQUENCE "VOUCHER_POSTING_DATA_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 NOCACHE NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
-CREATE SEQUENCE "WORKFLOWID_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 ORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
-CREATE SEQUENCE "JRNL_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
-
--- [FIX: Added missing sequence required for REQUEST_VID_TRIGGER]
-CREATE SEQUENCE "REQUEST_VOUCHER_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
-
--- ==============================================================================
--- 2. INDEPENDENT TABLES (No Foreign Keys pointing outside)
--- ==============================================================================
-CREATE TABLE "VOUCHER_CATEGORY" ( 
-    "ID" NUMBER GENERATED BY DEFAULT AS IDENTITY MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE NOT NULL ENABLE, 
-    "CATEGORY_NAME" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
-    "CREATED_DATE" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY ("ID"),
-    UNIQUE ("CATEGORY_NAME")
-);
-
-CREATE TABLE "VOUCHER_POSTING" ( 
-    "BATCH_ID" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
-    "VID_FK" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
-    "WORKFLOW_CODE" VARCHAR2(100 BYTE), 
-    "CREATED_BY" VARCHAR2(100 BYTE), 
-    "CREATED_AT" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP, 
-    "PENDING_AT" NUMBER, 
-    "IS_EXECUTION_SCHEDULED" VARCHAR2(3 BYTE), 
-    "SCHEDULED_TIME" TIMESTAMP (6), 
-    "IS_SCHEDULE_OVERRIDE" VARCHAR2(3 BYTE), 
-    "EXECUTED_AT" TIMESTAMP (6), 
-    "BATCH_STATUS" VARCHAR2(20 BYTE), 
-    "RECORDS_COUNT" NUMBER, 
-    "COMMON_BATCH_REMARKS" VARCHAR2(30 CHAR), 
-    "CREATOR_ROLE" NUMBER(10,0), 
-    "EXECUTOR_ID" VARCHAR2(10 BYTE),
-    CHECK (UPPER("IS_EXECUTION_SCHEDULED")='YES' OR UPPER("IS_EXECUTION_SCHEDULED")='NO') ENABLE,
-    CHECK (UPPER(is_schedule_override) IN ('YES', 'NO')) ENABLE,
-    PRIMARY KEY ("BATCH_ID")
-);
-
-CREATE TABLE "VOUCHER_POSTING_DATA" ( 
-    "REQ_STATUS" VARCHAR2(10 CHAR) DEFAULT 'P' NOT NULL ENABLE, 
-    "REQ_DATE" DATE DEFAULT SYSDATE NOT NULL ENABLE, 
-    "CREATOR_ID" VARCHAR2(12 CHAR) NOT NULL ENABLE, 
-    "EXECUTION_DATE" DATE, 
-    "BATCH_ID" VARCHAR2(50 CHAR), 
-    "JOURNAL_ID" VARCHAR2(50 CHAR), 
-    "REQ_BRANCH_CODE" VARCHAR2(50 CHAR), 
-    "REQ_CURRENCY" VARCHAR2(3 BYTE), 
-    "REQ_CGL" VARCHAR2(50 CHAR), 
-    "REQ_AMOUNT" NUMBER(25,4), 
-    "REQ_NARRATION" VARCHAR2(200 CHAR), 
-    "REQ_PRODUCT" VARCHAR2(50 CHAR), 
-    "REQ_ID" NUMBER(19,0), 
-    "IS_CGL_VALID" CHAR(1 BYTE), 
-    "IS_CURRENCY_VALID" CHAR(1 BYTE), 
-    "IS_BRANCH_VALID" CHAR(1 BYTE), 
-    "IS_VALIDATED" CHAR(1 BYTE) DEFAULT 'N' NOT NULL ENABLE
-);
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_STATUS" IS 'Row-level processing status (e.g., P for Pending, A for Approved, R for Rejected).';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_DATE" IS 'The date when maker created the journal';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."EXECUTION_DATE" IS 'Timestamp when this checker acted upon the journal';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."BATCH_ID" IS 'Foreign key linking this row to its parent in JOURNAL_BATCH_MASTER.';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."JOURNAL_ID" IS 'Unique identifier for the individual request.';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_BRANCH_CODE" IS 'The branch code requested for the transaction.';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_CURRENCY" IS 'The 3-character currency code requested.';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_CGL" IS 'The 10-digit CGL account code requested.';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_AMOUNT" IS 'Raw requested amount ';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_NARRATION" IS 'remarks from the uploaded file.';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_PRODUCT" IS 'The product code requested.';
-COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."IS_VALIDATED" IS 'Flag for checking row is checked or not for validation';
-CREATE INDEX "IDX_JR_BATCH_OPT" ON "VOUCHER_POSTING_DATA" ("BATCH_ID", "REQ_STATUS");
-CREATE INDEX "IDX_JR_BRANCH_CODE" ON "VOUCHER_POSTING_DATA" ("REQ_BRANCH_CODE");
-CREATE INDEX "IDX_JR_JOURNAL_ID" ON "VOUCHER_POSTING_DATA" ("JOURNAL_ID");
-CREATE INDEX "IDX_JR_BATCH_ID" ON "VOUCHER_POSTING_DATA" ("BATCH_ID");
-
-CREATE TABLE "VOUCHER_TRANSACTIONS" ( 
-    "TRANSACTION_ID" NUMBER(20,0) NOT NULL ENABLE, 
-    "BATCH_ID" VARCHAR2(50 CHAR), 
-    "JOURNAL_ID" VARCHAR2(50 CHAR), 
-    "TRANSACTION_DATE" DATE, 
-    "POST_DATE" TIMESTAMP (6), 
-    "BRANCH_CODE" VARCHAR2(50 CHAR), 
-    "CURRENCY" VARCHAR2(3 BYTE), 
-    "CGL" VARCHAR2(10 BYTE), 
-    "NARRATION" VARCHAR2(40 CHAR), 
-    "DEBIT_AMOUNT" NUMBER(25,4), 
-    "CREDIT_AMOUNT" NUMBER(25,4), 
-    "TRANSACTION_COUNT" NUMBER(10,0), 
-    "SOURCE_FLAG" VARCHAR2(1 BYTE),
-    CONSTRAINT "VOUCHER_TRANSACTIONS_PK" PRIMARY KEY ("TRANSACTION_ID")
-);
-
-CREATE TABLE "WORKFLOW_TRANSITIONS" ( 
-    "WORKFLOW_CODE" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
-    "ALLOWED_ROLE_ID" NUMBER(10,0), 
-    "IS_FINAL_APPROVAL" CHAR(1 BYTE) DEFAULT 'N', 
-    "SCHEDULING_ALLOWED" CHAR(1 BYTE), 
-    "WORKFLOW_STAGE" VARCHAR2(100 BYTE), 
-    "ESCALATION_TIME" NUMBER(10,0), 
-    "WORKFLOW_ORDER" NUMBER(3,0) NOT NULL ENABLE, 
-    "WORKFLOW_ID" NUMBER DEFAULT "WORKFLOWID_SEQ"."NEXTVAL",
-    CONSTRAINT "WORKFLOW_TRANSITIONS_UK1" UNIQUE ("WORKFLOW_ID"),
-    CONSTRAINT "WORKFLOW_TRANSITIONS_PK" PRIMARY KEY ("WORKFLOW_CODE", "WORKFLOW_ORDER")
-);
-
-CREATE TABLE "REQUEST_VOUCHER" ( 
-    "ID" NUMBER GENERATED BY DEFAULT AS IDENTITY MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE NOT NULL ENABLE, 
-    "VID" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
-    "CATEGORY_ID" NUMBER NOT NULL ENABLE, 
-    "DESCRIPTION" VARCHAR2(500 BYTE) NOT NULL ENABLE, 
-    "ALLOWED_ROLE" NUMBER NOT NULL ENABLE, 
-    "SD_REQ_NO" VARCHAR2(100 BYTE), 
-    "CREATED_BY" VARCHAR2(100 BYTE), 
-    "CREATED_AT" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP, 
-    "TERMINATED_BY" VARCHAR2(100 BYTE), 
-    "TERMINATED_AT" TIMESTAMP (6), 
-    "STATUS" VARCHAR2(30 BYTE) NOT NULL ENABLE, 
-    "REMARKS" VARCHAR2(500 BYTE),
-    PRIMARY KEY ("ID"),
-    UNIQUE ("VID")
-);
-
-CREATE TABLE "SCHEDULED_BATCH_RETRY" ( 
-    "BATCH_ID" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
-    "CREATED_AT" TIMESTAMP (6) DEFAULT SYSTIMESTAMP, 
-    "RETRY_COUNT" NUMBER DEFAULT 0, 
-    "STATUS" VARCHAR2(20 BYTE) DEFAULT 'PENDING',
-    CONSTRAINT "PK_SCHEDULED_RETRY" PRIMARY KEY ("BATCH_ID")
-);
-
-CREATE TABLE "HDFS_SYNC_RETRY_QUEUE" ( 
-    "BATCH_ID" VARCHAR2(50 BYTE), 
-    "CREATED_AT" TIMESTAMP (6) DEFAULT SYSTIMESTAMP, 
-    "RETRY_COUNT" NUMBER DEFAULT 0, 
-    "STATUS" VARCHAR2(20 BYTE) DEFAULT 'PENDING',
-    PRIMARY KEY ("BATCH_ID")
-);
-CREATE INDEX "IDX_HDFS_RETRY_STATUS" ON "HDFS_SYNC_RETRY_QUEUE" ("STATUS");
-
-CREATE TABLE "JS_EOD_MASTER" ( 
-    "ID" NUMBER DEFAULT 1, 
-    "JS_STATUS" NUMBER(1,0) DEFAULT 1, 
-    "EOD_STATUS" NUMBER(1,0) DEFAULT 0, 
-    "JS_UPDATED_AT" TIMESTAMP (6), 
-    "EOD_UPDATED_AT" TIMESTAMP (6), 
-    "JS_PENDING_COUNTER" NUMBER DEFAULT 0,
-    CONSTRAINT "CHK_JS_EOD_SINGLE_ROW" CHECK (ID = 1) ENABLE,
-    PRIMARY KEY ("ID")
-);
-
--- ==============================================================================
--- 3. DEPENDENT TABLES (Contains Foreign Keys)
--- ==============================================================================
--- [FIX: ISSUE_CATEGORY must be created BEFORE REQUEST_VOUCHER_ISSUE_CATEGORY]
-CREATE TABLE "ISSUE_CATEGORY" ( 
-    "ID" NUMBER, 
-    "VOUCHER_CATEGORY_ID" NUMBER NOT NULL ENABLE, 
-    "ISSUE_CATEGORY_NAME" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
-    "CREATED_DATE" TIMESTAMP (6) DEFAULT SYSTIMESTAMP,
-    PRIMARY KEY ("ID"),
-    CONSTRAINT "FK_ISSUE_CATEGORY_VOUCHER" FOREIGN KEY ("VOUCHER_CATEGORY_ID") REFERENCES "VOUCHER_CATEGORY" ("ID") ENABLE
-);
-
-CREATE TABLE "REQUEST_VOUCHER_ISSUE_CATEGORY" ( 
-    "ID" NUMBER, 
-    "REQUEST_VOUCHER_ID" NUMBER NOT NULL ENABLE, 
-    "ISSUE_CATEGORY_ID" NUMBER NOT NULL ENABLE,
-    PRIMARY KEY ("ID"),
-    CONSTRAINT "FK_REQ_VOUCHER_ISSUE" FOREIGN KEY ("REQUEST_VOUCHER_ID") REFERENCES "REQUEST_VOUCHER" ("ID") ENABLE,
-    CONSTRAINT "FK_REQ_ISSUE_CATEGORY" FOREIGN KEY ("ISSUE_CATEGORY_ID") REFERENCES "ISSUE_CATEGORY" ("ID") ENABLE
-);
-
-CREATE TABLE "VOUCHER_WORKFLOW" ( 
-    "WORKFLOW_ID" NUMBER GENERATED ALWAYS AS IDENTITY MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE NOT NULL ENABLE, 
-    "BATCH_ID_FK" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
-    "VID_FK" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
-    "LAST_ACTION" VARCHAR2(30 BYTE), 
-    "LAST_ACTION_BY" VARCHAR2(100 BYTE), 
-    "LAST_ACTION_AT" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP, 
-    "REMARKS" VARCHAR2(500 BYTE), 
-    "SCHEDULED_TIME" TIMESTAMP (6),
-    PRIMARY KEY ("WORKFLOW_ID"),
-    CONSTRAINT "FK_VP_BATCH" FOREIGN KEY ("BATCH_ID_FK") REFERENCES "VOUCHER_POSTING" ("BATCH_ID") ENABLE
-);
-
--- ==============================================================================
--- 4. TRIGGERS
--- ==============================================================================
-CREATE OR REPLACE EDITIONABLE TRIGGER "REQUEST_VID_TRIGGER" 
-BEFORE INSERT ON REQUEST_VOUCHER
-FOR EACH ROW
-DECLARE
-    v_seq_number NUMBER;
-    v_prefix VARCHAR2(20);
-BEGIN
-    v_prefix := 'VID-' || TO_CHAR(SYSDATE, 'YYMM') || '-';
-    SELECT REQUEST_VOUCHER_SEQ.NEXTVAL INTO v_seq_number FROM DUAL;
-    :NEW.VID := v_prefix || LPAD(v_seq_number, 5, '0');
-END;
-/
-ALTER TRIGGER "REQUEST_VID_TRIGGER" ENABLE;
-
--- ==============================================================================
--- 5. PROCEDURES
--- ==============================================================================
-CREATE OR REPLACE EDITIONABLE PROCEDURE "PROCESS_JOURNAL_BATCH" (
-    p_batch_id      IN VARCHAR2,
-    p_executor_id   IN VARCHAR2,
-    p_remarks       IN VARCHAR2,
-    p_status        IN VARCHAR2,
-    o_cursor        OUT SYS_REFCURSOR
-) AS
-    v_missing_rates NUMBER;
-    v_txn_count     NUMBER; 
-    v_users_date    DATE; 
-BEGIN
-    SELECT USERS_DATE INTO v_users_date FROM FINCORE_DATE WHERE ROWNUM = 1;
-
-    SELECT COUNT(*) INTO v_missing_rates
-    FROM (
-        SELECT DISTINCT REQ_CURRENCY FROM voucher_posting_data
-        WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P'
-    ) req
-    LEFT JOIN CURRENCY_MASTER cm ON req.REQ_CURRENCY = cm.CURRENCY_CODE AND cm.FLAG = 1
-    WHERE req.REQ_CURRENCY <> 'INR'
-      AND (cm.CURRENCY_RATE IS NULL OR cm.CURRENCY_RATE <= 0);
-
-    IF v_missing_rates > 0 THEN
-        RAISE_APPLICATION_ERROR(-20001, 'EXCHANGE_RATE_MISSING');
-    END IF;
-
-    SELECT COUNT(*) INTO v_txn_count
-    FROM voucher_posting_data
-    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
-
-    INSERT /*+ PARALLEL(GL_TRANSACTIONS, 8) */ INTO GL_TRANSACTIONS (
-        TRANSACTION_ID, BATCH_ID, JOURNAL_ID, TRANSACTION_DATE, POST_DATE,
-        BRANCH_CODE, CURRENCY, CGL, NARRATION, DEBIT_AMOUNT, CREDIT_AMOUNT, SOURCE_FLAG, TRANSACTION_COUNT
-    )
-    SELECT /*+ PARALLEL(voucher_posting_data, 8) */
-        GL_TRANSACTIONS_SEQ.nextval, BATCH_ID, JOURNAL_ID, v_users_date,
-        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata', REQ_BRANCH_CODE, REQ_CURRENCY, REQ_CGL, REQ_NARRATION,
-        CASE WHEN REQ_AMOUNT > 0 THEN (REQ_AMOUNT * -1) ELSE 0 END,
-        CASE WHEN REQ_AMOUNT < 0 THEN ABS(REQ_AMOUNT) ELSE 0 END,
-        'J', '1' 
-    FROM voucher_posting_data
-    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
-
-    MERGE INTO GL_BALANCE target
-    USING (
-        SELECT j.REQ_BRANCH_CODE, j.REQ_CURRENCY, j.REQ_CGL, v_users_date as BAL_DATE,
-               SUM(j.REQ_AMOUNT) as TXN_AMOUNT,
-               CASE WHEN j.REQ_CURRENCY = 'INR' THEN 1 ELSE MAX(c.CURRENCY_RATE) END as EXCH_RATE
-        FROM voucher_posting_data j
-        LEFT JOIN CURRENCY_MASTER c ON j.REQ_CURRENCY = c.CURRENCY_CODE AND c.FLAG = 1
-        WHERE j.BATCH_ID = p_batch_id AND j.REQ_STATUS = 'P'
-        GROUP BY j.REQ_BRANCH_CODE, j.REQ_CURRENCY, j.REQ_CGL
-    ) source
-    ON (target.BRANCH_CODE = source.REQ_BRANCH_CODE
-        AND target.CURRENCY = source.REQ_CURRENCY
-        AND target.CGL = source.REQ_CGL
-        AND target.BALANCE_DATE = source.BAL_DATE)
-    WHEN MATCHED THEN
-        UPDATE SET
-            target.BALANCE = target.BALANCE + source.TXN_AMOUNT,
-            target.INR_BALANCE = NVL(target.INR_BALANCE, 0) + (source.TXN_AMOUNT * source.EXCH_RATE)
-    WHEN NOT MATCHED THEN
-        INSERT (ID, BALANCE_DATE, BRANCH_CODE, CURRENCY, CGL, BALANCE, INR_BALANCE)
-        VALUES (GL_BALANCE_SEQ.nextval, source.BAL_DATE, source.REQ_BRANCH_CODE,
-                source.REQ_CURRENCY, source.REQ_CGL, source.TXN_AMOUNT,
-                (source.TXN_AMOUNT * source.EXCH_RATE));
-
-    OPEN o_cursor FOR
-    SELECT
-        j.REQ_BRANCH_CODE AS BRANCH, j.REQ_CURRENCY AS CURRENCY, j.REQ_CGL AS CGL,
-        v_users_date AS BAL_DATE,
-        g.BALANCE AS NEW_BALANCE, g.INR_BALANCE AS NEW_INR_BALANCE
-    FROM (
-        SELECT DISTINCT REQ_BRANCH_CODE, REQ_CURRENCY, REQ_CGL
-        FROM voucher_posting_data WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P'
-    ) j
-    JOIN GL_BALANCE g
-        ON g.BRANCH_CODE = j.REQ_BRANCH_CODE
-        AND g.CURRENCY = j.REQ_CURRENCY
-        AND g.CGL = j.REQ_CGL
-        AND g.BALANCE_DATE = v_users_date;
-
-    UPDATE voucher_posting_data
-    SET REQ_STATUS = p_status,
-        EXECUTION_DATE = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'
-    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
-
-EXCEPTION
-    WHEN OTHERS THEN
-        ROLLBACK;
-        RAISE;
-END;
-/
-
-CREATE OR REPLACE EDITIONABLE PROCEDURE "PURGE_JOURNAL_BATCH" (
-    p_batch_id IN VARCHAR2,
-    p_user_id  IN VARCHAR2
-) AS
-    v_status VARCHAR2(20);
-BEGIN
-    SELECT BATCH_STATUS INTO v_status
-    FROM VOUCHER_POSTING
-    WHERE BATCH_ID = p_batch_id 
-      AND UPPER(TRIM(CREATED_BY)) = UPPER(TRIM(p_user_id));
-
-    IF v_status NOT IN ('P') THEN
-        RAISE_APPLICATION_ERROR(-20002, 'Cannot delete batch. Status is ' || v_status);
-    END IF;
-
-    DELETE FROM VOUCHER_WORKFLOW WHERE BATCH_ID_FK = p_batch_id;
-    DELETE FROM VOUCHER_POSTING_DATA WHERE BATCH_ID = p_batch_id;
-    DELETE FROM VOUCHER_POSTING WHERE BATCH_ID = p_batch_id;
-END;
-/
-
-CREATE OR REPLACE EDITIONABLE PROCEDURE "VD_VALIDATE_VOUCHER_DATA" (
-    in_batch_id IN VARCHAR2
-) AS
-    c_batch_size CONSTANT NUMBER := 25000;
- 
-    CURSOR c_staging_data IS
-    SELECT 
-        s.rowid,
-        CASE WHEN bm.code IS NULL AND s.req_branch_code IS NOT NULL THEN 'N' ELSE 'Y' END AS is_branch_code_valid,
-        CASE WHEN cm.currency_code IS NULL AND s.req_currency IS NOT NULL THEN 'N' ELSE 'Y' END AS is_currency_code_valid,
-        CASE WHEN cgm.cgl_number IS NULL AND s.req_cgl IS NOT NULL THEN 'N' ELSE 'Y' END AS is_cgl_valid
-    FROM voucher_posting_data s
-    LEFT JOIN branch_master bm ON (s.req_branch_code = bm.code AND bm.status = 1)
-    LEFT JOIN currency_master cm ON (s.req_currency = cm.currency_code AND cm.flag = 1) 
-    LEFT JOIN cgl_master cgm ON (s.req_cgl = cgm.cgl_number AND cgm.status = 1)
-    WHERE s.is_validated = 'N' 
-      AND s.batch_id = in_batch_id
-      AND (
-          (bm.code IS NULL AND s.req_branch_code IS NOT NULL) OR
-          (cm.currency_code IS NULL AND s.req_currency IS NOT NULL) OR
-          (cgm.cgl_number IS NULL AND s.req_cgl IS NOT NULL)
-      );
-
-    TYPE t_staging_rec is RECORD (
-        rid ROWID,
-        is_branch_code_valid varchar(1),
-        is_currency_code_valid varchar(1),
-        is_cgl_valid varchar(1)
-    );
-
-    TYPE t_staging_tab IS TABLE OF t_staging_rec;
-    l_batch_data t_staging_tab;
-
-BEGIN
-    OPEN c_staging_data;
- 
-    LOOP
-        FETCH c_staging_data BULK COLLECT INTO l_batch_data LIMIT c_batch_size;
-        EXIT WHEN l_batch_data.COUNT = 0;
-        
-        FORALL i IN 1..l_batch_data.COUNT
-        UPDATE voucher_posting_data 
-        SET is_branch_valid = l_batch_data(i).is_branch_code_valid, 
-            is_currency_valid = l_batch_data(i).is_currency_code_valid, 
-            is_cgl_valid = l_batch_data(i).is_cgl_valid,
-            is_validated = 'Y' 
-        WHERE rowid = l_batch_data(i).rid;
-    END LOOP;
-    CLOSE c_staging_data;
-
-    UPDATE voucher_posting_data 
-    SET is_branch_valid = 'Y', 
-        is_currency_valid = 'Y', 
-        is_cgl_valid = 'Y', 
-        is_validated = 'Y' 
-    WHERE is_validated = 'N' AND batch_id = in_batch_id;
-END;
-/
-
--- ==============================================================================
--- 6. DATA INSERTIONS
--- ==============================================================================
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9001,'N','Y','Creation',0,1,24);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9001,'N','N','Verification',45,2,25);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9002,'N','N','Review',30,3,26);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9002,'Y','Y','Approval',15,4,27);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9001,'N','Y','Creation',0,1,30);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',null,'N','N','Execution',0,5,28);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9001,'N','N','Validation',45,2,31);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9001,'N','Y','Verification',30,3,32);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9002,'N','N','Review',15,4,33);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9002,'Y','Y','Approval',0,5,34);
-Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',null,'N','N','Execution',0,6,35);
-
-COMMIT;
+}
