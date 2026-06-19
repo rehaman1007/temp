@@ -1,18 +1,32 @@
 --------------------------------------------------------
---  DDL for Procedure PROCESS_JOURNAL_BATCH
+-- Drop Script for Original Procedure
+--------------------------------------------------------
+DROP PROCEDURE "PROCESS_JOURNAL_BATCH";
+
+--------------------------------------------------------
+-- Drop Script for Original Trigger
+--------------------------------------------------------
+DROP TRIGGER "FINCORE_DATE_AUDIT_TRIGGER";
+
+
+--------------------------------------------------------
+--  Drop Script for Procedure REVERSE_JOURNAL_BATCH
+--------------------------------------------------------
+-- DROP PROCEDURE "REVERSE_JOURNAL_BATCH";
+
+--------------------------------------------------------
+--  DDL for Procedure REVERSE_JOURNAL_BATCH
 --------------------------------------------------------
 set define off;
 
-  CREATE OR REPLACE EDITIONABLE PROCEDURE "PROCESS_JOURNAL_BATCH" (
+  CREATE OR REPLACE EDITIONABLE PROCEDURE "REVERSE_JOURNAL_BATCH" (
     p_batch_id      IN VARCHAR2,
     p_executor_id   IN VARCHAR2,
     p_remarks       IN VARCHAR2,
-    p_status        IN VARCHAR2,
     o_cursor        OUT SYS_REFCURSOR
 ) AS
-    v_missing_rates NUMBER;
-    v_txn_count     NUMBER; 
-    v_users_date    DATE; -- Store business date from FINCORE_DATE
+    v_users_date    DATE;
+    v_is_posted     NUMBER;
 BEGIN
     -- ==============================================================================
     -- 0. FETCH OPERATIONAL SYSTEM BUSINESS DATE
@@ -22,60 +36,48 @@ BEGIN
     WHERE ROWNUM = 1;
 
     -- ==============================================================================
-    -- 0.1. PRE-CHECK: EXCHANGE RATE INTEGRITY
+    -- 0.1. PRE-CHECK: VERIFY BATCH IS ALREADY POSTED
     -- ==============================================================================
-    SELECT COUNT(*) INTO v_missing_rates
-    FROM (
-        SELECT DISTINCT REQ_CURRENCY FROM voucher_posting_data
-        WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P'
-    ) req
-    LEFT JOIN CURRENCY_MASTER cm
-        ON req.REQ_CURRENCY = cm.CURRENCY_CODE AND cm.FLAG = 1
-    WHERE req.REQ_CURRENCY <> 'INR'
-      AND (cm.CURRENCY_RATE IS NULL OR cm.CURRENCY_RATE <= 0);
+    SELECT COUNT(*) INTO v_is_posted
+    FROM voucher_posting_data
+    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'S'; -- Assuming 'S' is Success/Posted
 
-    IF v_missing_rates > 0 THEN
-        RAISE_APPLICATION_ERROR(-20001, 'EXCHANGE_RATE_MISSING');
+    IF v_is_posted = 0 THEN
+        RAISE_APPLICATION_ERROR(-20002, 'BATCH_NOT_FOUND_OR_NOT_POSTED');
     END IF;
 
     -- ==============================================================================
-    -- 0.5. PRE-CALCULATE TRANSACTION COUNT
-    -- ==============================================================================
-    SELECT COUNT(*) INTO v_txn_count
-    FROM voucher_posting_data
-    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
-
-    -- ==============================================================================
-    -- 1. Insert GL_TRANSACTIONS (FINCORE_DATE -> TRANSACTION_DATE, System -> POST_DATE)
+    -- 1. Insert Reversal into GL_TRANSACTIONS (Flip the signs/amounts)
     -- ==============================================================================
     INSERT /*+ PARALLEL(GL_TRANSACTIONS, 8) */ INTO GL_TRANSACTIONS (
         TRANSACTION_ID, BATCH_ID, JOURNAL_ID, TRANSACTION_DATE, POST_DATE,
         BRANCH_CODE, CURRENCY, CGL, NARRATION, DEBIT_AMOUNT, CREDIT_AMOUNT, SOURCE_FLAG, TRANSACTION_COUNT
     )
     SELECT /*+ PARALLEL(voucher_posting_data, 8) */
-        GL_TRANSACTIONS_SEQ.nextval, BATCH_ID, JOURNAL_ID,
-        v_users_date,                                        -- FIXED: Business date goes here now
-        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata',       -- FIXED: Auto-generated real system time
-        REQ_BRANCH_CODE, REQ_CURRENCY, REQ_CGL, REQ_NARRATION,
-        CASE WHEN REQ_AMOUNT > 0 THEN (REQ_AMOUNT * -1)   ELSE 0 END,
-        CASE WHEN REQ_AMOUNT < 0 THEN ABS(REQ_AMOUNT) ELSE 0 END,
-        'J' ,
+        GL_TRANSACTIONS_SEQ.nextval, BATCH_ID || '_REV', JOURNAL_ID,
+        v_users_date,                                        
+        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata',       
+        REQ_BRANCH_CODE, REQ_CURRENCY, REQ_CGL, 'REVERSAL: ' || p_remarks,
+        -- Flip debit and credit amounts for reversal
+        CASE WHEN REQ_AMOUNT < 0 THEN ABS(REQ_AMOUNT) ELSE 0 END, 
+        CASE WHEN REQ_AMOUNT > 0 THEN (REQ_AMOUNT * -1) ELSE 0 END, 
+        'R', -- 'R' for Reversal
         '1' 
     FROM voucher_posting_data
-    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
+    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'S';
 
     -- ==============================================================================
-    -- 3. Merge GL Balances
+    -- 2. Merge Reversal into GL Balances (Subtracting the original amounts)
     -- ==============================================================================
     MERGE INTO GL_BALANCE target
     USING (
         SELECT j.REQ_BRANCH_CODE, j.REQ_CURRENCY, j.REQ_CGL,
-               v_users_date as BAL_DATE, -- Stays anchored to the business day baseline
-               SUM(j.REQ_AMOUNT) as TXN_AMOUNT,
+               v_users_date as BAL_DATE, 
+               SUM(j.REQ_AMOUNT * -1) as REVERSAL_AMOUNT, -- Negate the amount
                CASE WHEN j.REQ_CURRENCY = 'INR' THEN 1 ELSE MAX(c.CURRENCY_RATE) END as EXCH_RATE
         FROM voucher_posting_data j
         LEFT JOIN CURRENCY_MASTER c ON j.REQ_CURRENCY = c.CURRENCY_CODE AND c.FLAG = 1
-        WHERE j.BATCH_ID = p_batch_id AND j.REQ_STATUS = 'P'
+        WHERE j.BATCH_ID = p_batch_id AND j.REQ_STATUS = 'S'
         GROUP BY j.REQ_BRANCH_CODE, j.REQ_CURRENCY, j.REQ_CGL
     ) source
     ON (target.BRANCH_CODE = source.REQ_BRANCH_CODE
@@ -84,25 +86,25 @@ BEGIN
         AND target.BALANCE_DATE = source.BAL_DATE)
     WHEN MATCHED THEN
         UPDATE SET
-            target.BALANCE = target.BALANCE + source.TXN_AMOUNT,
-            target.INR_BALANCE = NVL(target.INR_BALANCE, 0) + (source.TXN_AMOUNT * source.EXCH_RATE)
+            target.BALANCE = target.BALANCE + source.REVERSAL_AMOUNT,
+            target.INR_BALANCE = NVL(target.INR_BALANCE, 0) + (source.REVERSAL_AMOUNT * source.EXCH_RATE)
     WHEN NOT MATCHED THEN
         INSERT (ID, BALANCE_DATE, BRANCH_CODE, CURRENCY, CGL, BALANCE, INR_BALANCE)
         VALUES (GL_BALANCE_SEQ.nextval, source.BAL_DATE, source.REQ_BRANCH_CODE,
-                source.REQ_CURRENCY, source.REQ_CGL, source.TXN_AMOUNT,
-                (source.TXN_AMOUNT * source.EXCH_RATE));
+                source.REQ_CURRENCY, source.REQ_CGL, source.REVERSAL_AMOUNT,
+                (source.REVERSAL_AMOUNT * source.EXCH_RATE));
 
     -- ==============================================================================
-    -- 4. Capture Sync Data for HDFS (Data Lake)
+    -- 3. Return Cursor for Validation/UI
     -- ==============================================================================
     OPEN o_cursor FOR
     SELECT
         j.REQ_BRANCH_CODE AS BRANCH, j.REQ_CURRENCY AS CURRENCY, j.REQ_CGL AS CGL,
         v_users_date AS BAL_DATE,
-        g.BALANCE AS NEW_BALANCE, g.INR_BALANCE AS NEW_INR_BALANCE
+        g.BALANCE AS REVERSED_BALANCE, g.INR_BALANCE AS REVERSED_INR_BALANCE
     FROM (
         SELECT DISTINCT REQ_BRANCH_CODE, REQ_CURRENCY, REQ_CGL
-        FROM voucher_posting_data WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P'
+        FROM voucher_posting_data WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'S'
     ) j
     JOIN GL_BALANCE g
         ON g.BRANCH_CODE = j.REQ_BRANCH_CODE
@@ -111,51 +113,17 @@ BEGIN
         AND g.BALANCE_DATE = v_users_date;
 
     -- ==============================================================================
-    -- 5. Finalize Batch Status
+    -- 4. Mark Original Batch as Reversed
     -- ==============================================================================
     UPDATE voucher_posting_data
-    SET REQ_STATUS = p_status,
-        EXECUTION_DATE = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'
-    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
+    SET REQ_STATUS = 'R', -- 'R' for Reversed
+        EXECUTION_DATE = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata',
+        REQ_NARRATION = REQ_NARRATION || ' [REVERSED BY ' || p_executor_id || ']'
+    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'S';
 
 EXCEPTION
     WHEN OTHERS THEN
         ROLLBACK;
         RAISE;
 END;
-
 /
-
-
-
-
-
-
-
---------------------------------------------------------
---  DDL for Trigger FINCORE_DATE_AUDIT_TRIGGER
---------------------------------------------------------
-
-  CREATE OR REPLACE EDITIONABLE TRIGGER "FINCORE_DATE_AUDIT_TRIGGER" 
-BEFORE UPDATE OF ETL_DATE ON fincore_date
-FOR EACH ROW
-BEGIN
-    /* 
-       Logic to detect if ETL_DATE has changed, 
-       handling NULL values safely.
-    */
-    IF (:NEW.ETL_DATE <> :OLD.ETL_DATE 
-        OR (:NEW.ETL_DATE IS NULL AND :OLD.ETL_DATE IS NOT NULL)
-        OR (:NEW.ETL_DATE IS NOT NULL AND :OLD.ETL_DATE IS NULL)) THEN
-
-        -- Update audit metadata
-        :NEW.LAST_UPDATED_DATE := SYSDATE;
-
-        -- Capture the network IP of the client
-        :NEW.LAST_UPDATED_IP   := SYS_CONTEXT('USERENV', 'IP_ADDRESS');
-
-    END IF;
-END;
-
-/
-ALTER TRIGGER "FINCORE_DATE_AUDIT_TRIGGER" ENABLE;
