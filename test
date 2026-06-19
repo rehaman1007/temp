@@ -1,8 +1,3 @@
-{
-    "error": true,
-    "message": "StatementCallback; bad SQL grammar [SELECT COUNT(*)\nFROM (\nSELECT BALANCE_DATEG  FROM GL_BALANCE WHERE BALANCE_DATE = TO_DATE('01/04/2026','DD/MM/YYYY')) CNT\n]"
-}
-
 package com.fincore.transactions_service.service;
 
 import com.fincore.transactions_service.dto.AdminSupportDTO;
@@ -54,8 +49,6 @@ public class AdminSupportServiceImpl implements AdminSupportService {
     private final AdminSupportExecutor adminSupportExecutor;
     private final FileSystem hdfsFileSystem;
 
-
-
     /**
      * =========================================================
      * EXECUTE ADMIN SQL (COMMAND CONSOLE)
@@ -82,28 +75,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                     ==================================================
                     """, userId, clientIp, dto.getPage(), dto.getSize());
 
-            /* CLEAN SQL */
-            rawSql = rawSql.replaceAll(";\\s*$", "").trim();
-
-            List<String> cleanStatements = new ArrayList<>();
-
-            if (isSelectQuery(rawSql)) {
-
-                cleanStatements.add(rawSql);
-
-            } else {
-
-                String[] statements = rawSql.split(";");
-
-                for (String stmt : statements) {
-
-                    String clean = stmt.replaceAll("(?m)^--.*", "").trim();
-
-                    if (!clean.isEmpty()) {
-                        cleanStatements.add(clean);
-                    }
-                }
-            }
+            /* CLEAN AND PARSE SQL/PLSQL */
+            List<String> cleanStatements = parseSqlStatements(rawSql);
 
             if (cleanStatements.isEmpty()) {
                 response.put("error", true);
@@ -114,7 +87,6 @@ public class AdminSupportServiceImpl implements AdminSupportService {
             /**
              * SINGLE SELECT EVALUATION
              */
-
             boolean isSingleSelect = cleanStatements.size() == 1 && isSelectQuery(cleanStatements.get(0));
             int page = dto.getPage() != null ? dto.getPage() : 0;
             int size = dto.getSize() != null ? dto.getSize() : 10;
@@ -138,7 +110,6 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                 int startRow = page * size;
                 int endRow = startRow + size;
 
-
                 String paginatedSql = executableSelect.trim() +
                         " OFFSET ? ROWS FETCH NEXT ? ROWS ONLY";
 
@@ -151,20 +122,16 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                     int columnCount = metaData.getColumnCount();
 
                     if (columns.isEmpty()) {
-
                         for (int i = 1; i <= columnCount; i++) {
                             columns.add(Map.of("name", metaData.getColumnLabel(i)));
                         }
                     }
 
                     while (rs.next()) {
-
                         Map<String, Object> row = new LinkedHashMap<>();
-
                         for (int i = 1; i <= columnCount; i++) {
                             row.put(metaData.getColumnLabel(i), rs.getObject(i));
                         }
-
                         rawRows.add(row);
                     }
 
@@ -184,7 +151,6 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
                 return response;
             }
-
 
             /**
              * EXECUTE DML/DDL COMMANDS
@@ -206,10 +172,12 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                     else otherCount++;
 
                 } catch (Exception e) {
-                    adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", cleanStatements.size(), successCount, successCount, insertCount, updateCount, deleteCount, otherCount, i + 1, sql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+                    Throwable rootCause = getRootCause(e);
+                    
+                    adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", cleanStatements.size(), successCount, successCount, insertCount, updateCount, deleteCount, otherCount, i + 1, sql, rootCause.getClass().getSimpleName(), rootCause.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
 
                     response.put("error", true);
-                    response.put("message", "Error at statement " + (i + 1) + " : " + e.getMessage());
+                    response.put("message", "Error at statement " + (i + 1) + " : " + rootCause.getMessage());
                     response.put("failedSql", sql);
                     return response;
                 }
@@ -227,14 +195,15 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
         } catch (Exception e) {
             log.error("ADMIN SQL EXECUTION FAILED", e);
-            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", 0, 0, 0, 0, 0, 0, 0, null, rawSql, e.getClass().getSimpleName(), e.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
+            Throwable rootCause = getRootCause(e);
+            
+            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", 0, 0, 0, 0, 0, 0, 0, null, rawSql, rootCause.getClass().getSimpleName(), rootCause.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
 
             response.put("error", true);
-            response.put("message", e.getMessage());
+            response.put("message", rootCause.getMessage());
             return response;
         }
     }
-
 
     /**
      * =========================================================
@@ -263,18 +232,12 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                 """, userId, dto.getExportType(), count);
 
         return switch (dto.getExportType().toUpperCase()) {
-
             case "EXCEL" -> exportExcel(sql);
-
             case "JSON" -> exportJson(sql);
-
             case "INSERT" -> exportInsert(dto);
-
             default -> exportCsv(sql);
         };
     }
-
-
 
     /**
      * =========================================================
@@ -313,14 +276,11 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                 log.error("HDFS Backup failed, but proceeding with execution", hdfsEx);
             }
 
-
             log.info("HDFS Backup Success and proceeding with execution");
             log.info("HDFS Filename: {}", hdfsFilename);
             log.info("HDFS filePath: {}", filePath);
 
             // 2. PASS TO ASYNC EXECUTOR
-            // We NO LONGER delete the file in a finally block here.
-            // The AdminSupportExecutor is now responsible for deleting it after processing completes.
             adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, getClientIp(request), hdfsFilename);
 
             response.put("jobId", jobId);
@@ -350,6 +310,70 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         Map<String, Object> response = new LinkedHashMap<>();
         response.putAll(status);
         return response;
+    }
+
+    /**
+     * =========================================================
+     * Robust SQL Parser for Mixed SQL & PL/SQL
+     * =========================================================
+     */
+    private List<String> parseSqlStatements(String rawSql) {
+        List<String> statements = new ArrayList<>();
+        
+        // 1. Split by Oracle's PL/SQL block terminator (a single '/' on its own line)
+        String[] blocks = rawSql.split("(?m)^\\s*/\\s*$");
+        
+        for (String block : blocks) {
+            block = block.trim();
+            if (block.isEmpty()) continue;
+            
+            // 2. Check if this block is PL/SQL
+            if (isPlSqlBlock(block)) {
+                // Keep the entire block intact (JDBC needs the internal semicolons but NO trailing '/')
+                statements.add(block);
+            } else {
+                // 3. It's standard SQL, safely split by semicolon
+                String[] sqlStmts = block.split(";");
+                for (String stmt : sqlStmts) {
+                    // Remove standalone comments and trim
+                    String clean = stmt.replaceAll("(?m)^--.*", "").trim();
+                    if (!clean.isEmpty()) {
+                        statements.add(clean);
+                    }
+                }
+            }
+        }
+        return statements;
+    }
+
+    /**
+     * =========================================================
+     * Identifies if a string is a PL/SQL block
+     * =========================================================
+     */
+    private boolean isPlSqlBlock(String sql) {
+        String normalized = sql.trim().toUpperCase();
+        
+        // Check for Anonymous blocks
+        if (normalized.startsWith("DECLARE") || normalized.startsWith("BEGIN")) {
+            return true;
+        }
+        
+        // Check for DDL PL/SQL blocks using dotall regex (?s) to handle newlines
+        return normalized.matches("(?s)^CREATE\\s+(OR\\s+REPLACE\\s+)?(EDITIONABLE\\s+|NONEDITIONABLE\\s+)?(PROCEDURE|FUNCTION|TRIGGER|PACKAGE|TYPE).*");
+    }
+
+    /**
+     * =========================================================
+     * Extract Root Cause Exception
+     * =========================================================
+     */
+    private Throwable getRootCause(Throwable e) {
+        Throwable cause = e;
+        while (cause.getCause() != null && cause != cause.getCause()) {
+            cause = cause.getCause();
+        }
+        return cause;
     }
 
     /**
@@ -384,7 +408,6 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      * =========================================================
      */
     private long validateExportLimit(String sql) {
-
         String countSql = """
                 SELECT COUNT(*)
                 FROM (
@@ -458,7 +481,6 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         return "INSERT INTO " + tableName + " (" + columns + ") VALUES (" + values + ");";
     }
 
-
     /**
      * =========================================================
      * Exporting data to INSERT (.sql File)
@@ -475,13 +497,11 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         StringBuilder script = new StringBuilder();
 
         jdbcTemplate.query(
-
                 connection -> {
                     var ps = connection.prepareStatement(dto.getSql());
                     ps.setFetchSize(FETCH_SIZE);
                     return ps;
                 },
-
                 rs -> {
                     try {
                         script.append(buildInsertStatement(tableName, rs)).append("\n");
@@ -491,10 +511,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                 });
 
         byte[] bytes = script.toString().getBytes(StandardCharsets.UTF_8);
-
         return downloadFile(bytes, tableName + ".sql", MediaType.TEXT_PLAIN_VALUE);
     }
-
 
     /**
      * =========================================================
@@ -513,13 +531,11 @@ public class AdminSupportServiceImpl implements AdminSupportService {
             AtomicInteger rowNum = new AtomicInteger(0);
 
             jdbcTemplate.query(
-
                     connection -> {
                         var ps = connection.prepareStatement(sql);
                         ps.setFetchSize(FETCH_SIZE);
                         return ps;
                     },
-
                     rs -> {
                         ResultSetMetaData meta = rs.getMetaData();
                         int cols = meta.getColumnCount();
@@ -558,30 +574,21 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         }
     }
 
-
     /**
      * =========================================================
      * Exporting data to JSON
      * =========================================================
      */
     private ResponseEntity<Resource> exportJson(String sql) {
-
         try {
-
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
-
             ObjectMapper mapper = new ObjectMapper();
-
             byte[] bytes = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(rows);
-
             return downloadFile(bytes, "export.json", MediaType.APPLICATION_JSON_VALUE);
-
         } catch (Exception e) {
-
             throw new RuntimeException(e);
         }
     }
-
 
     /**
      * =========================================================
@@ -594,15 +601,12 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         final boolean[] headerWritten = {false};
 
         jdbcTemplate.query(
-
                 connection -> {
                     var ps = connection.prepareStatement(sql);
                     ps.setFetchSize(FETCH_SIZE);
                     return ps;
                 },
-
                 rs -> {
-
                     ResultSetMetaData meta = rs.getMetaData();
                     int cols = meta.getColumnCount();
 
@@ -632,14 +636,12 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         return downloadFile(csv.toString().getBytes(StandardCharsets.UTF_8), "export.csv", "text/csv");
     }
 
-
     /**
      * =========================================================
      * Helper Method for Exporting data to CSV
      * =========================================================
      */
     private String csvEscape(Object value) {
-
         if (value == null) {
             return "";
         }
@@ -652,13 +654,10 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                 || text.contains("\r")) {
 
             text = text.replace("\"", "\"\"");
-
             return "\"" + text + "\"";
         }
-
         return text;
     }
-
 
     /**
      * =========================================================
@@ -667,11 +666,10 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      */
     private ResponseEntity<Resource> downloadFile(byte[] data, String fileName, String contentType) {
         ByteArrayResource resource = new ByteArrayResource(data);
-        return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName).contentLength(data.length).contentType(MediaType.parseMediaType(contentType)).body(resource);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName)
+                .contentLength(data.length)
+                .contentType(MediaType.parseMediaType(contentType))
+                .body(resource);
     }
-
-
-
-
-
 }
