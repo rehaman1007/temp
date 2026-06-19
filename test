@@ -1,326 +1,436 @@
-import React, { useEffect, useState, useMemo } from "react";
-import {
-  Box,
-  Fab,
-  Switch,
-  IconButton,
-  Stack,
-  Tooltip,
-  Typography,
-} from "@mui/material";
-import AddIcon from "@mui/icons-material/Add";
-import { DataGrid } from "@mui/x-data-grid";
-import EditIcon from "@mui/icons-material/Edit";
-import CreateAnnouncementDialog from "./components/CreateAnnouncementDialog";
-import EditAnnouncementDialog from "./components/EditAnnouncementDialog";
-import ViewAnnouncementDialog from "./components/ViewAnnouncementDialog";
-import useApi from "../../hooks/useApi";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import OnlinePredictionIcon from "@mui/icons-material/OnlinePrediction";
-import CustomChip from "../../utils/CustomChip";
-import { timeStampFormatter } from "../../utils/CommonUtilities";
-import InfoIcon from "@mui/icons-material/Info";
-import PriorityHighIcon from "@mui/icons-material/PriorityHigh";
-import WarningIcon from "@mui/icons-material/Warning";
+-- ==============================================================================
+-- DROP PROCEDURES
+-- ==============================================================================
+DROP PROCEDURE PROCESS_JOURNAL_BATCH;
+DROP PROCEDURE PURGE_JOURNAL_BATCH;
+DROP PROCEDURE VD_VALIDATE_VOUCHER_DATA;
 
-export default function Announcements() {
-  const { callApi } = useApi();
+-- ==============================================================================
+-- DROP TABLES (With Cascade to ignore FK dependencies during drop)
+-- ==============================================================================
+DROP TABLE REQUEST_VOUCHER_ISSUE_CATEGORY CASCADE CONSTRAINTS;
+DROP TABLE ISSUE_CATEGORY CASCADE CONSTRAINTS;
+DROP TABLE VOUCHER_WORKFLOW CASCADE CONSTRAINTS;
+DROP TABLE VOUCHER_CATEGORY CASCADE CONSTRAINTS;
+DROP TABLE VOUCHER_POSTING CASCADE CONSTRAINTS;
+DROP TABLE VOUCHER_POSTING_DATA CASCADE CONSTRAINTS;
+DROP TABLE VOUCHER_TRANSACTIONS CASCADE CONSTRAINTS;
+DROP TABLE WORKFLOW_TRANSITIONS CASCADE CONSTRAINTS;
+DROP TABLE REQUEST_VOUCHER CASCADE CONSTRAINTS;
+DROP TABLE SCHEDULED_BATCH_RETRY CASCADE CONSTRAINTS;
+DROP TABLE HDFS_SYNC_RETRY_QUEUE CASCADE CONSTRAINTS;
+DROP TABLE JS_EOD_MASTER CASCADE CONSTRAINTS;
 
-  const [rows, setRows] = useState([]);
-  const [roles, setRoles] = useState([]);
-  const [loading, setLoading] = useState(false);
+-- ==============================================================================
+-- DROP SEQUENCES
+-- ==============================================================================
+DROP SEQUENCE JOURNAL_REQUEST_SEQ;
+DROP SEQUENCE VOUCHER_POSTING_DATA_SEQ;
+DROP SEQUENCE WORKFLOWID_SEQ;
+DROP SEQUENCE JRNL_SEQ;
+DROP SEQUENCE REQUEST_VOUCHER_SEQ;
 
-  const [openCreate, setOpenCreate] = useState(false);
-  const [editRow, setEditRow] = useState(null);
-  const [viewRow, setViewRow] = useState(null);
-  const [openViewDailog, setOpenViewDailog] = useState(false);
 
-  // ---------- INITIAL LOAD ----------
-  useEffect(() => {
-    fetchRoles();
-    fetchRows();
-  }, []);
 
-  // ---------- FETCH ROLES ----------
-  async function fetchRoles() {
-    try {
-      const res = await callApi("/UM/role/get-roles", null, "GET");
-      const data = res?.data ?? res;
-      setRoles(Array.isArray(data) ? data : data?.data ?? []);
-    } catch (err) {
-      console.error("fetchRoles error", err);
-      setRoles([]);
-    }
-  }
 
-  // ---------- FETCH ANNOUNCEMENTS ----------
-  const fetchRows = async () => {
-    setLoading(true);
-    try {
-      const res = await callApi("/CM/announcements/list", null, "GET");
-      const payload = res?.data ?? res;
-      const list = payload?.data ?? payload;
-      setRows(Array.isArray(list) ? list : []);
-    } catch (err) {
-      console.error("fetchRows error", err);
-      setRows([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+SET DEFINE OFF;
 
-  // ---------- ACTIVE/INACTIVE TOGGLE ----------
-  const handleToggle = async (row) => {
-    try {
-      const res = await callApi(
-        `/CM/announcements/${row.id}/toggle`,
-        null,
-        "PATCH"
+-- ==============================================================================
+-- 1. SEQUENCES
+-- ==============================================================================
+CREATE SEQUENCE "JOURNAL_REQUEST_SEQ" MINVALUE 1 MAXVALUE 999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 1000 NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
+CREATE SEQUENCE "VOUCHER_POSTING_DATA_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 NOCACHE NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
+CREATE SEQUENCE "WORKFLOWID_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 ORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
+CREATE SEQUENCE "JRNL_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
+
+-- [FIX: Added missing sequence required for REQUEST_VID_TRIGGER]
+CREATE SEQUENCE "REQUEST_VOUCHER_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL;
+
+-- ==============================================================================
+-- 2. INDEPENDENT TABLES (No Foreign Keys pointing outside)
+-- ==============================================================================
+CREATE TABLE "VOUCHER_CATEGORY" ( 
+    "ID" NUMBER GENERATED BY DEFAULT AS IDENTITY MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE NOT NULL ENABLE, 
+    "CATEGORY_NAME" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
+    "CREATED_DATE" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY ("ID"),
+    UNIQUE ("CATEGORY_NAME")
+);
+
+CREATE TABLE "VOUCHER_POSTING" ( 
+    "BATCH_ID" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
+    "VID_FK" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
+    "WORKFLOW_CODE" VARCHAR2(100 BYTE), 
+    "CREATED_BY" VARCHAR2(100 BYTE), 
+    "CREATED_AT" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP, 
+    "PENDING_AT" NUMBER, 
+    "IS_EXECUTION_SCHEDULED" VARCHAR2(3 BYTE), 
+    "SCHEDULED_TIME" TIMESTAMP (6), 
+    "IS_SCHEDULE_OVERRIDE" VARCHAR2(3 BYTE), 
+    "EXECUTED_AT" TIMESTAMP (6), 
+    "BATCH_STATUS" VARCHAR2(20 BYTE), 
+    "RECORDS_COUNT" NUMBER, 
+    "COMMON_BATCH_REMARKS" VARCHAR2(30 CHAR), 
+    "CREATOR_ROLE" NUMBER(10,0), 
+    "EXECUTOR_ID" VARCHAR2(10 BYTE),
+    CHECK (UPPER("IS_EXECUTION_SCHEDULED")='YES' OR UPPER("IS_EXECUTION_SCHEDULED")='NO') ENABLE,
+    CHECK (UPPER(is_schedule_override) IN ('YES', 'NO')) ENABLE,
+    PRIMARY KEY ("BATCH_ID")
+);
+
+CREATE TABLE "VOUCHER_POSTING_DATA" ( 
+    "REQ_STATUS" VARCHAR2(10 CHAR) DEFAULT 'P' NOT NULL ENABLE, 
+    "REQ_DATE" DATE DEFAULT SYSDATE NOT NULL ENABLE, 
+    "CREATOR_ID" VARCHAR2(12 CHAR) NOT NULL ENABLE, 
+    "EXECUTION_DATE" DATE, 
+    "BATCH_ID" VARCHAR2(50 CHAR), 
+    "JOURNAL_ID" VARCHAR2(50 CHAR), 
+    "REQ_BRANCH_CODE" VARCHAR2(50 CHAR), 
+    "REQ_CURRENCY" VARCHAR2(3 BYTE), 
+    "REQ_CGL" VARCHAR2(50 CHAR), 
+    "REQ_AMOUNT" NUMBER(25,4), 
+    "REQ_NARRATION" VARCHAR2(200 CHAR), 
+    "REQ_PRODUCT" VARCHAR2(50 CHAR), 
+    "REQ_ID" NUMBER(19,0), 
+    "IS_CGL_VALID" CHAR(1 BYTE), 
+    "IS_CURRENCY_VALID" CHAR(1 BYTE), 
+    "IS_BRANCH_VALID" CHAR(1 BYTE), 
+    "IS_VALIDATED" CHAR(1 BYTE) DEFAULT 'N' NOT NULL ENABLE
+);
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_STATUS" IS 'Row-level processing status (e.g., P for Pending, A for Approved, R for Rejected).';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_DATE" IS 'The date when maker created the journal';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."EXECUTION_DATE" IS 'Timestamp when this checker acted upon the journal';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."BATCH_ID" IS 'Foreign key linking this row to its parent in JOURNAL_BATCH_MASTER.';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."JOURNAL_ID" IS 'Unique identifier for the individual request.';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_BRANCH_CODE" IS 'The branch code requested for the transaction.';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_CURRENCY" IS 'The 3-character currency code requested.';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_CGL" IS 'The 10-digit CGL account code requested.';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_AMOUNT" IS 'Raw requested amount ';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_NARRATION" IS 'remarks from the uploaded file.';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."REQ_PRODUCT" IS 'The product code requested.';
+COMMENT ON COLUMN "VOUCHER_POSTING_DATA"."IS_VALIDATED" IS 'Flag for checking row is checked or not for validation';
+CREATE INDEX "IDX_JR_BATCH_OPT" ON "VOUCHER_POSTING_DATA" ("BATCH_ID", "REQ_STATUS");
+CREATE INDEX "IDX_JR_BRANCH_CODE" ON "VOUCHER_POSTING_DATA" ("REQ_BRANCH_CODE");
+CREATE INDEX "IDX_JR_JOURNAL_ID" ON "VOUCHER_POSTING_DATA" ("JOURNAL_ID");
+CREATE INDEX "IDX_JR_BATCH_ID" ON "VOUCHER_POSTING_DATA" ("BATCH_ID");
+
+CREATE TABLE "VOUCHER_TRANSACTIONS" ( 
+    "TRANSACTION_ID" NUMBER(20,0) NOT NULL ENABLE, 
+    "BATCH_ID" VARCHAR2(50 CHAR), 
+    "JOURNAL_ID" VARCHAR2(50 CHAR), 
+    "TRANSACTION_DATE" DATE, 
+    "POST_DATE" TIMESTAMP (6), 
+    "BRANCH_CODE" VARCHAR2(50 CHAR), 
+    "CURRENCY" VARCHAR2(3 BYTE), 
+    "CGL" VARCHAR2(10 BYTE), 
+    "NARRATION" VARCHAR2(40 CHAR), 
+    "DEBIT_AMOUNT" NUMBER(25,4), 
+    "CREDIT_AMOUNT" NUMBER(25,4), 
+    "TRANSACTION_COUNT" NUMBER(10,0), 
+    "SOURCE_FLAG" VARCHAR2(1 BYTE),
+    CONSTRAINT "VOUCHER_TRANSACTIONS_PK" PRIMARY KEY ("TRANSACTION_ID")
+);
+
+CREATE TABLE "WORKFLOW_TRANSITIONS" ( 
+    "WORKFLOW_CODE" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
+    "ALLOWED_ROLE_ID" NUMBER(10,0), 
+    "IS_FINAL_APPROVAL" CHAR(1 BYTE) DEFAULT 'N', 
+    "SCHEDULING_ALLOWED" CHAR(1 BYTE), 
+    "WORKFLOW_STAGE" VARCHAR2(100 BYTE), 
+    "ESCALATION_TIME" NUMBER(10,0), 
+    "WORKFLOW_ORDER" NUMBER(3,0) NOT NULL ENABLE, 
+    "WORKFLOW_ID" NUMBER DEFAULT "WORKFLOWID_SEQ"."NEXTVAL",
+    CONSTRAINT "WORKFLOW_TRANSITIONS_UK1" UNIQUE ("WORKFLOW_ID"),
+    CONSTRAINT "WORKFLOW_TRANSITIONS_PK" PRIMARY KEY ("WORKFLOW_CODE", "WORKFLOW_ORDER")
+);
+
+CREATE TABLE "REQUEST_VOUCHER" ( 
+    "ID" NUMBER GENERATED BY DEFAULT AS IDENTITY MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE NOT NULL ENABLE, 
+    "VID" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
+    "CATEGORY_ID" NUMBER NOT NULL ENABLE, 
+    "DESCRIPTION" VARCHAR2(500 BYTE) NOT NULL ENABLE, 
+    "ALLOWED_ROLE" NUMBER NOT NULL ENABLE, 
+    "SD_REQ_NO" VARCHAR2(100 BYTE), 
+    "CREATED_BY" VARCHAR2(100 BYTE), 
+    "CREATED_AT" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP, 
+    "TERMINATED_BY" VARCHAR2(100 BYTE), 
+    "TERMINATED_AT" TIMESTAMP (6), 
+    "STATUS" VARCHAR2(30 BYTE) NOT NULL ENABLE, 
+    "REMARKS" VARCHAR2(500 BYTE),
+    PRIMARY KEY ("ID"),
+    UNIQUE ("VID")
+);
+
+CREATE TABLE "SCHEDULED_BATCH_RETRY" ( 
+    "BATCH_ID" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
+    "CREATED_AT" TIMESTAMP (6) DEFAULT SYSTIMESTAMP, 
+    "RETRY_COUNT" NUMBER DEFAULT 0, 
+    "STATUS" VARCHAR2(20 BYTE) DEFAULT 'PENDING',
+    CONSTRAINT "PK_SCHEDULED_RETRY" PRIMARY KEY ("BATCH_ID")
+);
+
+CREATE TABLE "HDFS_SYNC_RETRY_QUEUE" ( 
+    "BATCH_ID" VARCHAR2(50 BYTE), 
+    "CREATED_AT" TIMESTAMP (6) DEFAULT SYSTIMESTAMP, 
+    "RETRY_COUNT" NUMBER DEFAULT 0, 
+    "STATUS" VARCHAR2(20 BYTE) DEFAULT 'PENDING',
+    PRIMARY KEY ("BATCH_ID")
+);
+CREATE INDEX "IDX_HDFS_RETRY_STATUS" ON "HDFS_SYNC_RETRY_QUEUE" ("STATUS");
+
+CREATE TABLE "JS_EOD_MASTER" ( 
+    "ID" NUMBER DEFAULT 1, 
+    "JS_STATUS" NUMBER(1,0) DEFAULT 1, 
+    "EOD_STATUS" NUMBER(1,0) DEFAULT 0, 
+    "JS_UPDATED_AT" TIMESTAMP (6), 
+    "EOD_UPDATED_AT" TIMESTAMP (6), 
+    "JS_PENDING_COUNTER" NUMBER DEFAULT 0,
+    CONSTRAINT "CHK_JS_EOD_SINGLE_ROW" CHECK (ID = 1) ENABLE,
+    PRIMARY KEY ("ID")
+);
+
+-- ==============================================================================
+-- 3. DEPENDENT TABLES (Contains Foreign Keys)
+-- ==============================================================================
+-- [FIX: ISSUE_CATEGORY must be created BEFORE REQUEST_VOUCHER_ISSUE_CATEGORY]
+CREATE TABLE "ISSUE_CATEGORY" ( 
+    "ID" NUMBER, 
+    "VOUCHER_CATEGORY_ID" NUMBER NOT NULL ENABLE, 
+    "ISSUE_CATEGORY_NAME" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
+    "CREATED_DATE" TIMESTAMP (6) DEFAULT SYSTIMESTAMP,
+    PRIMARY KEY ("ID"),
+    CONSTRAINT "FK_ISSUE_CATEGORY_VOUCHER" FOREIGN KEY ("VOUCHER_CATEGORY_ID") REFERENCES "VOUCHER_CATEGORY" ("ID") ENABLE
+);
+
+CREATE TABLE "REQUEST_VOUCHER_ISSUE_CATEGORY" ( 
+    "ID" NUMBER, 
+    "REQUEST_VOUCHER_ID" NUMBER NOT NULL ENABLE, 
+    "ISSUE_CATEGORY_ID" NUMBER NOT NULL ENABLE,
+    PRIMARY KEY ("ID"),
+    CONSTRAINT "FK_REQ_VOUCHER_ISSUE" FOREIGN KEY ("REQUEST_VOUCHER_ID") REFERENCES "REQUEST_VOUCHER" ("ID") ENABLE,
+    CONSTRAINT "FK_REQ_ISSUE_CATEGORY" FOREIGN KEY ("ISSUE_CATEGORY_ID") REFERENCES "ISSUE_CATEGORY" ("ID") ENABLE
+);
+
+CREATE TABLE "VOUCHER_WORKFLOW" ( 
+    "WORKFLOW_ID" NUMBER GENERATED ALWAYS AS IDENTITY MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 1 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE NOT NULL ENABLE, 
+    "BATCH_ID_FK" VARCHAR2(50 BYTE) NOT NULL ENABLE, 
+    "VID_FK" VARCHAR2(20 BYTE) NOT NULL ENABLE, 
+    "LAST_ACTION" VARCHAR2(30 BYTE), 
+    "LAST_ACTION_BY" VARCHAR2(100 BYTE), 
+    "LAST_ACTION_AT" TIMESTAMP (6) DEFAULT CURRENT_TIMESTAMP, 
+    "REMARKS" VARCHAR2(500 BYTE), 
+    "SCHEDULED_TIME" TIMESTAMP (6),
+    PRIMARY KEY ("WORKFLOW_ID"),
+    CONSTRAINT "FK_VP_BATCH" FOREIGN KEY ("BATCH_ID_FK") REFERENCES "VOUCHER_POSTING" ("BATCH_ID") ENABLE
+);
+
+-- ==============================================================================
+-- 4. TRIGGERS
+-- ==============================================================================
+CREATE OR REPLACE EDITIONABLE TRIGGER "REQUEST_VID_TRIGGER" 
+BEFORE INSERT ON REQUEST_VOUCHER
+FOR EACH ROW
+DECLARE
+    v_seq_number NUMBER;
+    v_prefix VARCHAR2(20);
+BEGIN
+    v_prefix := 'VID-' || TO_CHAR(SYSDATE, 'YYMM') || '-';
+    SELECT REQUEST_VOUCHER_SEQ.NEXTVAL INTO v_seq_number FROM DUAL;
+    :NEW.VID := v_prefix || LPAD(v_seq_number, 5, '0');
+END;
+/
+ALTER TRIGGER "REQUEST_VID_TRIGGER" ENABLE;
+
+-- ==============================================================================
+-- 5. PROCEDURES
+-- ==============================================================================
+CREATE OR REPLACE EDITIONABLE PROCEDURE "PROCESS_JOURNAL_BATCH" (
+    p_batch_id      IN VARCHAR2,
+    p_executor_id   IN VARCHAR2,
+    p_remarks       IN VARCHAR2,
+    p_status        IN VARCHAR2,
+    o_cursor        OUT SYS_REFCURSOR
+) AS
+    v_missing_rates NUMBER;
+    v_txn_count     NUMBER; 
+    v_users_date    DATE; 
+BEGIN
+    SELECT USERS_DATE INTO v_users_date FROM FINCORE_DATE WHERE ROWNUM = 1;
+
+    SELECT COUNT(*) INTO v_missing_rates
+    FROM (
+        SELECT DISTINCT REQ_CURRENCY FROM voucher_posting_data
+        WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P'
+    ) req
+    LEFT JOIN CURRENCY_MASTER cm ON req.REQ_CURRENCY = cm.CURRENCY_CODE AND cm.FLAG = 1
+    WHERE req.REQ_CURRENCY <> 'INR'
+      AND (cm.CURRENCY_RATE IS NULL OR cm.CURRENCY_RATE <= 0);
+
+    IF v_missing_rates > 0 THEN
+        RAISE_APPLICATION_ERROR(-20001, 'EXCHANGE_RATE_MISSING');
+    END IF;
+
+    SELECT COUNT(*) INTO v_txn_count
+    FROM voucher_posting_data
+    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
+
+    INSERT /*+ PARALLEL(GL_TRANSACTIONS, 8) */ INTO GL_TRANSACTIONS (
+        TRANSACTION_ID, BATCH_ID, JOURNAL_ID, TRANSACTION_DATE, POST_DATE,
+        BRANCH_CODE, CURRENCY, CGL, NARRATION, DEBIT_AMOUNT, CREDIT_AMOUNT, SOURCE_FLAG, TRANSACTION_COUNT
+    )
+    SELECT /*+ PARALLEL(voucher_posting_data, 8) */
+        GL_TRANSACTIONS_SEQ.nextval, BATCH_ID, JOURNAL_ID, v_users_date,
+        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata', REQ_BRANCH_CODE, REQ_CURRENCY, REQ_CGL, REQ_NARRATION,
+        CASE WHEN REQ_AMOUNT > 0 THEN (REQ_AMOUNT * -1) ELSE 0 END,
+        CASE WHEN REQ_AMOUNT < 0 THEN ABS(REQ_AMOUNT) ELSE 0 END,
+        'J', '1' 
+    FROM voucher_posting_data
+    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
+
+    MERGE INTO GL_BALANCE target
+    USING (
+        SELECT j.REQ_BRANCH_CODE, j.REQ_CURRENCY, j.REQ_CGL, v_users_date as BAL_DATE,
+               SUM(j.REQ_AMOUNT) as TXN_AMOUNT,
+               CASE WHEN j.REQ_CURRENCY = 'INR' THEN 1 ELSE MAX(c.CURRENCY_RATE) END as EXCH_RATE
+        FROM voucher_posting_data j
+        LEFT JOIN CURRENCY_MASTER c ON j.REQ_CURRENCY = c.CURRENCY_CODE AND c.FLAG = 1
+        WHERE j.BATCH_ID = p_batch_id AND j.REQ_STATUS = 'P'
+        GROUP BY j.REQ_BRANCH_CODE, j.REQ_CURRENCY, j.REQ_CGL
+    ) source
+    ON (target.BRANCH_CODE = source.REQ_BRANCH_CODE
+        AND target.CURRENCY = source.REQ_CURRENCY
+        AND target.CGL = source.REQ_CGL
+        AND target.BALANCE_DATE = source.BAL_DATE)
+    WHEN MATCHED THEN
+        UPDATE SET
+            target.BALANCE = target.BALANCE + source.TXN_AMOUNT,
+            target.INR_BALANCE = NVL(target.INR_BALANCE, 0) + (source.TXN_AMOUNT * source.EXCH_RATE)
+    WHEN NOT MATCHED THEN
+        INSERT (ID, BALANCE_DATE, BRANCH_CODE, CURRENCY, CGL, BALANCE, INR_BALANCE)
+        VALUES (GL_BALANCE_SEQ.nextval, source.BAL_DATE, source.REQ_BRANCH_CODE,
+                source.REQ_CURRENCY, source.REQ_CGL, source.TXN_AMOUNT,
+                (source.TXN_AMOUNT * source.EXCH_RATE));
+
+    OPEN o_cursor FOR
+    SELECT
+        j.REQ_BRANCH_CODE AS BRANCH, j.REQ_CURRENCY AS CURRENCY, j.REQ_CGL AS CGL,
+        v_users_date AS BAL_DATE,
+        g.BALANCE AS NEW_BALANCE, g.INR_BALANCE AS NEW_INR_BALANCE
+    FROM (
+        SELECT DISTINCT REQ_BRANCH_CODE, REQ_CURRENCY, REQ_CGL
+        FROM voucher_posting_data WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P'
+    ) j
+    JOIN GL_BALANCE g
+        ON g.BRANCH_CODE = j.REQ_BRANCH_CODE
+        AND g.CURRENCY = j.REQ_CURRENCY
+        AND g.CGL = j.REQ_CGL
+        AND g.BALANCE_DATE = v_users_date;
+
+    UPDATE voucher_posting_data
+    SET REQ_STATUS = p_status,
+        EXECUTION_DATE = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata'
+    WHERE BATCH_ID = p_batch_id AND REQ_STATUS = 'P';
+
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+END;
+/
+
+CREATE OR REPLACE EDITIONABLE PROCEDURE "PURGE_JOURNAL_BATCH" (
+    p_batch_id IN VARCHAR2,
+    p_user_id  IN VARCHAR2
+) AS
+    v_status VARCHAR2(20);
+BEGIN
+    SELECT BATCH_STATUS INTO v_status
+    FROM VOUCHER_POSTING
+    WHERE BATCH_ID = p_batch_id 
+      AND UPPER(TRIM(CREATED_BY)) = UPPER(TRIM(p_user_id));
+
+    IF v_status NOT IN ('P') THEN
+        RAISE_APPLICATION_ERROR(-20002, 'Cannot delete batch. Status is ' || v_status);
+    END IF;
+
+    DELETE FROM VOUCHER_WORKFLOW WHERE BATCH_ID_FK = p_batch_id;
+    DELETE FROM VOUCHER_POSTING_DATA WHERE BATCH_ID = p_batch_id;
+    DELETE FROM VOUCHER_POSTING WHERE BATCH_ID = p_batch_id;
+END;
+/
+
+CREATE OR REPLACE EDITIONABLE PROCEDURE "VD_VALIDATE_VOUCHER_DATA" (
+    in_batch_id IN VARCHAR2
+) AS
+    c_batch_size CONSTANT NUMBER := 25000;
+ 
+    CURSOR c_staging_data IS
+    SELECT 
+        s.rowid,
+        CASE WHEN bm.code IS NULL AND s.req_branch_code IS NOT NULL THEN 'N' ELSE 'Y' END AS is_branch_code_valid,
+        CASE WHEN cm.currency_code IS NULL AND s.req_currency IS NOT NULL THEN 'N' ELSE 'Y' END AS is_currency_code_valid,
+        CASE WHEN cgm.cgl_number IS NULL AND s.req_cgl IS NOT NULL THEN 'N' ELSE 'Y' END AS is_cgl_valid
+    FROM voucher_posting_data s
+    LEFT JOIN branch_master bm ON (s.req_branch_code = bm.code AND bm.status = 1)
+    LEFT JOIN currency_master cm ON (s.req_currency = cm.currency_code AND cm.flag = 1) 
+    LEFT JOIN cgl_master cgm ON (s.req_cgl = cgm.cgl_number AND cgm.status = 1)
+    WHERE s.is_validated = 'N' 
+      AND s.batch_id = in_batch_id
+      AND (
+          (bm.code IS NULL AND s.req_branch_code IS NOT NULL) OR
+          (cm.currency_code IS NULL AND s.req_currency IS NOT NULL) OR
+          (cgm.cgl_number IS NULL AND s.req_cgl IS NOT NULL)
       );
-      const updated = res?.data ?? res;
 
-      setRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
-    } catch (err) {
-      console.error("toggle error", err);
-      if (err?.response?.status === 400) {
-        alert(err.response.data?.message ?? "Toggle not allowed");
-      }
-    }
-  };
+    TYPE t_staging_rec is RECORD (
+        rid ROWID,
+        is_branch_code_valid varchar(1),
+        is_currency_code_valid varchar(1),
+        is_cgl_valid varchar(1)
+    );
 
-  // ---------- CREATE SAVE ----------
-  const handleCreateSave = async (payload) => {
-    try {
-      await callApi("/CM/announcements", payload, "POST");
-      setOpenCreate(false);
-      fetchRows();
-    } catch (err) {
-      console.error("create error", err);
-    }
-  };
+    TYPE t_staging_tab IS TABLE OF t_staging_rec;
+    l_batch_data t_staging_tab;
 
-  // ---------- EDIT SAVE ----------
-  const handleEditSave = async (updated) => {
-    try {
-      await callApi(`/CM/announcements/${updated.id}`, updated, "PUT");
-      setEditRow(null);
-      fetchRows();
-    } catch (err) {
-      console.error("edit save error", err);
-    }
-  };
+BEGIN
+    OPEN c_staging_data;
+ 
+    LOOP
+        FETCH c_staging_data BULK COLLECT INTO l_batch_data LIMIT c_batch_size;
+        EXIT WHEN l_batch_data.COUNT = 0;
+        
+        FORALL i IN 1..l_batch_data.COUNT
+        UPDATE voucher_posting_data 
+        SET is_branch_valid = l_batch_data(i).is_branch_code_valid, 
+            is_currency_valid = l_batch_data(i).is_currency_code_valid, 
+            is_cgl_valid = l_batch_data(i).is_cgl_valid,
+            is_validated = 'Y' 
+        WHERE rowid = l_batch_data(i).rid;
+    END LOOP;
+    CLOSE c_staging_data;
 
-  // ---------- ROLE NAME MAPPING ----------
-  const roleMap = useMemo(() => {
-    const m = {};
-    roles.forEach((r) => (m[String(r.id)] = r.name));
-    return m;
-  }, [roles]);
+    UPDATE voucher_posting_data 
+    SET is_branch_valid = 'Y', 
+        is_currency_valid = 'Y', 
+        is_cgl_valid = 'Y', 
+        is_validated = 'Y' 
+    WHERE is_validated = 'N' AND batch_id = in_batch_id;
+END;
+/
 
-  const columns = [
-    { field: "title", headerName: "Title", flex: 1 },
-    {
-      field: "severity",
-      headerName: "Severity",
-      flex: 1,
+-- ==============================================================================
+-- 6. DATA INSERTIONS
+-- ==============================================================================
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9001,'N','Y','Creation',0,1,24);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9001,'N','N','Verification',45,2,25);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9002,'N','N','Review',30,3,26);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',9002,'Y','Y','Approval',15,4,27);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9001,'N','Y','Creation',0,1,30);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_3',null,'N','N','Execution',0,5,28);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9001,'N','N','Validation',45,2,31);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9001,'N','Y','Verification',30,3,32);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9002,'N','N','Review',15,4,33);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',9002,'Y','Y','Approval',0,5,34);
+Insert into WORKFLOW_TRANSITIONS (WORKFLOW_CODE,ALLOWED_ROLE_ID,IS_FINAL_APPROVAL,SCHEDULING_ALLOWED,WORKFLOW_STAGE,ESCALATION_TIME,WORKFLOW_ORDER,WORKFLOW_ID) values ('workflow_4',null,'N','N','Execution',0,6,35);
 
-      renderCell: (params) => {
-        const sev = params.value;
-        const icon =
-          sev === "CRITICAL" ? (
-            <InfoIcon fontSize="small" />
-          ) : sev === "WARN" ? (
-            <WarningIcon fontSize="small" />
-          ) : (
-            <PriorityHighIcon fontSize="small" />
-          );
-        const color =
-          sev === "CRITICAL" ? "error" : sev === "WARN" ? "warning" : "info";
-        return (
-          <CustomChip
-            variant="outlined"
-            label={sev}
-            color={color}
-            icon={icon}
-          />
-        );
-      },
-    },
-    {
-      field: "targetRoles",
-      headerName: "Target Roles",
-      flex: 1,
-      renderCell: (params) => {
-        const tr = params.row.targetRoles;
-
-        if (!tr || tr === "ALL") return "ALL";
-
-        const arr = Array.isArray(tr)
-          ? tr
-          : String(tr)
-              .split(",")
-              .map((x) => x.trim());
-
-        return arr.map((id) => roleMap[id] ?? id).join(", ");
-      },
-    },
-
-    {
-      field: "startDate",
-      headerName: "Start Date",
-      flex: 1,
-      sortable: true,
-      renderCell: (p) => (
-        <Typography
-          variant="body1"
-          component="span"
-          sx={{ fontSize: "0.9rem" }}
-        >
-          {timeStampFormatter(p?.row?.startDate) || "NA"}
-        </Typography>
-      ),
-    },
-
-    {
-      field: "expiryDate",
-      headerName: "Expiry Date",
-      flex: 1,
-      sortable: true,
-      renderCell: (p) => (
-        <Typography
-          variant="body1"
-          component="span"
-          sx={{ fontSize: "0.9rem" }}
-        >
-          {timeStampFormatter(p?.row?.expiryDate) || "NA"}
-        </Typography>
-      ),
-    },
-
-    {
-      field: "displayStatus",
-      headerName: "Status",
-      flex: 1,
-      // sortable: true,
-      renderCell: (params) => (
-        <CustomChip
-          color={
-            params.value === "ACTIVE"
-              ? "#3b803fff"
-              : params.value === "EXPIRED"
-              ? "#d32f2f"
-              : params.value === "SCHEDULED"
-              ? "#1976d2"
-              : "#9e9e9e"
-          }
-          variant="outlined"
-          icon={<OnlinePredictionIcon />}
-          label={params.value}
-        />
-      ),
-    },
-
-    {
-      field: "action",
-      headerName: "Actions",
-      flex: 1,
-
-      renderCell: (params) => (
-        <Stack
-          direction="row"
-          spacing={1}
-          justifyContent="center"
-          alignItems="center"
-          sx={{ height: "100%" }}
-        >
-          <Tooltip
-            title={
-              params.row.isActive === "Y"
-                ? "Inactive Announcement"
-                : "Activate Announcement"
-            }
-          >
-            {/* <IconButton
-              color={params.row.isActive === "Y" ? "error" : "success"}
-              onClick={() => handleToggle(params.row)}
-            >
-              <CampaignIcon fontSize="inherit" />
-            </IconButton> */}
-            <Switch
-              checked={params.row.isActive === "Y"}
-              onChange={() => handleToggle(params.row)}
-            />
-          </Tooltip>
-
-          <Tooltip title="Edit Announcement">
-            <IconButton onClick={() => setEditRow(params.row)}>
-              <EditIcon fontSize="inherit" />
-            </IconButton>
-          </Tooltip>
-
-          <Tooltip title="View Announcement">
-            <IconButton
-              onClick={() => {
-                setOpenViewDailog(true);
-                setViewRow(params.row);
-              }}
-            >
-              <VisibilityIcon fontSize="inherit" />
-            </IconButton>
-          </Tooltip>
-        </Stack>
-      ),
-    },
-  ];
-
-  return (
-    <Box p={2} height="80vh">
-      <DataGrid
-        rows={rows}
-        columns={columns}
-        loading={loading}
-        pageSizeOptions={[5, 10, 25]}
-        disableRowSelectionOnClick
-      />
-
-      <Fab
-        color="primary"
-        onClick={() => setOpenCreate(true)}
-        variant="extended"
-        sx={{
-          position: "fixed",
-          borderRadius: 1,
-          fontSize: "15px",
-          bottom: (theme) => theme.spacing(8),
-          right: (theme) => theme.spacing(4),
-        }}
-      >
-        <AddIcon />
-        Create
-      </Fab>
-
-      <CreateAnnouncementDialog
-        open={openCreate}
-        onClose={() => setOpenCreate(false)}
-        onSave={handleCreateSave}
-      />
-
-      {editRow && (
-        <EditAnnouncementDialog
-          open={Boolean(editRow)}
-          record={editRow}
-          onClose={() => setEditRow(null)}
-          onSave={handleEditSave}
-        />
-      )}
-
-      {viewRow && (
-        <ViewAnnouncementDialog
-          open={openViewDailog}
-          data={viewRow}
-          onClose={() => setOpenViewDailog(false)}
-        />
-      )}
-    </Box>
-  );
-}
+COMMIT;
