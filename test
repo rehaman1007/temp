@@ -1,3 +1,125 @@
+@PostMapping("/enquires")
+        public ResponseEntity<ApiResponse<PaginatedResponseDTO<BalanceResponseDTO>>> getBalance(
+                        @RequestBody BalanceRequestDTO request) {
+
+                PaginatedResponseDTO<BalanceResponseDTO> result = service.getBalanceDetails(request);
+                return ResponseEntity.ok(ApiResponse.success(result, "Balance records fetched Successfully"));
+        }
+		
+		
+PaginatedResponseDTO<BalanceResponseDTO> getBalanceDetails(BalanceRequestDTO request);
+
+@Override
+	public PaginatedResponseDTO<BalanceResponseDTO> getBalanceDetails(BalanceRequestDTO request) {
+		// if (request.getEndDate().before(request.getStartDate())) {
+		// log.error("End date must be after start date.");
+		// throw new IllegalArgumentException("End date must be after start date");
+		// }
+
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM-yyyy");
+		// 1. Force Start Date to 00:00:00 IST
+		LocalDate adjustedStartDate = LocalDate.parse(request.getStartDate(), formatter);
+		// 2. Force End Date to 23:59:59 IST
+		LocalDate adjustedEndDate = LocalDate.parse(request.getEndDate(), formatter);
+
+		log.info("Start date is {}", adjustedStartDate);
+		log.info("End date is {}", adjustedEndDate);
+
+		if (adjustedStartDate.isAfter(adjustedEndDate)) {
+			log.error("End date must be after start date.");
+			throw new IllegalArgumentException("End date must be after start date");
+		}
+
+		int page = (request.getPage() != null && request.getPage() >= 0) ? request.getPage() : 0;
+		int size = (request.getSize() != null && request.getSize() >= 0) ? request.getSize() : 10;
+
+		String sortIn = (request.getSortIn() != null && !request.getSortIn().isBlank())
+				? request.getSortIn().toUpperCase()
+				: "ASC";
+
+		Sort sort = sortIn.equals("DESC") ? Sort.by("date").descending() : Sort.by("date").ascending();
+		PageRequest pageRequest = PageRequest.of(page, size, sort);
+
+		log.info("Adjusted Start Date : {}", adjustedStartDate);
+		log.info("Adjusted End Date : {}", adjustedEndDate);
+
+		Page<GLBalance> records = glBalanceRepository.findByBranchAndCglAndCurrencyAndDateBetween(
+				request.getBranch(), request.getCgl(), request.getCurrency(),
+				adjustedStartDate, adjustedEndDate,
+				pageRequest);
+
+		if (records.isEmpty()) {
+			log.warn("No records found for the given filters.");
+			throw new NoDataFoundException("No records found for given filters");
+		}
+
+		List<BalanceResponseDTO> list = records.stream()
+				.map(r -> new BalanceResponseDTO(
+						r.getId(), r.getDate(), r.getBranch(), r.getCgl(), r.getCurrency(), r.getBalance(),
+						r.getBalance() < 0 ? "DR" : "CR"))
+				.toList();
+
+		String actualSort = records.getSort().stream().findFirst().map(order -> order.getDirection().name())
+				.orElse("UNSORTED");
+
+		return new PaginatedResponseDTO<>(
+				records.getNumber(), records.getTotalPages(), records.getSize(), records.getTotalElements(), actualSort,
+				list, null);
+	}
+
+
+
+
+Page<GLBalance> findByBranchAndCglAndCurrencyAndDateBetween(String branch, String cgl, String currency,
+																LocalDate startDate, LocalDate endDate, Pageable pageable);
+
+	@Query(value = """  
+		SELECT 
+			c.CIRCLE_CODE,
+			c.CIRCLE_NAME,
+			b.NAME AS BRANCH_NAME, 
+			b.CODE AS BRANCH_CODE,
+			g.CGL,  
+			d.DESCRIPTION AS CGL_DESCRIPTION,
+			g.BALANCE_DATE,
+			g.CURRENCY,
+			SUM(g.BALANCE) AS TOTAL_BALANCE, 
+			SUM(g.INR_BALANCE) AS TOTAL_INR_BALANCE
+		FROM 
+			GL_BALANCE g
+		INNER JOIN 
+			BRANCH_MASTER b ON g.BRANCH_CODE = b.CODE
+		LEFT JOIN
+			CIRCLE_MASTER c ON b.CIRCLE_CODE = c.CIRCLE_CODE
+		LEFT JOIN
+			CGL_MASTER d ON g.CGL = d.CGL_NUMBER
+		WHERE 
+			g.BALANCE_DATE >= TO_DATE(:startDate,'DD/MM/YYYY') 
+			AND g.BALANCE_DATE < TO_DATE(:endDate,'DD/MM/YYYY')
+			AND g.CURRENCY = :currency
+			AND (:v_circle IS NULL OR c.CIRCLE_CODE = :v_circle)
+			AND (:v_branch IS NULL OR b.CODE = :v_branch)
+			AND (:v_cgl IS NULL OR g.CGL = :v_cgl)
+		GROUP BY 
+			c.CIRCLE_CODE, c.CIRCLE_NAME, b.NAME, b.CODE, 
+			g.CGL, d.DESCRIPTION, g.BALANCE_DATE, g.CURRENCY
+    """, 
+    countQuery = """
+        SELECT count(*) FROM (
+            SELECT g.CGL FROM GL_BALANCE g
+            INNER JOIN BRANCH_MASTER b ON g.BRANCH_CODE = b.CODE
+            LEFT JOIN CIRCLE_MASTER c ON b.CIRCLE_CODE = c.CIRCLE_CODE
+            WHERE g.BALANCE_DATE >= TO_DATE(:startDate,'DD/MM/YYYY') 
+                AND g.BALANCE_DATE < TO_DATE(:endDate,'DD/MM/YYYY')
+				AND g.CURRENCY = :currency
+                AND (:v_circle IS NULL OR c.CIRCLE_CODE = :v_circle)
+                AND (:v_branch IS NULL OR b.CODE = :v_branch)
+                AND (:v_cgl IS NULL OR g.CGL = :v_cgl)
+            GROUP BY c.CIRCLE_CODE, c.CIRCLE_NAME, b.NAME, b.CODE, g.CGL, g.BALANCE_DATE, g.CURRENCY
+        )
+    """, nativeQuery = true)
+	
+	
 package com.fincore.enquiry_service.model;
 
 import java.util.Date;
@@ -37,6 +159,10 @@ public class GLBalance {
 
     @Column(name = "CURRENCY", nullable = false)
     private String currency;
+
+    // Hibernate will run this subquery to fetch the CGL description
+//    @Formula("(SELECT d.CURRENCY_NAME FROM CGL_MASTER d WHERE d.CURRENCY_CODE = CURRENCY)")
+//    private String currencyName;
 
     @Column(name = "BALANCE", nullable = false)
     private Double balance;
