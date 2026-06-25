@@ -1,3 +1,523 @@
+import React, { useState, useCallback, useEffect, useMemo } from "react";
+import { useSelector } from "react-redux";
+import { Box } from "@mui/material";
+import { LocalizationProvider } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import dayjs from "dayjs";
+import debounce from "lodash/debounce";
+import LedgerForm from "./components/LedgerForm";
+import LedgerDataGrid from "./components/LedgerDataGrid";
+import { getPermissions } from "../../utils/CommonUtilities";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import downloadFile from "../../utils/DownloadUtils";
+
+const DEFAULT_PAGE_SIZE = 20;
+const FOREIGN_CIRCLE_CODE = "021";
+
+const CIRCLE_GROUPS = {
+  ALL: "ALL",
+  DOMESTIC: "DOMESTIC",
+  FOREIGN: "FOREIGN",
+};
+
+const LedgerWiseEnquiry = () => {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const user = useSelector((state) => state.auth.user);
+  const menu = useSelector((state) => state.menus.selectedMenuItem);
+  const permissions = getPermissions(menu);
+
+  const MIN_ALLOWED_DATE = dayjs("2026-03-31");
+  const DATE_FORMAT = "DD/MM/YYYY";
+
+  const hasWholeBank = !!permissions.wholebank;
+  const hasCircle = user?.isCircle || !!permissions.circle;
+  const isCircleUser = user?.isCircle && !hasWholeBank;
+
+  const [circles, setCircles] = useState([]);
+  const [initialState, setInitialState] = useState({
+    level: "BRANCH",
+    circle: "ALL",
+    branches: ["ALL"],
+    currencies: "All Currencies",
+    sourceFlags: [],
+    cgl: "",
+    fromDate: null,
+    toDate: null,
+  });
+  const [currencies, setCurrencies] = useState([]);
+  const [sourceOptions, setSourceOptions] = useState([]);
+  const [etlDate, setEtlDate] = useState(null);
+
+  const [rows, setRows] = useState(null);
+  const [rowCount, setRowCount] = useState(0);
+
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: DEFAULT_PAGE_SIZE,
+  });
+
+  const [sortModel, setSortModel] = useState([
+    {
+      field: "transactionDate",
+      sort: "desc",
+    },
+  ]);
+
+  const [filterModel, setFilterModel] = useState({
+    items: [],
+  });
+
+  /* INITIAL FILTERS */
+  const initialDetails = useMemo(() => {
+    return {
+      level: hasWholeBank ? "BANK" : isCircleUser ? "CIRCLE" : "BRANCH",
+      circle: hasWholeBank ? "ALL" : user?.circleCode,
+      branches:
+        !user?.isCircle && !hasWholeBank
+          ? [`${user?.branch}-${user?.branchName}`]
+          : ["ALL"],
+
+      currencies: "All Currencies",
+      sourceFlags: sourceOptions || [],
+      cgl: "",
+      fromDate: null,
+      toDate: null,
+    };
+  }, [
+    hasWholeBank,
+    user?.circleCode,
+    user?.isCircle,
+    user?.branch,
+    user?.branchName,
+    isCircleUser,
+    sourceOptions,
+  ]);
+
+  useEffect(() => {
+    setInitialState(initialDetails);
+    setFilters(initialDetails);
+  }, [initialDetails]);
+
+  const [filters, setFilters] = useState(initialState);
+  const [searchQuery, setSearchQuery] = useState(null);
+
+  /* FETCH MASTERS */
+  const fetchMasters = useCallback(async () => {
+    try {
+      const [dateRes, currRes, flagRes] = await Promise.all([
+        callApi("/PS/file/fincore-date", {}, "GET"),
+
+        callApi("/CM/common-master/currency-code-name-only", null, "GET"),
+
+        callApi("/CM/common-master/source-flag", null, "GET"),
+      ]);
+
+      /* ETL DATE */
+      if (dateRes?.data?.userDate) {
+        setEtlDate(dayjs(dateRes.data.userDate, "YYYY-MM-DD"));
+      }
+
+      /*CURRENCIES */
+      const formattedCurrencies =
+        currRes?.data?.map((c) => `${c.currencyCode} (${c.currencyName})`) ||
+        [];
+
+      const sortedCurrencies = formattedCurrencies.sort((a, b) => {
+        const aCode = a.split(" ")[0];
+        const bCode = b.split(" ")[0];
+
+        // INR always on top
+        if (aCode === "INR") return -1;
+        if (bCode === "INR") return 1;
+
+        // Remaining alphabetical
+        return a.localeCompare(b);
+      });
+
+      setCurrencies(sortedCurrencies);
+
+      /* SOURCE FLAGS */
+      if (flagRes?.data) {
+        setSourceOptions(flagRes.data);
+
+        setFilters((prev) => ({
+          ...prev,
+          sourceFlags: flagRes.data,
+        }));
+      }
+
+      /* CIRCLES */
+      if (hasWholeBank) {
+        const circleRes = await callApi(
+          "/CM/common-master/circle-codes",
+          null,
+          "GET",
+        );
+
+        setCircles(circleRes?.data || []);
+      }
+    } catch (error) {
+      console.error(error);
+
+      showSnackBar("Failed to load master configuration", "error");
+    }
+  }, [callApi, hasWholeBank, showSnackBar]);
+
+  useEffect(() => {
+    fetchMasters();
+  }, [fetchMasters]);
+
+  /* FILTERED SOURCE OPTIONS */
+  const selectedSourceOptions = useMemo(() => {
+    if (!filters?.sourceFlags?.length) {
+      return sourceOptions;
+    }
+
+    const selectedIds = new Set(filters.sourceFlags.map((f) => f.flagId));
+
+    return sourceOptions.filter((option) => selectedIds.has(option.flagId));
+  }, [filters.sourceFlags, sourceOptions]);
+
+  /* BRANCH OPTIONS */
+  const selectedBranchOptions = useMemo(() => {
+    if (!filters.branches?.length || filters.branches.includes("ALL")) {
+      return [];
+    }
+    return filters.branches.map((branch) => ({
+      value: branch.split("-")[0],
+      label: branch,
+    }));
+  }, [filters.branches]);
+
+  /* CIRCLE OPTIONS */
+  const selectedCircleOptions = useMemo(() => {
+    const formattedCircles = circles.map((circle) => ({
+      value: circle.circleCode,
+      label:
+        circle.circleCode === FOREIGN_CIRCLE_CODE
+          ? `${circle.circleCode} - Foreign`
+          : `${circle.circleCode} - ${circle.circleName}`,
+    }));
+
+    // ALL/GROUP OPTIONS
+    if (
+      filters.circle === CIRCLE_GROUPS.ALL ||
+      filters.circle === CIRCLE_GROUPS.DOMESTIC ||
+      filters.circle === CIRCLE_GROUPS.FOREIGN
+    ) {
+      return formattedCircles;
+    }
+
+    return formattedCircles.filter((circle) => circle.value === filters.circle);
+  }, [filters.circle, circles]);
+
+  /* CURRENCY OPTIONS */
+  const selectedCurrencyOptions = useMemo(() => {
+    if (!filters.currencies || filters.currencies === "ALL") {
+      return currencies.map((currency) => ({
+        value: currency.split(" (")[0],
+
+        label: currency,
+      }));
+    }
+    return [
+      {
+        value: filters.currencies.split(" (")[0],
+        label: filters.currencies,
+      },
+    ];
+  }, [filters.currencies, currencies]);
+
+  /* PAYLOAD */
+  const buildPayload = useCallback(() => {
+    if (!searchQuery) return null;
+
+    const gridFilters =
+      filterModel.items
+        ?.filter(
+          (item) =>
+            item.field &&
+            item.operator &&
+            item.value !== undefined &&
+            item.value !== null &&
+            item.value !== "",
+        )
+        .map((item) => ({
+          field: item.field,
+          operator: item.operator,
+          value: item.value,
+        })) || [];
+
+    return {
+      // Main Filters
+      circle: searchQuery.circle,
+      cgl: searchQuery.cgl.split(" - ")[0],
+      cglName: searchQuery.cgl.split(" - ")[1],
+
+      currencies:
+        searchQuery.currencies === "All Currencies"
+          ? "ALL"
+          : searchQuery.currencies.split(" (")[0],
+
+      branches: searchQuery.branches.includes("ALL")
+        ? ["ALL"]
+        : searchQuery.branches.map((b) => b.split("-")[0]),
+
+      sourceFlags: searchQuery.sourceFlags?.map((f) => f.flagId) || [],
+      fromDate: dayjs(searchQuery.fromDate).format("DD/MM/YYYY"),
+      toDate: dayjs(searchQuery.toDate).format("DD/MM/YYYY"),
+
+      // Pagination
+      page: paginationModel.page,
+      size: paginationModel.pageSize,
+
+      // Sorting
+      sortField: sortModel?.[0]?.field || "transactionDate",
+      sortOrder: sortModel?.[0]?.sort || "desc",
+
+      // Grid Filters
+      gridFilters,
+    };
+  }, [searchQuery, paginationModel, sortModel, filterModel]);
+
+  /* FETCH ROWS */
+  const fetchRows = useCallback(async () => {
+    const payload = buildPayload();
+    if (!payload) return;
+    try {
+      setLoading(true);
+      console.log(payload);
+      const res = await callApi("/ES/ledger-enquiries/search", payload, "POST");
+      setRows(res?.data?.content || []);
+      setRowCount(res?.data?.page?.totalElements || 0);
+    } catch (error) {
+      console.error(error);
+      showSnackBar(error?.message || "Enquiry failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [callApi, buildPayload, showSnackBar]);
+
+  /* DEBOUNCED FETCH */
+  const debouncedFetch = useMemo(
+    () =>
+      debounce(() => {
+        fetchRows();
+      }, 300),
+    [fetchRows],
+  );
+
+  useEffect(() => {
+    if (!searchQuery) return;
+    debouncedFetch();
+    return () => {
+      debouncedFetch.cancel();
+    };
+  }, [paginationModel, sortModel, filterModel, searchQuery, debouncedFetch]);
+
+  const handleSearch = useCallback(() => {
+    const { cgl, fromDate, toDate } = filters;
+
+    if (!cgl || !fromDate || !toDate) {
+      showSnackBar("Please fill all required fields", "warning");
+      return;
+    }
+
+    if (!fromDate?.isValid?.() || !toDate?.isValid?.()) {
+      showSnackBar("Invalid date selected", "warning");
+      return;
+    }
+
+    if (fromDate.isBefore(MIN_ALLOWED_DATE, "day")) {
+      showSnackBar(
+        `From date cannot be earlier than ${MIN_ALLOWED_DATE.format(
+          DATE_FORMAT,
+        )}`,
+        "warning",
+      );
+      return;
+    }
+
+    if (toDate.isBefore(MIN_ALLOWED_DATE, "day")) {
+      showSnackBar(
+        `To date cannot be earlier than ${MIN_ALLOWED_DATE.format(
+          DATE_FORMAT,
+        )}`,
+        "warning",
+      );
+      return;
+    }
+
+    if (fromDate.isAfter(toDate, "day")) {
+      showSnackBar("From date cannot be greater than To date", "warning");
+      return;
+    }
+
+    if (toDate.isAfter(fromDate.add(1, "year"), "day")) {
+      showSnackBar("Date range cannot exceed 12 months", "warning");
+      return;
+    }
+
+    if (etlDate?.isValid?.() && toDate.isAfter(etlDate, "day")) {
+      showSnackBar(
+        `To date cannot exceed ETL date ${etlDate.format(DATE_FORMAT)}`,
+        "warning",
+      );
+      return;
+    }
+
+    setPaginationModel({
+      page: 0,
+      pageSize: paginationModel.pageSize,
+    });
+
+    setSortModel([
+      {
+        field: "transactionDate",
+        sort: "desc",
+      },
+    ]);
+
+    setFilterModel({
+      items: [],
+    });
+
+    setSearchQuery({
+      ...filters,
+    });
+  }, [
+    filters,
+    etlDate,
+    MIN_ALLOWED_DATE,
+    DATE_FORMAT,
+    paginationModel.pageSize,
+    showSnackBar,
+  ]);
+
+  /* RESET */
+  const handleReset = useCallback(() => {
+    setFilters(initialState);
+    setSearchQuery(null);
+    setRows(null);
+    setRowCount(0);
+    setPaginationModel({
+      page: 0,
+      pageSize: DEFAULT_PAGE_SIZE,
+    });
+    setSortModel([
+      {
+        field: "transactionDate",
+        sort: "desc",
+      },
+    ]);
+    setFilterModel({
+      items: [],
+    });
+  }, [initialState]);
+
+  /* EXPORT */
+  const handleExcelExport = useCallback(async () => {
+    const payload = buildPayload();
+    if (!payload) return;
+    try {
+      setExporting(true);
+      console.log(payload);
+      const response = await callApi(
+        "/ES/ledger-enquiries/export-excel",
+        payload,
+        "POST",
+        "arraybuffer",
+      );
+      const fileName = `GL_Enquiry_${searchQuery.cgl.split(" - ")[0]}`;
+      if (response?.byteLength) {
+        downloadFile(response, "excel", fileName);
+      } else {
+        showSnackBar(
+          "Failed to download, Something went wrong Kindly try again",
+          "error",
+        );
+      }
+    } catch (error) {
+      showSnackBar(
+        error?.message ||
+          "Failed to export, Something went wrong Kindly try again",
+        "error",
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [buildPayload, callApi, searchQuery, showSnackBar]);
+
+  return (
+    <LocalizationProvider dateAdapter={AdapterDayjs}>
+      <Box
+        sx={{
+          p: 2.5,
+        }}
+      >
+        <LedgerForm
+          filters={filters}
+          onFilterChange={(field, value) =>
+            setFilters((prev) => ({
+              ...prev,
+              [field]: value,
+            }))
+          }
+          onReset={handleReset}
+          onFetch={handleSearch}
+          permissions={{
+            hasWholeBank,
+            hasCircle,
+          }}
+          user={user}
+          circles={circles}
+          currencies={currencies}
+          sourceOptions={sourceOptions}
+          FOREIGN_CIRCLE_CODE={FOREIGN_CIRCLE_CODE}
+          CIRCLE_GROUPS={CIRCLE_GROUPS}
+          minLimit={MIN_ALLOWED_DATE}
+          maxLimit={etlDate || dayjs()}
+          fetchLoading={loading}
+        />
+
+        {rows && (
+          <LedgerDataGrid
+            rows={rows}
+            loading={loading}
+            rowCount={rowCount}
+            paginationModel={paginationModel}
+            setPaginationModel={setPaginationModel}
+            sortModel={sortModel}
+            setSortModel={setSortModel}
+            filterModel={filterModel}
+            setFilterModel={setFilterModel}
+            onExcelExport={handleExcelExport}
+            exporting={exporting}
+            selectedCurrency={searchQuery?.currencies || "ALL"}
+            selectedCircle={searchQuery?.circle || "ALL"}
+            sourceOptions={selectedSourceOptions}
+            branchOptions={selectedBranchOptions}
+            circleOptions={selectedCircleOptions}
+            currencyOptions={selectedCurrencyOptions}
+            searchPerformed={!!searchQuery}
+            selectedCgl={filters?.cgl || ""}
+          />
+        )}
+      </Box>
+    </LocalizationProvider>
+  );
+};
+
+export default React.memo(LedgerWiseEnquiry);
+
+
+
+
 import React, { useState, useCallback, useMemo, useEffect } from "react";
 import {
   Card,
@@ -59,11 +579,11 @@ const LedgerForm = ({
   const [cgls, setCgls] = useState([]);
   const [loading, setLoading] = useState({ branch: false, cgl: false });
   const [viewBranchList, setViewBranchList] = useState(false);
-  
+
   // Validation States
   const [fromDateError, setFromDateError] = useState(null);
   const [toDateError, setToDateError] = useState(null);
-  
+
   // Quick Filter State
   const [quickFilter, setQuickFilter] = useState("custom");
 
@@ -82,15 +602,51 @@ const LedgerForm = ({
     return [
       { value: "custom", label: "Custom Range", show: true },
       { value: "currentDay", label: "Current Day", show: isValid(baseDate) },
-      { value: "previousDay", label: "Previous Day", show: isValid(baseDate.subtract(1, "day")) },
-      { value: "currentWeek", label: "Current Week", show: isValid(baseDate.startOf("week")) },
-      { value: "previousWeek", label: "Previous Week", show: isValid(baseDate.subtract(1, "week").startOf("week")) },
-      { value: "currentMonth", label: "Current Month", show: isValid(baseDate.startOf("month")) },
-      { value: "previousMonth", label: "Previous Month", show: isValid(baseDate.subtract(1, "month").startOf("month")) },
-      { value: "last3Months", label: "Last 3 Months", show: isValid(baseDate.subtract(3, "month")) },
-      { value: "last6Months", label: "Last 6 Months", show: isValid(baseDate.subtract(6, "month")) },
-      { value: "currentYear", label: "Current Year", show: isValid(baseDate.startOf("year")) },
-      { value: "previousYear", label: "Previous Year", show: isValid(baseDate.subtract(1, "year").startOf("year")) },
+      {
+        value: "previousDay",
+        label: "Previous Day",
+        show: isValid(baseDate.subtract(1, "day")),
+      },
+      {
+        value: "currentWeek",
+        label: "Current Week",
+        show: isValid(baseDate.startOf("week")),
+      },
+      {
+        value: "previousWeek",
+        label: "Previous Week",
+        show: isValid(baseDate.subtract(1, "week").startOf("week")),
+      },
+      {
+        value: "currentMonth",
+        label: "Current Month",
+        show: isValid(baseDate.startOf("month")),
+      },
+      {
+        value: "previousMonth",
+        label: "Previous Month",
+        show: isValid(baseDate.subtract(1, "month").startOf("month")),
+      },
+      {
+        value: "last3Months",
+        label: "Last 3 Months",
+        show: isValid(baseDate.subtract(3, "month")),
+      },
+      {
+        value: "last6Months",
+        label: "Last 6 Months",
+        show: isValid(baseDate.subtract(6, "month")),
+      },
+      {
+        value: "currentYear",
+        label: "Current Year",
+        show: isValid(baseDate.startOf("year")),
+      },
+      {
+        value: "previousYear",
+        label: "Previous Year",
+        show: isValid(baseDate.subtract(1, "year").startOf("year")),
+      },
     ].filter((option) => option.show);
   }, [baseDate, minLimit]);
 
@@ -116,7 +672,8 @@ const LedgerForm = ({
     let newEnd = baseDate;
 
     switch (option) {
-      case "currentDay": break;
+      case "currentDay":
+        break;
       case "previousDay":
         newStart = baseDate.subtract(1, "day");
         newEnd = baseDate.subtract(1, "day");
@@ -148,7 +705,8 @@ const LedgerForm = ({
         newStart = baseDate.subtract(1, "year").startOf("year");
         newEnd = baseDate.subtract(1, "year").endOf("year");
         break;
-      default: break;
+      default:
+        break;
     }
 
     if (newStart.isBefore(minLimit)) newStart = minLimit;
@@ -218,7 +776,10 @@ const LedgerForm = ({
     ],
   );
 
-  const fetchSearchData = useMemo(() => debounce((t, v) => searchLogic(t, v), 300), [searchLogic]);
+  const fetchSearchData = useMemo(
+    () => debounce((t, v) => searchLogic(t, v), 300),
+    [searchLogic],
+  );
   useEffect(() => () => fetchSearchData.cancel(), [fetchSearchData]);
 
   // ================= HANDLERS =================
@@ -263,10 +824,21 @@ const LedgerForm = ({
   // ================= HELPERS =================
   const SectionHeader = ({ icon, title }) => (
     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
-      <Box sx={{ p: 0.5, bgcolor: "primary.main", borderRadius: 1, color: "white", display: "flex" }}>
+      <Box
+        sx={{
+          p: 0.5,
+          bgcolor: "primary.main",
+          borderRadius: 1,
+          color: "white",
+          display: "flex",
+        }}
+      >
         {icon}
       </Box>
-      <Typography variant="subtitle2" sx={{ fontWeight: 800, color: "text.primary", letterSpacing: 1 }}>
+      <Typography
+        variant="subtitle2"
+        sx={{ fontWeight: 800, color: "text.primary", letterSpacing: 1 }}
+      >
         {title}
       </Typography>
     </Stack>
@@ -274,12 +846,18 @@ const LedgerForm = ({
 
   const getDateErrorMessage = (field, error) => {
     switch (error) {
-      case "maxDate": return `${field} cannot be in future`;
-      case "minDate": return `${field} cannot be before ${minLimit.format("DD/MM/YYYY")}`;
-      case "invalidDate": return `Please enter a valid ${field}`;
-      case "fromGreaterThanTo": return "From Date cannot be greater than To Date";
-      case "toLessThanFrom": return "To Date cannot be less than From Date";
-      default: return "";
+      case "maxDate":
+        return `${field} cannot be in future`;
+      case "minDate":
+        return `${field} cannot be before ${minLimit.format("DD/MM/YYYY")}`;
+      case "invalidDate":
+        return `Please enter a valid ${field}`;
+      case "fromGreaterThanTo":
+        return "From Date cannot be greater than To Date";
+      case "toLessThanFrom":
+        return "To Date cannot be less than From Date";
+      default:
+        return "";
     }
   };
 
@@ -299,7 +877,11 @@ const LedgerForm = ({
         }}
       >
         <CardContent sx={{ p: 4 }}>
-          <Stack direction="row" justifyContent="space-between" sx={{ mb: 1.5 }}>
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            sx={{ mb: 1.5 }}
+          >
             <Box>
               <Typography variant="h4" sx={{ fontWeight: 900 }}>
                 Ledger Explorer
@@ -324,7 +906,10 @@ const LedgerForm = ({
                     position: "relative",
                   }}
                 >
-                  <SectionHeader icon={<AccountBalanceIcon fontSize="small" />} title="Hierarchy" />
+                  <SectionHeader
+                    icon={<AccountBalanceIcon fontSize="small" />}
+                    title="Hierarchy"
+                  />
                   <Grid container spacing={2}>
                     {isCircleVisible && (
                       <Grid size={{ xs: 12, sm: isBranchVisible ? 6 : 12 }}>
@@ -332,27 +917,55 @@ const LedgerForm = ({
                           size="small"
                           options={[
                             { value: CIRCLE_GROUPS.ALL, label: "All Circles" },
-                            { value: CIRCLE_GROUPS.DOMESTIC, label: "Domestic Circles" },
-                            { value: CIRCLE_GROUPS.FOREIGN, label: "Foreign Circles" },
+                            {
+                              value: CIRCLE_GROUPS.DOMESTIC,
+                              label: "Domestic Circles",
+                            },
+                            {
+                              value: CIRCLE_GROUPS.FOREIGN,
+                              label: "Foreign Circles",
+                            },
                             ...circles.map((c) => ({
                               value: c.circleCode,
-                              label: c.circleCode === FOREIGN_CIRCLE_CODE ? `${c.circleCode} - Foreign` : `${c.circleCode} - ${c.circleName}`,
+                              label:
+                                c.circleCode === FOREIGN_CIRCLE_CODE
+                                  ? `${c.circleCode} - Foreign`
+                                  : `${c.circleCode} - ${c.circleName}`,
                             })),
                           ]}
                           value={(() => {
-                            if (filters.circle === CIRCLE_GROUPS.ALL) return { value: CIRCLE_GROUPS.ALL, label: "All Circles" };
-                            if (filters.circle === CIRCLE_GROUPS.DOMESTIC) return { value: CIRCLE_GROUPS.DOMESTIC, label: "Domestic Circles" };
-                            if (filters.circle === CIRCLE_GROUPS.FOREIGN) return { value: CIRCLE_GROUPS.FOREIGN, label: "Foreign Circles" };
-                            
-                            const matched = circles.find((c) => c.circleCode === filters.circle);
+                            if (filters.circle === CIRCLE_GROUPS.ALL)
+                              return {
+                                value: CIRCLE_GROUPS.ALL,
+                                label: "All Circles",
+                              };
+                            if (filters.circle === CIRCLE_GROUPS.DOMESTIC)
+                              return {
+                                value: CIRCLE_GROUPS.DOMESTIC,
+                                label: "Domestic Circles",
+                              };
+                            if (filters.circle === CIRCLE_GROUPS.FOREIGN)
+                              return {
+                                value: CIRCLE_GROUPS.FOREIGN,
+                                label: "Foreign Circles",
+                              };
+
+                            const matched = circles.find(
+                              (c) => c.circleCode === filters.circle,
+                            );
                             return matched
                               ? {
                                   value: matched.circleCode,
-                                  label: matched.circleCode === FOREIGN_CIRCLE_CODE ? `${matched.circleCode} - Foreign` : `${matched.circleCode} - ${matched.circleName}`,
+                                  label:
+                                    matched.circleCode === FOREIGN_CIRCLE_CODE
+                                      ? `${matched.circleCode} - Foreign`
+                                      : `${matched.circleCode} - ${matched.circleName}`,
                                 }
                               : null;
                           })()}
-                          isOptionEqualToValue={(option, value) => option?.value === value?.value}
+                          isOptionEqualToValue={(option, value) =>
+                            option?.value === value?.value
+                          }
                           onChange={(_, value) => handleCircleChange(value)}
                           renderInput={(params) => (
                             <TextField
@@ -360,7 +973,10 @@ const LedgerForm = ({
                               label="Select Circle"
                               required
                               variant="standard"
-                              inputProps={{ ...params.inputProps, maxLength: 30 }}
+                              inputProps={{
+                                ...params.inputProps,
+                                maxLength: 30,
+                              }}
                             />
                           )}
                         />
@@ -379,7 +995,10 @@ const LedgerForm = ({
                           onInputChange={(event, newInputValue, reason) => {
                             if (newInputValue.length > 30) return;
                             setBranchSearch(newInputValue);
-                            if (reason === "input" && newInputValue.length >= 3) {
+                            if (
+                              reason === "input" &&
+                              newInputValue.length >= 3
+                            ) {
                               fetchSearchData("branch", newInputValue);
                             }
                           }}
@@ -390,7 +1009,11 @@ const LedgerForm = ({
                           renderTags={() => null}
                           renderOption={(props, option, { selected }) => (
                             <li {...props} key={option}>
-                              <Checkbox size="small" style={{ marginRight: 8 }} checked={selected} />
+                              <Checkbox
+                                size="small"
+                                style={{ marginRight: 8 }}
+                                checked={selected}
+                              />
                               <Typography variant="body2">{option}</Typography>
                             </li>
                           )}
@@ -400,28 +1023,66 @@ const LedgerForm = ({
                               label="Select Branches"
                               variant="standard"
                               required
-                              placeholder={filters.branches.includes("ALL") ? "Search branches..." : ""}
+                              placeholder={
+                                filters.branches.includes("ALL")
+                                  ? "Search branches..."
+                                  : ""
+                              }
                               InputProps={{
                                 ...p.InputProps,
                                 maxLength: 30,
                                 endAdornment: (
-                                  <InputAdornment position="end" sx={{ mb: 0.5 }}>
-                                    <Stack direction="row" alignItems="center" spacing={1}>
+                                  <InputAdornment
+                                    position="end"
+                                    sx={{ mb: 0.5 }}
+                                  >
+                                    <Stack
+                                      direction="row"
+                                      alignItems="center"
+                                      spacing={1}
+                                    >
                                       <CustomChip
-                                        label={filters.branches.includes("ALL") ? "All Branches" : `${filters.branches.length} Selected`}
-                                        color={filters.branches.includes("ALL") ? "default" : "primary"}
-                                        sx={{ fontWeight: 700, fontSize: "0.7rem" }}
+                                        label={
+                                          filters.branches.includes("ALL")
+                                            ? "All Branches"
+                                            : `${filters.branches.length} Selected`
+                                        }
+                                        color={
+                                          filters.branches.includes("ALL")
+                                            ? "default"
+                                            : "primary"
+                                        }
+                                        sx={{
+                                          fontWeight: 700,
+                                          fontSize: "0.7rem",
+                                        }}
                                       />
-                                      {!filters.branches.includes("ALL") && filters.branches.length > 0 && (
-                                        <IconButton
-                                          size="small"
-                                          onClick={() => setViewBranchList(!viewBranchList)}
-                                          color={viewBranchList ? "primary" : "default"}
-                                          sx={{ transition: "0.2s", bgcolor: viewBranchList ? "rgba(25, 118, 210, 0.08)" : "transparent" }}
-                                        >
-                                          {viewBranchList ? <VisibilityOffIcon fontSize="small" /> : <VisibilityIcon fontSize="small" />}
-                                        </IconButton>
-                                      )}
+                                      {!filters.branches.includes("ALL") &&
+                                        filters.branches.length > 0 && (
+                                          <IconButton
+                                            size="small"
+                                            onClick={() =>
+                                              setViewBranchList(!viewBranchList)
+                                            }
+                                            color={
+                                              viewBranchList
+                                                ? "primary"
+                                                : "default"
+                                            }
+                                            sx={{
+                                              transition: "0.2s",
+                                              bgcolor: viewBranchList
+                                                ? "rgba(25, 118, 210, 0.08)"
+                                                : "transparent",
+                                            }}
+                                          >
+                                            {viewBranchList ? (
+                                              <VisibilityOffIcon fontSize="small" />
+                                            ) : (
+                                              <VisibilityIcon fontSize="small" />
+                                            )}
+                                          </IconButton>
+                                        )}
                                     </Stack>
                                     {p.InputProps.endAdornment}
                                   </InputAdornment>
@@ -438,7 +1099,9 @@ const LedgerForm = ({
             )}
 
             {/* 2. ACCOUNT ZONE */}
-            <Grid size={{ xs: 12, md: isCircleVisible || isBranchVisible ? 6 : 12 }}>
+            <Grid
+              size={{ xs: 12, md: isCircleVisible || isBranchVisible ? 6 : 12 }}
+            >
               <Paper
                 variant="outlined"
                 sx={{
@@ -448,7 +1111,10 @@ const LedgerForm = ({
                   borderStyle: "dashed",
                 }}
               >
-                <SectionHeader icon={<SearchIcon fontSize="small" />} title="Account Details" />
+                <SectionHeader
+                  icon={<SearchIcon fontSize="small" />}
+                  title="Account Details"
+                />
                 <Grid container spacing={2}>
                   <Grid size={{ xs: 12, sm: 7 }}>
                     <Autocomplete
@@ -457,7 +1123,11 @@ const LedgerForm = ({
                       value={filters.cgl}
                       options={cgls}
                       clearIcon={filters.cgl ? undefined : null}
-                      noOptionsText={filters.cgl && filters.cgl < 3 ? "Please enter at least 3 characters" : "No Options"}
+                      noOptionsText={
+                        filters.cgl && filters.cgl < 3
+                          ? "Please enter at least 3 characters"
+                          : "No Options"
+                      }
                       onInputChange={(e, v) => {
                         if (v.length >= 3) fetchSearchData("cgl", v);
                       }}
@@ -481,7 +1151,9 @@ const LedgerForm = ({
                       size="small"
                       options={["All Currencies", ...currencies]}
                       value={filters.currencies}
-                      onChange={(_, v) => onFilterChange("currencies", v || "ALL")}
+                      onChange={(_, v) =>
+                        onFilterChange("currencies", v || "ALL")
+                      }
                       renderInput={(p) => (
                         <TextField
                           {...p}
@@ -516,13 +1188,28 @@ const LedgerForm = ({
                       direction="row"
                       justifyContent="space-between"
                       alignItems="center"
-                      sx={{ p: 2, borderBottom: "1px solid #f0f0f0", bgcolor: "rgba(25, 118, 210, 0.02)" }}
+                      sx={{
+                        p: 2,
+                        borderBottom: "1px solid #f0f0f0",
+                        bgcolor: "rgba(25, 118, 210, 0.02)",
+                      }}
                     >
                       <Stack direction="row" spacing={1} alignItems="center">
-                        <Typography variant="caption" sx={{ fontWeight: 800, color: "primary.main", letterSpacing: 1 }}>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            fontWeight: 800,
+                            color: "primary.main",
+                            letterSpacing: 1,
+                          }}
+                        >
                           SELECTED BRANCHES
                         </Typography>
-                        <CustomChip label={filters.branches.length} color="primary" sx={{ height: 20 }} />
+                        <CustomChip
+                          label={filters.branches.length}
+                          color="primary"
+                          sx={{ height: 20 }}
+                        />
                       </Stack>
                       <Button
                         size="small"
@@ -533,17 +1220,29 @@ const LedgerForm = ({
                           onFilterChange("branches", ["ALL"]);
                           setViewBranchList(false);
                         }}
-                        sx={{ p: 1, fontWeight: 700, "&:hover": { color: "white", background: "#9f0400" } }}
+                        sx={{
+                          p: 1,
+                          fontWeight: 700,
+                          "&:hover": { color: "white", background: "#9f0400" },
+                        }}
                       >
                         Clear All
                       </Button>
                     </Stack>
                     <Box
                       sx={{
-                        p: 2, maxHeight: "250px", overflowY: "auto", display: "flex", flexWrap: "wrap", gap: 1,
+                        p: 2,
+                        maxHeight: "250px",
+                        overflowY: "auto",
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 1,
                         "&::-webkit-scrollbar": { width: "6px" },
                         "&::-webkit-scrollbar-track": { background: "#f1f1f1" },
-                        "&::-webkit-scrollbar-thumb": { background: "#ccc", borderRadius: "10px" },
+                        "&::-webkit-scrollbar-thumb": {
+                          background: "#ccc",
+                          borderRadius: "10px",
+                        },
                       }}
                     >
                       {filters.branches.map((b) => (
@@ -554,9 +1253,21 @@ const LedgerForm = ({
                           variant="outlined"
                           onDelete={() => removeBranch(b)}
                           sx={{
-                            borderRadius: "8px", bgcolor: "white", fontWeight: 500,
-                            "& .MuiChip-deleteIcon": { color: "error.main", transition: "0.2s", "&:hover": { color: "#d32f2f", transform: "scale(1.2)" } },
-                            "&:hover": { bgcolor: "#f5f9ff", borderColor: "primary.main" },
+                            borderRadius: "8px",
+                            bgcolor: "white",
+                            fontWeight: 500,
+                            "& .MuiChip-deleteIcon": {
+                              color: "error.main",
+                              transition: "0.2s",
+                              "&:hover": {
+                                color: "#d32f2f",
+                                transform: "scale(1.2)",
+                              },
+                            },
+                            "&:hover": {
+                              bgcolor: "#f5f9ff",
+                              borderColor: "primary.main",
+                            },
                           }}
                         />
                       ))}
@@ -577,13 +1288,14 @@ const LedgerForm = ({
                 }}
               >
                 <Grid container spacing={3} alignItems="flex-end">
-                  
                   {/* Quick Filters */}
                   <Grid size={{ xs: 12, sm: 6, md: 3 }}>
                     <Stack spacing={1}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <CalendarMonthIcon fontSize="small" />
-                        <Typography sx={{ fontWeight: 700 }}>Date Range</Typography>
+                        <Typography sx={{ fontWeight: 700 }}>
+                          Date Range
+                        </Typography>
                       </Stack>
                       <TextField
                         select
@@ -607,7 +1319,9 @@ const LedgerForm = ({
                     <Stack spacing={1}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <DateRangeIcon fontSize="small" />
-                        <Typography sx={{ fontWeight: 700 }}>From Date *</Typography>
+                        <Typography sx={{ fontWeight: 700 }}>
+                          From Date *
+                        </Typography>
                       </Stack>
                       <DatePicker
                         value={filters.fromDate}
@@ -620,7 +1334,9 @@ const LedgerForm = ({
                           setQuickFilter("custom");
                           validateDateRange(value, filters.toDate);
                         }}
-                        onError={(error) => setFromDateError(error ? error : null)}
+                        onError={(error) =>
+                          setFromDateError(error ? error : null)
+                        }
                         slotProps={{
                           textField: {
                             size: "small",
@@ -639,7 +1355,9 @@ const LedgerForm = ({
                     <Stack spacing={1}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <DateRangeIcon fontSize="small" />
-                        <Typography sx={{ fontWeight: 700 }}>To Date *</Typography>
+                        <Typography sx={{ fontWeight: 700 }}>
+                          To Date *
+                        </Typography>
                       </Stack>
                       <DatePicker
                         value={filters.toDate}
@@ -653,7 +1371,9 @@ const LedgerForm = ({
                           setQuickFilter("custom");
                           validateDateRange(filters.fromDate, value);
                         }}
-                        onError={(error) => setToDateError(error ? error : null)}
+                        onError={(error) =>
+                          setToDateError(error ? error : null)
+                        }
                         slotProps={{
                           textField: {
                             size: "small",
@@ -672,7 +1392,9 @@ const LedgerForm = ({
                     <Stack spacing={1}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <ReceiptLongIcon fontSize="small" />
-                        <Typography sx={{ fontWeight: 700 }}>Transaction Type *</Typography>
+                        <Typography sx={{ fontWeight: 700 }}>
+                          Transaction Type *
+                        </Typography>
                       </Stack>
                       <Autocomplete
                         multiple
@@ -681,11 +1403,18 @@ const LedgerForm = ({
                         options={sourceOptions}
                         value={filters.sourceFlags}
                         getOptionLabel={(o) => o.flagName || ""}
-                        isOptionEqualToValue={(option, value) => option.flagId === value.flagId}
+                        isOptionEqualToValue={(option, value) =>
+                          option.flagId === value.flagId
+                        }
                         onChange={(_, selectedOptions) => {
-                          const isSelectAllClicked = selectedOptions.some((option) => option.flagId === "select-all");
+                          const isSelectAllClicked = selectedOptions.some(
+                            (option) => option.flagId === "select-all",
+                          );
                           if (isSelectAllClicked) {
-                            if (filters.sourceFlags.length === sourceOptions.length) {
+                            if (
+                              filters.sourceFlags.length ===
+                              sourceOptions.length
+                            ) {
                               onFilterChange("sourceFlags", []);
                             } else {
                               onFilterChange("sourceFlags", sourceOptions);
@@ -694,21 +1423,42 @@ const LedgerForm = ({
                             onFilterChange("sourceFlags", selectedOptions);
                           }
                         }}
-                        filterOptions={(options) => [{ flagId: "select-all", flagName: "Select All" }, ...options]}
+                        filterOptions={(options) => [
+                          { flagId: "select-all", flagName: "Select All" },
+                          ...options,
+                        ]}
                         renderTags={(v) => (
                           <CustomChip
-                            label={v.length === sourceOptions.length ? "All Types" : `${v.length} Types`}
+                            label={
+                              v.length === sourceOptions.length
+                                ? "All Types"
+                                : `${v.length} Types`
+                            }
                             color="default"
                             sx={{ bgcolor: "white" }}
                           />
                         )}
                         renderOption={(props, option, { selected }) => {
-                          const isAllSelected = filters.sourceFlags.length === sourceOptions.length;
-                          const isChecked = option.flagId === "select-all" ? isAllSelected : selected;
+                          const isAllSelected =
+                            filters.sourceFlags.length === sourceOptions.length;
+                          const isChecked =
+                            option.flagId === "select-all"
+                              ? isAllSelected
+                              : selected;
                           return (
                             <li {...props} key={option.flagId}>
-                              <Checkbox size="small" style={{ marginRight: 8 }} checked={isChecked} />
-                              <Typography variant="body2" sx={{ fontWeight: option.flagId === "select-all" ? 700 : 400 }}>
+                              <Checkbox
+                                size="small"
+                                style={{ marginRight: 8 }}
+                                checked={isChecked}
+                              />
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  fontWeight:
+                                    option.flagId === "select-all" ? 700 : 400,
+                                }}
+                              >
                                 {option.flagName}
                               </Typography>
                             </li>
@@ -719,7 +1469,8 @@ const LedgerForm = ({
                             {...p}
                             placeholder="Transaction Types"
                             sx={{
-                              bgcolor: "white", borderRadius: 1,
+                              bgcolor: "white",
+                              borderRadius: 1,
                               "& .MuiOutlinedInput-root": { borderRadius: 1 },
                             }}
                             inputProps={{ ...p.inputProps, maxLength: 30 }}
@@ -748,7 +1499,11 @@ const LedgerForm = ({
               >
                 <Stack spacing={0.5}>
                   {validationMessages.map((msg, index) => (
-                    <Typography key={index} variant="body2" sx={{ color: "#d32f2f", fontWeight: 600 }}>
+                    <Typography
+                      key={index}
+                      variant="body2"
+                      sx={{ color: "#d32f2f", fontWeight: 600 }}
+                    >
                       • {msg}
                     </Typography>
                   ))}
@@ -789,7 +1544,12 @@ const LedgerForm = ({
                 toDateError
               }
               loading={fetchLoading}
-              sx={{ borderRadius: 2, px: 4, textTransform: "none", fontWeight: 800 }}
+              sx={{
+                borderRadius: 2,
+                px: 4,
+                textTransform: "none",
+                fontWeight: 800,
+              }}
             >
               Search
             </Button>
@@ -801,3 +1561,421 @@ const LedgerForm = ({
 };
 
 export default LedgerForm;
+
+
+
+import React, { useMemo } from "react";
+import {
+  Box,
+  Typography,
+  Button,
+  CircularProgress,
+  Stack,
+  Chip,
+} from "@mui/material";
+import { DataGrid, GridToolbar } from "@mui/x-data-grid";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import FileDownloadIcon from "@mui/icons-material/FileDownload";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import TrendingDownIcon from "@mui/icons-material/TrendingDown";
+import dayjs from "dayjs";
+import { useTheme, useMediaQuery } from "@mui/material";
+
+const LedgerDataGrid = ({
+  rows,
+  loading,
+  rowCount,
+  paginationModel,
+  setPaginationModel,
+  sortModel,
+  setSortModel,
+  filterModel,
+  setFilterModel,
+  onExcelExport,
+  exporting,
+  selectedCurrency,
+  selectedCircle,
+  sourceOptions,
+  branchOptions,
+  circleOptions,
+  currencyOptions,
+}) => {
+  const theme = useTheme();
+
+  const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
+  const isTablet = useMediaQuery(theme.breakpoints.between("sm", "lg"));
+
+  const transactionColumns = useMemo(() => {
+    const cols = [
+      {
+        field: "transactionDate",
+        headerName: "Date",
+        flex: 0.6,
+        minWidth: 120,
+        filterable: false,
+        valueFormatter: (v) => (v ? dayjs(v).format("DD/MM/YYYY") : "-"),
+      },
+
+      // /* HIDDEN BRANCH NAME ONLY FOR FILTER COLUMN */
+      // {
+      //   field: "branchName",
+      //   headerName: "Branch Name",
+      // },
+
+      // /* HIDDEN CIRCLE NAME ONLY FOR FILTER COLUMN */
+      // {
+      //   field: "circleName",
+      //   headerName: "Circle Name",
+      // },
+
+      {
+        field: "branchCode",
+        headerName: "Branch",
+        flex: 1,
+        minWidth: 180,
+
+        ...(branchOptions?.length
+          ? {
+              type: "singleSelect",
+              valueOptions: branchOptions,
+            }
+          : {
+              type: "string",
+            }),
+
+        renderCell: (params) => (
+          <Box sx={{ lineHeight: "1.2", py: 0.5 }}>
+            <Typography
+              variant="body2"
+              sx={{
+                fontWeight: 700,
+                fontSize: "0.8rem",
+              }}
+            >
+              {params.row.branchCode}
+            </Typography>
+
+            <Typography
+              variant="caption"
+              sx={{
+                color: "text.secondary",
+                fontSize: "0.7rem",
+              }}
+            >
+              {params.row.branchName}
+            </Typography>
+          </Box>
+        ),
+      },
+      { field: "narration", headerName: "Narration", flex: 1.5, minWidth: 250 },
+      {
+        field: "debitAmount",
+        headerName: "Debit",
+        flex: 0.8,
+        minWidth: 150,
+        align: "right",
+        headerAlign: "left",
+        type: "number",
+        valueFormatter: (v) =>
+          new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2 }).format(
+            v || 0,
+          ),
+      },
+      {
+        field: "creditAmount",
+        headerName: "Credit",
+        flex: 0.8,
+        minWidth: 150,
+        align: "right",
+        headerAlign: "left",
+        type: "number",
+        valueFormatter: (v) =>
+          new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2 }).format(
+            v || 0,
+          ),
+      },
+      {
+        field: "sourceFlag",
+        headerName: "Source",
+        flex: 0.8,
+        minWidth: 150,
+        type: "singleSelect",
+
+        valueOptions:
+          sourceOptions?.map((flag) => ({
+            value: flag.flagId,
+            label: flag.flagName,
+          })) || [],
+
+        valueFormatter: (value) => {
+          const matchedFlag = sourceOptions?.find(
+            (flag) => flag.flagId === value,
+          );
+
+          return matchedFlag?.flagName || value || "-";
+        },
+      },
+    ];
+
+    if (selectedCircle === "ALL") {
+      cols.splice(2, 0, {
+        field: "circleCode",
+        headerName: "Circle",
+        flex: 1,
+        minWidth: 150,
+        type: "singleSelect",
+        valueOptions: circleOptions,
+        renderCell: (params) => (
+          <Box sx={{ lineHeight: "1.2", py: 0.5 }}>
+            <Typography
+              variant="body2"
+              sx={{ fontWeight: 700, fontSize: "0.8rem" }}
+            >
+              {params.row.circleCode}
+            </Typography>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", fontSize: "0.7rem" }}
+            >
+              {params.row.circleName}
+            </Typography>
+          </Box>
+        ),
+      });
+    }
+    if (selectedCurrency === "All Currencies") {
+      const index = cols.length == 8 ? 7 : 6;
+      cols.splice(index, 0, {
+        field: "currencyName",
+        headerName: "Currency",
+        flex: 1,
+        minWidth: 150,
+        type: "singleSelect",
+        valueOptions: currencyOptions,
+        renderCell: (params) => (
+          <Box sx={{ lineHeight: "1.2", py: 0.5 }}>
+            <Typography
+              variant="body2"
+              sx={{ fontWeight: 700, fontSize: "0.8rem" }}
+            >
+              {params.row.currency}
+            </Typography>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", fontSize: "0.7rem" }}
+            >
+              {params.row.currencyName}
+            </Typography>
+          </Box>
+        ),
+      });
+    }
+    return cols;
+  }, [
+    branchOptions,
+    sourceOptions,
+    selectedCircle,
+    selectedCurrency,
+    circleOptions,
+    currencyOptions,
+  ]);
+
+  const columnVisibilityModel = useMemo(
+    () => ({
+      branchName: false,
+      circleName: false,
+
+      ...(isMobile && {
+        narration: false,
+        sourceFlag: false,
+        circleCode: false,
+      }),
+
+      ...(isTablet && {
+        narration: false,
+      }),
+    }),
+    [isMobile, isTablet],
+  );
+
+  const CustomNoRowsOverlay = () => (
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
+      <ErrorOutlineIcon fontSize="large" color="action" />
+      <Typography variant="h5" fontSize="1.2rem" color="text.secondary">
+        No transactions available for the selected criteria
+      </Typography>
+    </Box>
+  );
+
+  return (
+    <Box sx={{ width: "100%", height: "100%", mt: 3 }}>
+      {/* SEPARATE HEADER SECTION (Replacing Internal Toolbar) */}
+      <Box
+        sx={{
+          p: 2.5,
+          mb: 3,
+          borderRadius: "20px",
+          background: "rgba(255, 255, 255, 0.4)",
+          backdropFilter: "blur(12px)",
+          border: "1px solid rgba(255, 255, 255, 0.3)",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.05)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 2.5,
+        }}
+      >
+        <Stack
+          direction={{ xs: "column", sm: "row" }}
+          spacing={2}
+          justifyContent="space-between"
+          alignItems={{ xs: "stretch", sm: "center" }}
+        >
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: {
+                xs: "column",
+                sm: "row",
+              },
+              alignItems: {
+                xs: "flex-start",
+                sm: "baseline",
+              },
+              gap: {
+                xs: 1,
+                sm: 1.5,
+              },
+            }}
+          >
+            <Typography
+              variant="h6"
+              fontWeight={800}
+              sx={{
+                color: "#1a1a1a",
+                letterSpacing: "-0.5px",
+              }}
+            >
+              Transactions Ledger
+            </Typography>
+
+            <Chip
+              label={
+                rowCount > 0
+                  ? `${rowCount.toLocaleString("en-IN")} Records Found`
+                  : "No Records"
+              }
+              size="small"
+              sx={{
+                fontWeight: 700,
+                color: "#58469f",
+                bgcolor: "rgba(88, 70, 159, 0.1)",
+                borderRadius: "8px",
+                width: {
+                  xs: "fit-content",
+                  sm: "auto",
+                },
+              }}
+            />
+          </Box>
+          <Button
+            variant="contained"
+            // size="small"
+            size={isMobile ? "medium" : "small"}
+            startIcon={
+              exporting ? (
+                <CircularProgress size={16} color="inherit" />
+              ) : (
+                <FileDownloadIcon />
+              )
+            }
+            onClick={onExcelExport}
+            disabled={!rowCount || loading || exporting}
+            sx={{
+              textTransform: "none",
+              bgcolor: "#58469f",
+              fontWeight: 700,
+              borderRadius: "8px",
+              px: 3,
+              "&:hover": { bgcolor: "#45357a" },
+            }}
+          >
+            {exporting ? "Preparing..." : "Export"}
+          </Button>
+        </Stack>
+
+        {/* DATA GRID SECTION */}
+        <Box
+          sx={{
+            width: "100%",
+            overflowX: "auto",
+            height: {
+              xs: "65vh",
+              sm: "70vh",
+              md: 600,
+            },
+          }}
+        >
+          <DataGrid
+            rows={rows}
+            columns={transactionColumns}
+            rowCount={rowCount}
+            loading={loading}
+            getRowId={(row) => row.transactionId}
+            pagination
+            paginationMode="server"
+            sortingMode="server"
+            filterMode="server"
+            pageSizeOptions={[10, 20, 50, 100]}
+            paginationModel={paginationModel}
+            onPaginationModelChange={setPaginationModel}
+            sortModel={sortModel}
+            onSortModelChange={setSortModel}
+            filterModel={filterModel}
+            onFilterModelChange={setFilterModel}
+            rowHeight={50}
+            disableRowSelectionOnClick
+            slots={{ noRowsOverlay: CustomNoRowsOverlay }}
+            // showToolbar={rowCount > 0}
+            // slotProps={{
+            //   toolbar: {
+            //     showQuickFilter: false,
+            //     csvOptions: { disableToolbarButton: true }, // Hides CSV export
+            //     printOptions: { disableToolbarButton: true }, // Hides Print option
+            //   },
+            // }}
+
+            initialState={{
+              columns: {
+                columnVisibilityModel,
+              },
+            }}
+            sx={{
+              borderRadius: "20px",
+              backgroundColor: "rgba(255,255,255,0.4)",
+              border: "1px solid rgba(255,255,255,0.3)",
+
+              "& .MuiDataGrid-columnHeaders": {
+                bgcolor: "#f8f9fa",
+                fontWeight: 700,
+              },
+            }}
+          />
+        </Box>
+      </Box>
+    </Box>
+  );
+};
+
+export default LedgerDataGrid;
+
+
+
