@@ -33,433 +33,308 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RequiredArgsConstructor
 @Slf4j
 public class TransactionStreamingExportService
-                extends BaseStreamingExcelExporter {
+        extends BaseStreamingExcelExporter {
 
-        private final JdbcTemplate jdbcTemplate;
+    private final JdbcTemplate jdbcTemplate;
+    private final MyDownloadsService myDownloadsService;
 
-        private final MyDownloadsService myDownloadsService;
+    public byte[] export(
+            GetPayloadDTO dto,
+            GLBalance openingGLBalance,
+            GLBalance closingGLBalance,
+            String userId) {
 
-        public byte[] export(
-                        GetPayloadDTO dto,
-                        GLBalance openingGLBalance,
-                        GLBalance closingGLBalance,
-                        String userId) {
+        try (
+                SXSSFWorkbook workbook = new SXSSFWorkbook(100);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()
 
-                try (
-                                SXSSFWorkbook workbook = new SXSSFWorkbook(100);
+        ) {
 
-                                ByteArrayOutputStream out = new ByteArrayOutputStream()
+            workbook.setCompressTempFiles(true);
+            SXSSFSheet sheet = workbook.createSheet("Transactions");
 
-                ) {
+            // ==================================================
+            // STYLES
+            // ==================================================
 
-                        workbook.setCompressTempFiles(true);
+            CellStyle headerStyle = ExcelStyleUtil.createHeaderStyle(workbook);
+            CellStyle titleStyle = ExcelStyleUtil.createTitleStyle(workbook);
+            CellStyle amountStyle = ExcelStyleUtil.createAmountStyle(workbook);
 
-                        SXSSFSheet sheet = workbook.createSheet("Transactions");
+            AtomicInteger rowNum = new AtomicInteger(0);
 
-                        // ==================================================
-                        // STYLES
-                        // ==================================================
+            // ==================================================
+            // TITLE
+            // ==================================================
 
-                        CellStyle headerStyle = ExcelStyleUtil.createHeaderStyle(workbook);
+            Row titleRow = sheet.createRow(rowNum.getAndIncrement());
+            Cell titleCell = titleRow.createCell(0);
+            titleCell.setCellValue("GL Transactions");
+            titleCell.setCellStyle(titleStyle);
 
-                        CellStyle titleStyle = ExcelStyleUtil.createTitleStyle(workbook);
+            sheet.addMergedRegion(new CellRangeAddress(0, 0, 0, 9)); // Increased merged columns
 
-                        CellStyle amountStyle = ExcelStyleUtil.createAmountStyle(workbook);
+            rowNum.incrementAndGet();
 
-                        AtomicInteger rowNum = new AtomicInteger(0);
+            // ==================================================
+            // SUMMARY HEADER
+            // ==================================================
 
-                        // ==================================================
-                        // TITLE
-                        // ==================================================
+            Row summaryHeader = sheet.createRow(rowNum.getAndIncrement());
+            int summaryCol = 0;
 
-                        Row titleRow = sheet.createRow(rowNum.getAndIncrement());
+            createHeaderCell(summaryHeader, summaryCol++, "Branch", headerStyle);
+            createHeaderCell(summaryHeader, summaryCol++, "Currency", headerStyle);
+            createHeaderCell(summaryHeader, summaryCol++, "CGL", headerStyle);
+            createHeaderCell(summaryHeader, summaryCol++, "From Date", headerStyle);
+            createHeaderCell(summaryHeader, summaryCol++, "To Date", headerStyle);
 
-                        Cell titleCell = titleRow.createCell(0);
+            if (dto.getMinAmount() != null) {
+                createHeaderCell(summaryHeader, summaryCol++, "From Amount", headerStyle);
+            }
+            if (dto.getMaxAmount() != null) {
+                createHeaderCell(summaryHeader, summaryCol++, "To Amount", headerStyle);
+            }
 
-                        titleCell.setCellValue("GL Transactions");
+            // ==================================================
+            // SUMMARY VALUES
+            // ==================================================
 
-                        titleCell.setCellStyle(titleStyle);
+            Row summaryRow = sheet.createRow(rowNum.getAndIncrement());
+            int summaryValueCol = 0;
 
-                        sheet.addMergedRegion(
-                                        new CellRangeAddress(
-                                                        0,
-                                                        0,
-                                                        0,
-                                                        8));
+            summaryRow.createCell(summaryValueCol++).setCellValue(dto.getBranch());
+            summaryRow.createCell(summaryValueCol++).setCellValue(dto.getCurrency());
+            summaryRow.createCell(summaryValueCol++).setCellValue(dto.getCgl());
+            summaryRow.createCell(summaryValueCol++).setCellValue(dto.getFromDate());
+            summaryRow.createCell(summaryValueCol++).setCellValue(dto.getToDate());
 
-                        rowNum.incrementAndGet();
+            if (dto.getMinAmount() != null) {
+                Cell cell = summaryRow.createCell(summaryValueCol++);
+                cell.setCellValue(dto.getMinAmount());
+                cell.setCellStyle(amountStyle);
+            }
 
-                        // ==================================================
-                        // SUMMARY HEADER
-                        // ==================================================
+            if (dto.getMaxAmount() != null) {
+                Cell cell = summaryRow.createCell(summaryValueCol++);
+                cell.setCellValue(dto.getMaxAmount());
+                cell.setCellStyle(amountStyle);
+            }
 
-                        Row summaryHeader = sheet.createRow(rowNum.getAndIncrement());
+            rowNum.incrementAndGet();
 
-                        int summaryCol = 0;
+            // ==================================================
+            // OPENING / CLOSING
+            // ==================================================
 
-                        createHeaderCell(
-                                        summaryHeader,
-                                        summaryCol++,
-                                        "Branch",
-                                        headerStyle);
+            Row openingRow = sheet.createRow(rowNum.getAndIncrement());
+            openingRow.createCell(0).setCellValue("Opening Date");
+            openingRow.createCell(1).setCellValue(dto.getFromDate());
+            openingRow.createCell(2).setCellValue("Opening Balance");
 
-                        createHeaderCell(
-                                        summaryHeader,
-                                        summaryCol++,
-                                        "Currency",
-                                        headerStyle);
+            Cell openBalCell = openingRow.createCell(3);
+            
+            double openingBalAmount = (openingGLBalance != null && openingGLBalance.getBalance() != null) 
+                    ? openingGLBalance.getBalance() 
+                    : 0.0;
+                    
+            openBalCell.setCellValue(openingBalAmount);
+            openBalCell.setCellStyle(amountStyle);
 
-                        createHeaderCell(
-                                        summaryHeader,
-                                        summaryCol++,
-                                        "CGL",
-                                        headerStyle);
+            Row closingRow = sheet.createRow(rowNum.getAndIncrement());
+            closingRow.createCell(0).setCellValue("Closing Date");
+            closingRow.createCell(1).setCellValue(dto.getToDate());
+            closingRow.createCell(2).setCellValue("Closing Balance");
 
-                        createHeaderCell(
-                                        summaryHeader,
-                                        summaryCol++,
-                                        "From Date",
-                                        headerStyle);
+            Cell closeBalCell = closingRow.createCell(3);
+            double closingBalAmount = (closingGLBalance != null && closingGLBalance.getBalance() != null) 
+                    ? closingGLBalance.getBalance() 
+                    : 0.0;
+                    
+            closeBalCell.setCellValue(closingBalAmount);
+            closeBalCell.setCellStyle(amountStyle);
 
-                        createHeaderCell(
-                                        summaryHeader,
-                                        summaryCol++,
-                                        "To Date",
-                                        headerStyle);
+            rowNum.incrementAndGet();
 
-                        if (dto.getMinAmount() != null) {
+            // ==================================================
+            // MAIN HEADER
+            // ==================================================
 
-                                createHeaderCell(
-                                                summaryHeader,
-                                                summaryCol++,
-                                                "From Amount",
-                                                headerStyle);
+            String[] columns = {
+                    "Date",
+                    "Batch ID",
+                    "Journal Number",
+                    "Debit Amount",
+                    "Credit Amount",
+                    "Running Balance", // <-- New Column Added
+                    "Narration",
+                    "Transaction Type",
+                    "Source Flag",
+                    "Posted Date"
+            };
+
+            Row headerRow = sheet.createRow(rowNum.getAndIncrement());
+
+            for (int i = 0; i < columns.length; i++) {
+                Cell cell = headerRow.createCell(i);
+                cell.setCellValue(columns[i]);
+                cell.setCellStyle(headerStyle);
+            }
+
+            // ==================================================
+            // SQL
+            // ==================================================
+
+            String sql = """
+                    SELECT
+                        g.TRANSACTION_DATE,
+                        g.BATCH_ID,
+                        g.JOURNAL_ID,
+                        ABS(g.DEBIT_AMOUNT) AS DEBIT_AMOUNT,
+                        ABS(g.CREDIT_AMOUNT) AS CREDIT_AMOUNT,
+                        g.NARRATION,
+                        NVL(g.TRANSACTION_COUNT,0) AS TRANSACTION_COUNT,
+                        sf.FLAG_NAME AS SOURCE_NAME,
+                        g.POST_DATE
+                    FROM GL_TRANSACTIONS g
+                    LEFT JOIN SOURCE_FLAG sf
+                        ON g.SOURCE_FLAG = sf.FLAG_ID
+                    WHERE g.BRANCH_CODE = ?
+                      AND g.CURRENCY = ?
+                      AND g.CGL = ?
+                      AND g.TRANSACTION_DATE BETWEEN ? AND ?
+                    ORDER BY g.TRANSACTION_DATE, g.TRANSACTION_ID 
+                    """; // Added TRANSACTION_ID tie-breaker to match pagination order
+
+            jdbcTemplate.setFetchSize(20000);
+
+            // Use a single-element array to allow mutation inside the lambda
+            final double[] runningBalanceTracker = new double[]{ openingBalAmount };
+
+            jdbcTemplate.query(
+                    connection -> {
+                        try {
+                            var ps = connection.prepareStatement(sql);
+                            ps.setFetchSize(20000);
+                            ps.setString(1, dto.getBranch().split("-")[0]);
+                            ps.setString(2, dto.getCurrency());
+                            ps.setString(3, dto.getCgl().split(" -")[0]);
+
+                            SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
+                            java.util.Date fromDate = sdf.parse(dto.getFromDate());
+                            java.util.Date toDate = sdf.parse(dto.getToDate());
+
+                            ps.setTimestamp(4, new Timestamp(fromDate.getTime()));
+                            ps.setTimestamp(5, new Timestamp(toDate.getTime()));
+
+                            return ps;
+                        } catch (ParseException e) {
+                            throw new IllegalArgumentException(
+                                    "Invalid date format. Expected dd/MM/yyyy", e);
                         }
-
-                        if (dto.getMaxAmount() != null) {
-
-                                createHeaderCell(
-                                                summaryHeader,
-                                                summaryCol++,
-                                                "To Amount",
-                                                headerStyle);
-                        }
-
-                        // ==================================================
-                        // SUMMARY VALUES
-                        // ==================================================
-
-                        Row summaryRow = sheet.createRow(rowNum.getAndIncrement());
-
-                        int summaryValueCol = 0;
-
-                        summaryRow.createCell(summaryValueCol++)
-                                        .setCellValue(dto.getBranch());
-
-                        summaryRow.createCell(summaryValueCol++)
-                                        .setCellValue(dto.getCurrency());
-
-                        summaryRow.createCell(summaryValueCol++)
-                                        .setCellValue(dto.getCgl());
-
-                        summaryRow.createCell(summaryValueCol++)
-                                        .setCellValue(dto.getFromDate());
-
-                        summaryRow.createCell(summaryValueCol++)
-                                        .setCellValue(dto.getToDate());
-
-                        if (dto.getMinAmount() != null) {
-
-                                Cell cell = summaryRow.createCell(summaryValueCol++);
-
-                                cell.setCellValue(dto.getMinAmount());
-
-                                cell.setCellStyle(amountStyle);
-                        }
-
-                        if (dto.getMaxAmount() != null) {
-
-                                Cell cell = summaryRow.createCell(summaryValueCol++);
-
-                                cell.setCellValue(dto.getMaxAmount());
-
-                                cell.setCellStyle(amountStyle);
-                        }
-
-                        rowNum.incrementAndGet();
-
-                        // ==================================================
-                        // OPENING / CLOSING
-                        // ==================================================
-
-                        Row openingRow = sheet.createRow(rowNum.getAndIncrement());
-
-                        openingRow.createCell(0)
-                                        .setCellValue("Opening Date");
-
-                        openingRow.createCell(1)
-                                        .setCellValue(dto.getFromDate());
-
-                        openingRow.createCell(2)
-                                        .setCellValue("Opening Balance");
-
-                        Cell openBalCell = openingRow.createCell(3);
-
-                        openBalCell.setCellValue(
-                                        openingGLBalance.getBalance());
-
-                        openBalCell.setCellStyle(amountStyle);
-
-                        Row closingRow = sheet.createRow(rowNum.getAndIncrement());
-
-                        closingRow.createCell(0)
-                                        .setCellValue("Closing Date");
-
-                        closingRow.createCell(1)
-                                        .setCellValue(dto.getToDate());
-
-                        closingRow.createCell(2)
-                                        .setCellValue("Closing Balance");
-
-                        Cell closeBalCell = closingRow.createCell(3);
-
-                        closeBalCell.setCellValue(
-                                        closingGLBalance.getBalance());
-
-                        closeBalCell.setCellStyle(amountStyle);
-
-                        rowNum.incrementAndGet();
-
-                        // ==================================================
-                        // MAIN HEADER
-                        // ==================================================
-
-                        String[] columns = {
-                                        "Date",
-                                        "Batch ID",
-                                        "Journal Number",
-                                        "Debit Amount",
-                                        "Credit Amount",
-                                        "Narration",
-                                        "Transaction Type",
-                                        "Source Flag",
-                                        "Posted Date"
-                        };
-
-                        Row headerRow = sheet.createRow(rowNum.getAndIncrement());
-
-                        for (int i = 0; i < columns.length; i++) {
-
-                                Cell cell = headerRow.createCell(i);
-
-                                cell.setCellValue(columns[i]);
-
-                                cell.setCellStyle(headerStyle);
-                        }
-
-                        // ==================================================
-                        // SQL
-                        // ==================================================
-
-                        String sql = """
-                                        SELECT
-                                            g.TRANSACTION_DATE,
-                                            g.BATCH_ID,
-                                            g.JOURNAL_ID,
-                                            ABS(g.DEBIT_AMOUNT) AS DEBIT_AMOUNT,
-                                            ABS(g.CREDIT_AMOUNT) AS CREDIT_AMOUNT,
-                                            g.NARRATION,
-                                            NVL(g.TRANSACTION_COUNT,0) AS TRANSACTION_COUNT,
-                                            sf.FLAG_NAME AS SOURCE_NAME,
-                                            g.POST_DATE
-                                        FROM GL_TRANSACTIONS g
-
-                                        LEFT JOIN SOURCE_FLAG sf
-                                            ON g.SOURCE_FLAG = sf.FLAG_ID
-
-                                        WHERE g.BRANCH_CODE = ?
-                                          AND g.CURRENCY = ?
-                                          AND g.CGL = ?
-                                          AND g.TRANSACTION_DATE BETWEEN ? AND ?
-
-                                        ORDER BY g.TRANSACTION_DATE
-                                        """;
-
-                        jdbcTemplate.setFetchSize(20000);
-
-                        jdbcTemplate.query(
-                                        connection -> {
-
-                                                try {
-
-                                                        var ps = connection.prepareStatement(sql);
-
-                                                        ps.setFetchSize(20000);
-
-                                                        ps.setString(
-                                                                        1,
-                                                                        dto.getBranch().split("-")[0]);
-
-                                                        ps.setString(
-                                                                        2,
-                                                                        dto.getCurrency());
-
-                                                        ps.setString(
-                                                                        3,
-                                                                        dto.getCgl().split(" -")[0]);
-
-                                                        SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
-
-                                                        java.util.Date fromDate = sdf.parse(dto.getFromDate());
-
-                                                        java.util.Date toDate = sdf.parse(dto.getToDate());
-
-                                                        ps.setTimestamp(
-                                                                        4,
-                                                                        new Timestamp(fromDate.getTime()));
-
-                                                        ps.setTimestamp(
-                                                                        5,
-                                                                        new Timestamp(toDate.getTime()));
-
-                                                        return ps;
-
-                                                } catch (ParseException e) {
-
-                                                        throw new IllegalArgumentException(
-                                                                        "Invalid date format. Expected dd/MM/yyyy",
-                                                                        e);
-                                                }
-                                        },
-                                        rs -> {
-
-                                                Row row = sheet.createRow(
-                                                                rowNum.getAndIncrement());
-
-                                                int col = 0;
-
-                                                row.createCell(col++)
-                                                                .setCellValue(
-                                                                                ExcelExportUtil.safeString(
-                                                                                                rs.getString("TRANSACTION_DATE")));
-
-                                                row.createCell(col++)
-                                                                .setCellValue(
-                                                                                ExcelExportUtil.safeString(
-                                                                                                rs.getString("BATCH_ID")));
-
-                                                row.createCell(col++)
-                                                                .setCellValue(
-                                                                                ExcelExportUtil.safeString(
-                                                                                                rs.getString("JOURNAL_ID")));
-
-                                                Cell debitCell = row.createCell(col++);
-
-                                                debitCell.setCellValue(
-                                                                rs.getDouble("DEBIT_AMOUNT"));
-
-                                                debitCell.setCellStyle(amountStyle);
-
-                                                Cell creditCell = row.createCell(col++);
-
-                                                creditCell.setCellValue(
-                                                                rs.getDouble("CREDIT_AMOUNT"));
-
-                                                creditCell.setCellStyle(amountStyle);
-
-                                                row.createCell(col++)
-                                                                .setCellValue(
-                                                                                ExcelExportUtil.safeString(
-                                                                                                rs.getString("NARRATION")));
-
-                                                row.createCell(col++)
-                                                                .setCellValue(
-                                                                                rs.getLong("TRANSACTION_COUNT"));
-
-                                                row.createCell(col++)
-                                                                .setCellValue(
-                                                                                ExcelExportUtil.safeString(
-                                                                                                rs.getString("SOURCE_NAME")));
-
-                                                row.createCell(col++)
-                                                                .setCellValue(
-                                                                                ExcelExportUtil.safeString(
-                                                                                                rs.getString("POST_DATE")));
-
-                                                ExcelExportUtil.flushIfNeeded(
-                                                                sheet,
-                                                                rowNum.get());
-                                        });
-
-                        for (int i = 0; i < columns.length; i++) {
-
-                                sheet.setColumnWidth(i, 6000);
-                        }
-
-                        workbook.write(out);
-
-                        byte[] bytes = out.toByteArray();
-
-                        MyDownloadsRequestDTO downloadRequest = new MyDownloadsRequestDTO();
-
-                        downloadRequest.setUserId(userId);
-
-                        String fileName = "GL_Transactions_" + dto.getCgl() + ".xlsx";
-                        downloadRequest.setFileName(fileName);
-
-                        downloadRequest.setMenuId(34);
-
-                        SearchCriteriaDTO searchDto = new SearchCriteriaDTO();
-
-                        searchDto.setBranch(dto.getBranch());
-                        searchDto.setCgl(dto.getCgl());
-                        searchDto.setCurrency(dto.getCurrency());
-                        searchDto.setFromDate(dto.getFromDate());
-                        searchDto.setToDate(dto.getToDate());
-
-                        if (dto.getMinAmount() != null) {
-                                searchDto.setMinAmount(dto.getMinAmount());
-                        }
-
-                        if (dto.getMaxAmount() != null) {
-                                searchDto.setMaxAmount(dto.getMaxAmount());
-                        }
-
-                        if (dto.getSourceFlags() == null) {
-                                searchDto.setSourceFlags(List.of("ALL"));
-                        } else {
-                                searchDto.setSourceFlags(dto.getSourceFlags());
-                        }
-
-                        String json = new ObjectMapper().writeValueAsString(searchDto);
-
-                        downloadRequest.setSearchCriteria(json);
-
-                        downloadRequest.setResultData(
-                                        bytes);
-
-                        myDownloadsService.insertRequest(downloadRequest);
-
-                        return bytes;
-
-                } catch (IOException e) {
-
-                        throw new ExportGenerationException(
-                                        "Failed to generate Transaction export",
-                                        e);
-                }
+                    },
+                    rs -> {
+                        Row row = sheet.createRow(rowNum.getAndIncrement());
+                        int col = 0;
+
+                        row.createCell(col++).setCellValue(
+                                ExcelExportUtil.safeString(rs.getString("TRANSACTION_DATE")));
+
+                        row.createCell(col++).setCellValue(
+                                ExcelExportUtil.safeString(rs.getString("BATCH_ID")));
+
+                        row.createCell(col++).setCellValue(
+                                ExcelExportUtil.safeString(rs.getString("JOURNAL_ID")));
+
+                        double debit = rs.getDouble("DEBIT_AMOUNT");
+                        double credit = rs.getDouble("CREDIT_AMOUNT");
+
+                        Cell debitCell = row.createCell(col++);
+                        debitCell.setCellValue(debit);
+                        debitCell.setCellStyle(amountStyle);
+
+                        Cell creditCell = row.createCell(col++);
+                        creditCell.setCellValue(credit);
+                        creditCell.setCellStyle(amountStyle);
+
+                        // --- Running Balance Calculation ---
+                        runningBalanceTracker[0] = runningBalanceTracker[0] + credit - debit;
+                        
+                        Cell runningBalCell = row.createCell(col++);
+                        runningBalCell.setCellValue(runningBalanceTracker[0]);
+                        runningBalCell.setCellStyle(amountStyle);
+                        // -----------------------------------
+
+                        row.createCell(col++).setCellValue(
+                                ExcelExportUtil.safeString(rs.getString("NARRATION")));
+
+                        row.createCell(col++).setCellValue(
+                                rs.getLong("TRANSACTION_COUNT"));
+
+                        row.createCell(col++).setCellValue(
+                                ExcelExportUtil.safeString(rs.getString("SOURCE_NAME")));
+
+                        row.createCell(col++).setCellValue(
+                                ExcelExportUtil.safeString(rs.getString("POST_DATE")));
+
+                        ExcelExportUtil.flushIfNeeded(sheet, rowNum.get());
+                    });
+
+            for (int i = 0; i < columns.length; i++) {
+                sheet.setColumnWidth(i, 6000);
+            }
+
+            workbook.write(out);
+            byte[] bytes = out.toByteArray();
+
+            MyDownloadsRequestDTO downloadRequest = new MyDownloadsRequestDTO();
+            downloadRequest.setUserId(userId);
+
+            String fileName = "GL_Transactions_" + dto.getCgl() + ".xlsx";
+            downloadRequest.setFileName(fileName);
+            downloadRequest.setMenuId(34);
+
+            SearchCriteriaDTO searchDto = new SearchCriteriaDTO();
+            searchDto.setBranch(dto.getBranch());
+            searchDto.setCgl(dto.getCgl());
+            searchDto.setCurrency(dto.getCurrency());
+            searchDto.setFromDate(dto.getFromDate());
+            searchDto.setToDate(dto.getToDate());
+
+            if (dto.getMinAmount() != null) {
+                searchDto.setMinAmount(dto.getMinAmount());
+            }
+            if (dto.getMaxAmount() != null) {
+                searchDto.setMaxAmount(dto.getMaxAmount());
+            }
+
+            if (dto.getSourceFlags() == null) {
+                searchDto.setSourceFlags(List.of("ALL"));
+            } else {
+                searchDto.setSourceFlags(dto.getSourceFlags());
+            }
+
+            String json = new ObjectMapper().writeValueAsString(searchDto);
+            downloadRequest.setSearchCriteria(json);
+            downloadRequest.setResultData(bytes);
+
+            myDownloadsService.insertRequest(downloadRequest);
+
+            return bytes;
+
+        } catch (IOException e) {
+            throw new ExportGenerationException(
+                    "Failed to generate Transaction export", e);
         }
+    }
 
-        private void createHeaderCell(
-                        Row row,
-                        int column,
-                        String value,
-                        CellStyle style) {
-
-                Cell cell = row.createCell(column);
-
-                cell.setCellValue(value);
-
-                cell.setCellStyle(style);
-        }
+    private void createHeaderCell(
+            Row row,
+            int column,
+            String value,
+            CellStyle style) {
+        Cell cell = row.createCell(column);
+        cell.setCellValue(value);
+        cell.setCellStyle(style);
+    }
 }
