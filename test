@@ -1,210 +1,465 @@
-// Add this new method inside TransactionEnquirySpecification.java
+package com.fincore.enquiry_service.service.export;
 
-public static Specification<GlTransactions> strictlyBefore(LocalDate date, String id, String sortOrder) {
-    return (root, query, cb) -> {
-        boolean isDesc = "DESC".equalsIgnoreCase(sortOrder);
-
-        // If descending, "before" in the list means chronologically AFTER in time.
-        Predicate dateCondition = isDesc ? 
-                cb.greaterThan(root.get("transactionDate"), date) : 
-                cb.lessThan(root.get("transactionDate"), date);
-
-        Predicate sameDateCondition = cb.equal(root.get("transactionDate"), date);
-        
-        // Tie-breaker using transactionId
-        Predicate idCondition = isDesc ? 
-                cb.greaterThan(root.get("transactionId").as(String.class), id) : 
-                cb.lessThan(root.get("transactionId").as(String.class), id);
-
-        return cb.or(dateCondition, cb.and(sameDateCondition, idCondition));
-    };
-}
-
-
-
-package com.fincore.enquiry_service.service;
-
-import java.io.IOException;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
-
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.criteria.CriteriaBuilder;
-import jakarta.persistence.criteria.CriteriaQuery;
-import jakarta.persistence.criteria.Expression;
-import jakarta.persistence.criteria.Root;
-
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
-import org.springframework.data.jpa.domain.Specification;
-import org.springframework.stereotype.Service;
-
-import com.fincore.enquiry_service.dto.BalanceRequestDTO;
-import com.fincore.enquiry_service.dto.BalanceResponseDTO;
-import com.fincore.enquiry_service.dto.GLBalanceProjection;
-import com.fincore.enquiry_service.dto.GLBalanceResponseDTO;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fincore.enquiry_service.dto.GetPayloadDTO;
-import com.fincore.enquiry_service.dto.GetResponseDTO;
-import com.fincore.enquiry_service.dto.PaginatedResponseDTO;
-import com.fincore.enquiry_service.exception.NoDataFoundException;
+import com.fincore.enquiry_service.dto.MyDownloadsRequestDTO;
+import com.fincore.enquiry_service.dto.SearchCriteriaDTO;
+import com.fincore.enquiry_service.exception.ExportGenerationException;
 import com.fincore.enquiry_service.model.GLBalance;
-import com.fincore.enquiry_service.model.GlTransactions;
-import com.fincore.enquiry_service.repository.GLBalanceRepository;
-import com.fincore.enquiry_service.repository.GlTransactionsRepository;
-import com.fincore.enquiry_service.service.export.BalanceStreamingExportService;
-import com.fincore.enquiry_service.service.export.TransactionStreamingExportService;
-import com.fincore.enquiry_service.service.utils.SourceFlagUtil;
-import com.fincore.enquiry_service.specification.TransactionEnquirySpecification;
+import com.fincore.enquiry_service.service.MyDownloadsService;
+import com.fincore.enquiry_service.service.utils.BaseStreamingExcelExporter;
+import com.fincore.enquiry_service.service.utils.ExcelExportUtil;
+import com.fincore.enquiry_service.service.utils.ExcelStyleUtil;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
-@Slf4j
-@Service("TransactionsService")
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.xssf.streaming.SXSSFSheet;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.sql.Timestamp;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@Service
 @RequiredArgsConstructor
-public class EnquiryServiceImpl implements EnquiryService {
+@Slf4j
+public class TransactionStreamingExportService
+                extends BaseStreamingExcelExporter {
 
-	private final GlTransactionsRepository glTransactionsRepository;
-	private final GLBalanceRepository glBalanceRepository;
-	private final TransactionStreamingExportService transactionStreamingExportService;
-	private final BalanceStreamingExportService balanceStreamingExportService;
-    
-	// 1. Inject the EntityManager for custom Criteria queries
-	private final EntityManager entityManager;
+        private final JdbcTemplate jdbcTemplate;
 
-	private static final String ZONE_IST = "Asia/Kolkata";
+        private final MyDownloadsService myDownloadsService;
 
-	@Override
-	public PaginatedResponseDTO<GetResponseDTO> getTransactionsData(GetPayloadDTO dto) {
+        public byte[] export(
+                        GetPayloadDTO dto,
+                        GLBalance openingGLBalance,
+                        GLBalance closingGLBalance,
+                        String userId) {
 
-		String branch = dto.getBranch().split("-")[0];
-		String currency = dto.getCurrency();
-		String cgl = dto.getCgl();
-		String fromDate = dto.getFromDate();
-		String toDate = dto.getToDate();
+                try (
+                                SXSSFWorkbook workbook = new SXSSFWorkbook(100);
 
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+                                ByteArrayOutputStream out = new ByteArrayOutputStream()
 
-		Double minAmount = dto.getMinAmount();
-		Double maxAmount = dto.getMaxAmount();
-		List<String> sourceFlag = dto.getSourceFlags();
+                ) {
 
-		LocalDate formattedFromDate = LocalDate.parse(fromDate, formatter);
-		LocalDate formattedToDate = LocalDate.parse(toDate, formatter);
-		LocalDate fromMinusOneDay = formattedFromDate.minusDays(1);
+                        workbook.setCompressTempFiles(true);
 
-		GLBalance openingGLBalance = glBalanceRepository
-				.getGlBalanceData(fromMinusOneDay.format(formatter), branch, currency, cgl);
+                        SXSSFSheet sheet = workbook.createSheet("Transactions");
 
-		GLBalance closingGLBalance = glBalanceRepository
-				.getGlBalanceData(formattedToDate.format(formatter), branch, currency, cgl);
+                        // ==================================================
+                        // STYLES
+                        // ==================================================
 
-		PaginatedResponseDTO<GetResponseDTO> response = new PaginatedResponseDTO<>();
+                        CellStyle headerStyle = ExcelStyleUtil.createHeaderStyle(workbook);
 
-		if (openingGLBalance == null || closingGLBalance == null) {
-			response.setData(Collections.emptyList());
-			return response;
-		}
+                        CellStyle titleStyle = ExcelStyleUtil.createTitleStyle(workbook);
 
-		if (sourceFlag == null || sourceFlag.isEmpty() || sourceFlag.contains("ALL")) {
-			sourceFlag = List.of("NA");
-		}
+                        CellStyle amountStyle = ExcelStyleUtil.createAmountStyle(workbook);
 
-		if (minAmount != null && maxAmount != null && minAmount > maxAmount) {
-			throw new IllegalArgumentException("minAmount cannot be greater than maxAmount");
-		}
+                        AtomicInteger rowNum = new AtomicInteger(0);
 
-		int page = (dto.getPage() == null || dto.getPage() < 0) ? 0 : dto.getPage();
-		int size = (dto.getSize() == null || dto.getSize() <= 0) ? 10 : dto.getSize();
+                        // ==================================================
+                        // TITLE
+                        // ==================================================
 
-		String sortField = dto.getSortField() != null ? dto.getSortField() : "date";
-		String sortOrder = dto.getSortOrder() != null ? dto.getSortOrder() : "ASC";
+                        Row titleRow = sheet.createRow(rowNum.getAndIncrement());
 
-		Sort.Direction direction = "DESC".equalsIgnoreCase(sortOrder)
-				? Sort.Direction.DESC
-				: Sort.Direction.ASC;
+                        Cell titleCell = titleRow.createCell(0);
 
-		Sort sort = Sort.by(direction, getSortField(sortField)).and(Sort.by("transactionId"));
-		Pageable pageable = PageRequest.of(page, size, sort);
+                        titleCell.setCellValue("GL Transactions");
 
-		// 2. Fetch ONLY the requested page
-		Specification<GlTransactions> baseSpec = TransactionEnquirySpecification.build(dto);
-		Page<GlTransactions> pageResult = glTransactionsRepository.findAll(baseSpec, pageable);
+                        titleCell.setCellStyle(titleStyle);
 
-		// 3. Initialize the running balance base
-		double currentRunningBalance = openingGLBalance.getBalance() != null 
-				? openingGLBalance.getBalance() 
-				: 0.0;
+                        sheet.addMergedRegion(
+                                        new CellRangeAddress(
+                                                        0,
+                                                        0,
+                                                        0,
+                                                        8));
 
-		// 4. If we are beyond page 0, calculate the offset sum from the database
-		if (page > 0 && !pageResult.isEmpty()) {
-			GlTransactions firstRecord = pageResult.getContent().get(0);
-			
-			Specification<GlTransactions> beforeSpec = TransactionEnquirySpecification.strictlyBefore(
-					firstRecord.getTransactionDate(), 
-					firstRecord.getTransactionId(), 
-					sortOrder
-			);
-			
-			Specification<GlTransactions> combinedSpec = Specification.where(baseSpec).and(beforeSpec);
-			
-			Double offsetSum = calculateOffsetSum(combinedSpec);
-			currentRunningBalance += offsetSum;
-		}
+                        rowNum.incrementAndGet();
 
-		List<GetResponseDTO> responseList = new ArrayList<>();
+                        // ==================================================
+                        // SUMMARY HEADER
+                        // ==================================================
 
-		for (GlTransactions txn : pageResult.getContent()) {
-			GetResponseDTO mappedDto = mapToResponseDTO(txn, formatter);
+                        Row summaryHeader = sheet.createRow(rowNum.getAndIncrement());
 
-			double debit = mappedDto.getDebitAmount() != null ? mappedDto.getDebitAmount() : 0.0;
-			double credit = mappedDto.getCreditAmount() != null ? mappedDto.getCreditAmount() : 0.0;
+                        int summaryCol = 0;
 
-			// Apply the transaction to the running balance
-			currentRunningBalance = currentRunningBalance + credit - debit;
-			
-			mappedDto.setRunningBalance(currentRunningBalance);
-			responseList.add(mappedDto);
-		}
+                        createHeaderCell(
+                                        summaryHeader,
+                                        summaryCol++,
+                                        "Branch",
+                                        headerStyle);
 
-		response.setCurrentPage(page);
-		response.setTotalPages(pageResult.getTotalPages());
-		response.setPageSize(size);
-		response.setTotalElements(pageResult.getTotalElements());
-		response.setData(responseList);
+                        createHeaderCell(
+                                        summaryHeader,
+                                        summaryCol++,
+                                        "Currency",
+                                        headerStyle);
 
-		Map<String, Object> extra = new HashMap<>();
-		extra.put("openingBalance", openingGLBalance.getBalance());
-		extra.put("closingBalance", closingGLBalance.getBalance());
-		extra.put("openingDate", formatter.format(formattedFromDate));
-		extra.put("closingDate", formatter.format(formattedToDate));
+                        createHeaderCell(
+                                        summaryHeader,
+                                        summaryCol++,
+                                        "CGL",
+                                        headerStyle);
 
-		response.setExtraData(extra);
+                        createHeaderCell(
+                                        summaryHeader,
+                                        summaryCol++,
+                                        "From Date",
+                                        headerStyle);
 
-		return response;
-	}
+                        createHeaderCell(
+                                        summaryHeader,
+                                        summaryCol++,
+                                        "To Date",
+                                        headerStyle);
 
-	// =========================================================
-	// NEW METHOD: Database-level Aggregate Calculation
-	// =========================================================
-	private Double calculateOffsetSum(Specification<GlTransactions> spec) {
-		CriteriaBuilder cb = entityManager.getCriteriaBuilder();
-		CriteriaQuery<Double> query = cb.createQuery(Double.class);
-		Root<GlTransactions> root = query.from(GlTransactions.class);
+                        if (dto.getMinAmount() != null) {
 
-		// SUM(COALESCE(creditAmount, 0) - COALESCE(debitAmount, 0))
-		Expression<Double> creditSum = cb.sum(cb.coalesce(root.get("creditAmount"), 0.0));
-		Expression<Double> debitSum = cb.sum(cb.coalesce(root.get("debitAmount"), 0.0));
-		
-		query.select(cb.diff(creditSum, debitSum));
-		query.where(spec.toPredicate(root, query, cb));
+                                createHeaderCell(
+                                                summaryHeader,
+                                                summaryCol++,
+                                                "From Amount",
+                                                headerStyle);
+                        }
 
-		Double result = entityManager.createQuery(query).getSingleResult();
-		return result != null ? result : 0.0;
-	}
+                        if (dto.getMaxAmount() != null) {
 
-	// ... (Rest of your existing methods: getTransactionsFile, getBalanceDetails, exportBalanceToExcel, mapToResponseDTO, etc. remain unchanged) ...
+                                createHeaderCell(
+                                                summaryHeader,
+                                                summaryCol++,
+                                                "To Amount",
+                                                headerStyle);
+                        }
+
+                        // ==================================================
+                        // SUMMARY VALUES
+                        // ==================================================
+
+                        Row summaryRow = sheet.createRow(rowNum.getAndIncrement());
+
+                        int summaryValueCol = 0;
+
+                        summaryRow.createCell(summaryValueCol++)
+                                        .setCellValue(dto.getBranch());
+
+                        summaryRow.createCell(summaryValueCol++)
+                                        .setCellValue(dto.getCurrency());
+
+                        summaryRow.createCell(summaryValueCol++)
+                                        .setCellValue(dto.getCgl());
+
+                        summaryRow.createCell(summaryValueCol++)
+                                        .setCellValue(dto.getFromDate());
+
+                        summaryRow.createCell(summaryValueCol++)
+                                        .setCellValue(dto.getToDate());
+
+                        if (dto.getMinAmount() != null) {
+
+                                Cell cell = summaryRow.createCell(summaryValueCol++);
+
+                                cell.setCellValue(dto.getMinAmount());
+
+                                cell.setCellStyle(amountStyle);
+                        }
+
+                        if (dto.getMaxAmount() != null) {
+
+                                Cell cell = summaryRow.createCell(summaryValueCol++);
+
+                                cell.setCellValue(dto.getMaxAmount());
+
+                                cell.setCellStyle(amountStyle);
+                        }
+
+                        rowNum.incrementAndGet();
+
+                        // ==================================================
+                        // OPENING / CLOSING
+                        // ==================================================
+
+                        Row openingRow = sheet.createRow(rowNum.getAndIncrement());
+
+                        openingRow.createCell(0)
+                                        .setCellValue("Opening Date");
+
+                        openingRow.createCell(1)
+                                        .setCellValue(dto.getFromDate());
+
+                        openingRow.createCell(2)
+                                        .setCellValue("Opening Balance");
+
+                        Cell openBalCell = openingRow.createCell(3);
+
+                        openBalCell.setCellValue(
+                                        openingGLBalance.getBalance());
+
+                        openBalCell.setCellStyle(amountStyle);
+
+                        Row closingRow = sheet.createRow(rowNum.getAndIncrement());
+
+                        closingRow.createCell(0)
+                                        .setCellValue("Closing Date");
+
+                        closingRow.createCell(1)
+                                        .setCellValue(dto.getToDate());
+
+                        closingRow.createCell(2)
+                                        .setCellValue("Closing Balance");
+
+                        Cell closeBalCell = closingRow.createCell(3);
+
+                        closeBalCell.setCellValue(
+                                        closingGLBalance.getBalance());
+
+                        closeBalCell.setCellStyle(amountStyle);
+
+                        rowNum.incrementAndGet();
+
+                        // ==================================================
+                        // MAIN HEADER
+                        // ==================================================
+
+                        String[] columns = {
+                                        "Date",
+                                        "Batch ID",
+                                        "Journal Number",
+                                        "Debit Amount",
+                                        "Credit Amount",
+                                        "Narration",
+                                        "Transaction Type",
+                                        "Source Flag",
+                                        "Posted Date"
+                        };
+
+                        Row headerRow = sheet.createRow(rowNum.getAndIncrement());
+
+                        for (int i = 0; i < columns.length; i++) {
+
+                                Cell cell = headerRow.createCell(i);
+
+                                cell.setCellValue(columns[i]);
+
+                                cell.setCellStyle(headerStyle);
+                        }
+
+                        // ==================================================
+                        // SQL
+                        // ==================================================
+
+                        String sql = """
+                                        SELECT
+                                            g.TRANSACTION_DATE,
+                                            g.BATCH_ID,
+                                            g.JOURNAL_ID,
+                                            ABS(g.DEBIT_AMOUNT) AS DEBIT_AMOUNT,
+                                            ABS(g.CREDIT_AMOUNT) AS CREDIT_AMOUNT,
+                                            g.NARRATION,
+                                            NVL(g.TRANSACTION_COUNT,0) AS TRANSACTION_COUNT,
+                                            sf.FLAG_NAME AS SOURCE_NAME,
+                                            g.POST_DATE
+                                        FROM GL_TRANSACTIONS g
+
+                                        LEFT JOIN SOURCE_FLAG sf
+                                            ON g.SOURCE_FLAG = sf.FLAG_ID
+
+                                        WHERE g.BRANCH_CODE = ?
+                                          AND g.CURRENCY = ?
+                                          AND g.CGL = ?
+                                          AND g.TRANSACTION_DATE BETWEEN ? AND ?
+
+                                        ORDER BY g.TRANSACTION_DATE
+                                        """;
+
+                        jdbcTemplate.setFetchSize(20000);
+
+                        jdbcTemplate.query(
+                                        connection -> {
+
+                                                try {
+
+                                                        var ps = connection.prepareStatement(sql);
+
+                                                        ps.setFetchSize(20000);
+
+                                                        ps.setString(
+                                                                        1,
+                                                                        dto.getBranch().split("-")[0]);
+
+                                                        ps.setString(
+                                                                        2,
+                                                                        dto.getCurrency());
+
+                                                        ps.setString(
+                                                                        3,
+                                                                        dto.getCgl().split(" -")[0]);
+
+                                                        SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy");
+
+                                                        java.util.Date fromDate = sdf.parse(dto.getFromDate());
+
+                                                        java.util.Date toDate = sdf.parse(dto.getToDate());
+
+                                                        ps.setTimestamp(
+                                                                        4,
+                                                                        new Timestamp(fromDate.getTime()));
+
+                                                        ps.setTimestamp(
+                                                                        5,
+                                                                        new Timestamp(toDate.getTime()));
+
+                                                        return ps;
+
+                                                } catch (ParseException e) {
+
+                                                        throw new IllegalArgumentException(
+                                                                        "Invalid date format. Expected dd/MM/yyyy",
+                                                                        e);
+                                                }
+                                        },
+                                        rs -> {
+
+                                                Row row = sheet.createRow(
+                                                                rowNum.getAndIncrement());
+
+                                                int col = 0;
+
+                                                row.createCell(col++)
+                                                                .setCellValue(
+                                                                                ExcelExportUtil.safeString(
+                                                                                                rs.getString("TRANSACTION_DATE")));
+
+                                                row.createCell(col++)
+                                                                .setCellValue(
+                                                                                ExcelExportUtil.safeString(
+                                                                                                rs.getString("BATCH_ID")));
+
+                                                row.createCell(col++)
+                                                                .setCellValue(
+                                                                                ExcelExportUtil.safeString(
+                                                                                                rs.getString("JOURNAL_ID")));
+
+                                                Cell debitCell = row.createCell(col++);
+
+                                                debitCell.setCellValue(
+                                                                rs.getDouble("DEBIT_AMOUNT"));
+
+                                                debitCell.setCellStyle(amountStyle);
+
+                                                Cell creditCell = row.createCell(col++);
+
+                                                creditCell.setCellValue(
+                                                                rs.getDouble("CREDIT_AMOUNT"));
+
+                                                creditCell.setCellStyle(amountStyle);
+
+                                                row.createCell(col++)
+                                                                .setCellValue(
+                                                                                ExcelExportUtil.safeString(
+                                                                                                rs.getString("NARRATION")));
+
+                                                row.createCell(col++)
+                                                                .setCellValue(
+                                                                                rs.getLong("TRANSACTION_COUNT"));
+
+                                                row.createCell(col++)
+                                                                .setCellValue(
+                                                                                ExcelExportUtil.safeString(
+                                                                                                rs.getString("SOURCE_NAME")));
+
+                                                row.createCell(col++)
+                                                                .setCellValue(
+                                                                                ExcelExportUtil.safeString(
+                                                                                                rs.getString("POST_DATE")));
+
+                                                ExcelExportUtil.flushIfNeeded(
+                                                                sheet,
+                                                                rowNum.get());
+                                        });
+
+                        for (int i = 0; i < columns.length; i++) {
+
+                                sheet.setColumnWidth(i, 6000);
+                        }
+
+                        workbook.write(out);
+
+                        byte[] bytes = out.toByteArray();
+
+                        MyDownloadsRequestDTO downloadRequest = new MyDownloadsRequestDTO();
+
+                        downloadRequest.setUserId(userId);
+
+                        String fileName = "GL_Transactions_" + dto.getCgl() + ".xlsx";
+                        downloadRequest.setFileName(fileName);
+
+                        downloadRequest.setMenuId(34);
+
+                        SearchCriteriaDTO searchDto = new SearchCriteriaDTO();
+
+                        searchDto.setBranch(dto.getBranch());
+                        searchDto.setCgl(dto.getCgl());
+                        searchDto.setCurrency(dto.getCurrency());
+                        searchDto.setFromDate(dto.getFromDate());
+                        searchDto.setToDate(dto.getToDate());
+
+                        if (dto.getMinAmount() != null) {
+                                searchDto.setMinAmount(dto.getMinAmount());
+                        }
+
+                        if (dto.getMaxAmount() != null) {
+                                searchDto.setMaxAmount(dto.getMaxAmount());
+                        }
+
+                        if (dto.getSourceFlags() == null) {
+                                searchDto.setSourceFlags(List.of("ALL"));
+                        } else {
+                                searchDto.setSourceFlags(dto.getSourceFlags());
+                        }
+
+                        String json = new ObjectMapper().writeValueAsString(searchDto);
+
+                        downloadRequest.setSearchCriteria(json);
+
+                        downloadRequest.setResultData(
+                                        bytes);
+
+                        myDownloadsService.insertRequest(downloadRequest);
+
+                        return bytes;
+
+                } catch (IOException e) {
+
+                        throw new ExportGenerationException(
+                                        "Failed to generate Transaction export",
+                                        e);
+                }
+        }
+
+        private void createHeaderCell(
+                        Row row,
+                        int column,
+                        String value,
+                        CellStyle style) {
+
+                Cell cell = row.createCell(column);
+
+                cell.setCellValue(value);
+
+                cell.setCellStyle(style);
+        }
 }
