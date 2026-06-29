@@ -1,13 +1,45 @@
+// Add this new method inside TransactionEnquirySpecification.java
+
+public static Specification<GlTransactions> strictlyBefore(LocalDate date, String id, String sortOrder) {
+    return (root, query, cb) -> {
+        boolean isDesc = "DESC".equalsIgnoreCase(sortOrder);
+
+        // If descending, "before" in the list means chronologically AFTER in time.
+        Predicate dateCondition = isDesc ? 
+                cb.greaterThan(root.get("transactionDate"), date) : 
+                cb.lessThan(root.get("transactionDate"), date);
+
+        Predicate sameDateCondition = cb.equal(root.get("transactionDate"), date);
+        
+        // Tie-breaker using transactionId
+        Predicate idCondition = isDesc ? 
+                cb.greaterThan(root.get("transactionId").as(String.class), id) : 
+                cb.lessThan(root.get("transactionId").as(String.class), id);
+
+        return cb.or(dateCondition, cb.and(sameDateCondition, idCondition));
+    };
+}
+
+
+
 package com.fincore.enquiry_service.service;
 
 import java.io.IOException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.Expression;
+import jakarta.persistence.criteria.Root;
+
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 
 import com.fincore.enquiry_service.dto.BalanceRequestDTO;
@@ -39,6 +71,9 @@ public class EnquiryServiceImpl implements EnquiryService {
 	private final GLBalanceRepository glBalanceRepository;
 	private final TransactionStreamingExportService transactionStreamingExportService;
 	private final BalanceStreamingExportService balanceStreamingExportService;
+    
+	// 1. Inject the EntityManager for custom Criteria queries
+	private final EntityManager entityManager;
 
 	private static final String ZONE_IST = "Asia/Kolkata";
 
@@ -59,7 +94,6 @@ public class EnquiryServiceImpl implements EnquiryService {
 
 		LocalDate formattedFromDate = LocalDate.parse(fromDate, formatter);
 		LocalDate formattedToDate = LocalDate.parse(toDate, formatter);
-
 		LocalDate fromMinusOneDay = formattedFromDate.minusDays(1);
 
 		GLBalance openingGLBalance = glBalanceRepository
@@ -93,55 +127,53 @@ public class EnquiryServiceImpl implements EnquiryService {
 				? Sort.Direction.DESC
 				: Sort.Direction.ASC;
 
-		Sort sort = Sort.by(direction, getSortField(sortField))
-				.and(Sort.by("transactionId"));
+		Sort sort = Sort.by(direction, getSortField(sortField)).and(Sort.by("transactionId"));
+		Pageable pageable = PageRequest.of(page, size, sort);
 
-		// ---------------------------------------------------------
-		// RUNNING BALANCE CALCULATION LOGIC
-		// ---------------------------------------------------------
-		// To calculate the running balance accurately for page N, we must 
-		// sequentially calculate the balance from page 0 up to page N.
-		int limit = (page + 1) * size;
-		Pageable cumulativePageable = PageRequest.of(0, limit, sort);
+		// 2. Fetch ONLY the requested page
+		Specification<GlTransactions> baseSpec = TransactionEnquirySpecification.build(dto);
+		Page<GlTransactions> pageResult = glTransactionsRepository.findAll(baseSpec, pageable);
 
-		Page<GlTransactions> cumulativePageResult = glTransactionsRepository.findAll(
-				TransactionEnquirySpecification.build(dto),
-				cumulativePageable);
-
-		List<GlTransactions> allFetchedTxns = cumulativePageResult.getContent();
-
-		// Recalculate standard pagination metadata based on total elements found
-		long totalElements = cumulativePageResult.getTotalElements();
-		int totalPages = (int) Math.ceil((double) totalElements / size);
-
+		// 3. Initialize the running balance base
 		double currentRunningBalance = openingGLBalance.getBalance() != null 
 				? openingGLBalance.getBalance() 
 				: 0.0;
 
-		List<GetResponseDTO> responseList = new ArrayList<>();
-		int startIndex = page * size;
+		// 4. If we are beyond page 0, calculate the offset sum from the database
+		if (page > 0 && !pageResult.isEmpty()) {
+			GlTransactions firstRecord = pageResult.getContent().get(0);
+			
+			Specification<GlTransactions> beforeSpec = TransactionEnquirySpecification.strictlyBefore(
+					firstRecord.getTransactionDate(), 
+					firstRecord.getTransactionId(), 
+					sortOrder
+			);
+			
+			Specification<GlTransactions> combinedSpec = Specification.where(baseSpec).and(beforeSpec);
+			
+			Double offsetSum = calculateOffsetSum(combinedSpec);
+			currentRunningBalance += offsetSum;
+		}
 
-		for (int i = 0; i < allFetchedTxns.size(); i++) {
-			GlTransactions txn = allFetchedTxns.get(i);
+		List<GetResponseDTO> responseList = new ArrayList<>();
+
+		for (GlTransactions txn : pageResult.getContent()) {
 			GetResponseDTO mappedDto = mapToResponseDTO(txn, formatter);
 
 			double debit = mappedDto.getDebitAmount() != null ? mappedDto.getDebitAmount() : 0.0;
 			double credit = mappedDto.getCreditAmount() != null ? mappedDto.getCreditAmount() : 0.0;
 
-			// Adjust the logic (+ credit - debit OR + debit - credit) based on the account type rules
+			// Apply the transaction to the running balance
 			currentRunningBalance = currentRunningBalance + credit - debit;
+			
 			mappedDto.setRunningBalance(currentRunningBalance);
-
-			// Only add the record to the final response if it belongs to the requested page
-			if (i >= startIndex) {
-				responseList.add(mappedDto);
-			}
+			responseList.add(mappedDto);
 		}
 
 		response.setCurrentPage(page);
-		response.setTotalPages(totalPages);
+		response.setTotalPages(pageResult.getTotalPages());
 		response.setPageSize(size);
-		response.setTotalElements(totalElements);
+		response.setTotalElements(pageResult.getTotalElements());
 		response.setData(responseList);
 
 		Map<String, Object> extra = new HashMap<>();
@@ -155,203 +187,24 @@ public class EnquiryServiceImpl implements EnquiryService {
 		return response;
 	}
 
-	@Override
-	public byte[] getTransactionsFile(
-			GetPayloadDTO dto,
-			String userId)
-			throws IOException {
-
-		String branch = dto.getBranch().split("-")[0];
-		String currency = dto.getCurrency();
-		String cgl = dto.getCgl().split(" -")[0];
-
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
-		LocalDate fromDate = LocalDate.parse(dto.getFromDate(), formatter);
-		LocalDate toDate = LocalDate.parse(dto.getToDate(), formatter);
-
-		GLBalance openingBalance = glBalanceRepository.getGlBalanceData(
-				fromDate.minusDays(1).format(formatter),
-				branch,
-				currency,
-				cgl);
-
-		GLBalance closingBalance = glBalanceRepository.getGlBalanceData(
-				toDate.format(formatter),
-				branch,
-				currency,
-				cgl);
-
-        // Ensure that TransactionStreamingExportService internally implements 
-        // the same sequential running balance loop while streaming data to Excel.
-		return transactionStreamingExportService.export(
-				dto,
-				openingBalance,
-				closingBalance,
-				userId);
-	}
-
-	@Override
-	public PaginatedResponseDTO<BalanceResponseDTO> getBalanceDetails(BalanceRequestDTO request) {
-
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM-yyyy");
-		LocalDate adjustedStartDate = LocalDate.parse(request.getStartDate(), formatter);
-		LocalDate adjustedEndDate = LocalDate.parse(request.getEndDate(), formatter);
-
-		log.info("Start date is {}", adjustedStartDate);
-		log.info("End date is {}", adjustedEndDate);
-
-		if (adjustedStartDate.isAfter(adjustedEndDate)) {
-			log.error("End date must be after start date.");
-			throw new IllegalArgumentException("End date must be after start date");
-		}
-
-		int page = (request.getPage() != null && request.getPage() >= 0) ? request.getPage() : 0;
-		int size = (request.getSize() != null && request.getSize() >= 0) ? request.getSize() : 10;
-
-		String sortIn = (request.getSortIn() != null && !request.getSortIn().isBlank())
-				? request.getSortIn().toUpperCase()
-				: "ASC";
-
-		Sort sort = sortIn.equals("DESC") ? Sort.by("date").descending() : Sort.by("date").ascending();
-		PageRequest pageRequest = PageRequest.of(page, size, sort);
-
-		log.info("Adjusted Start Date : {}", adjustedStartDate);
-		log.info("Adjusted End Date : {}", adjustedEndDate);
-
-		Page<GLBalance> records = glBalanceRepository.findByBranchAndCglAndCurrencyAndDateBetween(
-				request.getBranch(), request.getCgl(), request.getCurrency(),
-				adjustedStartDate, adjustedEndDate,
-				pageRequest);
-
-		if (records.isEmpty()) {
-			log.warn("No records found for the given filters.");
-			throw new NoDataFoundException("No records found for given filters");
-		}
-
-		List<BalanceResponseDTO> list = records.stream()
-				.map(r -> new BalanceResponseDTO(
-						r.getId(), r.getDate(), r.getBranch(), r.getCgl(), r.getCurrency(), r.getBalance(),
-						r.getBalance() < 0 ? "DR" : "CR"))
-				.toList();
-
-		String actualSort = records.getSort().stream().findFirst().map(order -> order.getDirection().name())
-				.orElse("UNSORTED");
-
-		return new PaginatedResponseDTO<>(
-				records.getNumber(), records.getTotalPages(), records.getSize(), records.getTotalElements(), actualSort,
-				list, null);
-	}
-
-	@Override
-	public byte[] exportBalanceToExcel(
-			BalanceRequestDTO request,
-			String userId) {
-
-		return balanceStreamingExportService.export(
-				request, userId);
-	}
-
-	@Override
-	public PaginatedResponseDTO<GLBalanceResponseDTO> getGlBalanceReport(
-			String startDate, String endDate, String circle, String branch, String cgl, Integer page, Integer size,
-			String currency) {
-
-		Pageable pageable = PageRequest.of(page != null ? page : 0, size != null ? size : 10);
-
-		Page<GLBalanceProjection> pageResult = glBalanceRepository.findGlBalances(
-				startDate, endDate, currency, circle, branch, cgl, pageable);
-
-		List<GLBalanceResponseDTO> list = pageResult.getContent().stream()
-				.map(this::toGlBalanceDto)
-				.toList();
-
-		return new PaginatedResponseDTO<>(
-				pageResult.getNumber(),
-				pageResult.getTotalPages(),
-				pageResult.getSize(),
-				pageResult.getTotalElements(),
-				null,
-				list, null);
-	}
-
 	// =========================================================
-	// PRIVATE HELPER METHODS
+	// NEW METHOD: Database-level Aggregate Calculation
 	// =========================================================
+	private Double calculateOffsetSum(Specification<GlTransactions> spec) {
+		CriteriaBuilder cb = entityManager.getCriteriaBuilder();
+		CriteriaQuery<Double> query = cb.createQuery(Double.class);
+		Root<GlTransactions> root = query.from(GlTransactions.class);
 
-	private GetResponseDTO mapToResponseDTO(
-			GlTransactions txn,
-			DateTimeFormatter formatter) {
+		// SUM(COALESCE(creditAmount, 0) - COALESCE(debitAmount, 0))
+		Expression<Double> creditSum = cb.sum(cb.coalesce(root.get("creditAmount"), 0.0));
+		Expression<Double> debitSum = cb.sum(cb.coalesce(root.get("debitAmount"), 0.0));
+		
+		query.select(cb.diff(creditSum, debitSum));
+		query.where(spec.toPredicate(root, query, cb));
 
-		GetResponseDTO res = new GetResponseDTO();
-
-		res.setDate(formatter.format(txn.getTransactionDate()));
-		res.setJournalNumber(txn.getJournalId());
-		res.setBatchId(txn.getBatchId());
-		res.setSourceFlag(
-				SourceFlagUtil.getSourceFlagDescription(
-						txn.getSourceFlag()));
-
-		res.setTransactionCount(txn.getTransactionCount());
-		res.setParticulars(txn.getNarration());
-		res.setPostDate(txn.getPostDate().toLocalDateTime());
-		res.setTransactionId(txn.getTransactionId());
-
-		double debit = txn.getDebitAmount() != null ? Math.abs(txn.getDebitAmount()) : 0;
-		double credit = txn.getCreditAmount() != null ? Math.abs(txn.getCreditAmount()) : 0;
-
-		res.setDebitAmount(debit);
-		res.setCreditAmount(credit);
-
-		return res;
+		Double result = entityManager.createQuery(query).getSingleResult();
+		return result != null ? result : 0.0;
 	}
 
-	private Date convertToStartOfDay(Date date) {
-		if (date == null)
-			return null;
-		Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone(ZONE_IST));
-		calendar.setTime(date);
-		calendar.set(Calendar.HOUR_OF_DAY, 0);
-		calendar.set(Calendar.MINUTE, 0);
-		calendar.set(Calendar.SECOND, 0);
-		calendar.set(Calendar.MILLISECOND, 0);
-		return calendar.getTime();
-	}
-
-	private Date convertToEndOfDay(Date date) {
-		if (date == null)
-			return null;
-		Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone(ZONE_IST));
-		calendar.setTime(date);
-		calendar.set(Calendar.HOUR_OF_DAY, 23);
-		calendar.set(Calendar.MINUTE, 59);
-		calendar.set(Calendar.SECOND, 59);
-		calendar.set(Calendar.MILLISECOND, 999);
-		return calendar.getTime();
-	}
-
-	private GLBalanceResponseDTO toGlBalanceDto(GLBalanceProjection p) {
-		return new GLBalanceResponseDTO(
-				p.getCIRCLE_CODE(),
-				p.getCIRCLE_NAME(),
-				p.getBRANCH_NAME(),
-				p.getBRANCH_CODE(),
-				p.getCGL(),
-				p.getCGL_DESCRIPTION(),
-				p.getBALANCE_DATE(),
-				p.getCURRENCY(),
-				p.getTOTAL_BALANCE(),
-				p.getTOTAL_INR_BALANCE());
-	}
-
-	private String getSortField(String field) {
-		return switch (field) {
-			case "date" -> "transactionDate";
-			case "journalNumber" -> "journalId";
-			case "batchId" -> "batchId";
-			case "sourceFlag" -> "sourceFlag";
-			case "particulars" -> "narration";
-			case "postDate" -> "postDate";
-			default -> "transactionDate";
-		};
-	}
+	// ... (Rest of your existing methods: getTransactionsFile, getBalanceDetails, exportBalanceToExcel, mapToResponseDTO, etc. remain unchanged) ...
 }
