@@ -1,482 +1,507 @@
-import React from "react";
-import { DataGrid } from "@mui/x-data-grid";
-import {
-  Button,
-  Typography,
-  Stack,
-  Box,
-  styled,
-  Grid,
-} from "@mui/material";
-import FileDownloadIcon from "@mui/icons-material/FileDownload";
-import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
-import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
-import EventIcon from "@mui/icons-material/Event";
-import TrendingUpIcon from "@mui/icons-material/TrendingUp";
-import TrendingDownIcon from "@mui/icons-material/TrendingDown";
-import { StyledDataBox } from "./TransactionStyles";
-import CircularProgress from "@mui/material/CircularProgress";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
+import { useSelector } from "react-redux";
+import { Box } from "@mui/material";
+import { LocalizationProvider } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import dayjs from "dayjs";
+import debounce from "lodash/debounce";
+import LedgerForm from "./components/BalanceLedgerForm";
+import LedgerDataGrid from "./components/BalanceLedgerDataGrid";
+import { getPermissions } from "../../utils/CommonUtilities";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import downloadFile from "../../utils/DownloadUtils";
 
-const OverlayBox = styled(Box)(() => ({
-  display: "flex",
-  flexDirection: "column",
-  height: "100%",
-  justifyContent: "center",
-  alignItems: "center",
-}));
+const DEFAULT_PAGE_SIZE = 20;
+const FOREIGN_CIRCLE_CODE = "021";
 
-const CustomNoRowsOverlay = () => (
-  <OverlayBox>
-    <ErrorOutlineIcon fontSize="large" color="action" />
-    <Typography variant="h5" fontSize="1.2rem" color="text.secondary">
-      No transactions available for the selected criteria
-    </Typography>
-  </OverlayBox>
-);
+const CIRCLE_GROUPS = {
+  ALL: "ALL",
+  DOMESTIC: "DOMESTIC",
+  FOREIGN: "FOREIGN",
+};
 
-const TransactionTable = ({
-  data,
-  loading,
-  onDownload,
-  rowCount,
-  paginationModel,
-  setPaginationModel,
-  sortModel,
-  setSortModel,
-  filterModel,
-  setFilterModel,
-  userInputs,
-  sourceOptions,
-  exportLoading,
-}) => {
-  const rows = data?.data || [];
-  const balances = data?.extraData || {};
+const LedgerWiseBalanceEnquiry = () => {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const user = useSelector((state) => state.auth.user);
+  const menu = useSelector((state) => state.menus.selectedMenuItem);
+  const permissions = getPermissions(menu);
 
-  // =========================================================
-  // FRONTEND GUARDRAIL: Check if sort is chronological
-  // =========================================================
-  // If sortModel is empty, the backend defaults to Date ASC.
-  const isChronologicalSort =
-    !sortModel ||
-    sortModel.length === 0 ||
-    sortModel[0]?.field === "date" ||
-    sortModel[0]?.field === "postDate";
+  const MIN_ALLOWED_DATE = dayjs("2026-03-31");
+  const DATE_FORMAT = "DD/MM/YYYY";
 
-  // Hide the top summary cards if not sorted chronologically
-  const showBalances =
-    userInputs?.sourceFlags?.length === sourceOptions?.length &&
-    !userInputs?.minAmount &&
-    !userInputs?.maxAmount &&
-    rows.length > 0 &&
-    isChronologicalSort; // <-- Appended check here
+  const hasWholeBank = !!permissions.wholebank;
+  const hasCircle = user?.isCircle || !!permissions.circle;
+  const isCircleUser = user?.isCircle && !hasWholeBank;
 
-  const transactionColumns = [
-    {
-      field: "date",
-      headerName: "Date",
-      flex: 1,
-      minWidth: 120,
-      filterable: false,
-    },
-    {
-      field: "batchId",
-      headerName: "Batch Id",
-      flex: 0.7,
-      minWidth: 100,
-      filterable: true,
-      valueFormatter: (value) => (value == null ? "-" : value),
-    },
-    {
-      field: "journalNumber",
-      headerName: "Journal No.",
-      flex: 0.8,
-      minWidth: 150,
-      filterable: true,
-      valueFormatter: (value) => (value == null ? "-" : value),
-    },
-    {
-      field: "particulars",
-      headerName: "Narration",
-      flex: 1.5,
-      minWidth: 200,
-      filterable: true,
-    },
-    {
-      field: "debitAmount",
-      headerName: "Debit",
-      flex: 1,
-      minWidth: 150,
-      headerAlign: "left",
-      align: "right",
-      filterable: false,
-      valueFormatter: (value) => Number(value || 0).toFixed(4),
-    },
-    {
-      field: "creditAmount",
-      headerName: "Credit",
-      flex: 1,
-      minWidth: 150,
-      headerAlign: "left",
-      align: "right",
-      filterable: false,
-      valueFormatter: (value) => Number(value || 0).toFixed(4),
-    },
-    {
-      field: "runningBalance",
-      headerName: "Balance",
-      flex: 1,
-      minWidth: 170,
-      headerAlign: "left",
-      align: "right",
-      filterable: false,
-      valueFormatter: (value) => (value == null ? "-" : value),
-    },
-    {
-      field: "sourceFlag",
-      headerName: "Transaction Type",
-      flex: 1,
-      minWidth: 150,
-      filterable: true,
-      valueGetter: (value) => sourceOptions[value] || value,
-    },
-  ];
+  
+  const [circles, setCircles] = useState([]);
+  const [initialState, setInitialState] = useState({
+    enquiryType: "COLLATION",
+    level: "BRANCH",
+    circle: "ALL",
+    branches: ["ALL"],
+    currencies: ["All Currencies"],
+    cgl: [],
+    balanceDate:null,
+  });
 
-  // =========================================================
-  // DYNAMIC COLUMNS: Remove "Balance" column if not chronological
-  // =========================================================
-  const activeColumns = isChronologicalSort
-    ? transactionColumns
-    : transactionColumns.filter((col) => col.field !== "runningBalance");
+  
+  const [currencies, setCurrencies] = useState([]);
+  const [etlDate, setEtlDate] = useState(null);
+
+  const [rows, setRows] = useState(null);
+  const [rowCount, setRowCount] = useState(0);
+
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: DEFAULT_PAGE_SIZE,
+  });
+
+  const [sortModel, setSortModel] = useState([
+    {
+      field: "balanceDate",
+      sort: "desc",
+    },
+  ]);
+
+  const [filterModel, setFilterModel] = useState({
+    items: [],
+  });
+
+  /* INITIAL FILTERS */
+  const initialDetails = useMemo(() => {
+    return {
+      enquiryType:"COLLATION",
+      level: hasWholeBank ? "BANK" : isCircleUser ? "CIRCLE" : "BRANCH",
+      circle: hasWholeBank ? "ALL" : user?.circleCode,
+      branches:
+        !user?.isCircle && !hasWholeBank
+          ? [`${user?.branch}-${user?.branchName}`]
+          : ["ALL"],
+
+      currencies: ["All Currencies"],
+      cgl: hasWholeBank?["All CGLs"] : [],
+      fromDate: null,
+      toDate: null,
+    };
+  }, [
+    hasWholeBank,
+    user?.circleCode,
+    user?.isCircle,
+    user?.branch,
+    user?.branchName,
+    isCircleUser,
+  ]);
+
+  const [filters, setFilters] = useState(initialState);
+  const [searchQuery, setSearchQuery] = useState(null);
+
+    useEffect(() => {
+    setInitialState(initialDetails);
+    setFilters(initialDetails);
+  }, [initialDetails]);
+
+
+  const isCollationMode = !hasWholeBank || filters.enquiryType ==="COLLATION";
+  /* FETCH MASTERS */
+  const fetchMasters = useCallback(async () => {
+    try {
+      const [dateRes, currRes] = await Promise.all([
+        callApi("/PS/file/fincore-date", {}, "GET"),
+
+        callApi("/CM/common-master/currency-code-name-only", null, "GET"),
+
+      ]);
+
+      /* ETL DATE */
+      if (dateRes?.data?.userDate) {
+        setEtlDate(dayjs(dateRes.data.userDate, "YYYY-MM-DD"));
+      }
+
+      /*CURRENCIES */
+      const formattedCurrencies =
+        currRes?.data?.map((c) => `${c.currencyCode} (${c.currencyName})`) ||
+        [];
+
+      const sortedCurrencies = formattedCurrencies.sort((a, b) => {
+        const aCode = a.split(" ")[0];
+        const bCode = b.split(" ")[0];
+
+        // INR always on top
+        if (aCode === "INR") return -1;
+        if (bCode === "INR") return 1;
+
+        // Remaining alphabetical
+        return a.localeCompare(b);
+      });
+
+      setCurrencies(sortedCurrencies);
+
+      /* CIRCLES */
+      if (hasWholeBank) {
+        const circleRes = await callApi(
+          "/CM/common-master/circle-codes",
+          null,
+          "GET",
+        );
+
+        setCircles(circleRes?.data || []);
+      }
+    } catch (error) {
+      console.error(error);
+
+      showSnackBar("Failed to load master configuration", "error");
+    }
+  }, [callApi, hasWholeBank, showSnackBar]);
+
+  useEffect(() => {
+    fetchMasters();
+  }, [fetchMasters]);
+
+  /* BRANCH OPTIONS */
+  const selectedBranchOptions = useMemo(() => {
+    if (!filters.branches?.length || filters.branches.includes("ALL")) {
+      return [];
+    }
+    return filters.branches.map((branch) => ({
+      value: branch.split("-")[0],
+      label: branch,
+    }));
+  }, [filters.branches]);
+
+  /* CIRCLE OPTIONS */
+  const selectedCircleOptions = useMemo(() => {
+    const formattedCircles = circles.map((circle) => ({
+      value: circle.circleCode,
+      label:
+        circle.circleCode === FOREIGN_CIRCLE_CODE
+          ? `${circle.circleCode} - Foreign`
+          : `${circle.circleCode} - ${circle.circleName}`,
+    }));
+
+    // ALL/GROUP OPTIONS
+    if (
+      filters.circle === CIRCLE_GROUPS.ALL ||
+      filters.circle === CIRCLE_GROUPS.DOMESTIC ||
+      filters.circle === CIRCLE_GROUPS.FOREIGN
+    ) {
+      return formattedCircles;
+    }
+
+    return formattedCircles.filter((circle) => circle.value === filters.circle);
+  }, [filters.circle, circles]);
+
+  /* CURRENCY OPTIONS */
+  const selectedCurrencyOptions = useMemo(() => {
+    if (!filters.currencies?.length || filters.currencies.includes("All Currencies")) {
+      return currencies.map((currency) => ({
+        value: currency.split(" (")[0],
+
+        label: currency,
+      }));
+    }
+    // return [
+    //   {
+    //     value: filters.currencies.split(" (")[0],
+    //     label: filters.currencies,
+    //   },
+    // ];
+    return(filters.currencies || []).map((currency)=>({
+      value: currency.split(" (")[0],
+      label: currency,
+    }));
+  }, [filters.currencies, currencies]);
+
+  /* PAYLOAD */
+  const buildPayload = useCallback(() => {
+    if (!searchQuery) return null;
+
+    const gridFilters =
+      filterModel.items
+        ?.filter(
+          (item) =>
+            item.field &&
+            item.operator &&
+            item.value !== undefined &&
+            item.value !== null &&
+            item.value !== "",
+        )
+        .map((item) => ({
+          field: item.field,
+          operator: item.operator,
+          value: item.value,
+        })) || [];
+
+    return {
+      enquiryType: searchQuery.enquiryType,
+      // Main Filters
+      circle: searchQuery.circle,
+      cgls: searchQuery.cgl?.includes("All CGLs")?["ALL"]:searchQuery.cgl?.map((c) => c.split("-")[0].trim()) || [],
+      cglName: searchQuery.cgl?.includes("All CGLs")?["ALL"]:searchQuery.cgl?.map((c) => c.split("-")[1]) || [],
+
+      currencies:
+        searchQuery.currencies?.includes("All Currencies")
+          ? ["ALL"]
+          : searchQuery.currencies?.map((currency)=>currency.split("(")[0]) || [], 
+
+      // branches: searchQuery.branches.includes("ALL")
+      //   ? ["ALL"]
+      //   : searchQuery.branches.map((b) => b.split("-")[0]),
+
+      branches:
+      searchQuery.enquiryType === "CONSOLIDATED"
+        ? []
+        : searchQuery.branches.includes("ALL")
+            ? ["ALL"]
+            : searchQuery.branches.map((b) => b.split("-")[0]),
+
+      balanceDate: dayjs(searchQuery.balanceDate).format("DD/MM/YYYY"),
+
+      // Pagination
+      page: paginationModel.page,
+      size: paginationModel.pageSize,
+
+      // Sorting
+      sortField: sortModel?.[0]?.field || "balanceDate",
+      sortOrder: sortModel?.[0]?.sort || "desc",
+
+      // Grid Filters
+      gridFilters,
+    };
+  }, [searchQuery, paginationModel, sortModel, filterModel]);
+
+  /* FETCH ROWS */
+  const fetchRows = useCallback(async () => {
+    const payload = buildPayload();
+    if (!payload) return;
+    try {
+      setLoading(true);
+      console.log(payload);
+      const res = await callApi("/ES/ledger-wise-balances/search", payload, "POST");
+      console.log("api response",res)
+      setRows(res?.data?.content || []);
+      setRowCount(res?.data?.page?.totalElements || 0);
+    } catch (error) {
+      console.error(error);
+      showSnackBar(error?.message || "Enquiry failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [callApi, buildPayload, showSnackBar]);
+
+  /* DEBOUNCED FETCH */
+  const debouncedFetch = useMemo(
+    () =>
+      debounce(() => {
+        fetchRows();
+      }, 300),
+    [fetchRows],
+  );
+
+  useEffect(() => {
+    if (!searchQuery) return;
+    debouncedFetch();
+    return () => {
+      debouncedFetch.cancel();
+    };
+  }, [paginationModel, sortModel, filterModel, searchQuery, debouncedFetch]);
+
+const handleSearch = useCallback(() => {
+  const { cgl, balanceDate } = filters;
+
+  if (cgl.length === 0 || !balanceDate) {
+    showSnackBar("Please fill all required fields", "warning");
+    return;
+  }
+
+  if (!balanceDate?.isValid?.()) {
+    showSnackBar("Invalid date selected", "warning");
+    return;
+  }
+
+  if (balanceDate.isBefore(MIN_ALLOWED_DATE, "day")) {
+    showSnackBar(
+      `Date cannot be earlier than ${MIN_ALLOWED_DATE.format(DATE_FORMAT)}`,
+      "warning"
+    );
+    return;
+  }
+
+  if (etlDate?.isValid?.() && balanceDate.isAfter(etlDate, "day")) {
+    showSnackBar(
+      `Date cannot exceed ETL date ${etlDate.format(DATE_FORMAT)}`,
+      "warning"
+    );
+    return;
+  }
+
+  setPaginationModel({
+    page: 0,
+    pageSize: paginationModel.pageSize,
+  });
+
+  setSortModel([
+    {
+      field: "balanceDate",
+      sort: "desc",
+    },
+  ]);
+
+  setFilterModel({
+    items: [],
+  });
+
+  setSearchQuery({
+    ...filters,
+  });
+}, [
+  filters,
+  etlDate,
+  MIN_ALLOWED_DATE,
+  DATE_FORMAT,
+  paginationModel.pageSize,
+  showSnackBar,
+]);
+
+  /* RESET */
+  const handleReset = useCallback(() => {
+    setFilters(initialState);
+    setSearchQuery(null);
+    setRows(null);
+    setRowCount(0);
+    setPaginationModel({
+      page: 0,
+      pageSize: DEFAULT_PAGE_SIZE,
+    });
+    setSortModel([
+      {
+        field: "balanceDate",
+        sort: "desc",
+      },
+    ]);
+    setFilterModel({
+      items: [],
+    });
+  }, [initialState]);
+
+  /* EXPORT */
+  const handleExcelExport = useCallback(async () => {
+    const payload = buildPayload();
+    if (!payload) return;
+    try {
+      setExporting(true);
+      console.log(payload);
+      const response = await callApi(
+        "/ES/ledger-wise-balances/export-excel",
+        payload,
+        "POST",
+        "arraybuffer",
+      );
+      // const fileName = `GL_Enquiry_${searchQuery.cgl.split(" - ")[0]}`;
+      const fileName = "Ledger_Balance_Report";
+      if (response?.byteLength) {
+        downloadFile(response, "excel", fileName);
+      } else {
+        showSnackBar(
+          "Failed to download, Something went wrong Kindly try again",
+          "error",
+        );
+      }
+    } catch (error) {
+      showSnackBar(
+        error?.message ||
+          "Failed to export, Something went wrong Kindly try again",
+        "error",
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [buildPayload, callApi, searchQuery, showSnackBar]);
 
   return (
-    <StyledDataBox
-      sx={{
-        mt: 2,
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-      }}
-    >
+    <LocalizationProvider dateAdapter={AdapterDayjs}>
       <Box
         sx={{
-          p: { xs: 1, sm: 1.2 },
-          mb: 3,
-          mt: { xs: 0, sm: -2 },
-          borderRadius: "16px",
-          background: "rgba(255,255,255,0.1)",
-          backdropFilter: "blur(12px)",
-          border: "1px solid rgba(255,255,255,0.3)",
-          boxShadow: "0 4px 20px rgba(0,0,0,0.03)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 1,
+          p: 2.5,
         }}
       >
-        <Stack
-          direction={{ xs: "column", sm: "row" }}
-          justifyContent="space-between"
-          alignItems={{ xs: "stretch", sm: "center" }}
-          spacing={2}
-        >
-          <Box
-            sx={{
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              gap: 1,
-            }}
-          >
-            <Typography
-              sx={{
-                fontWeight: 800,
-                color: "#1a1a1a",
-                letterSpacing: "-0.5px",
-                fontSize: {
-                  xs: "0.95rem",
-                  sm: "1rem",
-                  md: "1.05rem",
-                },
-              }}
-            >
-              Transaction Ledger
-            </Typography>
+        <LedgerForm
+          filters={filters}
+          // onFilterChange={(field, value) =>
+          //   setFilters((prev) => ({
+          //     ...prev,
+          //     [field]: value,
+          //   }))
+          // }
+          onFilterChange={(field, value) => {
 
-            <Typography
-              variant="caption"
-              fontWeight={700}
-              sx={{
-                color: "#58469f",
-                textTransform: "uppercase",
-                bgcolor: "rgba(88,70,159,0.1)",
-                px: 1.2,
-                py: 0.3,
-                borderRadius: 1.5,
-                fontSize: {
-                  xs: "0.6rem",
-                  sm: "0.65rem",
-                },
-              }}
-            >
-              {rowCount > 0
-                ? `${rowCount.toLocaleString()} Records Found`
-                : "No Records"}
-            </Typography>
-          </Box>
+          if (field === "enquiryType") {
 
-          <Button
-            variant="contained"
-            startIcon={
-              exportLoading ? (
-                <CircularProgress size={16} color="inherit" />
-              ) : (
-                <FileDownloadIcon />
-              )
-            }
-            onClick={onDownload}
-            disabled={!rowCount || loading || exportLoading}
-            sx={{
-              width: {
-                xs: "100%",
-                sm: "auto",
-              },
-              textTransform: "none",
-              bgcolor: "#58469f",
-              fontWeight: 700,
-              borderRadius: "8px",
-              px: 3,
-              minHeight: 38,
-              boxShadow: "0 4px 12px rgba(88,70,159,0.3)",
-              "&:hover": {
-                bgcolor: "#45357a",
-              },
-            }}
-          >
-            {exportLoading ? "Exporting..." : "Export"}
-          </Button>
-        </Stack>
+            setRows(null);
+            setRowCount(0);
+            setSearchQuery(null);
 
-        {showBalances && balances && (
-          <Grid container spacing={2}>
-            {[
-              {
-                label: "Opening Balance",
-                date: balances.openingDate || balances.OpeningDate,
-                amt: balances.openingBalance,
-                icon: <AccountBalanceWalletIcon />,
-              },
-              {
-                label: "Closing Balance",
-                date: balances.closingDate || balances.ClosingDate,
-                amt: balances.closingBalance,
-                icon: <AccountBalanceWalletIcon />,
-              },
-            ].map((item, index) => {
-              const isNeg = item.amt < 0;
-              const indicator = isNeg ? "DR" : "CR";
-              const absVal = Math.abs(item.amt || 0).toFixed(4);
+            setFilters({
+              ...initialDetails,
+              enquiryType: value,
+            });
 
-              const activeColor = isNeg ? "#b84646f3" : "#427a44";
-              const activeBg = isNeg
-                ? "linear-gradient(135deg, #fff5f5 0%, #fed7d759 100%)"
-                : "linear-gradient(135deg, #f6fdf9 0%, #c6f6d556 100%)";
+            return;
+          }
 
-              return (
-                <Grid
-                  key={index}
-                  size={{
-                    xs: 12,
-                    sm: 6,
-                  }}
-                >
-                  <Box
-                    sx={{
-                      p: { xs: 1, sm: 0.8 },
-                      borderRadius: "12px",
-                      background: activeBg,
-                      border: "1px solid rgba(255,255,255,0.3)",
-                      borderBottom: `4px solid ${activeColor}`,
-                      display: "flex",
-                      flexDirection: {
-                        xs: "column",
-                        sm: "row",
-                      },
-                      alignItems: {
-                        xs: "flex-start",
-                        sm: "center",
-                      },
-                      justifyContent: "space-between",
-                      gap: 1.5,
-                      position: "relative",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <Stack
-                      direction="row"
-                      spacing={2}
-                      justifyContent="space-between"
-                      alignItems={{ xs: "stretch", sm: "center" }}
-                      sx={{ zIndex: 1 }}
-                    >
-                      <Box
-                        sx={{
-                          p: 0.6,
-                          borderRadius: "10px",
-                          bgcolor: "#fff",
-                          display: "flex",
-                          mr: 1.5,
-                          boxShadow: "0 2px 6px rgba(0,0,0,0.05)",
-                          color: activeColor,
-                        }}
-                      >
-                        {item.icon}
-                      </Box>
-                      <Box>
-                        <Typography
-                          variant="caption"
-                          color="text.secondary"
-                          fontWeight={700}
-                          sx={{
-                            textTransform: "uppercase",
-                            fontSize: "0.72rem",
-                          }}
-                        >
-                          {item.label}
-                        </Typography>
-                        <Typography
-                          variant="body2"
-                          fontWeight={800}
-                          sx={{ color: "#2c3e50", lineHeight: 1 }}
-                        >
-                          {absVal}
-                          <Box
-                            component="span"
-                            sx={{
-                              fontSize: "0.7rem",
-                              ml: 0.5,
-                              color: activeColor,
-                              fontWeight: 900,
-                            }}
-                          >
-                            {indicator}
-                          </Box>
-                        </Typography>
-                      </Box>
-                    </Stack>
+          setFilters((prev) => ({
+            ...prev,
+            [field]: value,
+          }));
+        }}
 
-                    {isNeg ? (
-                      <TrendingDownIcon
-                        sx={{
-                          position: "absolute",
-                          left: "50%",
-                          top: "50%",
-                          transform: "translate(-50%, -50%)",
-                          fontSize: "2.8rem",
-                          opacity: 0.25,
-                          color: activeColor,
-                          zIndex: 0,
-                        }}
-                      />
-                    ) : (
-                      <TrendingUpIcon
-                        sx={{
-                          position: "absolute",
-                          left: "50%",
-                          top: "50%",
-                          transform: "translate(-50%, -50%)",
-                          fontSize: "2.8rem",
-                          opacity: 0.25,
-                          color: activeColor,
-                          zIndex: 0,
-                        }}
-                      />
-                    )}
+          onReset={handleReset}
+          onFetch={handleSearch}
+          permissions={{
+            hasWholeBank,
+            hasCircle,
+          }}
+          user={user}
+          circles={circles}
+          currencies={currencies}
+          FOREIGN_CIRCLE_CODE={FOREIGN_CIRCLE_CODE}
+          CIRCLE_GROUPS={CIRCLE_GROUPS}
+          minLimit={MIN_ALLOWED_DATE}
+          maxLimit={etlDate || dayjs()}
+          fetchLoading={loading}
+          isCollationMode={isCollationMode}
+        />
 
-                    <Box sx={{ textAlign: "right", zIndex: 1 }}>
-                      <Stack
-                        direction="row"
-                        alignItems="center"
-                        spacing={0.5}
-                        justifyContent="flex-end"
-                      >
-                        <EventIcon
-                          sx={{ fontSize: "0.8rem", color: "text.secondary" }}
-                        />
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            color: "text.secondary",
-                            fontWeight: 700,
-                            fontSize: "0.72rem",
-                          }}
-                        >
-                          AS OF
-                        </Typography>
-                      </Stack>
-                      <Typography
-                        variant="caption"
-                        sx={{
-                          color: "#2c3e50",
-                          fontWeight: 700,
-                          display: "block",
-                        }}
-                      >
-                        {item.date || "N/A"}
-                      </Typography>
-                    </Box>
-                  </Box>
-                </Grid>
-              );
-            })}
-          </Grid>
+        {rows && (
+          <LedgerDataGrid
+            rows={rows}
+            loading={loading}
+            rowCount={rowCount}
+            paginationModel={paginationModel}
+            setPaginationModel={setPaginationModel}
+            sortModel={sortModel}
+            setSortModel={setSortModel}
+            filterModel={filterModel}
+            setFilterModel={setFilterModel}
+            onExcelExport={handleExcelExport}
+            exporting={exporting}
+            selectedCurrency={searchQuery?.currencies || "ALL"}
+            selectedCircle={searchQuery?.circle || "ALL"}
+            branchOptions={selectedBranchOptions}
+            circleOptions={selectedCircleOptions}
+            currencyOptions={selectedCurrencyOptions}
+            searchPerformed={!!searchQuery}
+            enquiryType={filters.enquiryType}
+          />
         )}
       </Box>
-
-      <Box sx={{ flex: 1 }}>
-        <DataGrid
-          density="compact"
-          rows={rows}
-          columns={activeColumns} // <-- Pass the dynamic columns here
-          loading={loading}
-          disableRowSelectionOnClick
-          getRowId={(row) => row.transactionId}
-          paginationMode="server"
-          sortingMode="server"
-          filterMode="server"
-          rowCount={rowCount}
-          paginationModel={paginationModel}
-          onPaginationModelChange={setPaginationModel}
-          pageSizeOptions={[25, 50, 75, 100]}
-          sortModel={sortModel}
-          onSortModelChange={setSortModel}
-          filterModel={filterModel}
-          onFilterModelChange={setFilterModel}
-          slots={{
-            noRowsOverlay: CustomNoRowsOverlay,
-          }}
-          sx={{
-            mt: -2,
-            backgroundColor: "#ffffff6b",
-            border: "none",
-            "& .MuiDataGrid-columnHeaders": {
-              backgroundColor: "#f5f5f5 !important",
-              fontWeight: 700,
-              borderBottom: "2px solid rgba(88, 70, 159, 0.2)",
-              position: "sticky",
-              top: 0,
-              zIndex: 1,
-            },
-            "& .MuiDataGrid-virtualScroller": {
-              overflowY: "auto",
-            },
-            "& .MuiDataGrid-main": {
-              border: "none",
-            },
-          }}
-        />
-      </Box>
-    </StyledDataBox>
+    </LocalizationProvider>
   );
 };
 
-export default TransactionTable;
+export default React.memo(LedgerWiseBalanceEnquiry);
