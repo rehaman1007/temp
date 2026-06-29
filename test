@@ -6,9 +6,7 @@ import {
   Stack,
   Box,
   styled,
-  Avatar,
   Grid,
-  Divider,
 } from "@mui/material";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
@@ -16,9 +14,7 @@ import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
 import EventIcon from "@mui/icons-material/Event";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 import TrendingDownIcon from "@mui/icons-material/TrendingDown";
-import LockIcon from "@mui/icons-material/Lock";
 import { StyledDataBox } from "./TransactionStyles";
-import { GridToolbar } from "@mui/x-data-grid/internals";
 import CircularProgress from "@mui/material/CircularProgress";
 
 const OverlayBox = styled(Box)(() => ({
@@ -37,6 +33,7 @@ const CustomNoRowsOverlay = () => (
     </Typography>
   </OverlayBox>
 );
+
 const TransactionTable = ({
   data,
   loading,
@@ -55,11 +52,23 @@ const TransactionTable = ({
   const rows = data?.data || [];
   const balances = data?.extraData || {};
 
+  // =========================================================
+  // FRONTEND GUARDRAIL: Check if sort is chronological
+  // =========================================================
+  // If sortModel is empty, the backend defaults to Date ASC.
+  const isChronologicalSort =
+    !sortModel ||
+    sortModel.length === 0 ||
+    sortModel[0]?.field === "date" ||
+    sortModel[0]?.field === "postDate";
+
+  // Hide the top summary cards if not sorted chronologically
   const showBalances =
     userInputs?.sourceFlags?.length === sourceOptions?.length &&
     !userInputs?.minAmount &&
     !userInputs?.maxAmount &&
-    rows.length > 0;
+    rows.length > 0 &&
+    isChronologicalSort; // <-- Appended check here
 
   const transactionColumns = [
     {
@@ -75,7 +84,6 @@ const TransactionTable = ({
       flex: 0.7,
       minWidth: 100,
       filterable: true,
-      // Displays '-' but the grid still treats the value as null for sorting/filtering
       valueFormatter: (value) => (value == null ? "-" : value),
     },
     {
@@ -84,7 +92,6 @@ const TransactionTable = ({
       flex: 0.8,
       minWidth: 150,
       filterable: true,
-      // Displays '-' but the grid still treats the value as null for sorting/filtering
       valueFormatter: (value) => (value == null ? "-" : value),
     },
     {
@@ -94,7 +101,6 @@ const TransactionTable = ({
       minWidth: 200,
       filterable: true,
     },
-
     {
       field: "debitAmount",
       headerName: "Debit",
@@ -135,6 +141,13 @@ const TransactionTable = ({
     },
   ];
 
+  // =========================================================
+  // DYNAMIC COLUMNS: Remove "Balance" column if not chronological
+  // =========================================================
+  const activeColumns = isChronologicalSort
+    ? transactionColumns
+    : transactionColumns.filter((col) => col.field !== "runningBalance");
+
   return (
     <StyledDataBox
       sx={{
@@ -145,7 +158,6 @@ const TransactionTable = ({
         overflow: "hidden",
       }}
     >
-      {/* MASTER HEADER: Unified Actions & Balances */}
       <Box
         sx={{
           p: { xs: 1, sm: 1.2 },
@@ -161,7 +173,6 @@ const TransactionTable = ({
           gap: 1,
         }}
       >
-        {/* ROW 1: TITLE, RECORDS & EXPORT */}
         <Stack
           direction={{ xs: "column", sm: "row" }}
           justifyContent="space-between"
@@ -245,7 +256,6 @@ const TransactionTable = ({
           </Button>
         </Stack>
 
-        {/* ROW 2: BALANCES */}
         {showBalances && balances && (
           <Grid container spacing={2}>
             {[
@@ -280,19 +290,6 @@ const TransactionTable = ({
                   }}
                 >
                   <Box
-                    // sx={{
-                    //   flex: 1,
-                    //   p: 0.8,
-                    //   borderRadius: "12px",
-                    //   background: activeBg,
-                    //   border: "1px solid rgba(255, 255, 255, 0.3)",
-                    //   borderBottom: `4px solid ${activeColor}`,
-                    //   display: "flex",
-                    //   alignItems: "center",
-                    //   justifyContent: "space-between",
-                    //   position: "relative",
-                    //   overflow: "hidden",
-                    // }}
                     sx={{
                       p: { xs: 1, sm: 0.8 },
                       borderRadius: "12px",
@@ -318,7 +315,6 @@ const TransactionTable = ({
                       direction="row"
                       spacing={2}
                       justifyContent="space-between"
-                      // alignItems="center"
                       alignItems={{ xs: "stretch", sm: "center" }}
                       sx={{ zIndex: 1 }}
                     >
@@ -436,12 +432,11 @@ const TransactionTable = ({
         )}
       </Box>
 
-      {/* DATA GRID SECTION */}
       <Box sx={{ flex: 1 }}>
         <DataGrid
           density="compact"
           rows={rows}
-          columns={transactionColumns}
+          columns={activeColumns} // <-- Pass the dynamic columns here
           loading={loading}
           disableRowSelectionOnClick
           getRowId={(row) => row.transactionId}
@@ -477,9 +472,6 @@ const TransactionTable = ({
             "& .MuiDataGrid-main": {
               border: "none",
             },
-            // "& .MuiDataGrid-withBorderColor":{
-            //   borderColor:"transparent",
-            // }
           }}
         />
       </Box>
@@ -488,589 +480,3 @@ const TransactionTable = ({
 };
 
 export default TransactionTable;
-
-
-import { useCallback, useEffect, useState } from "react";
-import useApi from "../../hooks/useApi";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import downloadFile from "../../utils/DownloadUtils";
-import dayjs from "dayjs";
-import ReceiptIcon from "@mui/icons-material/Receipt";
-import ManageSearchIcon from "@mui/icons-material/ManageSearch";
-import LinearProgress from "@mui/material/LinearProgress";
-
-import { Box, Paper, Typography, Stack, Button } from "@mui/material";
-
-import { StyledBox, StyledFormHeader } from "./components/TransactionStyles";
-
-import TransactionFilters from "./components/TransactionFilters";
-import TransactionTable from "./components/TransactionTable";
-import { areUserInputsValid } from "./utils/InputValidations";
-import { useSelector } from "react-redux";
-
-const TransactionEnquiryScreen = () => {
-  const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-
-  const user = useSelector((state) => state.auth.user);
-
-  const [currencies, setCurrencies] = useState([]);
-  const [data, setData] = useState(null);
-  const [sourceOptions, setSourceOptions] = useState([]);
-  const [etlDate, setEtlDate] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [exportLoading, setExportLoading] = useState(false);
-  const [searchLoading, setSearchLoading] = useState(false);
-
-  const [filtersExpanded, setFiltersExpanded] = useState(true);
-  const [glcc, setGlcc] = useState("");
-  const [glccValidated, setGlccValidated] = useState(false);
-  const [glccLoading, setGlccLoading] = useState(false);
-
-  // const [userInputs, setUserInputs] = useState({
-  //   branch:
-  //     user?.isCircle === false
-  //       ? `${user.branch}-${user.branchName}`
-  //       : "",
-  const [userInputs, setUserInputs] = useState({
-    branch:
-      user?.isCircle === false
-        ? `${String(user?.branch).padStart(5, "0")}-${user.branchName}`
-        : "",
-    currency: null,
-    cgl: "",
-    fromDate: null,
-    toDate: null,
-    minAmount: "",
-    maxAmount: "",
-    sourceFlags: [],
-  });
-
-  const fetchCurrencies = useCallback(async () => {
-    const res = await callApi(
-      "/CM/common-master/currency-code-name-only",
-      null,
-      "GET",
-    );
-
-    const formattedCurrencies =
-      res?.data?.map((c) => `${c.currencyCode} (${c.currencyName})`) || [];
-
-    const sortedCurrencies = formattedCurrencies.sort((a, b) => {
-      if (a.startsWith("INR")) return -1;
-      if (b.startsWith("INR")) return 1;
-      return a.localeCompare(b);
-    });
-
-    setCurrencies(sortedCurrencies);
-  }, [callApi]);
-
-  const [rowCount, setRowCount] = useState(0);
-
-  const [paginationModel, setPaginationModel] = useState({
-    page: 0,
-    pageSize: 25,
-  });
-
-  const [sortModel, setSortModel] = useState([]);
-
-  const [filterModel, setFilterModel] = useState({
-    items: [],
-  });
-  const [debouncedFilterModel, setDebouncedFilterModel] = useState({
-    items: [],
-  });
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedFilterModel(filterModel);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [filterModel]);
-
-  const fetchTransactions = useCallback(async () => {
-    try {
-      if (!areUserInputsValid(userInputs)) return;
-
-      setLoading(true);
-
-      const payload = {
-        branch: userInputs?.branch?.split(" (")[0],
-        currency: userInputs?.currency?.split(" (")[0],
-        cgl: userInputs?.cgl?.split(" - ")[0],
-        fromDate: dayjs(userInputs?.fromDate).format("DD/MM/YYYY"),
-        toDate: dayjs(userInputs?.toDate).format("DD/MM/YYYY"),
-        minAmount: userInputs.minAmount ? Number(userInputs.minAmount) : null,
-        maxAmount: userInputs.maxAmount ? Number(userInputs.maxAmount) : null,
-        sourceFlags: (userInputs.sourceFlags || []).map((item) => item.flagId),
-        page: paginationModel.page,
-        size: paginationModel.pageSize,
-
-        sortField: sortModel?.[0]?.field || null,
-
-        sortOrder: sortModel?.[0]?.sort || null,
-
-        gridFilters: debouncedFilterModel.items
-          .filter(
-            (item) =>
-              item.field &&
-              item.operator &&
-              item.value !== undefined &&
-              item.value !== null &&
-              item.value !== "",
-          )
-          .map((item) => ({
-            field: item.field,
-            operator: item.operator,
-            value: item.value,
-          })),
-      };
-
-      setSearchLoading(true);
-
-      const res = await callApi(
-        "/ES/transaction-con/transactions",
-        payload,
-        "POST",
-      );
-
-      if (res?.data?.length > 0) {
-        setData(res);
-        setFiltersExpanded(false);
-        setRowCount(res.totalElements || 0);
-      } else {
-        setData({
-          data: [],
-          extraData: null,
-        });
-        setRowCount(0);
-      }
-    } catch {
-      snackbar("Failed to fetch transactions", "error");
-    } finally {
-      setLoading(false);
-      setSearchLoading(false);
-    }
-  }, [
-    userInputs,
-    callApi,
-    paginationModel,
-    sortModel,
-    debouncedFilterModel,
-    snackbar,
-  ]);
-
-  const validateGlcc = async (value) => {
-    try {
-      setGlccLoading(true);
-
-      const res = await callApi(
-        "/CM/common-master/validate-glcc",
-        { glcc: value },
-        "POST",
-      );
-
-      const data = res?.data;
-
-      if (data?.valid) {
-        setUserInputs((prev) => ({
-          ...prev,
-          branch: `${data.branchCode}-${data.branchName.trim()}`,
-          currency: `${data.currencyCode} (${data.currencyName.trim()})`,
-          cgl: `${data.cglNumber} - ${data.cglDescription}`,
-        }));
-
-        setGlccValidated(true);
-      } else {
-        setGlccValidated(false);
-
-        setUserInputs((prev) => ({
-          ...prev,
-          branch: "",
-          currency: null,
-          cgl: "",
-        }));
-
-        snackbar(data?.errors?.join(", ") || "Invalid GLCC", "error");
-      }
-    } catch (e) {
-      setGlccValidated(false);
-
-      setUserInputs((prev) => ({
-        ...prev,
-        branch: "",
-        currency: null,
-        cgl: "",
-      }));
-
-      snackbar(
-        e?.response?.data?.data?.errors?.join(", ") || "Invalid GLCC",
-        "error",
-      );
-    } finally {
-      setGlccLoading(false);
-    }
-  };
-
-  const handleDownload = async () => {
-    try {
-      setExportLoading(true);
-      const payload = {
-        branch: userInputs?.branch?.split("-")[0].trim(),
-        currency: userInputs?.currency?.split(" (")[0],
-        cgl: userInputs?.cgl?.split(" -")[0],
-        fromDate: dayjs(userInputs?.fromDate).format("DD/MM/YYYY"),
-        toDate: dayjs(userInputs?.toDate).format("DD/MM/YYYY"),
-        minAmount: userInputs.minAmount ? Number(userInputs.minAmount) : null,
-        maxAmount: userInputs.maxAmount ? Number(userInputs.maxAmount) : null,
-        sourceFlags: (userInputs.sourceFlags || []).map((item) => item.flagId),
-      };
-
-      const res = await callApi(
-        "/ES/transaction-con/transactions-download",
-        payload,
-        "POST",
-        "arraybuffer",
-      );
-
-      if (res?.byteLength) {
-        downloadFile(res, "excel", "transactions");
-      }
-    } finally {
-      setExportLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    // if (rowCount > 0) fetchTransactions();
-    if (data) {
-      fetchTransactions();
-    }
-  }, [
-    paginationModel.page,
-    paginationModel.pageSize,
-    sortModel,
-    debouncedFilterModel,
-    // fetchTransactions,
-    // rowCount,
-  ]);
-
-  const resetState = () => {
-    setData(null);
-    setRowCount(0);
-    setLoading(false);
-
-    // NEW
-    setFiltersExpanded(true);
-    setGlcc("");
-    setGlccValidated(false);
-
-    setUserInputs({
-      branch: "",
-      currency: null,
-      cgl: "",
-      fromDate: null,
-      toDate: null,
-      minAmount: "",
-      maxAmount: "",
-      sourceFlags: [
-        {
-          flagId: "ALL",
-          flagName: "Select All",
-        },
-      ],
-    });
-
-    setPaginationModel({
-      page: 0,
-      pageSize: 10,
-    });
-  };
-
-  // Date Requirement
-  useEffect(() => {
-    const fetchSystemDate = async () => {
-      try {
-        const dateRes = await callApi("/PS/file/fincore-date", {}, "GET");
-
-        const etlRaw = dateRes?.data?.userDate;
-        const etl = etlRaw ? dayjs(etlRaw.split("T")[0]) : dayjs();
-        // const startDate = dayjs("2026-03-31");
-
-        setEtlDate(etl);
-        // setUserInputs((prev) => ({
-        //   ...prev,
-        //   fromDate: startDate,
-        //   toDate: etl,
-        // }));
-      } catch (e) {
-        console.error("System Date Fetch Error:", e);
-      }
-    };
-    fetchSystemDate();
-  }, [callApi]);
-
-  useEffect(() => {
-    const fetchFlags = async () => {
-      try {
-        const res = await callApi("/CM/common-master/source-flag", null, "GET");
-
-        const flags = res?.data || [];
-
-        setSourceOptions(flags);
-
-        if (flags.length > 0) {
-          setUserInputs((prev) => ({
-            ...prev,
-            sourceFlags: flags,
-          }));
-        }
-      } catch (e) {
-        console.error("Flags error:", e);
-      }
-    };
-
-    fetchFlags();
-  }, [callApi]);
-
-  return (
-    <>
-      <Box sx={{ p: 1 }}>
-        <Paper
-          elevation={0}
-          sx={{
-            p: {
-              xs: 1.5,
-              sm: 2,
-              md: 2.5,
-            },
-            mt: {
-              xs: -1,
-              sm: -2,
-            },
-            mb: 3,
-            bgcolor: "rgba(255, 255, 255, 0.4)",
-            backdropFilter: "blur(4px)",
-            border: "1px solid",
-            borderColor: "divider",
-            borderRadius: {
-              xs: 2,
-              sm: 3,
-            },
-            overflow: "hidden",
-          }}
-        >
-          <Box
-            sx={{
-              mb: 3,
-              p: 1.2,
-              borderRadius: 2,
-              bgcolor: "background.paper",
-              boxShadow: 2,
-              borderLeft: "6px solid",
-              borderColor: "primary.main",
-            }}
-          >
-            <Stack
-              direction={{ xs: "column", sm: "row" }}
-              alignItems={{ xs: "flex-start", sm: "center" }}
-              justifyContent="space-between"
-              spacing={2}
-            >
-              {/* LEFT */}
-              <Stack
-                direction="row"
-                spacing={{ xs: 1.5, sm: 2 }}
-                alignItems="center"
-                sx={{ width: "100%" }}
-              >
-                <ReceiptIcon color="primary" fontSize="medium" />
-
-                <Box sx={{ minWidth: 0 }}>
-                  <Typography
-                    variant="subtitle1"
-                    fontWeight={700}
-                    lineHeight={1.2}
-                    sx={{
-                      fontSize: {
-                        xs: "0.95rem",
-                        sm: "1rem",
-                        md: "1.05rem",
-                      },
-                    }}
-                  >
-                    Transaction Search & Records Enquiry
-                  </Typography>
-
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ mt: 0.2 }}
-                  >
-                    Enter the required details below to retrieve and view
-                    historical transaction records.
-                  </Typography>
-                </Box>
-              </Stack>
-
-              {/* BUTTON */}
-              {data && (
-                <Button
-                  startIcon={<ManageSearchIcon />}
-                  variant="contained"
-                  size="small"
-                  onClick={() => setFiltersExpanded((prev) => !prev)}
-                  sx={{
-                    textTransform: "none",
-                    borderRadius: "8px",
-                    fontWeight: 600,
-                    minWidth: {
-                      xs: "100%",
-                      sm: "140px",
-                    },
-                    width: {
-                      xs: "100%",
-                      sm: "auto",
-                    },
-                    height: {
-                      xs: 38,
-                      sm: 32,
-                    },
-                    px: 1.5,
-                    fontSize: {
-                      xs: "0.8rem",
-                      sm: "0.82rem",
-                    },
-                  }}
-                >
-                  {filtersExpanded ? "Hide Filters" : "Edit Search"}
-                </Button>
-              )}
-            </Stack>
-          </Box>
-
-          {/* SUMMARY CHIPS */}
-          {data && !filtersExpanded && (
-            <Stack
-              direction="row"
-              spacing={1}
-              sx={{
-                mt: 2,
-                mb: 1,
-                flexWrap: "wrap",
-                rowGap: 1,
-              }}
-            >
-              {[
-                `Branch: ${userInputs?.branch}`,
-                `Currency: ${userInputs?.currency}`,
-                `CGL: ${userInputs?.cgl}`,
-                `Date: ${dayjs(userInputs?.fromDate).format(
-                  "DD MMM YYYY",
-                )} - ${dayjs(userInputs?.toDate).format("DD MMM YYYY")}`,
-                ...(userInputs?.minAmount || userInputs?.maxAmount
-                  ? [
-                      `Amount: ${userInputs?.minAmount || 0} - ${
-                        userInputs?.maxAmount || "∞"
-                      }`,
-                    ]
-                  : []),
-              ].map((item, index) => (
-                <Box
-                  key={index}
-                  sx={{
-                    px: { xs: 1.2, sm: 1.5 },
-                    py: 0.45,
-                    borderRadius: "20px",
-                    bgcolor: "rgba(88, 70, 159, 0.08)",
-                    border: "1px solid rgba(88, 70, 159, 0.36)",
-                    maxWidth: "100%",
-                  }}
-                >
-                  <Typography
-                    sx={{
-                      fontSize: {
-                        xs: "0.68rem",
-                        sm: "0.72rem",
-                      },
-                      fontWeight: 500,
-                      color: "#58469f",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    {item}
-                  </Typography>
-                </Box>
-              ))}
-            </Stack>
-          )}
-
-          {/* FILTERS */}
-          {filtersExpanded && (
-            <>
-              {searchLoading && !data?.data?.length && (
-                <LinearProgress
-                  sx={{
-                    height: 3,
-                    borderRadius: 999,
-                    mb: 2,
-                    bgcolor: "rgba(88,70,159,0.08)",
-                    "& .MuiLinearProgress-bar": {
-                      bgcolor: "#58469f",
-                    },
-                  }}
-                />
-              )}
-              <TransactionFilters
-                userInputs={userInputs}
-                setUserInputs={setUserInputs}
-                currencies={currencies}
-                fetchCurrencies={fetchCurrencies}
-                glcc={glcc}
-                setGlcc={setGlcc}
-                glccValidated={glccValidated}
-                setGlccValidated={setGlccValidated}
-                validateGlcc={validateGlcc}
-                glccLoading={glccLoading}
-                onSubmit={() => {
-                  // setFiltersExpanded(false);
-                  if (paginationModel.page === 0) {
-                    fetchTransactions();
-                  } else {
-                    setPaginationModel((prev) => ({
-                      ...prev,
-                      page: 0,
-                    }));
-                  }
-                }}
-                resetState={resetState}
-                user={user}
-                sourceOptions={sourceOptions}
-                etlDate={etlDate}
-              />
-            </>
-          )}
-        </Paper>
-
-        {data && (
-          <TransactionTable
-            data={data}
-            loading={loading}
-            userInputs={userInputs}
-            sourceOptions={sourceOptions}
-            onDownload={handleDownload}
-            rowCount={rowCount}
-            paginationModel={paginationModel}
-            setPaginationModel={setPaginationModel}
-            sortModel={sortModel}
-            setSortModel={setSortModel}
-            filterModel={filterModel}
-            setFilterModel={setFilterModel}
-            exportLoading={exportLoading}
-          />
-        )}
-      </Box>
-    </>
-  );
-};
-
-export default TransactionEnquiryScreen;
