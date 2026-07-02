@@ -31,11 +31,15 @@ import {
   StyledCloseButton,
   StyledEmptyCell,
 } from "./CurrencyRateChangeStyles";
-import { DataGrid, GridActionsCellItem, GridToolbarContainer } from "@mui/x-data-grid";
+import {
+  DataGrid,
+  GridActionsCellItem,
+  GridToolbarContainer,
+} from "@mui/x-data-grid";
 import EditIcon from "@mui/icons-material/Edit";
 import CloseIcon from "@mui/icons-material/Close";
 import HistoryIcon from "@mui/icons-material/History";
-import UpdateIcon from '@mui/icons-material/Update';
+import UpdateIcon from "@mui/icons-material/Update";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
@@ -52,7 +56,7 @@ import {
   DialogContent,
   DialogContentText,
   DialogActions,
-  Button
+  Button,
 } from "@mui/material";
 import { currencyFormatterWith6Decimals } from "../../utils/NumberFormat";
 
@@ -91,7 +95,7 @@ export default function CurrencyRateChangeTab() {
   const showSnackBar = useCustomSnackbar();
   const [rows, setRows] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
-  
+
   // Single Edit State
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [formData, setFormData] = useState(initialFormState);
@@ -115,7 +119,7 @@ export default function CurrencyRateChangeTab() {
     { value: "all", label: "All Months" },
   ]);
   const [page, setPage] = useState(0);
-  
+
   const [etlDate, setEtlDate] = useState("");
 
   const handleChangePage = (event, newPage) => {
@@ -146,10 +150,10 @@ export default function CurrencyRateChangeTab() {
           return { ...row, id: row.currencyCode, updatedAt: formattedDate };
         });
         setRows(formattedData);
-        
+
         // Mocking ETL Date for now, replace with your actual API call if needed
         const etlResponse = await callApi("/PS/file/fincore-date", null, "GET");
-        setEtlDate(etlResponse?.data?.etlDate || "2026-07-31"); 
+        setEtlDate(etlResponse?.data?.etlDate || "2026-07-31");
       } else {
         showSnackBar("Received invalid data format.", "error");
         setRows([]);
@@ -167,9 +171,113 @@ export default function CurrencyRateChangeTab() {
     fetchData();
   }, [fetchData]);
 
-  // ... [Keep your existing fetchHistoryData, useEffects for history, and filteredHistoryData exactly the same] ...
-  const fetchHistoryData = useCallback(async (currencyCode) => { /* existing code */ }, [callApi, showSnackBar]);
-  // ...
+  const fetchHistoryData = useCallback(
+    async (currencyCode) => {
+      setIsHistoryLoading(true);
+      try {
+        const response = await callApi(
+          `/CM/common-master/currency-rate-change`,
+          null,
+          "GET",
+        );
+
+        if (response && response.data && Array.isArray(response.data)) {
+          const currencySpecificData = response.data.filter(
+            (item) => item.currencyCode === currencyCode,
+          );
+
+          if (currencySpecificData.length === 0) {
+            setHistoryData([]);
+            showSnackBar(
+              `No history data found for currency: ${currencyCode}.`,
+              "info",
+            );
+          } else {
+            const processedData = currencySpecificData.map((item) => {
+              const dateObject = new Date(item.rateChangeDate);
+              let formattedDate = "N/A";
+              if (!isNaN(dateObject.getTime())) {
+                const day = String(dateObject.getDate()).padStart(2, "0");
+                const month = String(dateObject.getMonth() + 1).padStart(
+                  2,
+                  "0",
+                );
+                const year = dateObject.getFullYear();
+                formattedDate = `${day}-${month}-${year}`;
+              }
+              return {
+                ...item,
+                rateChangeDate: formattedDate,
+                dateObject: dateObject,
+              };
+            });
+
+            setHistoryData(processedData);
+
+            const years = [
+              ...new Set(
+                processedData.map((item) => getFinancialYear(item.dateObject)),
+              ),
+            ];
+            years.sort().reverse();
+            setFinancialYearOptions(years);
+            if (years.length > 0) {
+              setSelectedYear(years[0]);
+            }
+          }
+        } else {
+          setHistoryData([]);
+          showSnackBar(
+            "Received invalid history data format from server.",
+            "warning",
+          );
+        }
+      } catch (error) {
+        console.error("Error fetching currency history:", error);
+        showSnackBar("Failed to fetch currency rate history.", "error");
+        setHistoryData([]);
+      } finally {
+        setIsHistoryLoading(false);
+      }
+    },
+    [callApi, showSnackBar],
+  );
+
+  useEffect(() => {
+    if (!selectedYear || historyData.length === 0) {
+      setMonthOptions([{ value: "all", label: "All Months" }]);
+      return;
+    }
+    const availableMonths = new Set();
+    historyData.forEach((item) => {
+      if (getFinancialYear(item.dateObject) === selectedYear) {
+        availableMonths.add(item.dateObject.getMonth());
+      }
+    });
+    const sortedMonths = Array.from(availableMonths).sort((a, b) => a - b);
+    const options = [
+      { value: "all", label: "All Months" },
+      ...sortedMonths.map((monthIndex) => ({
+        value: monthIndex,
+        label: new Date(0, monthIndex).toLocaleString("default", {
+          month: "long",
+        }),
+      })),
+    ];
+    setMonthOptions(options);
+    setSelectedMonth("all");
+  }, [selectedYear, historyData]);
+
+  const filteredHistoryData = useMemo(() => {
+    if (!selectedYear) return [];
+    return historyData.filter((item) => {
+      const itemFinancialYear = getFinancialYear(item.dateObject);
+      const yearMatch = itemFinancialYear === selectedYear;
+      const monthMatch =
+        selectedMonth === "all" || item.dateObject.getMonth() === selectedMonth;
+      return yearMatch && monthMatch;
+    });
+  }, [historyData, selectedYear, selectedMonth]);
 
   const handleCloseDialog = () => {
     setIsDialogOpen(false);
@@ -212,8 +320,10 @@ export default function CurrencyRateChangeTab() {
   const validate = () => {
     let tempErrors = {};
     const rate = formData.currencyRate;
-    if (!String(rate).trim()) tempErrors.currencyRate = "Currency Rate is required.";
-    else if (parseFloat(rate) === 0) tempErrors.currencyRate = "Currency Rate cannot be taken as zero.";
+    if (!String(rate).trim())
+      tempErrors.currencyRate = "Currency Rate is required.";
+    else if (parseFloat(rate) === 0)
+      tempErrors.currencyRate = "Currency Rate cannot be taken as zero.";
     setErrors(tempErrors);
     return Object.keys(tempErrors).length === 0;
   };
@@ -222,7 +332,10 @@ export default function CurrencyRateChangeTab() {
     const { name, value } = e.target;
     if (name === "currencyRate") {
       if (value !== "" && !/^[0-9.]*$/.test(value)) {
-        setErrors((prev) => ({ ...prev, currencyRate: "Special Characters and Alphabeticals are not allowed." }));
+        setErrors((prev) => ({
+          ...prev,
+          currencyRate: "Special Characters and Alphabeticals are not allowed.",
+        }));
         return;
       }
       if (!/^\d{0,6}(\.\d{0,6})?$/.test(value)) return;
@@ -248,7 +361,7 @@ export default function CurrencyRateChangeTab() {
       const data = await callApi("/CR/create-request", apiPayload, "POST");
       if (data) showSnackBar("Request submitted successfully.", "success");
       handleCloseDialog();
-      fetchData(); 
+      fetchData();
     } catch (err) {
       showSnackBar(err.message, "error");
     }
@@ -263,23 +376,33 @@ export default function CurrencyRateChangeTab() {
     const bulkPayload = {
       requestType: "BULK_CURRENCY_RATE_CHANGE",
       changeType: "UPDATE",
-      requests: rows.map(row => ({
+      requests: rows.map((row) => ({
         currencyCode: row.currencyCode,
         currencyRate: parseFloat(row.currencyRate).toFixed(6) || 0,
         existingCurrencyRate: parseFloat(row.currencyRate).toFixed(6) || 0,
-      }))
+      })),
     };
 
     try {
       // Trigger your new bulk API endpoint
-      const response = await callApi("/CR/bulk-create-request", bulkPayload, "POST");
+      const response = await callApi(
+        "/CR/bulk-create-request",
+        bulkPayload,
+        "POST",
+      );
       if (response) {
-        showSnackBar("All unchanged currency rates have been submitted for the new month.", "success");
+        showSnackBar(
+          "All unchanged currency rates have been submitted for the new month.",
+          "success",
+        );
         fetchData();
       }
     } catch (err) {
       console.error(err);
-      showSnackBar("Failed to process bulk updates. Please try again.", "error");
+      showSnackBar(
+        "Failed to process bulk updates. Please try again.",
+        "error",
+      );
     } finally {
       setIsBulkSubmitting(false);
     }
@@ -288,22 +411,66 @@ export default function CurrencyRateChangeTab() {
   const columns = useMemo(() => {
     // ... [Keep your existing column definitions and etlDate logic exactly the same] ...
     return [
-      { field: "currencyCode", headerName: "Currency Code", flex: 1, minWidth: 150 },
       {
-        field: "currencyRate", headerName: "Currency Rate", flex: 1, minWidth: 150, align: "right",
-        renderCell: (params) => currencyFormatterWith6Decimals("INR").format(params.value),
+        field: "currencyCode",
+        headerName: "Currency Code",
+        flex: 1,
+        minWidth: 150,
       },
-      { field: "updatedAt", headerName: "Last Updated", flex: 1, minWidth: 250 },
       {
-        field: "actions", type: "actions", headerName: "Actions", flex: 0.5, minWidth: 150,
+        field: "currencyRate",
+        headerName: "Currency Rate",
+        flex: 1,
+        minWidth: 150,
+        align: "right",
+        renderCell: (params) =>
+          currencyFormatterWith6Decimals("INR").format(params.value),
+      },
+      {
+        field: "updatedAt",
+        headerName: "Last Updated",
+        flex: 1,
+        minWidth: 250,
+      },
+      {
+        field: "actions",
+        type: "actions",
+        headerName: "Actions",
+        flex: 0.5,
+        minWidth: 150,
         getActions: ({ id }) => [
-          <GridActionsCellItem icon={<EditIcon />} label="Edit Rate" onClick={handleEditClick(id)} key="edit" sx={{ ml: 6 }} />,
-          <GridActionsCellItem icon={<HistoryIcon />} label="View History" onClick={handleHistoryClick(id)} color="inherit" key="history" />,
+          <GridActionsCellItem
+            icon={<EditIcon />}
+            label="Edit Rate"
+            onClick={handleEditClick(id)}
+            key="edit"
+            sx={{ ml: 6 }}
+          />,
+          <GridActionsCellItem
+            icon={<HistoryIcon />}
+            label="View History"
+            onClick={handleHistoryClick(id)}
+            color="inherit"
+            key="history"
+          />,
         ],
       },
     ];
   }, [handleEditClick, handleHistoryClick, etlDate]);
 
+  const historyColumns = [
+    {
+      field: "rateChangeDate",
+      headerName: "Date of Change",
+      flex: 1.5,
+    },
+    {
+      field: "currencyRate",
+      headerName: "Changed Rate",
+      type: "number",
+      flex: 1,
+    },
+  ];
 
   // Custom Toolbar containing the bulk update button
   const CustomToolbar = () => (
@@ -313,7 +480,7 @@ export default function CurrencyRateChangeTab() {
         color="primary"
         startIcon={<UpdateIcon />}
         onClick={() => setIsBulkConfirmDialogOpen(true)}
-        disabled={isBulkSubmitting || rows.length === 0} 
+        disabled={isBulkSubmitting || rows.length === 0}
       >
         Carry Forward Unchanged Rates
       </StyledButton>
@@ -346,24 +513,33 @@ export default function CurrencyRateChangeTab() {
         aria-describedby="bulk-update-dialog-description"
         disableEscapeKeyDown // Forces explicit interaction
       >
-        <DialogTitle id="bulk-update-dialog-title" sx={{ color: 'warning.main', fontWeight: 'bold' }}>
+        <DialogTitle
+          id="bulk-update-dialog-title"
+          sx={{ color: "warning.main", fontWeight: "bold" }}
+        >
           Warning: Confirm Bulk Rate Update
         </DialogTitle>
         <DialogContent>
           <DialogContentText id="bulk-update-dialog-description">
-            You are about to submit the current rates for <strong>all {rows.length} currencies</strong> to satisfy the monthly pipeline requirements. 
-            <br /><br />
+            You are about to submit the current rates for{" "}
+            <strong>all {rows.length} currencies</strong> to satisfy the monthly
+            pipeline requirements.
+            <br />
+            <br />
             Are you sure you want to continue? This action cannot be undone.
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ p: 2, pt: 0 }}>
-          <Button onClick={() => setIsBulkConfirmDialogOpen(false)} color="inherit">
+          <Button
+            onClick={() => setIsBulkConfirmDialogOpen(false)}
+            color="inherit"
+          >
             Cancel
           </Button>
-          <Button 
-            onClick={handleBulkSubmit} 
-            color="warning" 
-            variant="contained" 
+          <Button
+            onClick={handleBulkSubmit}
+            color="warning"
+            variant="contained"
             autoFocus
           >
             Continue
@@ -373,14 +549,190 @@ export default function CurrencyRateChangeTab() {
 
       {/* --- SINGLE EDIT DIALOG --- */}
       <StyledDialog open={isDialogOpen} fullWidth maxWidth="sm">
-        {/* ... Keep your existing edit dialog JSX ... */}
+        <StyledDialogTitle>
+          <StyledTypography>Edit Currency Rate</StyledTypography>
+          <StyledCloseButton onClick={handleCloseDialog}>
+            <CloseIcon />
+          </StyledCloseButton>
+        </StyledDialogTitle>
+        <Divider />
+        <StyledDialogContent>
+          <StyledTextField
+            autoFocus
+            name="currencyCode"
+            label="Currency Code"
+            type="text"
+            fullWidth
+            variant="outlined"
+            value={formData.currencyCode}
+            disabled
+          />
+
+          <StyledTextField
+            name="currencyRate"
+            label="New Currency Rate"
+            type="text"
+            fullWidth
+            variant="outlined"
+            value={formData.currencyRate}
+            onChange={handleInputChange}
+            error={!!errors.currencyRate}
+            helperText={
+              errors.currencyRate ||
+              "Max 6 digits before decimal, up to 6 after (e.g., 123456.123456)."
+            }
+          />
+        </StyledDialogContent>
+        <StyledDialogActions>
+          <StyledButton onClick={handleCloseDialog}>Cancel</StyledButton>
+          <StyledButton
+            onClick={handleSubmit}
+            // disabled={isSameRate} // commented for updating same rate for that month
+            variant="contained"
+          >
+            Submit Request
+          </StyledButton>
+        </StyledDialogActions>
       </StyledDialog>
 
       {/* --- HISTORY DIALOG --- */}
-      <StyledDialog open={isHistoryDialogOpen} onClose={handleCloseHistoryDialog} fullWidth maxWidth="md">
-         {/* ... Keep your existing history dialog JSX ... */}
-      </StyledDialog>
+      <StyledDialog
+        open={isHistoryDialogOpen}
+        onClose={handleCloseHistoryDialog}
+        fullWidth
+        maxWidth="md"
+      >
+        <StyledDialogTitle>
+          <StyledTypography>
+            Rate Change History for {currentCurrency}
+          </StyledTypography>
+          <StyledCloseButton onClick={handleCloseHistoryDialog}>
+            <CloseIcon />
+          </StyledCloseButton>
+        </StyledDialogTitle>
+        <Divider />
 
+        <StyledBox>
+          <StyledDialogTitleBox>
+            <StyledDialogContent>
+              {isHistoryLoading ? (
+                <StyledCircularProgressBox>
+                  <StyledCircularProgress />
+                </StyledCircularProgressBox>
+              ) : financialYearOptions.length ? (
+                <>
+                  <StyledGridContainer container spacing={2}>
+                    {/* Financial Year */}
+                    <StyledGridItem item xs={12} sm={6}>
+                      <StyledFormControl fullWidth>
+                        <StyledInputLabel id="financial-year-select-label">
+                          Financial Year
+                        </StyledInputLabel>
+                        <StyledSelect
+                          labelId="financial-year-select-label"
+                          value={selectedYear}
+                          label="Financial Year"
+                          onChange={(e) => setSelectedYear(e.target.value)}
+                          disabled={!financialYearOptions.length}
+                        >
+                          {financialYearOptions.map((year) => (
+                            <StyledMenuItem key={year} value={year}>
+                              {year}
+                            </StyledMenuItem>
+                          ))}
+                        </StyledSelect>
+                      </StyledFormControl>
+                    </StyledGridItem>
+
+                    {/* Month */}
+                    <StyledGridItem item xs={12} sm={6}>
+                      <StyledFormControl fullWidth>
+                        <StyledInputLabel id="month-select-label">
+                          Month
+                        </StyledInputLabel>
+                        <StyledSelect
+                          labelId="month-select-label"
+                          value={selectedMonth}
+                          label="Month"
+                          onChange={(e) => setSelectedMonth(e.target.value)}
+                        >
+                          {monthOptions.map((option) => (
+                            <StyledMenuItem
+                              key={option.value}
+                              value={option.value}
+                            >
+                              {option.label}
+                            </StyledMenuItem>
+                          ))}
+                        </StyledSelect>
+                      </StyledFormControl>
+                    </StyledGridItem>
+                  </StyledGridContainer>
+
+                  {/* TABLE START */}
+                  <StyledTableContainer>
+                    <StyledTable>
+                      <StyledTableHead>
+                        <StyledTableRow>
+                          {historyColumns.map((col) => (
+                            <StyledTableHeaderCell key={col.field}>
+                              {col.headerName}
+                            </StyledTableHeaderCell>
+                          ))}
+                        </StyledTableRow>
+                      </StyledTableHead>
+
+                      <StyledTableBody>
+                        {filteredHistoryData.length === 0 ? (
+                          <StyledTableRow>
+                            <StyledEmptyCell colSpan={historyColumns.length}>
+                              No history found for the selected period
+                            </StyledEmptyCell>
+                          </StyledTableRow>
+                        ) : (
+                          filteredHistoryData
+                            .slice(page * 5, page * 5 + 5)
+                            .map((row) => (
+                              <StyledTableRow key={row.id}>
+                                {historyColumns.map((col) => (
+                                  <StyledTableCell key={col.field}>
+                                    {col.field == "currencyRate"
+                                      ? currencyFormatterWith6Decimals(
+                                          "INR",
+                                        ).format(row[col.field])
+                                      : row[col.field]}
+                                  </StyledTableCell>
+                                ))}
+                              </StyledTableRow>
+                            ))
+                        )}
+                      </StyledTableBody>
+                    </StyledTable>
+                  </StyledTableContainer>
+                  {/* TABLE END */}
+                </>
+              ) : (
+                <StyledTypographyBox>
+                  No data found for this currency
+                </StyledTypographyBox>
+              )}
+              {filteredHistoryData.length > 0 && (
+                <StyledTablePagination
+                  component="div"
+                  count={filteredHistoryData.length}
+                  page={page}
+                  onPageChange={handleChangePage}
+                  rowsPerPage={5}
+                  rowsPerPageOptions={[]}
+                  labelDisplayedRows={({ page }) => {
+                    return `PAGE: ${page + 1}`;
+                  }}
+                />
+              )}
+            </StyledDialogContent>
+          </StyledDialogTitleBox>
+        </StyledBox>
+      </StyledDialog>
     </StyledContainerBox>
   );
 }
