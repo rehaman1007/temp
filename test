@@ -1,66 +1,68 @@
-I have a query where it returns Change satus of that curencies, I have a screen where curencies rate should be updated every month,
-I have three tables to track this 
-1. CURRENCY_MASTER (base table for all currencies with columns as CURRENCY_CODE, CURRENCY_NAME, FLAG, CURRENCY_RATE, RATE_DATE, CREATED_AT, UPDATED_AT)
-2. CURRENCY_RATE_CHANGE (Every time if a currency got approved it will add a row with that rate track of history when it is updated and what it is updated)
-3. COMMON_REQ (Keeps track of every individual currency when raised through screen approved, rejected , pending of request)
-For Currencies which we change through screen will go through maker/checker action 
-User can have many request on same currencies need to check only for Pending
-User can have many inserts on same currency  as i first updated USD as 85 and it is approved later I agin change that to 90 then in USD history we will get all rates
- if some currencies are not changed then we have no track so I want status of each and every currency wheather is modified this month or not yet modified or else modified and it at pending for approval state check my query to give result as required
+WITH approved AS
+(
+    SELECT DISTINCT currency_code
+    FROM currency_rate_change
+    WHERE rate_change_date BETWEEN :fromDate AND :toDate
+),
+pending AS
+(
+    SELECT DISTINCT target_id
+    FROM common_req
+    WHERE req_type='CURRENCY_RATE_CHANGE'
+      AND req_status='P'
+      AND req_date BETWEEN :fromDate AND :toDate
+)
 
---DEFINE TEST_DATE = TO_DATE('31-03-2026','DD-MM-YYYY');
-DEFINE TEST_DATE = SYSDATE;
-with base as (SELECT
-    *
-FROM
-    currency_master cm
-    LEFT JOIN (
-        SELECT
-            currency_code as crc_code,rate_change_date
-        FROM
-            currency_rate_change
-        WHERE
-            rate_change_date BETWEEN &test_date - 7 AND &test_date + 7
-    )               crc ON cm.currency_code = crc.crc_code
-    ) ,    
-pending as (SELECT REQ_DATE,
-        TARGET_ID,
-        REQ_STATUS,
-        REQ_ID FROM COMMON_REQ WHERE REQ_TYPE = 'CURRENCY_RATE_CHANGE' AND REQ_DATE BETWEEN &TEST_DATE - 7 AND &TEST_DATE + 7 and REQ_STATUS='P'),
-final_frame as(select * from base left join pending on base.currency_code = pending.target_id)
-select CURRENCY_CODE,CURRENCY_NAME,CURRENCY_RATE, UPDATED_AT ,
-CASE
-    WHEN RATE_CHANGE_DATE is NULL and REQ_STATUS is NULL THEN 'U'
-    WHEN REQ_STATUS ='P' THEN 'P'
-    ELSE 'A'
-END as CHANGE_STATUS    
-from final_frame
-;
-
-
-==========================================================
+SELECT
+    cm.currency_code,
+    cm.currency_name,
+    cm.currency_rate,
+    cm.updated_at,
+    CASE
+        WHEN p.target_id IS NOT NULL THEN 'P'
+        WHEN a.currency_code IS NOT NULL THEN 'A'
+        ELSE 'U'
+    END change_status
+FROM currency_master cm
+LEFT JOIN approved a
+       ON a.currency_code=cm.currency_code
+LEFT JOIN pending p
+       ON p.target_id=cm.currency_code
+ORDER BY cm.currency_code;
 
 
 
+
+WITH pending_reqs AS (
+    -- 1. Identify currencies with AT LEAST ONE pending request this month
+    SELECT DISTINCT TARGET_ID
+    FROM COMMON_REQ
+    WHERE REQ_TYPE = 'CURRENCY_RATE_CHANGE'
+      AND REQ_STATUS = 'P'
+      -- Using TRUNC to check the current month. 
+      -- (Change back to your +/- 7 days logic if that specific window is strictly required)
+      AND REQ_DATE >= TRUNC(SYSDATE, 'MM') 
+),
+approved_changes AS (
+    -- 2. Identify currencies with AT LEAST ONE approved change this month
+    SELECT DISTINCT currency_code
+    FROM currency_rate_change
+    WHERE rate_change_date >= TRUNC(SYSDATE, 'MM')
+)
 SELECT 
     cm.CURRENCY_CODE,
     cm.CURRENCY_NAME,
     cm.CURRENCY_RATE,
     cm.UPDATED_AT,
     CASE
-        WHEN crc.rate_change_date IS NULL AND p.REQ_STATUS IS NULL THEN 'U'
-        WHEN p.REQ_STATUS = 'P' THEN 'P'
-        ELSE 'A'
+        -- Order matters: If it's pending right now, mark as 'P' even if it was previously 'A' this month
+        WHEN p.TARGET_ID IS NOT NULL THEN 'P' 
+        WHEN a.currency_code IS NOT NULL THEN 'A'
+        ELSE 'U'
     END AS CHANGE_STATUS
 FROM 
-    currency_master cm
+    CURRENCY_MASTER cm
 LEFT JOIN 
-    currency_rate_change crc 
-    ON cm.currency_code = crc.currency_code
-    AND crc.rate_change_date BETWEEN SYSDATE - 7 AND SYSDATE + 7
+    pending_reqs p ON cm.CURRENCY_CODE = p.TARGET_ID
 LEFT JOIN 
-    COMMON_REQ p 
-    ON cm.currency_code = p.TARGET_ID
-    AND p.REQ_TYPE = 'CURRENCY_RATE_CHANGE'
-    AND p.REQ_DATE BETWEEN SYSDATE - 7 AND SYSDATE + 7
-    AND p.REQ_STATUS = 'P';   
+    approved_changes a ON cm.CURRENCY_CODE = a.currency_code;
