@@ -1,141 +1,1135 @@
-WITH pending_reqs AS (
-    SELECT DISTINCT target_id
-    FROM common_req
-    WHERE req_type = 'CURRENCY_RATE_CHANGE'
-      AND req_status = 'P'
-      AND req_date >= TRUNC(:testDate, 'MM')
-      AND req_date < ADD_MONTHS(TRUNC(:testDate, 'MM'), 1)
-),
-approved_changes AS (
-    SELECT DISTINCT currency_code
-    FROM currency_rate_change
-    WHERE rate_change_date >= TRUNC(:testDate, 'MM')
-      AND rate_change_date < ADD_MONTHS(TRUNC(:testDate, 'MM'), 1)
-)
-SELECT
-    cm.currency_code,
-    cm.currency_name,
-    cm.currency_rate,
-    cm.rate_date,
-    cm.updated_at,
-    CASE
-        WHEN p.target_id IS NOT NULL THEN 'P'
-        WHEN a.currency_code IS NOT NULL THEN 'A'
-        ELSE 'U'
-    END AS change_status
-FROM currency_master cm
-LEFT JOIN pending_reqs p
-       ON p.target_id = cm.currency_code
-LEFT JOIN approved_changes a
-       ON a.currency_code = cm.currency_code
-ORDER BY cm.currency_code;
+import React, { useState, useCallback, useMemo, useEffect } from "react";
+import {
+  Card,
+  CardContent,
+  TextField,
+  Button,
+  Autocomplete,
+  Checkbox,
+  Typography,
+  Stack,
+  Box,
+  IconButton,
+  Grid,
+  InputAdornment,
+  Paper,
+  Collapse,
+  Chip,
+  MenuItem,
+} from "@mui/material";
+import { DatePicker } from "@mui/x-date-pickers";
 
+// Icons
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import SearchIcon from "@mui/icons-material/Search";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import DeleteSweepIcon from "@mui/icons-material/DeleteSweep";
+import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
+import DateRangeIcon from "@mui/icons-material/DateRange";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+import ReceiptLongIcon from "@mui/icons-material/ReceiptLong";
 
+// Utilities & Hooks
+import { debounce } from "lodash";
+import useApi from "../../../hooks/useApi";
+import CustomChip from "../../../utils/CustomChip";
+import dayjs from "dayjs";
+import {
+  calculateQuickFilterDates,
+  getAvailableFilters,
+} from "../../../utils/CommonUtilities";
 
+const LedgerForm = ({
+  filters,
+  onFilterChange,
+  onReset,
+  onFetch,
+  permissions,
+  user,
+  circles,
+  currencies,
+  sourceOptions,
+  FOREIGN_CIRCLE_CODE,
+  CIRCLE_GROUPS,
+  minLimit,
+  maxLimit,
+  fetchLoading,
+}) => {
+  const { callApi } = useApi();
+  const { hasWholeBank, hasCircle } = permissions;
 
+  // Search States
+  const [branchSearch, setBranchSearch] = useState(null);
+  const [branches, setBranches] = useState([]);
+  const [cgls, setCgls] = useState([]);
+  const [loading, setLoading] = useState({ branch: false, cgl: false });
 
+  // Dynamic Tray State: "NONE", "BRANCHES", "CURRENCIES"
+  const [activeTray, setActiveTray] = useState("NONE");
 
-WITH pending_reqs AS (
-    SELECT DISTINCT target_id
-    FROM common_req
-    WHERE req_type = 'CURRENCY_RATE_CHANGE'
-      AND req_status = 'P'
-      AND req_date >= TRUNC(:testDate, 'MM')
-      AND req_date < ADD_MONTHS(TRUNC(:testDate, 'MM'), 1)
-),
-approved_changes AS (
-    SELECT DISTINCT currency_code
-    FROM currency_rate_change
-    WHERE rate_change_date >= TRUNC(:testDate, 'MM')
-      AND rate_change_date < ADD_MONTHS(TRUNC(:testDate, 'MM'), 1)
-)
-SELECT
-    cm.currency_code,
-    cm.currency_name,
-    cm.currency_rate,
-    cm.rate_date,
-    cm.updated_at,
-    CASE
-        WHEN p.target_id IS NOT NULL THEN 'P'
-        WHEN a.currency_code IS NOT NULL THEN 'A'
-        ELSE 'U'
-    END AS change_status
-FROM currency_master cm
-LEFT JOIN pending_reqs p
-       ON p.target_id = cm.currency_code
-LEFT JOIN approved_changes a
-       ON a.currency_code = cm.currency_code
-ORDER BY cm.currency_code;
+  // Validation States
+  const [fromDateError, setFromDateError] = useState(null);
+  const [toDateError, setToDateError] = useState(null);
+  const [quickFilter, setQuickFilter] = useState("custom");
 
+  // Conditional Rendering Booleans
+  const isCircleVisible = !!hasWholeBank;
+  const isBranchVisible =
+    (!!hasWholeBank && filters.circle !== CIRCLE_GROUPS.ALL) || user?.isCircle;
 
+  const hasSelectedBranches =
+    !filters.branches?.includes("ALL") && filters.branches?.length > 0;
 
+  const hasSelectedCurrencies =
+    !filters.currencies?.includes("ALL") && filters.currencies?.length > 0;
 
+  // Auto-close tray if its list becomes empty
+  useEffect(() => {
+    if (activeTray === "BRANCHES" && !hasSelectedBranches)
+      setActiveTray("NONE");
+    if (activeTray === "CURRENCIES" && !hasSelectedCurrencies)
+      setActiveTray("NONE");
+  }, [activeTray, hasSelectedBranches, hasSelectedCurrencies]);
 
-WITH approved AS
-(
-    SELECT DISTINCT currency_code
-    FROM currency_rate_change
-    WHERE rate_change_date BETWEEN :fromDate AND :toDate
-),
-pending AS
-(
-    SELECT DISTINCT target_id
-    FROM common_req
-    WHERE req_type='CURRENCY_RATE_CHANGE'
-      AND req_status='P'
-      AND req_date BETWEEN :fromDate AND :toDate
-)
+  // ================= DYNAMIC DATE FILTERS =================
+  const baseDate = maxLimit?.isValid?.() ? maxLimit : dayjs();
 
-SELECT
-    cm.currency_code,
-    cm.currency_name,
-    cm.currency_rate,
-    cm.updated_at,
-    CASE
-        WHEN p.target_id IS NOT NULL THEN 'P'
-        WHEN a.currency_code IS NOT NULL THEN 'A'
-        ELSE 'U'
-    END change_status
-FROM currency_master cm
-LEFT JOIN approved a
-       ON a.currency_code=cm.currency_code
-LEFT JOIN pending p
-       ON p.target_id=cm.currency_code
-ORDER BY cm.currency_code;
+  const availableFilters = useMemo(() => {
+    return getAvailableFilters(baseDate, minLimit);
+  }, [minLimit, baseDate]);
 
+  const validateDateRange = (from, to) => {
+    setFromDateError(null);
+    setToDateError(null);
 
+    if (from && to && from.isValid() && to.isValid()) {
+      if (from.isAfter(to, "day")) {
+        setFromDateError("fromGreaterThanTo");
+        setToDateError("toLessThanFrom");
+      }
+    }
+  };
 
+  const handleQuickFilter = (e) => {
+    const option = e.target.value;
+    setQuickFilter(option);
 
-WITH pending_reqs AS (
-    -- 1. Identify currencies with AT LEAST ONE pending request this month
-    SELECT DISTINCT TARGET_ID
-    FROM COMMON_REQ
-    WHERE REQ_TYPE = 'CURRENCY_RATE_CHANGE'
-      AND REQ_STATUS = 'P'
-      -- Using TRUNC to check the current month. 
-      -- (Change back to your +/- 7 days logic if that specific window is strictly required)
-      AND REQ_DATE >= TRUNC(SYSDATE, 'MM') 
-),
-approved_changes AS (
-    -- 2. Identify currencies with AT LEAST ONE approved change this month
-    SELECT DISTINCT currency_code
-    FROM currency_rate_change
-    WHERE rate_change_date >= TRUNC(SYSDATE, 'MM')
-)
-SELECT 
-    cm.CURRENCY_CODE,
-    cm.CURRENCY_NAME,
-    cm.CURRENCY_RATE,
-    cm.UPDATED_AT,
-    CASE
-        -- Order matters: If it's pending right now, mark as 'P' even if it was previously 'A' this month
-        WHEN p.TARGET_ID IS NOT NULL THEN 'P' 
-        WHEN a.currency_code IS NOT NULL THEN 'A'
-        ELSE 'U'
-    END AS CHANGE_STATUS
-FROM 
-    CURRENCY_MASTER cm
-LEFT JOIN 
-    pending_reqs p ON cm.CURRENCY_CODE = p.TARGET_ID
-LEFT JOIN 
-    approved_changes a ON cm.CURRENCY_CODE = a.currency_code;
+    if (option === "custom") return;
+
+    const { newStart, newEnd } = calculateQuickFilterDates(
+      option,
+      baseDate,
+      minLimit,
+    );
+
+    onFilterChange("fromDate", newStart);
+    onFilterChange("toDate", newEnd);
+    validateDateRange(newStart, newEnd);
+  };
+
+  // ================= API & SEARCH LOGIC =================
+  const searchLogic = useCallback(
+    async (type, term) => {
+      if (!term || term.length < 3) return;
+      try {
+        setLoading((p) => ({ ...p, [type]: true }));
+        let cp = "";
+
+        if (hasWholeBank) {
+          if (
+            filters.circle !== CIRCLE_GROUPS.ALL &&
+            filters.circle !== CIRCLE_GROUPS.DOMESTIC &&
+            filters.circle !== CIRCLE_GROUPS.FOREIGN
+          ) {
+            cp = `&circleCode=${filters.circle}`;
+          } else if (filters.circle === CIRCLE_GROUPS.FOREIGN) {
+            cp = `&circleCode=${FOREIGN_CIRCLE_CODE}`;
+          } else if (filters.circle === CIRCLE_GROUPS.DOMESTIC) {
+            cp = `&circleCode=${CIRCLE_GROUPS.DOMESTIC}`;
+          } else {
+            cp = `&circleCode=${CIRCLE_GROUPS.ALL}`;
+          }
+        } else if (!hasWholeBank) {
+          cp = `&circleCode=${user.circleCode}`;
+        }
+
+        const url =
+          type === "branch"
+            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(term)}${cp}`
+            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(term)}`;
+
+        const res = await callApi(url, null, "GET");
+        if (res?.data) {
+          const opts = res.data.map((i) =>
+            type === "branch"
+              ? `${i.code}-${i.name}`
+              : `${i.cglNumber} - ${i.description}`,
+          );
+          type === "branch" ? setBranches(opts) : setCgls(opts);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading((p) => ({ ...p, [type]: false }));
+      }
+    },
+    [
+      hasWholeBank,
+      callApi,
+      filters.circle,
+      CIRCLE_GROUPS.ALL,
+      CIRCLE_GROUPS.DOMESTIC,
+      CIRCLE_GROUPS.FOREIGN,
+      FOREIGN_CIRCLE_CODE,
+      user.circleCode,
+    ],
+  );
+
+  const fetchSearchData = useMemo(
+    () => debounce((t, v) => searchLogic(t, v), 300),
+    [searchLogic],
+  );
+  useEffect(() => () => fetchSearchData.cancel(), [fetchSearchData]);
+
+  // ================= HANDLERS =================
+  const handleBranchChange = (val) => {
+    const clickedAll = val.includes("ALL") && !filters.branches.includes("ALL");
+    const isEmpty = val.length === 0;
+
+    if (clickedAll || isEmpty) {
+      onFilterChange("branches", ["ALL"]);
+      if (activeTray === "BRANCHES") setActiveTray("NONE");
+      return;
+    }
+    const valWithoutAll = val.filter((v) => v !== "ALL");
+    onFilterChange("branches", valWithoutAll);
+  };
+
+  const removeBranch = (branchToRemove) => {
+    const updated = filters.branches.filter((b) => b !== branchToRemove);
+    if (updated.length === 0) {
+      onFilterChange("branches", ["ALL"]);
+      setActiveTray("NONE");
+    } else {
+      onFilterChange("branches", updated);
+    }
+  };
+
+  const removeCurrency = (currencyToRemove) => {
+    const updated = filters.currencies.filter((c) => c !== currencyToRemove);
+    if (updated.length === 0) {
+      onFilterChange("currencies", ["ALL"]);
+      setActiveTray("NONE");
+    } else {
+      onFilterChange("currencies", updated);
+    }
+  };
+
+  const handleCircleChange = (value) => {
+    onFilterChange("branches", ["ALL"]);
+    setBranches([]);
+    if (activeTray === "BRANCHES") setActiveTray("NONE");
+    onFilterChange("circle", value?.value || CIRCLE_GROUPS.ALL);
+  };
+
+  const handleLocalReset = () => {
+    setQuickFilter("custom");
+    setFromDateError(null);
+    setToDateError(null);
+    setActiveTray("NONE");
+    onReset();
+  };
+
+  // ================= HELPERS =================
+  const SectionHeader = ({ icon, title }) => (
+    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
+      <Box
+        sx={{
+          p: 0.5,
+          bgcolor: "primary.main",
+          borderRadius: 1,
+          color: "white",
+          display: "flex",
+        }}
+      >
+        {icon}
+      </Box>
+      <Typography
+        variant="subtitle2"
+        sx={{ fontWeight: 800, color: "text.primary", letterSpacing: 1 }}
+      >
+        {title}
+      </Typography>
+    </Stack>
+  );
+
+  const getDateErrorMessage = (field, error) => {
+    switch (error) {
+      case "maxDate":
+        return `${field} cannot be in future`;
+      case "minDate":
+        return `${field} cannot be before ${minLimit.format("DD/MM/YYYY")}`;
+      case "invalidDate":
+        return `Please enter a valid ${field}`;
+      case "fromGreaterThanTo":
+        return "From Date cannot be greater than To Date";
+      case "toLessThanFrom":
+        return "To Date cannot be less than From Date";
+      default:
+        return "";
+    }
+  };
+
+  const validationMessages = [
+    fromDateError && getDateErrorMessage("From Date", fromDateError),
+    toDateError && getDateErrorMessage("To Date", toDateError),
+  ].filter(Boolean);
+
+  // ================= DYNAMIC TRAY CONTENT =================
+  const trayTitle =
+    activeTray === "BRANCHES" ? "SELECTED BRANCHES" : "SELECTED CURRENCIES";
+  const trayItems =
+    activeTray === "BRANCHES" ? filters.branches : filters.currencies;
+  const trayRemoveHandler =
+    activeTray === "BRANCHES" ? removeBranch : removeCurrency;
+  const trayClearAllHandler = () => {
+    if (activeTray === "BRANCHES") onFilterChange("branches", ["ALL"]);
+    if (activeTray === "CURRENCIES") onFilterChange("currencies", ["ALL"]);
+    setActiveTray("NONE");
+  };
+
+  // ================= UI =================
+  return (
+    <Box sx={{ position: "relative", mb: 2 }}>
+      <Card
+        sx={{
+          borderRadius: "24px",
+          boxShadow: "0 20px 50px rgba(0,0,0,0.1)",
+          border: "1px solid rgba(255,255,255,0.3)",
+        }}
+      >
+        <CardContent sx={{ p: 4 }}>
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            sx={{ mb: 1.5 }}
+          >
+            <Box>
+              <Typography variant="h4" sx={{ fontWeight: 900 }}>
+                Ledger Explorer
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Hierarchical data filtering & enquiry
+              </Typography>
+            </Box>
+          </Stack>
+
+          <Grid container spacing={4}>
+            {/* 1. HIERARCHY ZONE */}
+            {(isCircleVisible || isBranchVisible) && (
+              <Grid size={{ xs: 12, md: 6 }}>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 3,
+                    borderRadius: "20px",
+                    bgcolor: "rgba(0,0,0,0.01)",
+                    borderStyle: "dashed",
+                    position: "relative",
+                    height: "100%",
+                  }}
+                >
+                  <SectionHeader
+                    icon={<AccountBalanceIcon fontSize="small" />}
+                    title="Hierarchy"
+                  />
+                  <Grid container spacing={2}>
+                    {isCircleVisible && (
+                      <Grid size={{ xs: 12, sm: isCircleVisible ? 6 : 12 }}>
+                        <Autocomplete
+                          size="small"
+                          options={[
+                            { value: CIRCLE_GROUPS.ALL, label: "All Circles" },
+                            {
+                              value: CIRCLE_GROUPS.DOMESTIC,
+                              label: "Domestic Circles",
+                            },
+                            {
+                              value: CIRCLE_GROUPS.FOREIGN,
+                              label: "Foreign Circles",
+                            },
+                            ...circles.map((c) => ({
+                              value: c.circleCode,
+                              label:
+                                c.circleCode === FOREIGN_CIRCLE_CODE
+                                  ? `${c.circleCode} - Foreign`
+                                  : `${c.circleCode} - ${c.circleName}`,
+                            })),
+                          ]}
+                          value={(() => {
+                            if (filters.circle === CIRCLE_GROUPS.ALL)
+                              return {
+                                value: CIRCLE_GROUPS.ALL,
+                                label: "All Circles",
+                              };
+                            if (filters.circle === CIRCLE_GROUPS.DOMESTIC)
+                              return {
+                                value: CIRCLE_GROUPS.DOMESTIC,
+                                label: "Domestic Circles",
+                              };
+                            if (filters.circle === CIRCLE_GROUPS.FOREIGN)
+                              return {
+                                value: CIRCLE_GROUPS.FOREIGN,
+                                label: "Foreign Circles",
+                              };
+
+                            const matched = circles.find(
+                              (c) => c.circleCode === filters.circle,
+                            );
+                            return matched
+                              ? {
+                                  value: matched.circleCode,
+                                  label:
+                                    matched.circleCode === FOREIGN_CIRCLE_CODE
+                                      ? `${matched.circleCode} - Foreign`
+                                      : `${matched.circleCode} - ${matched.circleName}`,
+                                }
+                              : null;
+                          })()}
+                          isOptionEqualToValue={(option, value) =>
+                            option?.value === value?.value
+                          }
+                          onChange={(_, value) => handleCircleChange(value)}
+                          renderInput={(params) => (
+                            <TextField
+                              {...params}
+                              label="Select Circle"
+                              required
+                              variant="standard"
+                              inputProps={{
+                                ...params.inputProps,
+                                maxLength: 30,
+                              }}
+                            />
+                          )}
+                        />
+                      </Grid>
+                    )}
+                    <Grid size={{ xs: 12, sm: isCircleVisible ? 6 : 12 }}>
+                      <Autocomplete
+                        multiple
+                        size="small"
+                        disableCloseOnSelect
+                        options={["ALL", ...branches]}
+                        loading={loading.branch}
+                        value={filters.branches}
+                        inputValue={branchSearch}
+                        onInputChange={(event, newInputValue, reason) => {
+                          if (newInputValue.length > 30) return;
+                          setBranchSearch(newInputValue);
+                          if (reason === "input" && newInputValue.length >= 3) {
+                            fetchSearchData("branch", newInputValue);
+                          }
+                        }}
+                        onChange={(_, val) => {
+                          handleBranchChange(val);
+                          setBranchSearch("");
+                        }}
+                        renderTags={() => null}
+                        renderOption={(props, option, { selected }) => (
+                          <li {...props} key={option}>
+                            <Checkbox
+                              size="small"
+                              style={{ marginRight: 8 }}
+                              checked={selected}
+                            />
+                            <Typography variant="body2">{option}</Typography>
+                          </li>
+                        )}
+                        renderInput={(p) => (
+                          <TextField
+                            {...p}
+                            label="Select Branches"
+                            variant="standard"
+                            required
+                            placeholder={"Enter atleast 3 digits..."}
+                            InputProps={{
+                              ...p.InputProps,
+                              maxLength: 30,
+                              endAdornment: (
+                                <InputAdornment position="end" sx={{ mb: 0.5 }}>
+                                  <Stack
+                                    direction="row"
+                                    alignItems="center"
+                                    spacing={1}
+                                  >
+                                    <CustomChip
+                                      label={
+                                        filters.branches?.includes("ALL")
+                                          ? "All Branches"
+                                          : `${filters.branches?.length} Selected`
+                                      }
+                                      color={
+                                        filters.branches?.includes("ALL")
+                                          ? "default"
+                                          : "primary"
+                                      }
+                                      sx={{
+                                        fontWeight: 700,
+                                        fontSize: "0.7rem",
+                                      }}
+                                    />
+                                    {hasSelectedBranches && (
+                                      <IconButton
+                                        size="small"
+                                        onClick={() =>
+                                          setActiveTray((prev) =>
+                                            prev === "BRANCHES"
+                                              ? "NONE"
+                                              : "BRANCHES",
+                                          )
+                                        }
+                                        color={
+                                          activeTray === "BRANCHES"
+                                            ? "primary"
+                                            : "default"
+                                        }
+                                        sx={{
+                                          transition: "0.2s",
+                                          bgcolor:
+                                            activeTray === "BRANCHES"
+                                              ? "rgba(25, 118, 210, 0.08)"
+                                              : "transparent",
+                                        }}
+                                      >
+                                        {activeTray === "BRANCHES" ? (
+                                          <VisibilityOffIcon fontSize="small" />
+                                        ) : (
+                                          <VisibilityIcon fontSize="small" />
+                                        )}
+                                      </IconButton>
+                                    )}
+                                  </Stack>
+                                  {p.InputProps.endAdornment}
+                                </InputAdornment>
+                              ),
+                            }}
+                          />
+                        )}
+                      />
+                    </Grid>
+                  </Grid>
+                </Paper>
+              </Grid>
+            )}
+
+            {/* 2. ACCOUNT ZONE */}
+            <Grid
+              size={{ xs: 12, md: isCircleVisible || isBranchVisible ? 6 : 12 }}
+            >
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 3,
+                  borderRadius: "20px",
+                  bgcolor: "rgba(0,0,0,0.01)",
+                  borderStyle: "dashed",
+                  position: "relative",
+                  height: "100%",
+                }}
+              >
+                <SectionHeader
+                  icon={<SearchIcon fontSize="small" />}
+                  title="Account Details"
+                />
+                <Grid container spacing={2}>
+                  <Grid size={{ xs: 12, sm: 7 }}>
+                    <Autocomplete
+                      forcePopupIcon={false}
+                      autoHighlight
+                      value={filters.cgl}
+                      options={cgls}
+                      clearIcon={filters.cgl ? undefined : null}
+                      noOptionsText={
+                        filters.cgl && filters.cgl < 3
+                          ? "Please enter at least 3 characters"
+                          : "No Options"
+                      }
+                      onInputChange={(e, v) => {
+                        if (v.length >= 3) fetchSearchData("cgl", v);
+                      }}
+                      onChange={(_, v) => onFilterChange("cgl", v)}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label="CGL"
+                          required
+                          InputLabelProps={{ shrink: true }}
+                          placeholder={
+                            "Enter atleast 3 characters (eg. 9999999999)"
+                          }
+                          variant="standard"
+                          inputProps={{ ...params.inputProps, maxLength: 30 }}
+                        />
+                      )}
+                      loadingText="Searching Cgls..."
+                    />
+                  </Grid>
+
+                  {/* CURRENCY FIELD */}
+                  <Grid size={{ xs: 12, sm: 5 }}>
+                    <Autocomplete
+                      multiple
+                      size="small"
+                      disableCloseOnSelect
+                      options={currencies}
+                      value={
+                        filters.currencies?.includes("ALL")
+                          ? currencies
+                          : filters.currencies || []
+                      }
+                      onChange={(_, selectedOptions) => {
+                        const isSelectAllClicked =
+                          selectedOptions.includes("select-all");
+
+                        if (isSelectAllClicked) {
+                          const isAllCurrentlySelected =
+                            filters.currencies?.includes("ALL") ||
+                            (currencies.length > 0 &&
+                              filters.currencies?.length === currencies.length);
+
+                          if (isAllCurrentlySelected) {
+                            onFilterChange("currencies", []);
+                            if (activeTray === "CURRENCIES")
+                              setActiveTray("NONE");
+                          } else {
+                            onFilterChange("currencies", ["ALL"]);
+                            if (activeTray === "CURRENCIES")
+                              setActiveTray("NONE");
+                          }
+                        } else {
+                          if (selectedOptions.length === currencies.length) {
+                            onFilterChange("currencies", ["ALL"]);
+                            if (activeTray === "CURRENCIES")
+                              setActiveTray("NONE");
+                          } else {
+                            const valWithoutAll = selectedOptions.filter(
+                              (c) => c !== "ALL" && c !== "select-all",
+                            );
+                            onFilterChange("currencies", valWithoutAll);
+                            if (
+                              valWithoutAll.length === 0 &&
+                              activeTray === "CURRENCIES"
+                            )
+                              setActiveTray("NONE");
+                          }
+                        }
+                      }}
+                      filterOptions={(options) => ["select-all", ...options]}
+                      renderTags={() => null}
+                      renderOption={(props, option, { selected }) => {
+                        const isAllSelected =
+                          filters.currencies?.includes("ALL") ||
+                          (currencies.length > 0 &&
+                            filters.currencies?.length === currencies.length);
+
+                        const isChecked =
+                          option === "select-all"
+                            ? isAllSelected
+                            : filters.currencies?.includes("ALL")
+                              ? true
+                              : selected;
+
+                        return (
+                          <li {...props} key={option}>
+                            <Checkbox
+                              size="small"
+                              style={{ marginRight: 8 }}
+                              checked={isChecked}
+                            />
+                            <Typography
+                              variant="body2"
+                              sx={{
+                                fontWeight: option === "select-all" ? 700 : 400,
+                              }}
+                            >
+                              {option === "select-all" ? "Select All" : option}
+                            </Typography>
+                          </li>
+                        );
+                      }}
+                      renderInput={(p) => {
+                        const isAll =
+                          filters.currencies?.includes("ALL") ||
+                          (currencies.length > 0 &&
+                            filters.currencies?.length === currencies.length);
+                        return (
+                          <TextField
+                            {...p}
+                            label="Currencies"
+                            required
+                            variant="standard"
+                            InputProps={{
+                              ...p.InputProps,
+                              maxLength: 30,
+                              endAdornment: (
+                                <InputAdornment position="end" sx={{ mb: 0.5 }}>
+                                  <Stack
+                                    direction="row"
+                                    alignItems="center"
+                                    spacing={1}
+                                  >
+                                    <CustomChip
+                                      label={
+                                        isAll
+                                          ? "All Currencies"
+                                          : `${filters.currencies?.length} Selected`
+                                      }
+                                      color={isAll ? "default" : "primary"}
+                                      sx={{
+                                        fontWeight: 700,
+                                        fontSize: "0.7rem",
+                                      }}
+                                    />
+                                    {!isAll &&
+                                      filters.currencies?.length > 0 && (
+                                        <IconButton
+                                          size="small"
+                                          onClick={() =>
+                                            setActiveTray((prev) =>
+                                              prev === "CURRENCIES"
+                                                ? "NONE"
+                                                : "CURRENCIES",
+                                            )
+                                          }
+                                          color={
+                                            activeTray === "CURRENCIES"
+                                              ? "primary"
+                                              : "default"
+                                          }
+                                          sx={{
+                                            transition: "0.2s",
+                                            bgcolor:
+                                              activeTray === "CURRENCIES"
+                                                ? "rgba(25, 118, 210, 0.08)"
+                                                : "transparent",
+                                          }}
+                                        >
+                                          {activeTray === "CURRENCIES" ? (
+                                            <VisibilityOffIcon fontSize="small" />
+                                          ) : (
+                                            <VisibilityIcon fontSize="small" />
+                                          )}
+                                        </IconButton>
+                                      )}
+                                  </Stack>
+                                  {p.InputProps.endAdornment}
+                                </InputAdornment>
+                              ),
+                            }}
+                          />
+                        );
+                      }}
+                    />
+                  </Grid>
+                </Grid>
+              </Paper>
+            </Grid>
+
+            {/* SHARED DYNAMIC TRAY (Spans full width below top sections) */}
+            <Grid size={{ xs: 12 }}>
+              <Collapse in={activeTray !== "NONE"}>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    borderRadius: "12px",
+                    bgcolor: "#fff",
+                    border: "1px solid #e0e6ed",
+                    overflow: "hidden",
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.05)",
+                  }}
+                >
+                  <Stack
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    sx={{
+                      p: 1.5,
+                      borderBottom: "1px solid #f0f0f0",
+                      bgcolor: "rgba(25, 118, 210, 0.02)",
+                    }}
+                  >
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontWeight: 800,
+                          color: "primary.main",
+                          letterSpacing: 1,
+                        }}
+                      >
+                        {trayTitle}
+                      </Typography>
+                      <CustomChip
+                        label={trayItems?.length || 0}
+                        color="primary"
+                        sx={{ height: 20 }}
+                      />
+                    </Stack>
+                    <Stack direction="row" spacing={1}>
+                      <Button
+                        size="small"
+                        color="error"
+                        variant="text"
+                        startIcon={<DeleteSweepIcon />}
+                        onClick={trayClearAllHandler}
+                        sx={{
+                          p: 0.5,
+                          fontWeight: 700,
+                          "&:hover": { color: "white", background: "#9f0400" },
+                        }}
+                      >
+                        Clear All
+                      </Button>
+                      <IconButton
+                        size="small"
+                        onClick={() => setActiveTray("NONE")}
+                        sx={{ color: "text.secondary" }}
+                      >
+                        <VisibilityOffIcon fontSize="small" />
+                      </IconButton>
+                    </Stack>
+                  </Stack>
+                  <Box
+                    sx={{
+                      p: 1.5,
+                      maxHeight: "180px",
+                      overflowY: "auto",
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 1,
+                      "&::-webkit-scrollbar": { width: "6px" },
+                      "&::-webkit-scrollbar-track": { background: "#f1f1f1" },
+                      "&::-webkit-scrollbar-thumb": {
+                        background: "#ccc",
+                        borderRadius: "10px",
+                      },
+                    }}
+                  >
+                    {trayItems?.map((item) => (
+                      <Chip
+                        key={item}
+                        label={item}
+                        color="primary"
+                        variant="outlined"
+                        onDelete={() => trayRemoveHandler(item)}
+                        sx={{
+                          borderRadius: "8px",
+                          bgcolor: "white",
+                          fontWeight: 500,
+                          "& .MuiChip-deleteIcon": {
+                            color: "error.main",
+                            transition: "0.2s",
+                            "&:hover": {
+                              color: "#d32f2f",
+                              transform: "scale(1.2)",
+                            },
+                          },
+                          "&:hover": {
+                            bgcolor: "#f5f9ff",
+                            borderColor: "primary.main",
+                          },
+                        }}
+                      />
+                    ))}
+                  </Box>
+                </Paper>
+              </Collapse>
+            </Grid>
+
+            {/* 3. TIMELINE & FLAGS ZONE */}
+            <Grid size={{ xs: 12 }}>
+              <Paper
+                sx={{
+                  p: 2.5,
+                  borderRadius: "20px",
+                  background: "#58469f",
+                  color: "white",
+                }}
+              >
+                <Grid container spacing={3} alignItems="flex-end">
+                  {/* Quick Filters */}
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Stack spacing={1}>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <CalendarMonthIcon fontSize="small" />
+                        <Typography sx={{ fontWeight: 700 }}>
+                          Date Range
+                        </Typography>
+                      </Stack>
+                      <TextField
+                        select
+                        size="small"
+                        value={quickFilter}
+                        onChange={handleQuickFilter}
+                        fullWidth
+                        sx={{ bgcolor: "white", borderRadius: 1 }}
+                      >
+                        {availableFilters.map((opt) => (
+                          <MenuItem key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </MenuItem>
+                        ))}
+                      </TextField>
+                    </Stack>
+                  </Grid>
+
+                  {/* From Date */}
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Stack spacing={1}>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <DateRangeIcon fontSize="small" />
+                        <Typography sx={{ fontWeight: 700 }}>
+                          From Date *
+                        </Typography>
+                      </Stack>
+                      <DatePicker
+                        value={filters.fromDate}
+                        format="DD/MM/YYYY"
+                        minDate={minLimit}
+                        maxDate={filters.toDate || maxLimit}
+                        views={["year", "month", "day"]}
+                        onChange={(value) => {
+                          onFilterChange("fromDate", value);
+                          setQuickFilter("custom");
+                          validateDateRange(value, filters.toDate);
+                        }}
+                        onError={(error) =>
+                          setFromDateError(error ? error : null)
+                        }
+                        slotProps={{
+                          textField: {
+                            size: "small",
+                            fullWidth: true,
+                            placeholder: "DD/MM/YYYY",
+                            error: !!fromDateError,
+                            sx: { bgcolor: "white", borderRadius: 1 },
+                          },
+                        }}
+                      />
+                    </Stack>
+                  </Grid>
+
+                  {/* To Date */}
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Stack spacing={1}>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <DateRangeIcon fontSize="small" />
+                        <Typography sx={{ fontWeight: 700 }}>
+                          To Date *
+                        </Typography>
+                      </Stack>
+                      <DatePicker
+                        value={filters.toDate}
+                        format="DD/MM/YYYY"
+                        minDate={filters?.fromDate || minLimit}
+                        maxDate={maxLimit}
+                        views={["year", "month", "day"]}
+                        disabled={!filters.fromDate}
+                        onChange={(value) => {
+                          onFilterChange("toDate", value);
+                          setQuickFilter("custom");
+                          validateDateRange(filters.fromDate, value);
+                        }}
+                        onError={(error) =>
+                          setToDateError(error ? error : null)
+                        }
+                        slotProps={{
+                          textField: {
+                            size: "small",
+                            fullWidth: true,
+                            placeholder: "DD/MM/YYYY",
+                            error: !!toDateError,
+                            sx: { bgcolor: "white", borderRadius: 1 },
+                          },
+                        }}
+                      />
+                    </Stack>
+                  </Grid>
+
+                  {/* Transaction Type */}
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Stack spacing={1}>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <ReceiptLongIcon fontSize="small" />
+                        <Typography sx={{ fontWeight: 700 }}>
+                          Transaction Type *
+                        </Typography>
+                      </Stack>
+                      <Autocomplete
+                        multiple
+                        size="small"
+                        disableCloseOnSelect
+                        options={sourceOptions}
+                        value={filters.sourceFlags}
+                        getOptionLabel={(o) => o.flagName || ""}
+                        isOptionEqualToValue={(option, value) =>
+                          option.flagId === value.flagId
+                        }
+                        onChange={(_, selectedOptions) => {
+                          const isSelectAllClicked = selectedOptions.some(
+                            (option) => option.flagId === "select-all",
+                          );
+                          if (isSelectAllClicked) {
+                            if (
+                              filters.sourceFlags.length ===
+                              sourceOptions.length
+                            ) {
+                              onFilterChange("sourceFlags", []);
+                            } else {
+                              onFilterChange("sourceFlags", sourceOptions);
+                            }
+                          } else {
+                            onFilterChange("sourceFlags", selectedOptions);
+                          }
+                        }}
+                        filterOptions={(options) => [
+                          { flagId: "select-all", flagName: "Select All" },
+                          ...options,
+                        ]}
+                        renderTags={(v) => (
+                          <CustomChip
+                            label={
+                              v.length === sourceOptions.length
+                                ? "All Types"
+                                : `${v.length} Types`
+                            }
+                            color="default"
+                            sx={{ bgcolor: "white" }}
+                          />
+                        )}
+                        renderOption={(props, option, { selected }) => {
+                          const isAllSelected =
+                            filters.sourceFlags.length === sourceOptions.length;
+                          const isChecked =
+                            option.flagId === "select-all"
+                              ? isAllSelected
+                              : selected;
+                          return (
+                            <li {...props} key={option.flagId}>
+                              <Checkbox
+                                size="small"
+                                style={{ marginRight: 8 }}
+                                checked={isChecked}
+                              />
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  fontWeight:
+                                    option.flagId === "select-all" ? 700 : 400,
+                                }}
+                              >
+                                {option.flagName}
+                              </Typography>
+                            </li>
+                          );
+                        }}
+                        renderInput={(p) => (
+                          <TextField
+                            {...p}
+                            placeholder="Transaction Types"
+                            sx={{
+                              bgcolor: "white",
+                              borderRadius: 1,
+                              "& .MuiOutlinedInput-root": { borderRadius: 1 },
+                            }}
+                            inputProps={{ ...p.inputProps, maxLength: 30 }}
+                          />
+                        )}
+                      />
+                    </Stack>
+                  </Grid>
+                </Grid>
+              </Paper>
+            </Grid>
+          </Grid>
+
+          {/* Validation Messages Bottom Block */}
+          <Grid size={{ xs: 12 }}>
+            {validationMessages.length > 0 && (
+              <Paper
+                sx={{
+                  mt: 2,
+                  p: 1.5,
+                  borderRadius: 2,
+                  border: "1px solid",
+                  borderColor: "#ff4d4f",
+                  bgcolor: "#fff1f0",
+                }}
+              >
+                <Stack spacing={0.5}>
+                  {validationMessages.map((msg, index) => (
+                    <Typography
+                      key={index}
+                      variant="body2"
+                      sx={{ color: "#d32f2f", fontWeight: 600 }}
+                    >
+                      • {msg}
+                    </Typography>
+                  ))}
+                </Stack>
+              </Paper>
+            )}
+          </Grid>
+
+          {/* Action Buttons */}
+          <Box
+            sx={{
+              mt: 2,
+              position: "sticky",
+              bottom: 12,
+              zIndex: 20,
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 2,
+            }}
+          >
+            <Button
+              variant="outlined"
+              startIcon={<RestartAltIcon />}
+              onClick={handleLocalReset}
+              sx={{ borderRadius: 2, textTransform: "none", fontWeight: 700 }}
+            >
+              Reset
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<SearchIcon />}
+              onClick={onFetch}
+              disabled={
+                !filters.cgl ||
+                !filters.fromDate ||
+                !filters.toDate ||
+                fromDateError ||
+                toDateError ||
+                !filters.currencies?.length
+              }
+              loading={fetchLoading}
+              sx={{
+                borderRadius: 2,
+                px: 4,
+                textTransform: "none",
+                fontWeight: 800,
+              }}
+            >
+              Search
+            </Button>
+          </Box>
+        </CardContent>
+      </Card>
+    </Box>
+  );
+};
+
+export default LedgerForm;
