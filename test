@@ -1,124 +1,171 @@
-import React, { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import dayjs from "dayjs";
 import downloadFile from "../../utils/DownloadUtils";
-import { Box, Paper, Typography, Stack } from "@mui/material";
-import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
-import { useSelector } from "react-redux";
-import { getPermissions } from "../../utils/CommonUtilities";
-import ManageSearchOutlinedIcon from "@mui/icons-material/ManageSearchOutlined";
+import dayjs from "dayjs";
+import ReceiptIcon from "@mui/icons-material/Receipt";
+import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import LinearProgress from "@mui/material/LinearProgress";
 
-import BalanceFilters from "./components/BalanceFilters";
-import BalanceTable from "./components/BalanceTable";
-import { StyledButton } from "./components/BalanceStyles";
+import { Box, Paper, Typography, Stack, Button } from "@mui/material";
 
-export default function BalanceEnquiryScreen() {
+import { StyledBox, StyledFormHeader } from "./components/TransactionStyles";
+
+import TransactionFilters from "./components/TransactionFilters";
+import TransactionTable from "./components/TransactionTable";
+import { areUserInputsValid } from "./utils/InputValidations";
+import { useSelector } from "react-redux";
+
+const TransactionEnquiryScreen = () => {
   const { callApi } = useApi();
-  const showSnackBar = useCustomSnackbar();
+  const snackbar = useCustomSnackbar();
 
   const user = useSelector((state) => state.auth.user);
-  const selectedMenu = useSelector((state) => state.menus.selectedMenuItem);
-  const permissions = getPermissions(selectedMenu);
 
-  const [data, setData] = useState(null);
-  const [branches, setBranches] = useState([]);
-  const [cgls, setCgls] = useState([]);
   const [currencies, setCurrencies] = useState([]);
-
-  const [mode, setMode] = useState("datewise");
-  const [start, setStart] = useState(null);
-  const [end, setEnd] = useState(null);
-
-  const [currency, setCurrency] = useState();
-  const [cgl, setCgl] = useState(null);
-
-  const branchCodeStr = String(user?.branch).padStart(5, "0");
-  const [branch, setBranch] = useState(
-    user?.isCircle === false ? `${branchCodeStr}-${user.branchName}` : ""
-  );
-
+  const [data, setData] = useState(null);
+  const [sourceOptions, setSourceOptions] = useState([]);
   const [etlDate, setEtlDate] = useState(null);
-
+  const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
 
+  const [filtersExpanded, setFiltersExpanded] = useState(true);
   const [glcc, setGlcc] = useState("");
   const [glccValidated, setGlccValidated] = useState(false);
   const [glccLoading, setGlccLoading] = useState(false);
+  const selectedMenu = useSelector((state) => state.menus.selectedMenuItem);
 
-  const [loading, setLoading] = useState({
-    branch: false,
-    cgl: false,
-    currency: false,
-    balance: false,
+  const [userInputs, setUserInputs] = useState({
+    branch:
+      user?.isCircle === false
+        ? `${String(user?.branch).padStart(5, "0")}-${user.branchName}`
+        : "",
+    currency: null,
+    cgl: "",
+    fromDate: null,
+    toDate: null,
+    minAmount: "",
+    maxAmount: "",
+    sourceFlags: [],
   });
 
-  const [rowCount, setRowCount] = useState(0); // Default to 0
+  const fetchCurrencies = useCallback(async () => {
+    const res = await callApi(
+      "/CM/common-master/currency-code-name-only",
+      null,
+      "GET",
+    );
 
-  const [req, setReq] = useState({
-    branch: true,
-    cgl: true,
-  });
+    const formattedCurrencies =
+      res?.data?.map((c) => `${c.currencyCode} (${c.currencyName})`) || [];
 
-  const [filtersExpanded, setFiltersExpanded] = useState(true);
+    const sortedCurrencies = formattedCurrencies.sort((a, b) => {
+      if (a.startsWith("INR")) return -1;
+      if (b.startsWith("INR")) return 1;
+      return a.localeCompare(b);
+    });
 
-  const [fetchConf, setFetchConf] = useState({
+    setCurrencies(sortedCurrencies);
+  }, [callApi]);
+
+  const [rowCount, setRowCount] = useState(0);
+
+  const [paginationModel, setPaginationModel] = useState({
     page: 0,
     pageSize: 25,
     sortIn: "DESC",
   });
 
-  const isNumeric = (value) => {
-    if (value) {
-      const regex = /^\d+$/;
-      return regex.test(value);
-    }
-    return false;
-  };
+  const [sortModel, setSortModel] = useState([]);
 
-  // FIX 1: Removed debounce. Added explicit config override to avoid stale state.
-  const fetchBalance = useCallback(async (configOverride) => {
+  const [filterModel, setFilterModel] = useState({
+    items: [],
+  });
+  const [debouncedFilterModel, setDebouncedFilterModel] = useState({
+    items: [],
+  });
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedFilterModel(filterModel);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [filterModel]);
+
+  const fetchTransactions = useCallback(async () => {
     try {
-      setLoading((prev) => ({ ...prev, balance: true }));
+      if (!areUserInputsValid(userInputs)) return;
 
-      const matched = branch?.match(/^(\d{5})-/);
-      if (!matched) return;
-
-      // Use explicit config if provided (like on pagination/submit), otherwise fallback to state
-      const effectiveConfig = configOverride || fetchConf;
+      setLoading(true);
 
       const payload = {
-        currency,
-        cgl: cgl?.split(" - ")[0],
-        branch: matched[1],
-        startDate: start.format("DD-MM-YYYY"),
-        endDate: end.format("DD-MM-YYYY"),
-        page: effectiveConfig.page,
-        size: effectiveConfig.pageSize,
-        sortIn: effectiveConfig.sortIn,
+        branch: userInputs?.branch?.split(" (")[0],
+        currency: userInputs?.currency?.split(" (")[0],
+        cgl: userInputs?.cgl?.split(" - ")[0],
+        fromDate: dayjs(userInputs?.fromDate).format("DD/MM/YYYY"),
+        toDate: dayjs(userInputs?.toDate).format("DD/MM/YYYY"),
+        minAmount: userInputs.minAmount ? Number(userInputs.minAmount) : null,
+        maxAmount: userInputs.maxAmount ? Number(userInputs.maxAmount) : null,
+        sourceFlags: (userInputs.sourceFlags || []).map((item) => item.flagId),
+        page: paginationModel.page,
+        size: paginationModel.pageSize,
+
+        sortField: sortModel?.[0]?.field || null,
+
+        sortOrder: sortModel?.[0]?.sort || null,
+
+        gridFilters: debouncedFilterModel.items
+          .filter(
+            (item) =>
+              item.field &&
+              item.operator &&
+              item.value !== undefined &&
+              item.value !== null &&
+              item.value !== "",
+          )
+          .map((item) => ({
+            field: item.field,
+            operator: item.operator,
+            value: item.value,
+          })),
       };
 
-      const result = await callApi("/ES/balance/enquires", payload, "POST");
+      setSearchLoading(true);
 
-      if (result?.data?.data?.length > 0) {
-        setData(result.data.data);
-        setRowCount(result.data.totalElements);
+      const res = await callApi(
+        "/ES/transaction-con/transactions",
+        payload,
+        "POST",
+      );
+
+      if (res?.data?.length > 0) {
+        setData(res);
         setFiltersExpanded(false);
+        setRowCount(res.totalElements || 0);
       } else {
-        setData([]);
+        setData({
+          data: [],
+          extraData: null,
+        });
         setRowCount(0);
       }
-    } catch (e) {
-      setData([]);
-      setRowCount(0);
-      showSnackBar("No records found");
+    } catch {
+      snackbar(
+        "Failed to fetch transactions, Something went wrong Kindly try again after sometime",
+        "error",
+      );
     } finally {
-      setLoading((prev) => ({ ...prev, balance: false }));
+      setLoading(false);
       setSearchLoading(false);
     }
-  }, [callApi, branch, currency, cgl, start, end, fetchConf, showSnackBar]);
+  }, [
+    userInputs,
+    callApi,
+    paginationModel,
+    sortModel,
+    debouncedFilterModel,
+    snackbar,
+  ]);
 
   const validateGlcc = async (value) => {
     try {
@@ -127,199 +174,168 @@ export default function BalanceEnquiryScreen() {
       const res = await callApi(
         "/CM/common-master/validate-glcc",
         { glcc: value },
-        "POST"
+        "POST",
       );
 
-      const glccData = res?.data;
+      const data = res?.data;
 
-      if (glccData?.valid) {
-        setBranch(`${glccData.branchCode}-${glccData.branchName?.trim()}`);
-        setCurrency(glccData.currencyCode);
-        setCgl(`${glccData.cglNumber} - ${glccData.cglDescription}`);
+      if (data?.valid) {
+        setUserInputs((prev) => ({
+          ...prev,
+          branch: `${data.branchCode}-${data.branchName.trim()}`,
+          currency: `${data.currencyCode} (${data.currencyName.trim()})`,
+          cgl: `${data.cglNumber} - ${data.cglDescription}`,
+        }));
+
         setGlccValidated(true);
       } else {
         setGlccValidated(false);
-        setBranch("");
-        setCurrency("");
-        setCgl("");
-        showSnackBar(glccData?.errors?.join(", ") || "Invalid GLCC", "error");
+
+        setUserInputs((prev) => ({
+          ...prev,
+          branch: "",
+          currency: null,
+          cgl: "",
+        }));
+
+        snackbar(data?.errors?.join(", ") || "Invalid GLCC", "error");
       }
     } catch (e) {
       setGlccValidated(false);
-      setBranch("");
-      setCurrency("");
-      setCgl("");
 
-      const errors =
-        e?.response?.data?.data?.errors || e?.response?.data?.errors;
-      showSnackBar(errors?.join(", ") || "Invalid GLCC", "error");
+      setUserInputs((prev) => ({
+        ...prev,
+        branch: "",
+        currency: null,
+        cgl: "",
+      }));
+
+      snackbar(
+        e?.response?.data?.data?.errors?.join(", ") || "Invalid GLCC",
+        "error",
+      );
     } finally {
       setGlccLoading(false);
     }
   };
 
-  const fetchCurrencies = async () => {
-    setLoading((prev) => ({ ...prev, currency: true }));
-    try {
-      const result = await callApi(
-        "/CM/common-master/currency-code-name-only",
-        null,
-        "GET"
-      );
-
-      const sortedData = (result?.data || []).sort((a, b) => {
-        if (a.currencyCode === "INR") return -1;
-        if (b.currencyCode === "INR") return 1;
-        return a.currencyName.localeCompare(b.currencyName);
-      });
-
-      setCurrencies(sortedData);
-    } catch {
-      showSnackBar("Currency data not available", "error");
-    } finally {
-      setLoading((prev) => ({ ...prev, currency: false }));
-    }
-  };
-
-  const handleDownloadExcel = async () => {
+  const handleDownload = async () => {
     try {
       setExportLoading(true);
       const payload = {
         menuId: selectedMenu?.id,
-        currency: currency,
-        cgl: cgl?.split(" - ")[0],
-        branch: branch.split("-")[0],
-        startDate:
-          mode === "datewise"
-            ? start.format("DD-MM-YYYY")
-            : dayjs(start).format("DD-MM-YYYY"),
-        endDate:
-          mode === "datewise"
-            ? end.format("DD-MM-YYYY")
-            : dayjs(end).format("DD-MM-YYYY"),
+        branch: userInputs?.branch?.split("-")[0].trim(),
+        currency: userInputs?.currency?.split(" (")[0],
+        cgl: userInputs?.cgl?.split(" -")[0],
+        fromDate: dayjs(userInputs?.fromDate).format("DD/MM/YYYY"),
+        toDate: dayjs(userInputs?.toDate).format("DD/MM/YYYY"),
+        minAmount: userInputs.minAmount ? Number(userInputs.minAmount) : null,
+        maxAmount: userInputs.maxAmount ? Number(userInputs.maxAmount) : null,
+        sourceFlags: (userInputs.sourceFlags || []).map((item) => item.flagId),
       };
 
       const downloadResponse = await callApi(
-        "/ES/balance/export",
+        "/ES/transaction-con/transactions-download",
         payload,
         "POST",
-        "arraybuffer"
+        "arraybuffer",
       );
 
-      const fileName = `GL_Balance_${payload.cgl}`;
+      const fileName = `GL_Transactions_${payload.cgl}`;
       if (downloadResponse && downloadResponse?.byteLength > 0) {
         downloadFile(downloadResponse, "excel", fileName);
-        return;
       }
-    } catch (error) {
-      console.error("Something Went Wrong!!", error);
-      showSnackBar("Download Failed");
     } finally {
       setExportLoading(false);
     }
   };
 
-  const fetchSearchData = useCallback(
-    async (type, term) => {
-      try {
-        setLoading((prev) => ({ ...prev, [type]: true }));
-
-        let circleValue = "";
-        if (permissions?.wholebank === true) {
-          circleValue = "null";
-        } else if (user?.isCircle === true || permissions?.circle) {
-          circleValue = user?.circleCode;
-        }
-
-        const url =
-          type === "branch"
-            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(
-                term
-              )}&circleCode=${circleValue || ""}`
-            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(
-                term
-              )}`;
-
-        const result = await callApi(url, null, "GET");
-
-        if (result?.data?.length > 0) {
-          if (type === "branch") {
-            setBranches(result.data.map((i) => `${i.code}-${i.name}`));
-          } else {
-            setCgls(
-              result.data.map((i) => `${i.cglNumber} - ${i.description}`)
-            );
-          }
-        } else {
-          showSnackBar("Data not available", "error");
-        }
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading((prev) => ({ ...prev, [type]: false }));
-      }
-    },
-    [callApi, permissions, user]
-  );
-
-  const handleSearchChange = (value, reason, type) => {
-    if (reason === "input") {
-      if (value?.length >= 3) {
-        fetchSearchData(type, value);
-      }
-    } else if (reason === "clear" || reason === "blur") {
-      if (type === "branch") setBranches([]);
-      if (type === "cgl") setCgls([]);
+  useEffect(() => {
+    // if (rowCount > 0) fetchTransactions();
+    if (data) {
+      fetchTransactions();
     }
-  };
-
-  // FIX 2: Explicitly pass page 0 payload directly so state delays do not cause double calls
-  const handleSubmit = () => {
-    setSearchLoading(true);
-    setData(null);
-    const newConf = { ...fetchConf, page: 0 };
-    setFetchConf(newConf);
-    fetchBalance(newConf); 
-  };
+  }, [
+    paginationModel.page,
+    paginationModel.pageSize,
+    sortModel,
+    debouncedFilterModel,
+    // fetchTransactions,
+    // rowCount,
+  ]);
 
   const resetState = () => {
     setData(null);
-    setCgl(null);
-    setCgls([]);
-    setBranch(null);
-    setCurrency(null);
-    setStart(null);
-    setEnd(null);
-    setBranches([]);
-    setFetchConf({
+    setRowCount(0);
+    setLoading(false);
+
+    // NEW
+    setFiltersExpanded(true);
+    setGlcc("");
+    setGlccValidated(false);
+
+    setUserInputs({
+      branch: "",
+      currency: null,
+      cgl: "",
+      fromDate: null,
+      toDate: null,
+      minAmount: "",
+      maxAmount: "",
+      sourceFlags: sourceOptions,
+    });
+
+    setPaginationModel({
       page: 0,
       pageSize: 25,
       sortIn: "DESC",
     });
-    setGlcc("");
-    setGlccValidated(false);
   };
 
-  // FIX 3: REMOVED the useEffect listening to [fetchConf.page, fetchConf.pageSize] 
-  // It is an anti-pattern. Fetching is now explicitly handled.
-
-  useEffect(() => {
-    fetchCurrencies();
-  }, []);
-
+  // Date Requirement
   useEffect(() => {
     const fetchSystemDate = async () => {
       try {
         const dateRes = await callApi("/PS/file/fincore-date", {}, "GET");
+
         const etlRaw = dateRes?.data?.userDate;
         const etl = etlRaw ? dayjs(etlRaw.split("T")[0]) : dayjs();
+        // const startDate = dayjs("2026-03-31");
+
         setEtlDate(etl);
+        // setUserInputs((prev) => ({
+        //   ...prev,
+        //   fromDate: startDate,
+        //   toDate: etl,
+        // }));
       } catch (e) {
-        console.error("Date error:", e);
-        setEtlDate(dayjs());
+        console.error("System Date Fetch Error:", e);
       }
     };
     fetchSystemDate();
+  }, [callApi]);
+
+  useEffect(() => {
+    const fetchFlags = async () => {
+      try {
+        const res = await callApi("/CM/common-master/source-flag", null, "GET");
+
+        const flags = res?.data || [];
+
+        setSourceOptions(flags);
+
+        if (flags.length > 0) {
+          setUserInputs((prev) => ({
+            ...prev,
+            sourceFlags: flags,
+          }));
+        }
+      } catch (e) {
+        console.error("Flags error:", e);
+      }
+    };
+
+    fetchFlags();
   }, [callApi]);
 
   return (
@@ -328,21 +344,31 @@ export default function BalanceEnquiryScreen() {
         <Paper
           elevation={0}
           sx={{
-            p: { xs: 1.5, sm: 2, md: 2.5 },
-            mt: { xs: -1, sm: -2 },
+            p: {
+              xs: 1.5,
+              sm: 2,
+              md: 2.5,
+            },
+            mt: {
+              xs: -1,
+              sm: -2,
+            },
             mb: 3,
             bgcolor: "rgba(255, 255, 255, 0.4)",
             backdropFilter: "blur(4px)",
             border: "1px solid",
             borderColor: "divider",
-            borderRadius: { xs: 2, sm: 3 },
+            borderRadius: {
+              xs: 2,
+              sm: 3,
+            },
             overflow: "hidden",
           }}
         >
           <Box
             sx={{
-              mb: filtersExpanded ? 1 : 0.5,
-              p: { xs: 1, sm: 1.2 },
+              mb: 3,
+              p: 1.2,
               borderRadius: 2,
               bgcolor: "background.paper",
               boxShadow: 2,
@@ -356,19 +382,14 @@ export default function BalanceEnquiryScreen() {
               justifyContent="space-between"
               spacing={2}
             >
+              {/* LEFT */}
               <Stack
                 direction="row"
                 spacing={{ xs: 1.5, sm: 2 }}
                 alignItems="center"
                 sx={{ width: "100%" }}
               >
-                <AccountBalanceIcon
-                  color="primary"
-                  sx={{
-                    fontSize: { xs: 30, sm: 36 },
-                    flexShrink: 0,
-                  }}
-                />
+                <ReceiptIcon color="primary" fontSize="medium" />
 
                 <Box sx={{ minWidth: 0 }}>
                   <Typography
@@ -376,48 +397,64 @@ export default function BalanceEnquiryScreen() {
                     fontWeight={700}
                     lineHeight={1.2}
                     sx={{
-                      fontSize: { xs: "0.95rem", sm: "1rem", md: "1.05rem" },
+                      fontSize: {
+                        xs: "0.95rem",
+                        sm: "1rem",
+                        md: "1.05rem",
+                      },
                     }}
                   >
-                    Balance Search & Records Enquiry
+                    Transaction Search & Records Enquiry
                   </Typography>
 
                   <Typography
                     variant="body2"
                     color="text.secondary"
-                    sx={{
-                      mt: 0.2,
-                      fontSize: { xs: "0.75rem", sm: "0.82rem" },
-                    }}
+                    sx={{ mt: 0.2 }}
                   >
                     Enter the required details below to retrieve and view
-                    Balance records.
+                    historical transaction records.
                   </Typography>
                 </Box>
               </Stack>
 
+              {/* BUTTON */}
               {data && (
-                <StyledButton
+                <Button
+                  startIcon={<ManageSearchIcon />}
                   variant="contained"
-                  startIcon={<ManageSearchOutlinedIcon />}
+                  size="small"
                   onClick={() => setFiltersExpanded((prev) => !prev)}
                   sx={{
                     textTransform: "none",
                     borderRadius: "8px",
                     fontWeight: 600,
-                    minWidth: { xs: "100%", sm: "140px" },
-                    width: { xs: "100%", sm: "auto" },
-                    height: { xs: 38, sm: 32 },
+                    minWidth: {
+                      xs: "100%",
+                      sm: "140px",
+                    },
+                    width: {
+                      xs: "100%",
+                      sm: "auto",
+                    },
+                    height: {
+                      xs: 38,
+                      sm: 32,
+                    },
                     px: 1.5,
-                    fontSize: { xs: "0.8rem", sm: "0.82rem" },
+                    fontSize: {
+                      xs: "0.8rem",
+                      sm: "0.82rem",
+                    },
                   }}
                 >
                   {filtersExpanded ? "Hide Filters" : "Edit Search"}
-                </StyledButton>
+                </Button>
               )}
             </Stack>
           </Box>
 
+          {/* SUMMARY CHIPS */}
           {data && !filtersExpanded && (
             <Stack
               direction="row"
@@ -430,46 +467,53 @@ export default function BalanceEnquiryScreen() {
               }}
             >
               {[
-                { value: `Branch: ${branch}` },
-                { value: `Currency: ${currency}` },
-                { value: `Cgl: ${cgl}` },
-                {
-                  value: `Date: ${dayjs(start).format(
-                    "DD MMM YYYY"
-                  )} - ${dayjs(end).format("DD MMM YYYY")}`,
-                },
-              ]
-                .filter((item) => item.value)
-                .map((item, index) => (
-                  <Box
-                    key={index}
+                `Branch: ${userInputs?.branch}`,
+                `Currency: ${userInputs?.currency}`,
+                `CGL: ${userInputs?.cgl}`,
+                `Date: ${dayjs(userInputs?.fromDate).format(
+                  "DD MMM YYYY",
+                )} - ${dayjs(userInputs?.toDate).format("DD MMM YYYY")}`,
+                ...(userInputs?.minAmount || userInputs?.maxAmount
+                  ? [
+                      `Amount: ${userInputs?.minAmount || 0} - ${
+                        userInputs?.maxAmount || "∞"
+                      }`,
+                    ]
+                  : []),
+              ].map((item, index) => (
+                <Box
+                  key={index}
+                  sx={{
+                    px: { xs: 1.2, sm: 1.5 },
+                    py: 0.45,
+                    borderRadius: "20px",
+                    bgcolor: "rgba(88, 70, 159, 0.08)",
+                    border: "1px solid rgba(88, 70, 159, 0.36)",
+                    maxWidth: "100%",
+                  }}
+                >
+                  <Typography
                     sx={{
-                      px: { xs: 1.2, sm: 1.5 },
-                      py: 0.45,
-                      borderRadius: "20px",
-                      bgcolor: "rgba(88, 70, 159, 0.08)",
-                      border: "1px solid rgba(88, 70, 159, 0.36)",
-                      maxWidth: "100%",
+                      fontSize: {
+                        xs: "0.68rem",
+                        sm: "0.72rem",
+                      },
+                      fontWeight: 500,
+                      color: "#58469f",
+                      wordBreak: "break-word",
                     }}
                   >
-                    <Typography
-                      sx={{
-                        fontSize: { xs: "0.68rem", sm: "0.72rem" },
-                        fontWeight: 500,
-                        color: "#58469f",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {item.value}
-                    </Typography>
-                  </Box>
-                ))}
+                    {item}
+                  </Typography>
+                </Box>
+              ))}
             </Stack>
           )}
 
+          {/* FILTERS */}
           {filtersExpanded && (
             <>
-              {searchLoading && (
+              {searchLoading && !data?.data?.length && (
                 <LinearProgress
                   sx={{
                     height: 3,
@@ -482,170 +526,358 @@ export default function BalanceEnquiryScreen() {
                   }}
                 />
               )}
-
-              <BalanceFilters
-                branch={branch}
-                setBranch={setBranch}
-                currency={currency}
-                setCurrency={setCurrency}
-                cgl={cgl}
-                setCgl={setCgl}
-                start={start}
-                setStart={setStart}
-                end={end}
-                setEnd={setEnd}
-                mode={mode}
-                setMode={setMode}
+              <TransactionFilters
+                userInputs={userInputs}
+                setUserInputs={setUserInputs}
                 currencies={currencies}
-                branches={branches}
-                cgls={cgls}
-                loading={loading}
-                req={req}
-                handleSearchChange={handleSearchChange}
                 fetchCurrencies={fetchCurrencies}
-                handleSubmit={handleSubmit}
-                resetState={resetState}
-                isNumeric={isNumeric}
-                user={user}
-                permissions={permissions}
-                etlDate={etlDate}
                 glcc={glcc}
                 setGlcc={setGlcc}
                 glccValidated={glccValidated}
                 setGlccValidated={setGlccValidated}
                 validateGlcc={validateGlcc}
                 glccLoading={glccLoading}
+                onSubmit={() => {
+                  // setFiltersExpanded(false);
+                  if (paginationModel.page === 0) {
+                    fetchTransactions();
+                  } else {
+                    setPaginationModel((prev) => ({
+                      ...prev,
+                      page: 0,
+                    }));
+                  }
+                }}
+                resetState={resetState}
+                user={user}
+                sourceOptions={sourceOptions}
+                etlDate={etlDate}
               />
             </>
           )}
         </Paper>
 
         {data && (
-          <BalanceTable
+          <TransactionTable
             data={data}
-            loading={loading.balance}
+            loading={loading}
+            userInputs={userInputs}
+            sourceOptions={sourceOptions}
+            onDownload={handleDownload}
             rowCount={rowCount}
-            fetchConf={fetchConf}
-            setFetchConf={setFetchConf}
-            handleDownloadExcel={handleDownloadExcel}
+            paginationModel={paginationModel}
+            setPaginationModel={setPaginationModel}
+            sortModel={sortModel}
+            setSortModel={setSortModel}
+            filterModel={filterModel}
+            setFilterModel={setFilterModel}
             exportLoading={exportLoading}
-            onFetchData={fetchBalance} // FIX 4: Pass fetchBalance to the table to be called directly
           />
         )}
       </Box>
     </>
   );
-}
+};
 
-
+export default TransactionEnquiryScreen;
 
 
 import React from "react";
 import { DataGrid } from "@mui/x-data-grid";
+import { Button, Typography, Stack, Box, styled, Grid } from "@mui/material";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
-import { balanceColumns } from "./BalanceColumns";
-import { OverlayBox } from "./BalanceStyles";
-import LoadingOverlay from "../../../utils/LoadingOverlay";
-import {
-  Button,
-  Typography,
-  Stack,
-  Box,
-  Chip,
-  CircularProgress,
-} from "@mui/material";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
+import EventIcon from "@mui/icons-material/Event";
+import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import TrendingDownIcon from "@mui/icons-material/TrendingDown";
+import { StyledDataBox } from "./TransactionStyles";
+import CircularProgress from "@mui/material/CircularProgress";
+import CustomChip from "../../../utils/CustomChip";
+
+const OverlayBox = styled(Box)(() => ({
+  display: "flex",
+  flexDirection: "column",
+  height: "100%",
+  justifyContent: "center",
+  alignItems: "center",
+}));
 
 const CustomNoRowsOverlay = () => (
   <OverlayBox>
     <ErrorOutlineIcon fontSize="large" color="action" />
     <Typography variant="h5" fontSize="1.2rem" color="text.secondary">
-      No balance records available for the selected criteria
+      No transactions available for the selected criteria
     </Typography>
   </OverlayBox>
 );
 
-export default function BalanceTable({
+const TransactionTable = ({
   data,
   loading,
+  onDownload,
   rowCount,
-  fetchConf,
-  setFetchConf,
-  handleDownloadExcel,
+  paginationModel,
+  setPaginationModel,
+  sortModel,
+  setSortModel,
+  filterModel,
+  setFilterModel,
+  userInputs,
+  sourceOptions,
   exportLoading,
-  onFetchData, // Accept explicit fetch trigger
-}) {
+}) => {
+  const rows = data?.data || [];
+  const balances = data?.extraData || {};
+
+  // =========================================================
+  // FRONTEND GUARDRAIL: Check if sort is chronological
+  // =========================================================
+  // If sortModel is empty, the backend defaults to Date ASC.
+  const isChronologicalSort =
+    !sortModel ||
+    sortModel.length === 0 ||
+    sortModel[0]?.field === "date" ||
+    sortModel[0]?.field === "postDate";
+
+  // Hide the top summary cards if not sorted chronologically
+  const showBalances =
+    userInputs?.sourceFlags?.length === sourceOptions?.length &&
+    !userInputs?.minAmount &&
+    !userInputs?.maxAmount &&
+    rows.length > 0 &&
+    isChronologicalSort; // <-- Appended check here
+
+  const transactionColumns = [
+    {
+      field: "date",
+      headerName: "Date",
+      flex: 0.5,
+      minWidth: 120,
+      filterable: false,
+    },
+    {
+      field: "batchId",
+      headerName: "Batch Id",
+      flex: 0.5,
+      minWidth: 100,
+      filterable: true,
+      valueFormatter: (value) => (value == null ? "-" : value),
+    },
+    {
+      field: "journalNumber",
+      headerName: "Journal No.",
+      flex: 0.8,
+      minWidth: 150,
+      filterable: true,
+      valueFormatter: (value) => (value == null ? "-" : value),
+    },
+    {
+      field: "particulars",
+      headerName: "Narration",
+      flex: 1.5,
+      minWidth: 180,
+      filterable: true,
+    },
+    {
+      field: "debitAmount",
+      headerName: "Debit",
+      flex: 1,
+      minWidth: 150,
+      headerAlign: "left",
+      align: "right",
+      filterable: false,
+      renderCell: (params) => {
+        const val = Number(params.value);
+
+        const formattedAmount = new Intl.NumberFormat("en-IN", {
+          minimumFractionDigits: 4,
+          maximumFractionDigits: 4,
+        }).format(Math.abs(val));
+
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              height: "100%",
+              width: "100%",
+            }}
+          >
+            {/* Amount with dynamic color */}
+            <Typography variant="body2">{formattedAmount}</Typography>
+          </Box>
+        );
+      },
+    },
+    {
+      field: "creditAmount",
+      headerName: "Credit",
+      flex: 1,
+      minWidth: 150,
+      headerAlign: "left",
+      align: "right",
+      filterable: false,
+      renderCell: (params) => {
+        const val = Number(params.value);
+
+        const formattedAmount = new Intl.NumberFormat("en-IN", {
+          minimumFractionDigits: 4,
+          maximumFractionDigits: 4,
+        }).format(Math.abs(val));
+
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              height: "100%",
+              width: "100%",
+            }}
+          >
+            {/* Amount with dynamic color */}
+            <Typography variant="body2">{formattedAmount}</Typography>
+          </Box>
+        );
+      },
+    },
+    {
+      field: "runningBalance",
+      headerName: "Balance",
+      flex: 1,
+      minWidth: 170,
+      headerAlign: "left",
+      align: "right",
+      sortable: false,
+      renderCell: (params) => {
+        const val = Number(params.value);
+
+        const formattedAmount = new Intl.NumberFormat("en-IN", {
+          minimumFractionDigits: 4,
+          maximumFractionDigits: 4,
+        }).format(Math.abs(val));
+
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              height: "100%",
+              width: "100%",
+            }}
+          >
+            {/* Amount with dynamic color */}
+            <Typography variant="body2" fontWeight="500">
+              {formattedAmount}
+            </Typography>
+          </Box>
+        );
+      },
+    },
+    {
+      field: "sourceFlag",
+      headerName: "Transaction Type",
+      flex: 1.2,
+      minWidth: 150,
+      filterable: false,
+      renderCell: (params) => {
+        if (!params.value) return "";
+        const source = sourceOptions.find(
+          (item) => item.flagId === params.value,
+        );
+        return source ? source.flagName : params.value;
+      },
+    },
+  ];
+
+  // =========================================================
+  // DYNAMIC COLUMNS: Remove "Balance" column if not chronological
+  // =========================================================
+  const activeColumns = isChronologicalSort
+    ? transactionColumns
+    : transactionColumns.filter((col) => col.field !== "runningBalance");
+
   return (
-    <Box sx={{ width: "100%", height: "100%" }}>
+    <StyledDataBox
+      sx={{
+        mt: 2,
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
       <Box
         sx={{
-          p: 2,
-          borderRadius: "20px",
-          background: "rgba(255, 255, 255, 0.4)",
+          p: { xs: 1, sm: 1.2 },
+          mb: 3,
+          mt: { xs: 0, sm: -2 },
+          borderRadius: "16px",
+          background: "rgba(255,255,255,0.1)",
           backdropFilter: "blur(12px)",
-          border: "1px solid rgba(255, 255, 255, 0.3)",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.05)",
+          border: "1px solid rgba(255,255,255,0.3)",
+          boxShadow: "0 4px 20px rgba(0,0,0,0.03)",
           display: "flex",
           flexDirection: "column",
-          gap: 2.5,
+          gap: 1,
         }}
       >
         <Stack
           direction={{ xs: "column", sm: "row" }}
-          spacing={2}
           justifyContent="space-between"
           alignItems={{ xs: "stretch", sm: "center" }}
+          spacing={2}
         >
           <Box
             sx={{
               display: "flex",
-              flexDirection: {
-                xs: "column",
-                sm: "row",
-              },
-              alignItems: {
-                xs: "flex-start",
-                sm: "baseline",
-              },
-              gap: {
-                xs: 1,
-                sm: 1.5,
-              },
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: 1,
             }}
           >
             <Typography
-              variant="h6"
-              fontWeight={800}
               sx={{
+                fontWeight: 800,
                 color: "#1a1a1a",
                 letterSpacing: "-0.5px",
-              }}
-            >
-              Balance Ledger
-            </Typography>
-
-            <Chip
-              label={
-                rowCount > 0
-                  ? `${rowCount.toLocaleString("en-IN")} Records Found`
-                  : "No Records"
-              }
-              size="small"
-              sx={{
-                fontWeight: 700,
-                color: "#58469f",
-                bgcolor: "rgba(88, 70, 159, 0.1)",
-                borderRadius: "8px",
-                width: {
-                  xs: "fit-content",
-                  sm: "auto",
+                fontSize: {
+                  xs: "0.95rem",
+                  sm: "1rem",
+                  md: "1.05rem",
                 },
               }}
-            />
+            >
+              Transaction Ledger
+            </Typography>
+
+            <Typography
+              variant="caption"
+              fontWeight={700}
+              sx={{
+                color: "#58469f",
+                textTransform: "uppercase",
+                bgcolor: "rgba(88,70,159,0.1)",
+                px: 1.2,
+                py: 0.3,
+                borderRadius: 1.5,
+                fontSize: {
+                  xs: "0.6rem",
+                  sm: "0.65rem",
+                },
+              }}
+            >
+              {rowCount > 0
+                ? `${rowCount.toLocaleString()} Records Found`
+                : "No Records"}
+            </Typography>
           </Box>
+
           <Button
             variant="contained"
-            size="small"
             startIcon={
               exportLoading ? (
                 <CircularProgress size={16} color="inherit" />
@@ -653,96 +885,250 @@ export default function BalanceTable({
                 <FileDownloadIcon />
               )
             }
-            onClick={handleDownloadExcel}
+            onClick={onDownload}
             disabled={!rowCount || loading || exportLoading}
             sx={{
+              width: {
+                xs: "100%",
+                sm: "auto",
+              },
               textTransform: "none",
               bgcolor: "#58469f",
               fontWeight: 700,
               borderRadius: "8px",
               px: 3,
-              "&:hover": { bgcolor: "#45357a" },
+              minHeight: 38,
+              boxShadow: "0 4px 12px rgba(88,70,159,0.3)",
+              "&:hover": {
+                bgcolor: "#45357a",
+              },
             }}
           >
-            {exportLoading ? "Preparing..." : "Export"}
+            {exportLoading ? "Exporting..." : "Export"}
           </Button>
         </Stack>
 
-        <Box
-          sx={{
-            width: "100%",
-            overflowX: "auto",
-            height: {
-              xs: "55vh",
-              sm: "60vh",
-              md: 470,
-            },
-          }}
-        >
-          <DataGrid
-            rows={data}
-            columns={balanceColumns}
-            loading={loading}
-            rowCount={rowCount}
-            paginationMode="server"
-            pageSizeOptions={[25, 50, 75, 100]}
-            // Provide explicit format expected by MUI
-            paginationModel={{
-              page: fetchConf.page,
-              pageSize: fetchConf.pageSize,
-            }}
-            slots={{
-              noRowsOverlay: CustomNoRowsOverlay,
-            }}
-            onPaginationModelChange={(model) => {
-              const newConf = { 
-                ...fetchConf, 
-                page: model.page, 
-                pageSize: model.pageSize 
-              };
-              setFetchConf(newConf);
-              if (onFetchData) onFetchData(newConf); // Explicit Fetch Call
-            }}
-            sortingMode="server"
-            sortingOrder={["asc", "desc"]}
-            sortModel={[
+        {showBalances && balances && (
+          <Grid container spacing={2}>
+            {[
               {
-                field: "date",
-                sort: fetchConf.sortIn?.toLowerCase() || "desc",
+                label: "Opening Balance",
+                date: balances.openingDate || balances.OpeningDate,
+                amt: balances.openingBalance,
+                icon: <AccountBalanceWalletIcon />,
               },
-            ]}
-            onSortModelChange={(model) => {
-              if (model.length === 0) return;
-              
-              const newSort = model[0].sort?.toUpperCase();
-              
-              // Only trigger a new fetch if the sort direction truly changed
-              if (newSort && newSort !== fetchConf.sortIn) {
-                const newConf = { 
-                  ...fetchConf, 
-                  sortIn: newSort, 
-                  page: 0 // Reset page to 0 on new sort
-                };
-                setFetchConf(newConf);
-                if (onFetchData) onFetchData(newConf); // Explicit Fetch Call
-              }
-            }}
-            rowHeight={45}
-            disableRowSelectionOnClick
-            sx={{
-              borderRadius: "20px",
-              backgroundColor: "rgba(255,255,255,0.4)",
-              border: "1px solid rgba(255,255,255,0.3)",
-              "& .MuiDataGrid-columnHeaders": {
-                bgcolor: "#f8f9fa",
-                fontWeight: 700,
+              {
+                label: "Closing Balance",
+                date: balances.closingDate || balances.ClosingDate,
+                amt: balances.closingBalance,
+                icon: <AccountBalanceWalletIcon />,
               },
-            }}
-          />
-        </Box>
+            ].map((item, index) => {
+              const isNeg = item.amt < 0;
+              const indicator = isNeg ? "DR" : "CR";
+              const absVal = Math.abs(item.amt || 0).toFixed(4);
+
+              const activeColor = isNeg ? "#b84646f3" : "#427a44";
+              const activeBg = isNeg
+                ? "linear-gradient(135deg, #fff5f5 0%, #fed7d759 100%)"
+                : "linear-gradient(135deg, #f6fdf9 0%, #c6f6d556 100%)";
+
+              return (
+                <Grid
+                  key={index}
+                  size={{
+                    xs: 12,
+                    sm: 6,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      p: { xs: 1, sm: 0.8 },
+                      borderRadius: "12px",
+                      background: activeBg,
+                      border: "1px solid rgba(255,255,255,0.3)",
+                      borderBottom: `4px solid ${activeColor}`,
+                      display: "flex",
+                      flexDirection: {
+                        xs: "column",
+                        sm: "row",
+                      },
+                      alignItems: {
+                        xs: "flex-start",
+                        sm: "center",
+                      },
+                      justifyContent: "space-between",
+                      gap: 1.5,
+                      position: "relative",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <Stack
+                      direction="row"
+                      spacing={2}
+                      justifyContent="space-between"
+                      alignItems={{ xs: "stretch", sm: "center" }}
+                      sx={{ zIndex: 1 }}
+                    >
+                      <Box
+                        sx={{
+                          p: 0.6,
+                          borderRadius: "10px",
+                          bgcolor: "#fff",
+                          display: "flex",
+                          mr: 1.5,
+                          boxShadow: "0 2px 6px rgba(0,0,0,0.05)",
+                          color: activeColor,
+                        }}
+                      >
+                        {item.icon}
+                      </Box>
+                      <Box>
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          fontWeight={700}
+                          sx={{
+                            textTransform: "uppercase",
+                            fontSize: "0.72rem",
+                          }}
+                        >
+                          {item.label}
+                        </Typography>
+                        <Typography
+                          variant="body2"
+                          fontWeight={800}
+                          sx={{ color: "#2c3e50", lineHeight: 1 }}
+                        >
+                          {absVal}
+                          <Box
+                            component="span"
+                            sx={{
+                              fontSize: "0.7rem",
+                              ml: 0.5,
+                              color: activeColor,
+                              fontWeight: 900,
+                            }}
+                          >
+                            {indicator}
+                          </Box>
+                        </Typography>
+                      </Box>
+                    </Stack>
+
+                    {isNeg ? (
+                      <TrendingDownIcon
+                        sx={{
+                          position: "absolute",
+                          left: "50%",
+                          top: "50%",
+                          transform: "translate(-50%, -50%)",
+                          fontSize: "2.8rem",
+                          opacity: 0.25,
+                          color: activeColor,
+                          zIndex: 0,
+                        }}
+                      />
+                    ) : (
+                      <TrendingUpIcon
+                        sx={{
+                          position: "absolute",
+                          left: "50%",
+                          top: "50%",
+                          transform: "translate(-50%, -50%)",
+                          fontSize: "2.8rem",
+                          opacity: 0.25,
+                          color: activeColor,
+                          zIndex: 0,
+                        }}
+                      />
+                    )}
+
+                    <Box sx={{ textAlign: "right", zIndex: 1 }}>
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={0.5}
+                        justifyContent="flex-end"
+                      >
+                        <EventIcon
+                          sx={{ fontSize: "0.8rem", color: "text.secondary" }}
+                        />
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            color: "text.secondary",
+                            fontWeight: 700,
+                            fontSize: "0.72rem",
+                          }}
+                        >
+                          AS OF
+                        </Typography>
+                      </Stack>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          color: "#2c3e50",
+                          fontWeight: 700,
+                          display: "block",
+                        }}
+                      >
+                        {item.date || "N/A"}
+                      </Typography>
+                    </Box>
+                  </Box>
+                </Grid>
+              );
+            })}
+          </Grid>
+        )}
       </Box>
 
-      <LoadingOverlay loading={loading}></LoadingOverlay>
-    </Box>
+      <Box sx={{ flex: 1 }}>
+        <DataGrid
+          density="compact"
+          rows={rows}
+          columns={activeColumns} // <-- Pass the dynamic columns here
+          loading={loading}
+          disableRowSelectionOnClick
+          getRowId={(row) => row.transactionId}
+          paginationMode="server"
+          sortingMode="server"
+          filterMode="server"
+          rowCount={rowCount}
+          paginationModel={paginationModel}
+          onPaginationModelChange={setPaginationModel}
+          pageSizeOptions={[25, 50, 75, 100]}
+          sortModel={sortModel}
+          onSortModelChange={setSortModel}
+          filterModel={filterModel}
+          onFilterModelChange={setFilterModel}
+          slots={{
+            noRowsOverlay: CustomNoRowsOverlay,
+          }}
+          sx={{
+            mt: -2,
+            backgroundColor: "#ffffff6b",
+            border: "none",
+            "& .MuiDataGrid-columnHeaders": {
+              backgroundColor: "#f5f5f5 !important",
+              fontWeight: 700,
+              borderBottom: "2px solid rgba(88, 70, 159, 0.2)",
+              position: "sticky",
+              top: 0,
+              zIndex: 1,
+            },
+            "& .MuiDataGrid-virtualScroller": {
+              overflowY: "auto",
+            },
+            "& .MuiDataGrid-main": {
+              border: "none",
+            },
+          }}
+        />
+      </Box>
+    </StyledDataBox>
   );
-}
+};
+
+export default TransactionTable;
