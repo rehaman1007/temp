@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Autocomplete,
   Box,
@@ -57,7 +57,7 @@ export default function BalanceFilters({
   const { hasWholeBank } = permissions;
   const isBranchUser = !hasWholeBank && !user?.isCircle;
 
-  const MIN_ALLOWED_DATE = dayjs("2026-03-31");
+  const MIN_ALLOWED_DATE = useMemo(() => dayjs("2026-03-31"), []);
   const baseDate = etlDate?.isValid?.() ? etlDate : dayjs();
 
   const GLCC_ALLOWED_REGEX = /^[A-Z0-9]*$/;
@@ -87,7 +87,6 @@ export default function BalanceFilters({
   const INVALID_CGL_MSG =
     "Invalid CGL format. Only letters, numbers, spaces, '_', '-', ' ' ', '<', '>', '/', '&', '('  and ')' are allowed.";
 
-  // Dynamically calculate available filter options based on MIN_ALLOWED_DATE
   const availableFilters = useMemo(() => {
     return getAvailableFilters(baseDate, MIN_ALLOWED_DATE);
   }, [MIN_ALLOWED_DATE, baseDate]);
@@ -101,12 +100,11 @@ export default function BalanceFilters({
     const { newStart, newEnd } = calculateQuickFilterDates(
       option,
       baseDate,
-      MIN_ALLOWED_DATE,
+      MIN_ALLOWED_DATE
     );
 
     setStart(newStart);
     setEnd(newEnd);
-    validateDateRange(newStart, newEnd);
   };
 
   const getDateErrorMessage = (field, error) => {
@@ -114,7 +112,9 @@ export default function BalanceFilters({
       case "invalidDate":
         return `Please enter a valid ${field}`;
       case "minDate":
-        return `${field} cannot be earlier than ${MIN_ALLOWED_DATE.format("DD-MM-YYYY")}`;
+        return `${field} cannot be earlier than ${MIN_ALLOWED_DATE.format(
+          "DD-MM-YYYY"
+        )}`;
       case "maxDate":
         return `${field} cannot exceed ${etlDate?.format("DD-MM-YYYY")}`;
       case "fromGreaterThanTo":
@@ -130,29 +130,39 @@ export default function BalanceFilters({
     }
   };
 
-  const validateDateRange = (fromDate, toDate) => {
-    setFromDateError(null);
-    setToDateError(null);
+  // Centralized Validation Effect
+  useEffect(() => {
+    let fromErr = null;
+    let toErr = null;
 
-    if (!fromDate?.isValid?.() || !toDate?.isValid?.()) {
-      setFromDateError("invalidDate");
-      return;
+    // 1. Validate From Date independently
+    if (start) {
+      if (!start.isValid?.()) fromErr = "invalidDate";
+      else if (start.isBefore(MIN_ALLOWED_DATE, "day")) fromErr = "minDate";
+      else if (etlDate?.isValid?.() && start.isAfter(etlDate, "day"))
+        fromErr = "maxDate";
     }
 
-    if (fromDate.isAfter(toDate, "day")) {
-      setFromDateError("fromGreaterThanTo");
-      return;
+    // 2. Validate To Date independently
+    if (end) {
+      if (!end.isValid?.()) toErr = "invalidDate";
+      else if (end.isBefore(MIN_ALLOWED_DATE, "day")) toErr = "minDate";
+      else if (etlDate?.isValid?.() && end.isAfter(etlDate, "day"))
+        toErr = "afterEtlDate";
     }
 
-    if (toDate.isAfter(fromDate.clone().add(1, "year"), "day")) {
-      setToDateError("rangeExceeds12Months");
-      return;
+    // 3. Cross-field Validation (Only run if both dates are individually valid)
+    if (start?.isValid?.() && end?.isValid?.() && !fromErr && !toErr) {
+      if (start.isAfter(end, "day")) {
+        fromErr = "fromGreaterThanTo";
+      } else if (end.isAfter(start.clone().add(1, "year"), "day")) {
+        toErr = "rangeExceeds12Months";
+      }
     }
 
-    if (etlDate?.isValid?.() && toDate.isAfter(etlDate, "day")) {
-      setToDateError("afterEtlDate");
-    }
-  };
+    setFromDateError(fromErr);
+    setToDateError(toErr);
+  }, [start, end, etlDate, MIN_ALLOWED_DATE]);
 
   const handleReset = () => {
     setFromDateError(null);
@@ -168,23 +178,21 @@ export default function BalanceFilters({
 
   return (
     <Box sx={{ width: "100%", mt: 3 }}>
-      {/* GLOBAL GRID LAYOUT: Enforces uniform columns across both rows */}
       <Box
         sx={{
           display: "grid",
           gridTemplateColumns: {
-            xs: "1fr", // Mobile: 1 Column
-            sm: "repeat(2, 1fr)", // Tablet: 2 Columns
+            xs: "1fr",
+            sm: "repeat(2, 1fr)",
             md:
               permissions?.wholebank || !isBranchUser
                 ? "repeat(4, 1fr)"
-                : "repeat(3, 1fr)", // Desktop
+                : "repeat(3, 1fr)",
           },
           gap: 2,
           mb: 2,
         }}
       >
-        {/* === ROW 1: General Ledger Inputs === */}
         {(hasWholeBank || user?.isCircle === true) && (
           <Box>
             <TextField
@@ -197,19 +205,16 @@ export default function BalanceFilters({
               onChange={(e) => {
                 const value = e.target.value.toUpperCase();
 
-                // Block special characters
                 if (!GLCC_ALLOWED_REGEX.test(value)) {
                   showSnackBar(INVALID_GLCC_MSG, "warning");
                   return;
                 }
 
-                // First 5 characters must be digits
                 if (value.length <= 5 && !/^\d*$/.test(value)) {
                   showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
                   return;
                 }
 
-                // Characters 6-8 must be letters
                 if (
                   value.length > 5 &&
                   value.length <= 8 &&
@@ -219,7 +224,6 @@ export default function BalanceFilters({
                   return;
                 }
 
-                // Characters 9-18 must be digits
                 if (value.length > 8 && !/^\d{5}[A-Z]{3}\d*$/.test(value)) {
                   showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
                   return;
@@ -309,7 +313,7 @@ export default function BalanceFilters({
             setCurrencyInput(
               newValue
                 ? `${newValue.currencyCode} - ${newValue.currencyName}`
-                : "",
+                : ""
             );
           }}
           onOpen={fetchCurrencies}
@@ -374,7 +378,6 @@ export default function BalanceFilters({
         />
       </Box>
 
-      {/* === ROW 2: Date Filters & Actions === */}
       <LocalizationProvider dateAdapter={AdapterDayjs}>
         <Box
           sx={{
@@ -414,10 +417,8 @@ export default function BalanceFilters({
             disableHighlightToday
             onChange={(value) => {
               setStart(value);
-              setQuickFilter("custom"); // Revert on manual change
-              if (end) validateDateRange(value, end);
+              setQuickFilter("custom");
             }}
-            onError={(error) => setFromDateError(error)}
             slotProps={{
               textField: {
                 label: "From Date*",
@@ -440,15 +441,6 @@ export default function BalanceFilters({
             onChange={(value) => {
               setEnd(value);
               setQuickFilter("custom");
-              if (start) validateDateRange(start, value);
-            }}
-            // Ignore 'minDate' error from library to prevent conflict
-            onError={(error) => {
-              if (error === "minDate") {
-                // let validateDateRange handle the "From > To" message
-                return;
-              }
-              setToDateError(error);
             }}
             slotProps={{
               textField: {
@@ -461,7 +453,6 @@ export default function BalanceFilters({
             }}
           />
 
-          {/* Action Buttons Container */}
           <Box
             sx={{
               display: "flex",
@@ -484,8 +475,8 @@ export default function BalanceFilters({
               startIcon={<SearchIcon />}
               disabled={
                 !(cgl && currency && branch && start && end) ||
-                fromDateError ||
-                toDateError
+                fromDateError !== null ||
+                toDateError !== null
               }
               onClick={handleSubmit}
               sx={{ flex: { xs: 1, sm: "unset" } }}
@@ -496,7 +487,6 @@ export default function BalanceFilters({
         </Box>
       </LocalizationProvider>
 
-      {/* Validation Message Render */}
       {validationMessages.length > 0 && (
         <Box
           sx={{
