@@ -8,7 +8,7 @@ import {
   Chip,
   Typography,
   Grid,
-  Stack, // Make sure Stack is imported for the error messages
+  Stack,
 } from "@mui/material";
 import { DatePicker, LocalizationProvider } from "@mui/x-date-pickers";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
@@ -53,7 +53,7 @@ const TransactionFilters = ({
   const [toDateError, setToDateError] = useState(null);
   const [quickFilter, setQuickFilter] = useState("custom");
 
-  const MIN_ALLOWED_DATE = dayjs("2026-03-31");
+  const MIN_ALLOWED_DATE = useMemo(() => dayjs("2026-03-31"), []);
   const baseDate = etlDate?.isValid?.() ? etlDate : dayjs();
 
   const GLCC_ALLOWED_REGEX = /^[A-Z0-9]*$/;
@@ -114,12 +114,11 @@ const TransactionFilters = ({
     const { newStart, newEnd } = calculateQuickFilterDates(
       option,
       baseDate,
-      MIN_ALLOWED_DATE,
+      MIN_ALLOWED_DATE
     );
 
     update("fromDate", newStart);
     update("toDate", newEnd);
-    validateDateRange(newStart, newEnd);
   };
 
   // ================= SEARCH OPTIONS =================
@@ -138,13 +137,17 @@ const TransactionFilters = ({
           permissions?.wholebank === true
             ? "null"
             : user?.isCircle === true || permissions?.circle
-              ? user?.circleCode
-              : "";
+            ? user?.circleCode
+            : "";
 
         const url =
           type === "branch"
-            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(term)}&circleCode=${circleValue || ""}`
-            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(term)}`;
+            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(
+                term
+              )}&circleCode=${circleValue || ""}`
+            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(
+                term
+              )}`;
 
         const result = await callApi(url, null, "GET");
         let options = [];
@@ -154,7 +157,7 @@ const TransactionFilters = ({
             options.unshift(
               type === "branch"
                 ? `${item.code}-${item.name}`
-                : `${item.cglNumber} - ${item.description}`,
+                : `${item.cglNumber} - ${item.description}`
             );
           });
           setSearchOptions(type, options);
@@ -167,7 +170,7 @@ const TransactionFilters = ({
         setLoading((p) => ({ ...p, [type]: false }));
       }
     },
-    [callApi, permissions, user, showSnackBar],
+    [callApi, permissions, user, showSnackBar]
   );
 
   // ================= INPUT HANDLER =================
@@ -214,12 +217,50 @@ const TransactionFilters = ({
     if (req.cgl) setCgls([]);
   }, [req.cgl]);
 
+  // ================= CENTRALIZED DATE VALIDATION =================
+  useEffect(() => {
+    let fromErr = null;
+    let toErr = null;
+    const start = userInputs?.fromDate;
+    const end = userInputs?.toDate;
+
+    // 1. Validate From Date
+    if (start) {
+      if (!start.isValid?.()) fromErr = "invalidDate";
+      else if (start.isBefore(MIN_ALLOWED_DATE, "day")) fromErr = "minDate";
+      else if (etlDate?.isValid?.() && start.isAfter(etlDate, "day"))
+        fromErr = "maxDate";
+    }
+
+    // 2. Validate To Date
+    if (end) {
+      if (!end.isValid?.()) toErr = "invalidDate";
+      else if (end.isBefore(MIN_ALLOWED_DATE, "day")) toErr = "minDate";
+      else if (etlDate?.isValid?.() && end.isAfter(etlDate, "day"))
+        toErr = "afterEtlDate";
+    }
+
+    // 3. Cross-field Validation
+    if (start?.isValid?.() && end?.isValid?.() && !fromErr && !toErr) {
+      if (start.isAfter(end, "day")) {
+        fromErr = "fromGreaterThanTo";
+      } else if (end.isAfter(start.clone().add(1, "year"), "day")) {
+        toErr = "rangeExceeds12Months";
+      }
+    }
+
+    setFromDateError(fromErr);
+    setToDateError(toErr);
+  }, [userInputs?.fromDate, userInputs?.toDate, etlDate, MIN_ALLOWED_DATE]);
+
   const getDateErrorMessage = (field, error) => {
     switch (error) {
       case "invalidDate":
         return `Please enter a valid ${field}`;
       case "minDate":
-        return `${field} cannot be earlier than ${MIN_ALLOWED_DATE.format("DD-MM-YYYY")}`;
+        return `${field} cannot be earlier than ${MIN_ALLOWED_DATE.format(
+          "DD-MM-YYYY"
+        )}`;
       case "maxDate":
         return `${field} cannot exceed ${etlDate?.format("DD-MM-YYYY")}`;
       case "fromGreaterThanTo":
@@ -232,27 +273,6 @@ const TransactionFilters = ({
         return `To Date cannot exceed ETL Date ${etlDate?.format("DD-MM-YYYY")}`;
       default:
         return "";
-    }
-  };
-
-  const validateDateRange = (fromDate, toDate) => {
-    setFromDateError(null);
-    setToDateError(null);
-
-    if (!fromDate?.isValid?.() || !toDate?.isValid?.()) return;
-
-    if (fromDate.isAfter(toDate, "day")) {
-      setFromDateError("fromGreaterThanTo");
-      return;
-    }
-
-    if (toDate.isAfter(fromDate.clone().add(1, "year"), "day")) {
-      setToDateError("rangeExceeds12Months");
-      return;
-    }
-
-    if (etlDate?.isValid?.() && toDate.isAfter(etlDate, "day")) {
-      setToDateError("afterEtlDate");
     }
   };
 
@@ -289,19 +309,16 @@ const TransactionFilters = ({
                 onChange={(e) => {
                   const value = e.target.value.toUpperCase();
 
-                  // Block special characters
                   if (!GLCC_ALLOWED_REGEX.test(value)) {
                     showSnackBar(INVALID_GLCC_MSG, "warning");
                     return;
                   }
 
-                  // First 5 characters must be digits
                   if (value.length <= 5 && !/^\d*$/.test(value)) {
                     showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
                     return;
                   }
 
-                  // Characters 6-8 must be letters
                   if (
                     value.length > 5 &&
                     value.length <= 8 &&
@@ -311,7 +328,6 @@ const TransactionFilters = ({
                     return;
                   }
 
-                  // Characters 9-18 must be digits
                   if (value.length > 8 && !/^\d{5}[A-Z]{3}\d*$/.test(value)) {
                     showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
                     return;
@@ -354,7 +370,6 @@ const TransactionFilters = ({
                     ? "Please enter at least 3 characters"
                     : "No Options"
                 }
-                // Explicitly clear on close if reason is blur
                 onClose={(e, reason) => {
                   if (reason === "blur") {
                     setSearchOptions("branch", []);
@@ -408,7 +423,6 @@ const TransactionFilters = ({
                 value={userInputs?.currency || null}
                 inputValue={currencyInput}
                 onOpen={fetchCurrencies}
-                // onChange={(event, newValue) => update("currency", newValue)}
                 onInputChange={(e, value, reason) => {
                   if (
                     reason === "input" &&
@@ -460,7 +474,6 @@ const TransactionFilters = ({
                 noOptionsText={
                   req.cgl ? "Please enter at least 3 characters" : "No Options"
                 }
-                // 1. Clear options specifically on blur
                 onClose={(e, reason) => {
                   if (reason === "blur") {
                     setSearchOptions("cgl", []);
@@ -545,9 +558,7 @@ const TransactionFilters = ({
                 onChange={(value) => {
                   update("fromDate", value);
                   setQuickFilter("custom");
-                  validateDateRange(value, userInputs?.toDate);
                 }}
-                onError={(error) => setFromDateError(error ? error : null)}
                 slotProps={{
                   textField: {
                     label: "From Date*",
@@ -574,11 +585,6 @@ const TransactionFilters = ({
                 onChange={(value) => {
                   update("toDate", value);
                   setQuickFilter("custom");
-                  validateDateRange(userInputs?.fromDate, value);
-                }}
-                onError={(error) => {
-                  if (error === "minDate") return;
-                  setToDateError(error ? error : null);
                 }}
                 slotProps={{
                   textField: {
@@ -667,10 +673,6 @@ const TransactionFilters = ({
                     update("sourceFlags", newValue);
                   }
                 }}
-                // filterOptions={(options) => [
-                //   { flagId: "all", flagName: "Select All" },
-                //   ...options,
-                // ]}
                 filterOptions={(options, params) => {
                   const filtered = filter(options, params);
 
@@ -836,11 +838,12 @@ const TransactionFilters = ({
                     userInputs?.branch &&
                     userInputs?.currency &&
                     userInputs?.cgl &&
-                    userInputs?.fromDate?.isValid?.() &&
-                    userInputs?.toDate?.isValid?.() &&
-                    !userInputs.toDate.isBefore(userInputs.fromDate) &&
+                    userInputs?.fromDate &&
+                    userInputs?.toDate &&
                     userInputs?.sourceFlags?.length > 0
-                  )
+                  ) ||
+                  fromDateError !== null ||
+                  toDateError !== null
                 }
                 onClick={onSubmit}
               >
