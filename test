@@ -1,63 +1,59 @@
-import React, { useState, useMemo, useEffect } from "react";
 import {
-  Autocomplete,
   Box,
   MenuItem,
   TextField,
+  Button,
+  Autocomplete,
+  Checkbox,
+  Chip,
   Typography,
-  Stack,
+  Grid,
+  Stack, // Make sure Stack is imported for the error messages
 } from "@mui/material";
 import { DatePicker, LocalizationProvider } from "@mui/x-date-pickers";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import { StyledButton } from "./BalanceStyles";
-import dayjs from "dayjs";
-import SearchIcon from "@mui/icons-material/Search";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
+
+import { useState, useEffect, useCallback, useMemo } from "react";
+import useApi from "../../../hooks/useApi";
 import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import dayjs from "dayjs";
+import { useSelector } from "react-redux";
 import {
   calculateQuickFilterDates,
   getAvailableFilters,
+  getPermissions,
 } from "../../../utils/CommonUtilities";
+import SearchIcon from "@mui/icons-material/Search";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import { createFilterOptions } from "@mui/material/Autocomplete";
 
-export default function BalanceFilters({
-  branch,
-  setBranch,
-  currency,
-  setCurrency,
-  cgl,
-  setCgl,
-  start,
-  setStart,
-  end,
-  setEnd,
+const TransactionFilters = ({
+  userInputs,
+  setUserInputs,
   currencies,
-  branches,
-  cgls,
-  loading,
-  handleSearchChange,
   fetchCurrencies,
-  handleSubmit,
+  onSubmit,
   resetState,
-  isNumeric,
-  req,
   user,
-  permissions,
+  sourceOptions,
   etlDate,
   glcc,
   setGlcc,
   glccValidated,
   setGlccValidated,
   validateGlcc,
-}) {
+}) => {
+  const { callApi } = useApi();
+  const filter = createFilterOptions();
+  const showSnackBar = useCustomSnackbar();
+  const selectedMenu = useSelector((state) => state.menus.selectedMenuItem);
+  const permissions = getPermissions(selectedMenu);
+
   const [fromDateError, setFromDateError] = useState(null);
   const [toDateError, setToDateError] = useState(null);
   const [quickFilter, setQuickFilter] = useState("custom");
-  const showSnackBar = useCustomSnackbar();
 
-  const { hasWholeBank } = permissions;
-  const isBranchUser = !hasWholeBank && !user?.isCircle;
-
-  const MIN_ALLOWED_DATE = useMemo(() => dayjs("2026-03-31"), []);
+  const MIN_ALLOWED_DATE = dayjs("2026-03-31");
   const baseDate = etlDate?.isValid?.() ? etlDate : dayjs();
 
   const GLCC_ALLOWED_REGEX = /^[A-Z0-9]*$/;
@@ -85,8 +81,26 @@ export default function BalanceFilters({
     "Invalid Currency format. Only letters, spaces, '(' and ')' are allowed.";
 
   const INVALID_CGL_MSG =
-    "Invalid CGL format. Only letters, numbers, spaces, '_', '-', ' ' ', '<', '>', '/', '&', '('  and ')' are allowed.";
+    "Invalid CGL format. Only letters, numbers, spaces, '_', '-', ''', '<', '>', '/', '&', '(' and ')' are allowed.";
 
+  const update = (key, value) =>
+    setUserInputs((prev) => ({ ...prev, [key]: value }));
+
+  // ================= STATE =================
+  const [branches, setBranches] = useState([]);
+  const [cgls, setCgls] = useState([]);
+
+  const [loading, setLoading] = useState({
+    branch: false,
+    cgl: false,
+  });
+
+  const [req, setReq] = useState({
+    branch: true,
+    cgl: true,
+  });
+
+  // ================= DYNAMIC DATE FILTERS =================
   const availableFilters = useMemo(() => {
     return getAvailableFilters(baseDate, MIN_ALLOWED_DATE);
   }, [MIN_ALLOWED_DATE, baseDate]);
@@ -100,21 +114,112 @@ export default function BalanceFilters({
     const { newStart, newEnd } = calculateQuickFilterDates(
       option,
       baseDate,
-      MIN_ALLOWED_DATE
+      MIN_ALLOWED_DATE,
     );
 
-    setStart(newStart);
-    setEnd(newEnd);
+    update("fromDate", newStart);
+    update("toDate", newEnd);
+    validateDateRange(newStart, newEnd);
   };
+
+  // ================= SEARCH OPTIONS =================
+  const setSearchOptions = (type, data) => {
+    if (type === "branch") setBranches(data);
+    if (type === "cgl") setCgls(data);
+  };
+
+  // ================= API CALL =================
+  const fetchSearchData = useCallback(
+    async (type, term) => {
+      try {
+        setLoading((p) => ({ ...p, [type]: true }));
+
+        let circleValue =
+          permissions?.wholebank === true
+            ? "null"
+            : user?.isCircle === true || permissions?.circle
+              ? user?.circleCode
+              : "";
+
+        const url =
+          type === "branch"
+            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(term)}&circleCode=${circleValue || ""}`
+            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(term)}`;
+
+        const result = await callApi(url, null, "GET");
+        let options = [];
+
+        if (result?.data?.length > 0) {
+          result.data.forEach((item) => {
+            options.unshift(
+              type === "branch"
+                ? `${item.code}-${item.name}`
+                : `${item.cglNumber} - ${item.description}`,
+            );
+          });
+          setSearchOptions(type, options);
+        } else {
+          showSnackBar(type + " is not available", "error");
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading((p) => ({ ...p, [type]: false }));
+      }
+    },
+    [callApi, permissions, user, showSnackBar],
+  );
+
+  // ================= INPUT HANDLER =================
+  const handleSearchChange = (value = null, reason, type) => {
+    if (reason === "blur") {
+      setSearchOptions(type, []);
+      setReq((prev) => ({ ...prev, [type]: true }));
+      return;
+    }
+
+    if (reason === "input") {
+      const val = value || "";
+      if (val.length >= 3) {
+        setReq((prev) => ({ ...prev, [type]: false }));
+        fetchSearchData(type, val);
+      } else {
+        setReq((prev) => ({ ...prev, [type]: true }));
+        if (val.length === 0) setSearchOptions(type, []);
+      }
+    } else if (reason === "clear") {
+      setReq((prev) => ({ ...prev, [type]: true }));
+      setSearchOptions(type, []);
+    }
+  };
+
+  const isNumeric = (value) => {
+    if (value) {
+      const regex = /^\d+$/;
+      return regex.test(value);
+    }
+    return false;
+  };
+
+  // ================= EFFECTS =================
+  useEffect(() => {
+    if (req.branch) setBranches([]);
+  }, [req.branch]);
+
+  useEffect(() => {
+    fetchCurrencies();
+  }, [fetchCurrencies]);
+
+  useEffect(() => {
+    if (req.cgl) setCgls([]);
+  }, [req.cgl]);
 
   const getDateErrorMessage = (field, error) => {
     switch (error) {
       case "invalidDate":
         return `Please enter a valid ${field}`;
       case "minDate":
-        return `${field} cannot be earlier than ${MIN_ALLOWED_DATE.format(
-          "DD-MM-YYYY"
-        )}`;
+        return `${field} cannot be earlier than ${MIN_ALLOWED_DATE.format("DD-MM-YYYY")}`;
       case "maxDate":
         return `${field} cannot exceed ${etlDate?.format("DD-MM-YYYY")}`;
       case "fromGreaterThanTo":
@@ -130,44 +235,32 @@ export default function BalanceFilters({
     }
   };
 
-  // Centralized Validation Effect
-  useEffect(() => {
-    let fromErr = null;
-    let toErr = null;
-
-    // 1. Validate From Date independently
-    if (start) {
-      if (!start.isValid?.()) fromErr = "invalidDate";
-      else if (start.isBefore(MIN_ALLOWED_DATE, "day")) fromErr = "minDate";
-      else if (etlDate?.isValid?.() && start.isAfter(etlDate, "day"))
-        fromErr = "maxDate";
-    }
-
-    // 2. Validate To Date independently
-    if (end) {
-      if (!end.isValid?.()) toErr = "invalidDate";
-      else if (end.isBefore(MIN_ALLOWED_DATE, "day")) toErr = "minDate";
-      else if (etlDate?.isValid?.() && end.isAfter(etlDate, "day"))
-        toErr = "afterEtlDate";
-    }
-
-    // 3. Cross-field Validation (Only run if both dates are individually valid)
-    if (start?.isValid?.() && end?.isValid?.() && !fromErr && !toErr) {
-      if (start.isAfter(end, "day")) {
-        fromErr = "fromGreaterThanTo";
-      } else if (end.isAfter(start.clone().add(1, "year"), "day")) {
-        toErr = "rangeExceeds12Months";
-      }
-    }
-
-    setFromDateError(fromErr);
-    setToDateError(toErr);
-  }, [start, end, etlDate, MIN_ALLOWED_DATE]);
-
-  const handleReset = () => {
+  const validateDateRange = (fromDate, toDate) => {
     setFromDateError(null);
     setToDateError(null);
+
+    if (!fromDate?.isValid?.() || !toDate?.isValid?.()) return;
+
+    if (fromDate.isAfter(toDate, "day")) {
+      setFromDateError("fromGreaterThanTo");
+      return;
+    }
+
+    if (toDate.isAfter(fromDate.clone().add(1, "year"), "day")) {
+      setToDateError("rangeExceeds12Months");
+      return;
+    }
+
+    if (etlDate?.isValid?.() && toDate.isAfter(etlDate, "day")) {
+      setToDateError("afterEtlDate");
+    }
+  };
+
+  // ================= HANDLERS =================
+  const handleReset = () => {
     setQuickFilter("custom");
+    setFromDateError(null);
+    setToDateError(null);
     resetState();
   };
 
@@ -176,340 +269,614 @@ export default function BalanceFilters({
     toDateError && getDateErrorMessage("To Date", toDateError),
   ].filter(Boolean);
 
+  const fieldGridSize = permissions?.wholebank || user?.isCircle ? 3 : 4;
+
+  // ================= UI =================
   return (
-    <Box sx={{ width: "100%", mt: 3 }}>
-      <Box
-        sx={{
-          display: "grid",
-          gridTemplateColumns: {
-            xs: "1fr",
-            sm: "repeat(2, 1fr)",
-            md:
-              permissions?.wholebank || !isBranchUser
-                ? "repeat(4, 1fr)"
-                : "repeat(3, 1fr)",
-          },
-          gap: 2,
-          mb: 2,
-        }}
-      >
-        {(hasWholeBank || user?.isCircle === true) && (
-          <Box>
-            <TextField
-              label="GLCC (Optional)"
-              fullWidth
-              value={glcc}
-              placeholder="Enter 18 Characters GLCC"
-              InputLabelProps={{ shrink: true }}
-              inputProps={{ maxLength: 18 }}
-              onChange={(e) => {
-                const value = e.target.value.toUpperCase();
-
-                if (!GLCC_ALLOWED_REGEX.test(value)) {
-                  showSnackBar(INVALID_GLCC_MSG, "warning");
-                  return;
-                }
-
-                if (value.length <= 5 && !/^\d*$/.test(value)) {
-                  showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
-                  return;
-                }
-
-                if (
-                  value.length > 5 &&
-                  value.length <= 8 &&
-                  !/^\d{5}[A-Z]*$/.test(value)
-                ) {
-                  showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
-                  return;
-                }
-
-                if (value.length > 8 && !/^\d{5}[A-Z]{3}\d*$/.test(value)) {
-                  showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
-                  return;
-                }
-
-                setGlcc(value);
-                setGlccValidated(false);
-                setBranch("");
-                setCurrency("");
-                setCgl("");
-
-                if (value.length === 18) {
-                  validateGlcc(value);
-                }
-              }}
-            />
-          </Box>
-        )}
-
-        <Autocomplete
-          autoHighlight
-          disabled={
-            glccValidated ||
-            (!permissions?.wholebank &&
-              (user?.isCircle === false || permissions?.branch))
-          }
-          value={branch}
-          forcePopupIcon={false}
-          clearIcon={branchInput ? undefined : null}
-          options={branches || []}
-          noOptionsText={
-            req.branch ? "Please enter at least 3 characters" : "No Options"
-          }
-          inputValue={branchInput}
-          loading={!req.branch && loading.branch}
-          onClose={(e, reason) => {
-            if (reason === "blur") {
-              handleSearchChange(branchInput, "blur", "branch");
-            }
-          }}
-          onInputChange={(e, value, reason) => {
-            if (reason === "input" && !BRANCH_REGEX.test(value)) {
-              showSnackBar(INVALID_BRANCH_MSG, "warning");
-              return;
-            }
-
-            setBranchInput(value);
-            handleSearchChange(value, reason, "branch");
-          }}
-          onChange={(e, value) => setBranch(value)}
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              label="Branch Code or Name*"
-              fullWidth
-              InputLabelProps={{ shrink: true }}
-              placeholder="eg. 12345 or ABC"
-              slotProps={{
-                htmlInput: {
-                  ...params.inputProps,
-                  maxLength: isNumeric(params.inputProps.value) ? 5 : 15,
-                },
-              }}
-            />
-          )}
-        />
-
-        <Autocomplete
-          autoHighlight
-          disabled={glccValidated}
-          options={currencies || []}
-          value={currencies?.find((c) => c.currencyCode === currency) || null}
-          inputValue={currencyInput}
-          getOptionLabel={(option) =>
-            option ? `${option.currencyCode} - ${option.currencyName}` : ""
-          }
-          onInputChange={(e, value, reason) => {
-            if (reason === "input" && !CURRENCY_ALLOWED_REGEX.test(value)) {
-              showSnackBar(INVALID_CURRENCY_MSG, "warning");
-              return;
-            }
-
-            setCurrencyInput(value);
-          }}
-          onChange={(event, newValue) => {
-            setCurrency(newValue ? newValue.currencyCode : "");
-            setCurrencyInput(
-              newValue
-                ? `${newValue.currencyCode} - ${newValue.currencyName}`
-                : ""
-            );
-          }}
-          onOpen={fetchCurrencies}
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              label="Currency*"
-              fullWidth
-              InputLabelProps={{ shrink: true }}
-              placeholder={!currency ? "Please select Currency" : ""}
-            />
-          )}
-        />
-
-        <Autocomplete
-          disabled={glccValidated}
-          forcePopupIcon={false}
-          autoHighlight
-          value={cgl}
-          options={cgls}
-          inputValue={cglInput}
-          clearIcon={cglInput || cgl ? undefined : null}
-          noOptionsText={
-            cglInput.length < 3
-              ? "Please enter at least 3 characters"
-              : "No Options"
-          }
-          loading={!req.cgl && loading.cgl}
-          onClose={(e, reason) => {
-            if (reason === "blur") {
-              handleSearchChange(cglInput, "blur", "cgl");
-            }
-          }}
-          onInputChange={(e, value, reason) => {
-            if (reason === "input" && !CGL_ALLOWED_REGEX.test(value)) {
-              showSnackBar(INVALID_CGL_MSG, "warning");
-              return;
-            }
-
-            setCglInput(value);
-            handleSearchChange(value, reason, "cgl");
-          }}
-          onChange={(e, value) => {
-            setCgl(value);
-            setCglInput(value || "");
-          }}
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              label="CGL*"
-              fullWidth
-              InputLabelProps={{ shrink: true }}
-              placeholder="eg. 9999999999"
-              slotProps={{
-                htmlInput: {
-                  ...params.inputProps,
-                  maxLength: isNumeric(params.inputProps.value) ? 10 : 30,
-                },
-              }}
-            />
-          )}
-        />
-      </Box>
-
+    <Box sx={{ width: "100%" }}>
       <LocalizationProvider dateAdapter={AdapterDayjs}>
-        <Box
-          sx={{
-            display: "grid",
-            mt: 3,
-            mb: 0.5,
-            gridTemplateColumns: {
-              xs: "1fr",
-              sm: "repeat(2, 1fr)",
-              md: "repeat(4, 1fr)",
-            },
-            gap: 2,
-            alignItems: "start",
-          }}
-        >
-          <TextField
-            select
-            label="Date Range"
-            value={quickFilter}
-            onChange={handleQuickFilter}
-            InputLabelProps={{ shrink: true }}
-            fullWidth
-          >
-            {availableFilters.map((opt) => (
-              <MenuItem key={opt.value} value={opt.value}>
-                {opt.label}
-              </MenuItem>
-            ))}
-          </TextField>
+        <Grid container spacing={2}>
+          {/* GLCC (Only Wholebank) */}
+          {(permissions?.wholebank || user?.isCircle) && (
+            <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+              <TextField
+                fullWidth
+                label="GLCC(optional)"
+                value={glcc}
+                placeholder="18 Digit GLCC"
+                InputLabelProps={{ shrink: true }}
+                inputProps={{ maxLength: 18 }}
+                onChange={(e) => {
+                  const value = e.target.value.toUpperCase();
 
-          <DatePicker
-            value={start}
-            format="DD-MM-YYYY"
-            minDate={MIN_ALLOWED_DATE}
-            maxDate={etlDate}
-            views={["year", "month", "day"]}
-            disableHighlightToday
-            onChange={(value) => {
-              setStart(value);
-              setQuickFilter("custom");
-            }}
-            slotProps={{
-              textField: {
-                label: "From Date*",
-                InputLabelProps: { shrink: true },
-                placeholder: "DD-MM-YYYY",
-                error: !!fromDateError,
-                fullWidth: true,
-              },
-            }}
-          />
+                  // Block special characters
+                  if (!GLCC_ALLOWED_REGEX.test(value)) {
+                    showSnackBar(INVALID_GLCC_MSG, "warning");
+                    return;
+                  }
 
-          <DatePicker
-            value={end}
-            format="DD-MM-YYYY"
-            minDate={start || MIN_ALLOWED_DATE}
-            maxDate={etlDate}
-            views={["year", "month", "day"]}
-            disableHighlightToday
-            disabled={!start}
-            onChange={(value) => {
-              setEnd(value);
-              setQuickFilter("custom");
-            }}
-            slotProps={{
-              textField: {
-                label: "To Date*",
-                InputLabelProps: { shrink: true },
-                placeholder: "DD-MM-YYYY",
-                error: !!toDateError,
-                fullWidth: true,
-              },
-            }}
-          />
+                  // First 5 characters must be digits
+                  if (value.length <= 5 && !/^\d*$/.test(value)) {
+                    showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
+                    return;
+                  }
 
+                  // Characters 6-8 must be letters
+                  if (
+                    value.length > 5 &&
+                    value.length <= 8 &&
+                    !/^\d{5}[A-Z]*$/.test(value)
+                  ) {
+                    showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
+                    return;
+                  }
+
+                  // Characters 9-18 must be digits
+                  if (value.length > 8 && !/^\d{5}[A-Z]{3}\d*$/.test(value)) {
+                    showSnackBar(INVALID_GLCC_PATTERN_MSG, "warning");
+                    return;
+                  }
+
+                  setGlcc(value);
+                  setGlccValidated(false);
+                  setUserInputs((prev) => ({
+                    ...prev,
+                    branch: "",
+                    currency: null,
+                    cgl: "",
+                  }));
+
+                  if (value.length === 18) {
+                    validateGlcc(value);
+                  }
+                }}
+              />
+            </Grid>
+          )}
+
+          {/* 1. BRANCH */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <Autocomplete
+                disabled={
+                  glccValidated ||
+                  (!permissions?.wholebank &&
+                    (user?.isCircle === false || permissions?.branch))
+                }
+                forcePopupIcon={false}
+                autoHighlight
+                inputValue={branchInput}
+                value={userInputs?.branch || ""}
+                loading={!req.branch && loading.branch}
+                options={branches}
+                noOptionsText={
+                  req.branch
+                    ? "Please enter at least 3 characters"
+                    : "No Options"
+                }
+                // Explicitly clear on close if reason is blur
+                onClose={(e, reason) => {
+                  if (reason === "blur") {
+                    setSearchOptions("branch", []);
+                  }
+                }}
+                onInputChange={(e, value, reason) => {
+                  if (reason === "input" && !BRANCH_REGEX.test(value)) {
+                    showSnackBar(INVALID_BRANCH_MSG, "warning");
+                    return;
+                  }
+
+                  setBranchInput(value);
+                  handleSearchChange(value, reason, "branch");
+                }}
+                onChange={(e, value) => update("branch", value)}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    fullWidth
+                    label="Branch Code or Branch Name*"
+                    placeholder="eg. 12365 or ABC"
+                    InputLabelProps={{ shrink: true }}
+                    slotProps={{
+                      htmlInput: {
+                        ...params.inputProps,
+                        maxLength: isNumeric(params.inputProps.value) ? 5 : 15,
+                      },
+                    }}
+                    sx={{
+                      "& .MuiInputLabel-root": {
+                        fontWeight: 500,
+                        color: "text.primary",
+                      },
+                      "& .MuiOutlinedInput-root": {
+                        backgroundColor: "transparent",
+                      },
+                    }}
+                  />
+                )}
+              />
+            </Box>
+          </Grid>
+
+          {/* 2. CURRENCY */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <Autocomplete
+                autoHighlight
+                disabled={glccValidated}
+                options={currencies || []}
+                value={userInputs?.currency || null}
+                inputValue={currencyInput}
+                onOpen={fetchCurrencies}
+                // onChange={(event, newValue) => update("currency", newValue)}
+                onInputChange={(e, value, reason) => {
+                  if (
+                    reason === "input" &&
+                    !CURRENCY_ALLOWED_REGEX.test(value)
+                  ) {
+                    showSnackBar(INVALID_CURRENCY_MSG, "warning");
+                    return;
+                  }
+
+                  setCurrencyInput(value);
+                }}
+                onChange={(event, newValue) => {
+                  update("currency", newValue);
+                  setCurrencyInput(newValue || "");
+                }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    fullWidth
+                    label="Currency*"
+                    InputLabelProps={{ shrink: true }}
+                    placeholder="Select Currency"
+                    sx={{
+                      "& .MuiInputLabel-root": {
+                        fontWeight: 500,
+                        color: "text.primary",
+                      },
+                      "& .MuiOutlinedInput-root": {
+                        backgroundColor: "transparent",
+                      },
+                    }}
+                  />
+                )}
+              />
+            </Box>
+          </Grid>
+
+          {/* 3. CGL */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <Autocomplete
+                disabled={glccValidated}
+                forcePopupIcon={false}
+                autoHighlight
+                value={userInputs?.cgl || ""}
+                inputValue={cglInput}
+                loading={!req.cgl && loading.cgl}
+                options={cgls}
+                noOptionsText={
+                  req.cgl ? "Please enter at least 3 characters" : "No Options"
+                }
+                // 1. Clear options specifically on blur
+                onClose={(e, reason) => {
+                  if (reason === "blur") {
+                    setSearchOptions("cgl", []);
+                  }
+                }}
+                onInputChange={(e, value, reason) => {
+                  if (reason === "input" && !CGL_ALLOWED_REGEX.test(value)) {
+                    showSnackBar(INVALID_CGL_MSG, "warning");
+                    return;
+                  }
+
+                  setCglInput(value);
+                  handleSearchChange(value, reason, "cgl");
+                }}
+                onChange={(e, value) => {
+                  update("cgl", value);
+                  setCglInput(value || "");
+                }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    fullWidth
+                    label="CGL*"
+                    InputLabelProps={{ shrink: true }}
+                    placeholder="eg. 9999999999"
+                    sx={{
+                      "& .MuiInputLabel-root": {
+                        fontWeight: 500,
+                        color: "text.primary",
+                      },
+                      "& .MuiOutlinedInput-root": {
+                        backgroundColor: "transparent",
+                      },
+                    }}
+                    slotProps={{
+                      htmlInput: {
+                        ...params.inputProps,
+                        maxLength: isNumeric(params.inputProps.value) ? 10 : 30,
+                      },
+                    }}
+                  />
+                )}
+              />
+            </Box>
+          </Grid>
+
+          {/* 4. DATE RANGE */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <TextField
+                select
+                label="Date Range"
+                value={quickFilter}
+                onChange={handleQuickFilter}
+                InputLabelProps={{ shrink: true }}
+                fullWidth
+                sx={{
+                  "& .MuiInputLabel-root": {
+                    fontWeight: 500,
+                    color: "text.primary",
+                  },
+                }}
+              >
+                {availableFilters.map((opt) => (
+                  <MenuItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Box>
+          </Grid>
+
+          {/* 5. START DATE */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <DatePicker
+                disableHighlightToday
+                value={userInputs?.fromDate || null}
+                format="DD-MM-YYYY"
+                minDate={MIN_ALLOWED_DATE}
+                maxDate={etlDate}
+                onChange={(value) => {
+                  update("fromDate", value);
+                  setQuickFilter("custom");
+                  validateDateRange(value, userInputs?.toDate);
+                }}
+                onError={(error) => setFromDateError(error ? error : null)}
+                slotProps={{
+                  textField: {
+                    label: "From Date*",
+                    fullWidth: true,
+                    InputLabelProps: { shrink: true },
+                    error: !!fromDateError,
+                    sx: { "& .MuiInputLabel-root": { fontWeight: 500 } },
+                  },
+                }}
+              />
+            </Box>
+          </Grid>
+
+          {/* 6. TO DATE */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <DatePicker
+                disableHighlightToday
+                value={userInputs?.toDate || null}
+                format="DD-MM-YYYY"
+                disabled={!userInputs?.fromDate}
+                minDate={userInputs?.fromDate || MIN_ALLOWED_DATE}
+                maxDate={etlDate}
+                onChange={(value) => {
+                  update("toDate", value);
+                  setQuickFilter("custom");
+                  validateDateRange(userInputs?.fromDate, value);
+                }}
+                onError={(error) => {
+                  if (error === "minDate") return;
+                  setToDateError(error ? error : null);
+                }}
+                slotProps={{
+                  textField: {
+                    label: "To Date*",
+                    fullWidth: true,
+                    InputLabelProps: { shrink: true },
+                    error: !!toDateError,
+                    sx: { "& .MuiInputLabel-root": { fontWeight: 500 } },
+                  },
+                }}
+              />
+            </Box>
+          </Grid>
+
+          {/* 7. TRANSACTION TYPE */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <Autocomplete
+                multiple
+                autoHighlight
+                disableCloseOnSelect
+                forcePopupIcon={true}
+                openOnFocus
+                options={sourceOptions}
+                value={userInputs?.sourceFlags || []}
+                isOptionEqualToValue={(opt, val) => opt.flagId === val.flagId}
+                getOptionLabel={(opt) => opt.flagName || ""}
+                renderTags={(value, getTagProps) => {
+                  const allSelected = value.length === sourceOptions.length;
+                  if (allSelected) {
+                    return (
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          fontWeight: 500,
+                          color: "text.secondary",
+                          ml: 0.5,
+                        }}
+                      >
+                        Select All
+                      </Typography>
+                    );
+                  }
+                  if (value.length === 0) return null;
+                  const moreCount = value.length - 1;
+                  const { onDelete: _onDelete, ...tagProps } = getTagProps({
+                    index: 0,
+                  });
+
+                  return (
+                    <Box
+                      sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
+                    >
+                      <Chip
+                        {...tagProps}
+                        key={value[0].flagId}
+                        label={value[0].flagName}
+                        size="small"
+                        sx={{
+                          borderRadius: "6px",
+                          pointerEvents: "none",
+                          height: "24px",
+                        }}
+                      />
+                      {moreCount > 0 && (
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            fontWeight: 600,
+                            color: "text.secondary",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          +{moreCount} more
+                        </Typography>
+                      )}
+                    </Box>
+                  );
+                }}
+                onChange={(e, newValue) => {
+                  if (newValue.find((option) => option.flagId === "all")) {
+                    const isAllSelected =
+                      userInputs?.sourceFlags?.length === sourceOptions.length;
+                    update("sourceFlags", isAllSelected ? [] : sourceOptions);
+                  } else {
+                    update("sourceFlags", newValue);
+                  }
+                }}
+                // filterOptions={(options) => [
+                //   { flagId: "all", flagName: "Select All" },
+                //   ...options,
+                // ]}
+                filterOptions={(options, params) => {
+                  const filtered = filter(options, params);
+
+                  if (params.inputValue) {
+                    return filtered;
+                  }
+
+                  return [
+                    { flagId: "all", flagName: "Select All" },
+                    ...filtered,
+                  ];
+                }}
+                renderOption={(props, option, { selected }) => {
+                  const { key, ...optionProps } = props;
+                  const isSelectAll = option.flagId === "all";
+                  const allSelected =
+                    userInputs?.sourceFlags?.length === sourceOptions.length;
+                  return (
+                    <li
+                      key={key}
+                      {...optionProps}
+                      style={{ fontSize: "0.875rem" }}
+                    >
+                      <Checkbox
+                        size="small"
+                        style={{ marginRight: 8 }}
+                        checked={isSelectAll ? allSelected : selected}
+                      />
+                      <Typography
+                        variant="body2"
+                        sx={{ fontWeight: isSelectAll ? 600 : 400 }}
+                      >
+                        {option.flagName}
+                      </Typography>
+                    </li>
+                  );
+                }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    fullWidth
+                    label="Transaction Type*"
+                    placeholder={
+                      userInputs?.sourceFlags?.length > 0
+                        ? ""
+                        : "Select Options"
+                    }
+                    InputLabelProps={{ shrink: true }}
+                    sx={{
+                      "& .MuiInputLabel-root": {
+                        fontWeight: 500,
+                        color: "text.primary",
+                      },
+                      "& .MuiOutlinedInput-root": {
+                        backgroundColor: "transparent",
+                        minHeight: "56px !important",
+                        height: "56px !important",
+                        display: "flex",
+                        alignItems: "center",
+                        flexWrap: "nowrap !important",
+                        overflow: "hidden",
+                        cursor: "pointer",
+                        paddingRight: "65px !important",
+                        "& .MuiAutocomplete-input": {
+                          padding: "0px !important",
+                          minWidth: "0px !important",
+                        },
+                        "& .MuiAutocomplete-endAdornment": {
+                          top: "50%",
+                          transform: "translateY(-50%)",
+                          display: "flex",
+                          alignItems: "center",
+                          right: "8px",
+                        },
+                      },
+                    }}
+                  />
+                )}
+              />
+            </Box>
+          </Grid>
+
+          {/* 8. FROM AMOUNT */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <TextField
+                label="From Amount"
+                InputLabelProps={{ shrink: true }}
+                fullWidth
+                placeholder="eg. 0.00"
+                value={userInputs?.minAmount || ""}
+                onPaste={(e) => e.preventDefault()}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "" || /^\d*\.?\d*$/.test(val))
+                    update("minAmount", val);
+                }}
+                inputProps={{ maxLength: 20, inputMode: "decimal" }}
+                sx={{
+                  "& .MuiInputLabel-root": {
+                    fontWeight: 500,
+                    color: "text.primary",
+                  },
+                  "& .MuiOutlinedInput-root": {
+                    backgroundColor: "transparent",
+                  },
+                }}
+              />
+            </Box>
+          </Grid>
+
+          {/* 9. TO AMOUNT */}
+          <Grid size={{ xs: 12, sm: 6, md: fieldGridSize }}>
+            <Box sx={{ height: "100%" }}>
+              <TextField
+                label="To Amount"
+                InputLabelProps={{ shrink: true }}
+                fullWidth
+                placeholder="eg. 999999999..."
+                value={userInputs?.maxAmount || ""}
+                onPaste={(e) => e.preventDefault()}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "" || /^\d*\.?\d*$/.test(val))
+                    update("maxAmount", val);
+                }}
+                inputProps={{ maxLength: 20, inputMode: "decimal" }}
+                sx={{
+                  "& .MuiInputLabel-root": {
+                    fontWeight: 500,
+                    color: "text.primary",
+                  },
+                  "& .MuiOutlinedInput-root": {
+                    backgroundColor: "transparent",
+                  },
+                }}
+              />
+            </Box>
+          </Grid>
+
+          {/* BUTTONS */}
+          <Grid size={{ xs: 12, md: permissions?.wholebank ? 6 : 12 }}>
+            <Box
+              sx={{
+                display: "flex",
+                justifyContent: "flex-end",
+                alignItems: "flex-start",
+                gap: 2,
+              }}
+            >
+              <Button
+                variant="contained"
+                onClick={handleReset}
+                startIcon={<RestartAltIcon />}
+              >
+                Reset
+              </Button>
+              <Button
+                variant="contained"
+                startIcon={<SearchIcon />}
+                disabled={
+                  !(
+                    userInputs?.branch &&
+                    userInputs?.currency &&
+                    userInputs?.cgl &&
+                    userInputs?.fromDate?.isValid?.() &&
+                    userInputs?.toDate?.isValid?.() &&
+                    !userInputs.toDate.isBefore(userInputs.fromDate) &&
+                    userInputs?.sourceFlags?.length > 0
+                  )
+                }
+                onClick={onSubmit}
+              >
+                Search
+              </Button>
+            </Box>
+          </Grid>
+        </Grid>
+
+        {/* BOTTOM ERROR MESSAGE BOX */}
+        {validationMessages.length > 0 && (
           <Box
             sx={{
-              display: "flex",
-              justifyContent: { xs: "stretch", sm: "flex-end" },
-              gap: 1.5,
-              height: "100%",
-              alignItems: "center",
+              mt: 2,
+              p: 1.5,
+              borderRadius: 2,
+              border: "1px solid #ff4d4f",
+              bgcolor: "#fff1f0",
             }}
           >
-            <StyledButton
-              variant="contained"
-              startIcon={<RestartAltIcon />}
-              onClick={handleReset}
-              sx={{ flex: { xs: 1, sm: "unset" } }}
-            >
-              Reset
-            </StyledButton>
-            <StyledButton
-              variant="contained"
-              startIcon={<SearchIcon />}
-              disabled={
-                !(cgl && currency && branch && start && end) ||
-                fromDateError !== null ||
-                toDateError !== null
-              }
-              onClick={handleSubmit}
-              sx={{ flex: { xs: 1, sm: "unset" } }}
-            >
-              Search
-            </StyledButton>
+            <Stack spacing={0.5}>
+              {validationMessages.map((msg, index) => (
+                <Typography
+                  key={index}
+                  variant="body2"
+                  sx={{ color: "#d32f2f", fontWeight: 600 }}
+                >
+                  • {msg}
+                </Typography>
+              ))}
+            </Stack>
           </Box>
-        </Box>
+        )}
       </LocalizationProvider>
-
-      {validationMessages.length > 0 && (
-        <Box
-          sx={{
-            mt: 2,
-            p: 1.5,
-            borderRadius: 2,
-            border: "1px solid #ff4d4f",
-            bgcolor: "#fff1f0",
-          }}
-        >
-          <Stack spacing={0.5}>
-            {validationMessages.map((msg, index) => (
-              <Typography
-                key={index}
-                variant="body2"
-                sx={{ color: "#d32f2f", fontWeight: 600 }}
-              >
-                • {msg}
-              </Typography>
-            ))}
-          </Stack>
-        </Box>
-      )}
     </Box>
   );
-}
+};
+
+export default TransactionFilters;
