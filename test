@@ -1,93 +1,3 @@
-//package com.fincore.ReportService.config;
-//
-//import lombok.extern.slf4j.Slf4j;
-//import org.apache.hadoop.fs.FileSystem;
-//import org.springframework.beans.factory.annotation.Value;
-//import org.springframework.context.annotation.Bean;
-//import org.springframework.context.annotation.Configuration;
-//
-//import java.io.IOException;
-//import java.net.URI;
-//import java.net.URISyntaxException;
-//
-//@Configuration
-//@Slf4j
-//public class HadoopConfig {
-//
-//    @Value("${hadoop.fs.nameservice}")
-//    private String nameservice;
-//
-//    @Value("${hadoop.fs.user}")
-//    private String hadoopUser;
-//
-//    @Value("${hadoop.fs.ha.namenodes}")
-//    private String nnIds;
-//
-//    @Value("${hadoop.fs.ha.nn1.rpc}")
-//    private String nn1Rpc;
-//
-//    @Value("${hadoop.fs.ha.nn2.rpc}")
-//    private String nn2Rpc;
-//
-//    @Value("${hadoop.fs.ha.nn3.rpc}")
-//    private String nn3Rpc;
-//
-//    @Bean
-//    public org.apache.hadoop.conf.Configuration hadoopConfiguration() {
-//        log.info("Configuring HDFS HA for Nameservice: {}", nameservice);
-//
-//        org.apache.hadoop.conf.Configuration config = new org.apache.hadoop.conf.Configuration();
-//
-//        // 1. Set the default FileSystem to the logical Nameservice URI
-//        String authority = "hdfs://" + nameservice;
-//        config.set("fs.defaultFS", authority);
-//
-//        // 2. Configure HA Nameservice
-//        config.set("dfs.nameservices", nameservice);
-//        config.set("dfs.ha.namenodes." + nameservice, nnIds); // "nn1,nn2,nn3"
-//
-//        // 3. Configure RPC Addresses for each NameNode
-//        config.set("dfs.namenode.rpc-address." + nameservice + ".nn1", nn1Rpc);
-//        config.set("dfs.namenode.rpc-address." + nameservice + ".nn2", nn2Rpc);
-//        config.set("dfs.namenode.rpc-address." + nameservice + ".nn3", nn3Rpc);
-//
-//        // 4. Configure Failover Provider (UPDATED TO HEDGING)
-//        // RequestHedgingProxyProvider checks multiple NameNodes in parallel to find the Active one faster.
-//        config.set("dfs.client.failover.proxy.provider." + nameservice,
-//                "org.apache.hadoop.hdfs.server.namenode.ha.RequestHedgingProxyProvider");
-//
-//        // 5. Disable FS Cache to prevent singleton lifecycle issues
-//        config.set("fs.hdfs.impl.disable.cache", "true");
-//
-//        // 6. Robustness Settings
-//        // Increase retry counts for HA failover scenarios
-//        config.set("ipc.client.connect.max.retries.on.timeouts", "3");
-//        config.set("dfs.client.failover.max.attempts", "10");
-//        config.set("ipc.client.connect.timeout", "5000"); // 5s timeout
-//
-//        log.info("HDFS HA Configuration complete. Mode: Hedging. Nodes: {}, {}, {}", nn1Rpc, nn2Rpc, nn3Rpc);
-//
-//        return config;
-//    }
-//
-//    @Bean
-//    public FileSystem fileSystem(org.apache.hadoop.conf.Configuration config) {
-//        try {
-//            // Create the FileSystem using the HA config and the specific user
-//            URI logicalUri = new URI("hdfs://" + nameservice);
-//            return FileSystem.get(logicalUri, config, hadoopUser);
-//
-//        } catch (IOException | InterruptedException | URISyntaxException e) {
-//            log.error("CRITICAL: Failed to initialize HDFS HA Connection.", e);
-//            throw new RuntimeException("Could not initialize Hadoop FileSystem", e);
-//        }
-//    }
-//}
-//
-
-
-
-
 package com.fincore.transactions_service.config;
 
 import lombok.extern.slf4j.Slf4j;
@@ -103,37 +13,42 @@ import java.net.URISyntaxException;
 @Configuration
 @Slf4j
 public class HadoopConfig {
+
+    /* 
+     * Java 21+ Compatibility Safeguard:
+     * Programmatically allows the Security Manager before Hadoop's 
+     * UserGroupInformation class is loaded, preventing 'getSubject' crashes.
+     */
+    static {
+        if (System.getProperty("java.security.manager") == null) {
+            System.setProperty("java.security.manager", "allow");
+        }
+    }
+
     @Value("${hadoop.fs.uri}")
     private String hadoopFsUri;
+    
     @Value("${hadoop.fs.user}")
     private String hadoopUser;
 
     @Bean
     public FileSystem fileSystem() {
-
         log.info("Initializing HDFS connection to: {} as user: {}", hadoopFsUri, hadoopUser);
         org.apache.hadoop.conf.Configuration config = new org.apache.hadoop.conf.Configuration();
 
         // 1. Set the default FileSystem URI
         config.set("fs.defaultFS", hadoopFsUri);
 
-        // 2. OPTIMIZATION: Disable client-side permission checking.
-        // This relies on the server to check permissions, preventing local OS user mismatch errors.
-//        config.set("dfs.client.use.datanode.hostname", "true");
-
-        // 3. ROBUSTNESS: Set timeouts (default is often too high or infinite)
+        // 2. ROBUSTNESS: Set timeouts (default is often too high or infinite)
         config.set("ipc.client.connect.timeout", "5000"); // 5 seconds
         config.set("ipc.client.rpc-timeout.ms", "30000"); // 30 seconds
 
-        // 4. Replication adjustment (optional, prevents warnings in single-node dev setups)
-        // config.set("dfs.replication", "1");
         try {
             // Returns a FileSystem instance. The FileSystem class handles caching internally.
             // Spring will manage the lifecycle (closing it on shutdown).
             return FileSystem.get(new URI(hadoopFsUri), config, hadoopUser);
 
         } catch (IOException | InterruptedException | URISyntaxException e) {
-
             log.error("CRITICAL: Failed to connect to HDFS at {}", hadoopFsUri, e);
             throw new RuntimeException("Could not initialize Hadoop FileSystem", e);
         }
