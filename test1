@@ -17,18 +17,30 @@ spec:
       - name: enquiry-service-container
         image: h06vksharbor.corp.ad.sbi/cbops/enquiry-service:UAT03
         env:
+          # --- Non-Sensitive Config (Safe to keep in plain text) ---
           - name: SPRING_DATASOURCE_URL
             value: "jdbc:oracle:thin:@10.177.179.85:1523/fincorepdb1"
           - name: SPRING_DATASOURCE_USERNAME
             value: "fincore"
-          - name: SPRING_DATASOURCE_PASSWORD
-            value: "Password#1234"
           - name: SPRING_DATA_REDIS_HOST
             value: "redis-service"
           - name: SPRING_DATA_REDIS_PORT
             value: "6379"
           - name: SPRING_DATA_REDIS_CLIENT_TYPE
             value: "lettuce"
+            
+          # --- Sensitive Config (Injected securely from Kubernetes Secret) ---
+          - name: SPRING_DATASOURCE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: enquiry-app-secrets
+                key: db-password
+          - name: JWT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: enquiry-app-secrets
+                key: jwt-secret
+                
         ports:
         - containerPort: 4001
         imagePullPolicy: Always
@@ -47,4 +59,136 @@ spec:
       port: 80
       targetPort: 4001
   type: ClusterIP
+
+
+
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: enquiry-app-secrets
+  namespace: uat-cbops1
+type: Opaque
+stringData:
+  db-password: "Password#1234"
+  jwt-secret: "bWV0aGlvbnlsdGhyZW9ueWx0aHJlb255bGdsdXRhbWlueWxhbGFueWw="
+
+
+spring.application.name=EnquiryService
+spring.profiles.active=dev
+server.port=4001
+
+
+# --- Actuator Base Config ---
+# Enable the endpoints, but control exposure in specific profile files
+management.endpoints.web.base-path=/actuator
+management.endpoint.health.probes.enabled=true
+management.endpoints.web.exposure.include=health, info, prometheus
+management.endpoint.health.show-details=always
+management.metrics.tags.application=${spring.application.name}
+management.info.env.enabled=true
+
+# Add some custom info to the /info endpoint
+info.app.name=EnquiryService
+info.app.description=Service to manage and retrieve different reports
+info.app.version=1.0.0
+
+# Shows the SQL query strings
+spring.jpa.show-sql=false
+
+# Makes the displayed SQL queries readable (pretty-printed)
+spring.jpa.properties.hibernate.format_sql=true
+
+# Logs the parameters bound to the query (e.g., replacement of '?' with actual values)
+logging.level.org.hibernate.type.descriptor.sql.BasicBinder=TRACE
+
+
+# --- Redis Configuration ---
+spring.data.redis.host=10.0.17.242
+spring.data.redis.port=6379
+spring.cache.type=redis
+
+# DB Timeouts: Configuration of connection pooling timeouts ## 40 sec.
+spring.datasource.hikari.connection-timeout=40000
+spring.datasource.hikari.maximum-pool-size=40
+
+
+# ==============================================================
+# RESILIENCE4J CONFIGURATION (Global Rules)
+# ==============================================================
+
+# --- RETRY CONFIG ---
+resilience4j.retry.instances.defaultService.max-attempts=2
+resilience4j.retry.instances.defaultService.wait-duration=2s
+
+# RETRY ONLY TRANSIENT ISSUES
+resilience4j.retry.instances.defaultService.retry-exceptions[0]=org.springframework.dao.TransientDataAccessException
+resilience4j.retry.instances.defaultService.retry-exceptions[1]=org.springframework.transaction.CannotCreateTransactionException
+resilience4j.retry.instances.defaultService.retry-exceptions[2]=org.springframework.dao.DataAccessResourceFailureException
+resilience4j.retry.instances.defaultService.retry-exceptions[3]=java.io.IOException
+resilience4j.retry.instances.defaultService.retry-exceptions[4]=java.net.ConnectException
+resilience4j.retry.instances.defaultService.retry-exceptions[5]=java.net.SocketTimeoutException
+
+# DO NOT RETRY BUSINESS ERRORS
+resilience4j.retry.instances.defaultService.ignore-exceptions[0]=java.lang.IllegalArgumentException
+resilience4j.retry.instances.defaultService.ignore-exceptions[1]=java.lang.NullPointerException
+resilience4j.retry.instances.defaultService.ignore-exceptions[2]=org.springframework.dao.DataIntegrityViolationException
+resilience4j.retry.instances.defaultService.ignore-exceptions[3]=org.springframework.dao.DuplicateKeyException
+resilience4j.retry.instances.defaultService.ignore-exceptions[4]=org.springframework.web.client.HttpClientErrorException
+resilience4j.retry.instances.defaultService.ignore-exceptions[5]=com.fincore.enquiry_service.exception.ExportLimitException
+resilience4j.retry.instances.defaultService.ignore-exceptions[6]=com.fincore.enquiry_service.exception.NoDataFoundException
+
+# --- CIRCUIT BREAKER CONFIG ---
+resilience4j.circuitbreaker.instances.defaultService.failure-rate-threshold=50
+
+# increase because export/search APIs are long running
+resilience4j.circuitbreaker.instances.defaultService.slow-call-rate-threshold=80
+resilience4j.circuitbreaker.instances.defaultService.slow-call-duration-threshold=60s
+
+# prevent quick OPEN state
+resilience4j.circuitbreaker.instances.defaultService.minimum-number-of-calls=10
+
+# HALF OPEN
+resilience4j.circuitbreaker.instances.defaultService.permitted-number-of-calls-in-half-open-state=5
+resilience4j.circuitbreaker.instances.defaultService.wait-duration-in-open-state=20s
+resilience4j.circuitbreaker.instances.defaultService.automatic-transition-from-open-to-half-open-enabled=true
+
+# SLIDING WINDOW
+resilience4j.circuitbreaker.instances.defaultService.sliding-window-size=20
+resilience4j.circuitbreaker.instances.defaultService.sliding-window-type=COUNT_BASED
+
+# ==============================================================
+# RESPONSE COMPRESSION
+# ==============================================================
+server.compression.enabled=true
+
+# DO NOT compress excel/zip responses
+server.compression.mime-types=application/json,text/html,text/plain
+server.compression.min-response-size=1024
+
+
+
+# ==============================================================
+# EXPORT / LARGE RESPONSE TIMEOUTS
+# ==============================================================
+
+# Spring async timeout
+spring.mvc.async.request-timeout=30m
+
+# Tomcat connection timeout
+server.tomcat.connection-timeout=30m
+
+# Keep alive
+server.tomcat.keep-alive-timeout=30m
+
+# Large uploads/downloads
+spring.servlet.multipart.max-file-size=200MB
+spring.servlet.multipart.max-request-size=200MB
+
+
+spring.datasource.url=jdbc:oracle:thin:@10.177.103.192:1523/fincorepdb1
+spring.datasource.username=fincore
+spring.datasource.driver-class-name=oracle.jdbc.OracleDriver
+
+
 
