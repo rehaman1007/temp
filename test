@@ -1,172 +1,528 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+Mass Assignment: Insecure Binder Configuration (6 issues)
+Abstract
+The framework binder used for binding the HTTP request parameters to the model class has not been explicitly
+configured to allow, or disallow certain attributes.
+Explanation
+To ease development and increase productivity, most modern frameworks allow an object to be automatically
+instantiated and populated with the HTTP request parameters whose names match an attribute of the class to be
+bound. Automatic instantiation and population of objects speeds up development, but can lead to serious problems if
+implemented without caution. Any attribute in the bound classes, or nested classes, will be automatically bound to the
+HTTP request parameters. Therefore, malicious users will be able to assign a value to any attribute in bound or nested
+classes, even if they are not exposed to the client through web forms or API contracts. Example 1: Using Spring
+MVC with no additional configuration, the following controller method will bind the HTTP request parameters to any
+attribute in the User or Details classes:
+@RequestMapping(method = RequestMethod.POST)
+public String registerUser(@ModelAttribute("user") User user, BindingResult
+result, SessionStatus status) {
+ if (db.save(user).hasErrors()) {
+ return "CustomerForm";
+ } else {
+ status.setComplete();
+ return "CustomerSuccess";
+ }
+}
+Where User class is defined as:
+public class User {
+ private String name;
+ private String lastname;
+ private int age;
+ private Details details;
+ // Public Getters and Setters
+ ...
+}
+and Details class is defined as:
+public class Details {
+ private boolean is_admin;
+ private int id;
+ private Date login_date;
+ // Public Getters and Setters
+ ...
+}
+Recommendation
+When using frameworks that provide automatic model binding capabilities, it is a best practice to control which
+attributes will be bound to the model object so that even if attackers figure out other non-exposed attributes of the
+model or nested classes, they will not be able to bind arbitrary values from HTTP request parameters. Depending on
+the framework used there will be different ways to control the model binding process: Spring MVC: It is possible to
+control which HTTP request parameters will be used in the binding process and which ones will be ignored. In Spring
+MVC applications using @ModelAttribute annotated parameters, the binder can be configured to control which attributes should be bound. In order to do so, a method can be annotated with @InitBinder so that the framework
+will inject a reference to the Spring Model Binder. The Spring Model Binder can be configured to control the attribute
+binding process with the setAllowedFields and setDisallowedFields methods. Spring MVC applications
+extending BaseCommandController can override the initBinder(HttpServletRequest request,
+ServletRequestDataBinder binder) method in order to get a reference to the Spring Model Binder.
+Example 2: The Spring Model Binder (3.x) is configured to disallow the binding of sensitive attributes:
+final String[] DISALLOWED_FIELDS = new String[]{"details.role", "details.age",
+"is_admin"};
+@InitBinder
+public void initBinder(WebDataBinder binder) {
+ binder.setDisallowedFields(DISALLOWED_FIELDS);
+}
+Example 3: The Spring Model Binder (2.x) is configured to disallow the binding of sensitive attributes:
+@Override
+protected void initBinder(HttpServletRequest request, ServletRequestDataBinder
+binder) throws Exception {
+ binder.setDisallowedFields(new String[]{"details.role", "details.age",
+"is_admin"});
+}
+In Spring MVC Applications using @RequestBody annotated parameters, the binding process is handled by
+HttpMessageConverter instances which will use libraries such as Jackson and JAXB to convert the HTTP
+request body into Java Objects. These libraries offer annotations to control which fields should be allowed or
+disallowed. For example, for the Jackson JSON library, the @JsonIgnore annotation can be used to prevent a field
+from being bound to the request. Example 4: A controller method binds an HTTP request to an instance of the
+Employee class using the @RequestBody annotation.
+ @RequestMapping(value="/add/employee", method=RequestMethod.POST,
+consumes="text/html")
+ public void addEmployee(@RequestBody Employee employee){
+ // Do something with the employee object.
+ }
+The application uses the default Jackson HttpMessageConverter to bind JSON HTTP requests to the
+Employee class. In order to prevent the binding of the is_admin sensitive field, use the @JsonIgnore
+annotation:
+public class Employee {
+ @JsonIgnore
+ private boolean is_admin;
+ ...
+ // Public Getters and Setters
+ ...
+}
+Note: Check the following REST frameworks information for more details on how to configure Jackson and JAXB
+annotations. Apache Struts: Struts 1 and 2 will only bind HTTP request parameters to those Actions or
+ActionForms attributes which have an associated public setter accessor. If an attribute should not be bound to the
+request, its setter should be made private. Example 5: Configure a private setter so that Struts framework will not
+automatically bind any HTTP request parameter:
+private String role;
+private void setRole(String role) {
+ this.role = role;
+}
+REST frameworks: Most REST frameworks will automatically bind any HTTP request bodies with content type
+JSON or XML to a model object. Depending on the libraries used for JSON and XML processing, there will be different
+ways of controlling the binding process. The following are some examples for JAXB (XML) and Jackson (JSON):
+Example 6: Models bound from XML documents using Oracle's JAXB library can control the binding process using different annotations such as @XmlAccessorType, @XmlAttribute, @XmlElement and @XmlTransient.
+The binder can be told not to bind any attributes by default, by annotating the models using the
+@XmlAccessorType annotation with the value XmlAccessType.NONE and then selecting which fields should
+be bound using @XmlAttribute and @XmlElement annotations:
+@XmlRootElement
+@XmlAccessorType(XmlAccessType.NONE)
+public class User {
+ private String role;
+ private String name;
+ @XmlAttribute
+ public String getName() {
+ return name;
+ }
+ public void setName(String name) {
+ this.name = name;
+ }
+ public String getRole() {
+ return role;
+ }
+ public void setRole(String role) {
+ this.role = role;
+ }
+Example 7: Models bound from JSON documents using the Jackson library can control the binding process using
+different annotations such as @JsonIgnore, @JsonIgnoreProperties, @JsonIgnoreType and
+@JsonInclude. The binder can be told to ignore certain attributes by annotating them with @JsonIgnore
+annotation:
+public class User {
+ @JsonIgnore
+ private String role;
+ private String name;
+ public String getName() {
+ return name;
+ }
+ public void setName(String name) {
+ this.name = name;
+ }
+ public String getRole() {
+ return role;
+ }
+ public void setRole(String role) {
+ this.role = role;
+ }
+A different approach to protecting against mass assignment vulnerabilities is using a layered architecture where the
+HTTP request parameters are bound to DTO objects. The DTO objects are only used for that purpose, exposing only
+those attributes defined in the web forms or API contracts, and then mapping these DTO objects to Domain Objects
+where the rest of the private attributes can be defined.
 
-    <!-- Upgraded Spring Boot Parent -->
-    <parent>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.0</version>
-        <relativePath/> <!-- lookup parent from repository -->
-    </parent>
 
-    <groupId>com.fincore</groupId>
-    <artifactId>EnquiryService</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
-    <packaging>jar</packaging>
-    <name>enquiry-service</name>
-    <description>Service to view all the enquiries</description>
 
-    <properties>
-        <java.version>21</java.version>
-        <!-- Security Fix: Override transitive Tomcat version -->
-        <tomcat.version>11.0.23</tomcat.version>
-        <!-- Security Fix: Define Log4j version property -->
-        <log4j2.version>2.25.4</log4j2.version>
-    </properties>
 
-    <dependencies>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-devtools</artifactId>
-            <scope>runtime</scope>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
+Mass Assignment: Insecure Binder Configuration High
+Package: com.fincore.enquiry_service.controller
+src/main/java/com/fincore/enquiry_service/controller/SuspenseTrackerController.java,
+line 37 (Mass Assignment: Insecure Binder Configuration) High
+Issue Details
+Kingdom: API Abuse
+Scan Engine: SCA (Structural)
+Sink Details
+Sink: Function: exportBalanceDiff
+Enclosing Method: exportBalanceDiff()
+File: src/main/java/com/fincore/enquiry_service/controller/SuspenseTrackerController.java:37
+Taint Flags:
+34 }
+35
+36 @PostMapping("/export")
+37 public ResponseEntity<byte[]> exportBalanceDiff(
+38 @RequestHeader("Authorization") String token,
+39 @RequestBody BalanceRequestDTO request) {
+40
+src/main/java/com/fincore/enquiry_service/controller/SuspenseTrackerController.java,
+line 29 (Mass Assignment: Insecure Binder Configuration) High
+Issue Details
+Kingdom: API Abuse
+Scan Engine: SCA (Structural)
+Sink Details
+Sink: Function: getBalance
+Mass Assignment: Insecure Binder Configuration High
+Package: com.fincore.enquiry_service.controller
+src/main/java/com/fincore/enquiry_service/controller/SuspenseTrackerController.java,
+line 29 (Mass Assignment: Insecure Binder Configuration) High
+Enclosing Method: getBalance()
+File: src/main/java/com/fincore/enquiry_service/controller/SuspenseTrackerController.java:29
+Taint Flags:
+26 * Difference Enquiry API
+27 */
+28 @PostMapping("/enquires")
+29 public ResponseEntity<ApiResponse<PaginatedResponseDTO<SuspenseTrackerResponseDTO>>> getBalance(
+30 @RequestBody BalanceRequestDTO request) {
+31
+32 PaginatedResponseDTO<SuspenseTrackerResponseDTO> result = service.getSuspenseTrackerDetails(request);
+src/main/java/com/fincore/enquiry_service/controller/LedgerEnquiryController.java, line
+33 (Mass Assignment: Insecure Binder Configuration) High
+Issue Details
+Kingdom: API Abuse
+Scan Engine: SCA (Structural)
+Sink Details
+Sink: Function: search
+Enclosing Method: search()
+File: src/main/java/com/fincore/enquiry_service/controller/LedgerEnquiryController.java:33
+Taint Flags:
+30 private final JwtUtil jwtUtil;
+31
+32 @PostMapping("/search")
+33 public ResponseEntity<?> search(@RequestBody LedgerEnquiryRequest dto) {
+34 return ResponseEntity.ok(
+35 ApiResponse.success(
+36 ledgerEnquiryService.search(dto),
+src/main/java/com/fincore/enquiry_service/controller/BalanceEnquiryController.java, line
+42 (Mass Assignment: Insecure Binder Configuration) High
+Issue Details
+Kingdom: API Abuse
+Scan Engine: SCA (Structural)
+Sink Details
+Sink: Function: exportBalance
+Enclosing Method: exportBalance()
+File: src/main/java/com/fincore/enquiry_service/controller/BalanceEnquiryController.java:42
+Taint Flags:
+Mass Assignment: Insecure Binder Configuration High
+Package: com.fincore.enquiry_service.controller
+src/main/java/com/fincore/enquiry_service/controller/BalanceEnquiryController.java, line
+42 (Mass Assignment: Insecure Binder Configuration) High
+39
+40
+41 @PostMapping("/export")
+42 public ResponseEntity<byte[]> exportBalance(
+43 @RequestHeader("Authorization") String token,
+44 @RequestBody BalanceRequestDTO request) {
+45
+src/main/java/com/fincore/enquiry_service/controller/DifferenceController.java, line 51
+(Mass Assignment: Insecure Binder Configuration) High
+Issue Details
+Kingdom: API Abuse
+Scan Engine: SCA (Structural)
+Sink Details
+Sink: Function: getGlccHistory
+Enclosing Method: getGlccHistory()
+File: src/main/java/com/fincore/enquiry_service/controller/DifferenceController.java:51
+Taint Flags:
+48
+49 // GET History for a specific GLCC lifecycle
+50 @PostMapping("/history")
+51 public ResponseEntity<ApiResponse<Page<DifferenceHistoryDTO>>> getGlccHistory(
+52 @RequestBody GlccRequestBodyDto dto,
+53 @RequestParam(defaultValue = "0") int page,
+54 @RequestParam(defaultValue = "100") int size) {
+src/main/java/com/fincore/enquiry_service/controller/BalanceEnquiryController.java, line
+33 (Mass Assignment: Insecure Binder Configuration) High
+Issue Details
+Kingdom: API Abuse
+Scan Engine: SCA (Structural)
+Sink Details
+Sink: Function: getBalance
+Enclosing Method: getBalance()
+File: src/main/java/com/fincore/enquiry_service/controller/BalanceEnquiryController.java:33
+Taint Flags:
+30 private final JwtUtil jwtUtil;
+31
+32 @PostMapping("/enquires")
+Mass Assignment: Insecure Binder Configuration High
+Package: com.fincore.enquiry_service.controller
+src/main/java/com/fincore/enquiry_service/controller/BalanceEnquiryController.java, line
+33 (Mass Assignment: Insecure Binder Configuration) High
+33 public ResponseEntity<ApiResponse<PaginatedResponseDTO<BalanceResponseDTO>>> getBalance(
+34 @RequestBody BalanceRequestDTO request) {
+35
+36 PaginatedResponseDTO<BalanceResponseDTO> result = service.getBalanceDetails(request);
 
-        <!-- Security Fix: Explicit override for Tomcat core to 11.0.23 -->
-        <dependency>
-            <groupId>org.apache.tomcat.embed</groupId>
-            <artifactId>tomcat-embed-core</artifactId>
-            <version>${tomcat.version}</version>
-        </dependency>
+// Issues in my  Java files
+package com.fincore.enquiry_service.controller;
 
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-validation</artifactId>
-        </dependency>
+import com.fincore.commonutilities.jwt.JwtUtil;
+import com.fincore.enquiry_service.dto.ApiResponse;
+import com.fincore.enquiry_service.dto.BalanceRequestDTO;
+import com.fincore.enquiry_service.dto.SuspenseTrackerResponseDTO;
+import com.fincore.enquiry_service.dto.PaginatedResponseDTO;
+import com.fincore.enquiry_service.service.SuspenseTrackerService;
 
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <optional>true</optional>
-        </dependency>
+import lombok.RequiredArgsConstructor;
 
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
-        </dependency>
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
-        <dependency>
-            <groupId>jakarta.validation</groupId>
-            <artifactId>jakarta.validation-api</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.oracle.database.jdbc</groupId>
-            <artifactId>ojdbc11</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-        </dependency>
+@RestController
+@RequestMapping("/api/suspense-tracker")
+@RequiredArgsConstructor
+public class SuspenseTrackerController {
 
-        <!-- Internal Dependency with POI Exclusions -->
-        <dependency>
-            <groupId>com.fincore</groupId>
-            <artifactId>common-utilities</artifactId>
-            <version>0.0.1-SNAPSHOT</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.apache.poi</groupId>
-                    <artifactId>poi</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.poi</groupId>
-                    <artifactId>poi-ooxml</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.poi</groupId>
-                    <artifactId>poi-ooxml-schemas</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
+        private final SuspenseTrackerService service;
+        private final JwtUtil jwtUtil;
 
-        <!-- Apache POI -->
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>poi</artifactId>
-            <version>5.2.5</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>poi-ooxml</artifactId>
-            <version>5.2.5</version>
-        </dependency>
+        /**
+         * Difference Enquiry API
+         */
+        @PostMapping("/enquires")
+        public ResponseEntity<ApiResponse<PaginatedResponseDTO<SuspenseTrackerResponseDTO>>> getBalance(
+                        @RequestBody BalanceRequestDTO request) {
 
-        <!-- Security Fix: Upgraded Log4j to 2.25.4 -->
-        <dependency>
-            <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-api</artifactId>
-            <version>${log4j2.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-core</artifactId>
-            <version>${log4j2.version}</version>
-        </dependency>
+                PaginatedResponseDTO<SuspenseTrackerResponseDTO> result = service.getSuspenseTrackerDetails(request);
+                return ResponseEntity.ok(ApiResponse.success(result, "Balance records fetched Successfully"));
+        }
 
-        <!-- health metrics -->
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-registry-prometheus</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-        </dependency>
+        @PostMapping("/export")
+        public ResponseEntity<byte[]> exportBalanceDiff(
+                        @RequestHeader("Authorization") String token,
+                        @RequestBody BalanceRequestDTO request) {
 
-        <dependency>
-            <groupId>net.logstash.logback</groupId>
-            <artifactId>logstash-logback-encoder</artifactId>
-            <version>7.4</version>
-        </dependency>
+                String userId = jwtUtil.getUserIdFromToken(token);
 
-    </dependencies>
+                byte[] file = service.exportBalanceDiffToExcel(request, userId);
 
-    <build>
-        <finalName>${project.artifactId}</finalName>
-        <plugins>
-            <!-- maven-compiler-plugin with Lombok Annotation Processor -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                        </path>
-                    </annotationProcessorPaths>
-                </configuration>
-            </plugin>
+                return ResponseEntity.ok()
+                                .header(
+                                                HttpHeaders.CONTENT_DISPOSITION,
+                                                "attachment; filename=Suspense_Report.xlsx")
+                                .contentType(
+                                                MediaType.APPLICATION_OCTET_STREAM)
+                                .body(file);
+        }
 
-            <!-- Spring Boot Maven Plugin excluding Lombok from fat jar -->
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-                <configuration>
-                    <excludes>
-                        <exclude>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                        </exclude>
-                    </excludes>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
-</project>
+}
+
+
+package com.fincore.enquiry_service.controller;
+
+import com.fincore.commonutilities.jwt.JwtUtil;
+import com.fincore.enquiry_service.dto.ApiResponse; 
+import com.fincore.enquiry_service.dto.LedgerEnquiryRequest;
+import com.fincore.enquiry_service.service.LedgerEnquiryService;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+
+@RestController
+@RequiredArgsConstructor
+@Slf4j
+@RequestMapping("/api/ledger-enquiries")
+public class LedgerEnquiryController {
+
+    private final LedgerEnquiryService ledgerEnquiryService;
+    private final JwtUtil jwtUtil;
+
+	@PostMapping("/search")
+	public ResponseEntity<?> search(@RequestBody LedgerEnquiryRequest dto) {
+		return ResponseEntity.ok(
+				ApiResponse.success(
+						ledgerEnquiryService.search(dto),
+						"Transaction records fetched Successfully"
+				)
+		);
+	}
+    
+    @PostMapping("/export-excel")
+    public ResponseEntity<byte[]> excelExport (@Valid @RequestBody LedgerEnquiryRequest dto, @RequestHeader("AUthorization") String token) {
+    	String userId = jwtUtil.getUserIdFromToken(token);
+    	byte[] excelFile =  ledgerEnquiryService.excelExport(dto,userId);
+    	
+    	HttpHeaders headers = new HttpHeaders();
+		headers.setContentType(
+				MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+
+		headers.setContentDisposition(
+				ContentDisposition.builder("attachment")
+						.filename("transactions_ledger.xlsx")
+						.build());
+
+		headers.setContentLength(excelFile.length);
+
+		return new ResponseEntity<>(excelFile, headers, HttpStatus.OK);
+    }
+}
+
+
+
+
+package com.fincore.enquiry_service.controller;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.fincore.commonutilities.jwt.JwtUtil;
+import com.fincore.enquiry_service.dto.ApiResponse;
+import com.fincore.enquiry_service.dto.BalanceRequestDTO;
+import com.fincore.enquiry_service.dto.BalanceResponseDTO;
+import com.fincore.enquiry_service.dto.GLBalanceResponseDTO;
+import com.fincore.enquiry_service.dto.GetPayloadDTO;
+import com.fincore.enquiry_service.dto.PaginatedResponseDTO;
+import com.fincore.enquiry_service.service.EnquiryService;
+
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/api/balance")
+public class BalanceEnquiryController {
+
+        public final EnquiryService service;
+        private final JwtUtil jwtUtil;
+
+        @PostMapping("/enquires")
+        public ResponseEntity<ApiResponse<PaginatedResponseDTO<BalanceResponseDTO>>> getBalance(
+                        @RequestBody BalanceRequestDTO request) {
+
+                PaginatedResponseDTO<BalanceResponseDTO> result = service.getBalanceDetails(request);
+                return ResponseEntity.ok(ApiResponse.success(result, "Balance records fetched Successfully"));
+        }
+
+
+        @PostMapping("/export")
+        public ResponseEntity<byte[]> exportBalance(
+                        @RequestHeader("Authorization") String token,
+                        @RequestBody BalanceRequestDTO request) {
+
+                String userId = jwtUtil.getUserIdFromToken(token);
+
+                byte[] bytes = service.exportBalanceToExcel(
+                                request,
+                                userId);
+
+                return ResponseEntity.ok()
+                                .header(
+                                                HttpHeaders.CONTENT_DISPOSITION,
+                                                "attachment; filename=balance_enquiry.xlsx")
+                                .contentType(
+                                                MediaType.parseMediaType(
+                                                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                                .body(bytes);
+        }
+
+        @PostMapping("/whole-balances")
+        public PaginatedResponseDTO<GLBalanceResponseDTO> getGlBalanceReport(
+                        @RequestBody @Valid GetPayloadDTO payload) {
+
+                return service.getGlBalanceReport(
+                                payload.getFromDate(),
+                                payload.getToDate(),
+                                payload.getCircle(),
+                                payload.getBranch(),
+                                payload.getCgl(),
+                                payload.getPage(),
+                                payload.getSize(),
+                                payload.getCurrency());
+        }
+
+}
+
+package com.fincore.enquiry_service.controller;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import com.fincore.enquiry_service.dto.ApiResponse;
+import com.fincore.enquiry_service.dto.DifferenceDTO;
+import com.fincore.enquiry_service.dto.DifferenceHistoryDTO;
+import com.fincore.enquiry_service.dto.DifferenceSearchDto;
+import com.fincore.enquiry_service.dto.GlccRequestBodyDto;
+import com.fincore.enquiry_service.service.DifferenceService;
+
+import jakarta.validation.Valid;
+
+@RestController
+@RequestMapping("/api/differences")
+public class DifferenceController {
+
+    @Autowired
+    private DifferenceService service;
+
+    // GET All with ApiResponse
+    @GetMapping
+    public ResponseEntity<ApiResponse<Page<DifferenceDTO>>> getDifferences(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size) {
+        Page<DifferenceDTO> result = service.getAllDifferences(page, size);
+        return ResponseEntity.ok(ApiResponse.success(result, "Differences retrieved successfully"));
+    }
+
+    // POST Search with ApiResponse
+    @PostMapping("/search")
+    public ResponseEntity<ApiResponse<Page<DifferenceDTO>>> searchDifferences(
+            @Valid @RequestBody DifferenceSearchDto criteria,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size) {
+
+        Page<DifferenceDTO> result = service.searchDifferences(criteria, page, size);
+
+        if (result.isEmpty()) {
+            return ResponseEntity.ok(ApiResponse.error("No differences found for the given criteria"));
+        }
+
+        return ResponseEntity.ok(ApiResponse.success(result, "Differences retrieved successfully"));
+    }
+
+    // GET History for a specific GLCC lifecycle
+    @PostMapping("/history")
+    public ResponseEntity<ApiResponse<Page<DifferenceHistoryDTO>>> getGlccHistory(
+            @RequestBody GlccRequestBodyDto dto,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size) {
+
+        Page<DifferenceHistoryDTO> result = service.getGlccHistory(dto.getBranchCode(), dto.getCgl(), page, size);
+
+        if (result.isEmpty()) {
+            return ResponseEntity.ok(ApiResponse.error("No historical records found for the provided Branch and CGL"));
+        }
+
+        return ResponseEntity.ok(ApiResponse.success(result, "GLCC History retrieved successfully"));
+    }
+}
