@@ -1,28 +1,30 @@
-// import styled from "@emotion/styled";
 import { useEffect, useState, useCallback } from "react";
 import {
   Box,
   Button,
   Stack,
-  FormControl,
   Typography,
   Paper,
   Autocomplete,
   TextField,
   Grid,
+  Radio,
+  RadioGroup,
+  FormControlLabel,
 } from "@mui/material";
-import useApi from "../../hooks/useApi";
+import SearchIcon from "@mui/icons-material/Search";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { DatePicker, LocalizationProvider } from "@mui/x-date-pickers";
-import { getPermissions } from "../../utils/CommonUtilities";
-import { useSelector } from "react-redux";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import SearchIcon from "@mui/icons-material/Search";
 import dayjs from "dayjs";
+import { useSelector } from "react-redux";
+import useApi from "../../hooks/useApi";
+import { getPermissions } from "../../utils/CommonUtilities";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
-const AsciiReport = (req, isNumeric) => {
+const AsciiReport = ({ isNumeric }) => {
   const { callApi } = useApi();
-  const [reportDate, setReportDate] = useState(dayjs("30-0-2026"));
+  // 1. Set default date to 30-03-2026
+  const [reportDate, setReportDate] = useState(dayjs("2026-03-30"));
   const [asciiId, setAsciiId] = useState("");
   const [searchBy, setSearchBy] = useState("bank");
   const [branchInput, setBranchInput] = useState("");
@@ -38,103 +40,91 @@ const AsciiReport = (req, isNumeric) => {
     branch: false,
   });
   const [error, setError] = useState("");
+
   const user = useSelector((state) => state.auth.user);
-  console.log(user);
-  console.log(user.branch);
   const selectedMenu = useSelector((state) => state.menus.selectedMenuItem);
-  console.log(selectedMenu);
   const permissions = getPermissions(selectedMenu);
   const showSnackBar = useCustomSnackbar();
+
   useEffect(() => {
+    let isMounted = true;
     const fetchInitialData = async () => {
       try {
         const fileTypesRes = await callApi("/RS/ascii/file-types", null, "GET");
-        if (fileTypesRes && Array.isArray(fileTypesRes.data)) {
+        if (isMounted && fileTypesRes && Array.isArray(fileTypesRes.data)) {
           setAsciiOptions(fileTypesRes.data);
-        } else {
-          setAsciiOptions;
-        }
-
-        if (error) {
-          Object.keys(error);
+          
+          // 2. Set the first ASCII option as default
+          if (fileTypesRes.data.length > 0) {
+            setAsciiId(String(fileTypesRes.data[0].id));
+          }
+        } else if (isMounted) {
+          setAsciiOptions([]);
         }
       } catch (err) {
-        console.log("Error loading data", err);
+        console.error("Error loading data", err);
       }
     };
     fetchInitialData();
-    // fileTypesRes();
+
+    return () => {
+      isMounted = false;
+    };
   }, [callApi]);
 
   const fetchSearchData = useCallback(
     async (type, term) => {
       try {
-        // setLoading((prev) => ({ ...prev, [type]: true }));
         setFieldLoading((prev) => ({ ...prev, [type]: true }));
 
-        // Permissions logic for Circle/WholeBank
         let circleValue = "";
-        if (permissions?.wholebank === true) {
-          // circleValue = "null";
-        } else if (user?.isCircle === "Y" || permissions?.circle) {
+        if (user?.isCircle === "Y" || permissions?.circle) {
           circleValue = user?.circleCode;
         }
 
         const url =
           type === "branch"
             ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(
-                term,
+                term
               )}&circleCode=${circleValue || ""}`
             : "";
 
+        if (!url) return;
+
         const result = await callApi(url, null, "GET");
 
-        if (result && result.data && result.data.length > 0) {
+        if (result?.data?.length > 0) {
           if (type === "branch") {
-            const normlized = result.data.map((b) => ({
+            const normalized = result.data.map((b) => ({
               branchCode: b.code,
               branchName: b.name,
             }));
-
-            setBranchOptions(normlized);
-            console.log(
-              "setBranchOptions(result.data)",
-              setBranchOptions(normlized),
-            );
+            setBranchOptions(normalized);
           }
-          // else {
-          //   setAsciiOptions(result.data);
-          // }
         } else {
-          if (type === "branch") {
-            setBranchOptions([]);
-          }
+          if (type === "branch") setBranchOptions([]);
           showSnackBar("Data is not available");
         }
       } catch (e) {
         console.error(e);
       } finally {
-        // setLoading((prev) => ({ ...prev, [type]: false }));
         setFieldLoading((prev) => ({ ...prev, [type]: false }));
       }
     },
-    [callApi],
+    [callApi, user, permissions, showSnackBar]
   );
 
   const handleSearchChange = (value, reason, type) => {
     setFieldLoading((prev) => ({ ...prev, [type]: true }));
     if (reason === "input") {
-      // Fires instantly as soon as the 3rd character is typed
       if (value && value?.length >= 3) {
         fetchSearchData(type, value);
       }
     } else if (reason === "clear") {
-      // Optional: Clear the options when the user clears the input
       if (type === "branch") {
         setBranchOptions([]);
         setSelectedBranchCode("");
       } else {
-        // setAsciiOptions([]);
         setAsciiId("");
       }
       showSnackBar("Data is not available");
@@ -151,22 +141,19 @@ const AsciiReport = (req, isNumeric) => {
     if (searchBy === "branch") {
       basePayload.branchCode = selectedBranchCode || branchInput;
     }
-
     return basePayload;
   };
 
   const handleSearchFetch = async (e) => {
     e.preventDefault();
-    if (searchBy === "branch" && !branchInput) {
-      setError("please select or enter a branch code.");
-      return;
-    }
+    
     if (!reportDate || !asciiId) {
-      setError("Please select both Date and ASCII report type.");
+      showSnackBar("Please select both Date and ASCII report type.", "error");
       return;
     }
+    
     if (searchBy === "branch" && !branchInput) {
-      setError("Please select or enter branch code.");
+      showSnackBar("Please select or enter branch code.", "error");
       return;
     }
 
@@ -176,20 +163,15 @@ const AsciiReport = (req, isNumeric) => {
       setPlainTextData("");
 
       const payload = buildPayload();
-      console.log("payload", payload);
       const response = await callApi("/RS/ascii/view", payload, "POST");
-      if (response && response.data && response.data.content) {
-        setPlainTextData(response.data.content);
-        showSnackBar("Report Fetched Succssefully", "success");
-      } else if (response && response.content) {
-        setPlainTextData(response.content);
-        showSnackBar("Report Fetched Succssefully", "success");
+
+      if (response?.data?.content || response?.content) {
+        setPlainTextData(response.data?.content || response.content);
+        showSnackBar("Report Fetched Successfully", "success");
       } else {
-        setError("Report content is empty or invalid.");
+        showSnackBar("Report content is empty or invalid.", "error");
       }
-      showSnackBar("Report Fetched Succssefully.", "success");
     } catch (err) {
-      setError("ASCII file not found");
       showSnackBar("ASCII file not found", "error");
     } finally {
       setLoading(false);
@@ -200,54 +182,34 @@ const AsciiReport = (req, isNumeric) => {
     try {
       setLoading(true);
       const payload = buildPayload();
-      console.log("payload", JSON.stringify(payload, null, 2));
+      
       const response = await callApi(
         "/RS/ascii/download",
         payload,
         "POST",
         "text",
         "application/json",
-        {
-          responseType: "text",
-        },
-        false,
+        { responseType: "text" },
+        false
       );
-      console.log("FUll RESPONSE", response);
-      console.log("RESPONSE TYPE", typeof response);
-      console.log(
-        "RESPONSE KEYS",
-        response ? Object.keys(response) : "null/undefined",
-      );
+
       const contentDisposition = response?.headers?.["content-disposition"];
-      console.log("contentDisposition", contentDisposition);
       const actualData = response.data;
-      console.log("actualData", actualData);
       let fileName = "";
 
       if (contentDisposition) {
-        const match = contentDisposition.match(
-          /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/,
-        );
+        const match = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
         if (match) {
           fileName = match[1].replace(/['"\\]/g, "").trim();
         }
       }
 
-      console.log("fileName", fileName);
       if (!fileName) {
-        const formatedDate =
-          reportDate && typeof reportDate === "string"
-            ? reportDate.split("-").reverse().join("")
-            : "";
-
-        fileName = `${asciiId || "data"}.${formatedDate || "data"}.${
-          formatedDate || "data"
-        }.txt`;
+        const formattedDate = reportDate ? reportDate.format("YYYYMMDD") : "data";
+        fileName = `${asciiId || "data"}.${formattedDate}.txt`;
       }
 
-      const blob = new Blob([actualData], {
-        type: "text/plain;charset=utf-8",
-      });
+      const blob = new Blob([actualData], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -258,7 +220,6 @@ const AsciiReport = (req, isNumeric) => {
       window.URL.revokeObjectURL(url);
       showSnackBar("File Download Successfully", "success");
     } catch (err) {
-      // alert("Error downloading the file:" + err.message);
       showSnackBar("ASCII file not found", "error");
     } finally {
       setLoading(false);
@@ -270,366 +231,263 @@ const AsciiReport = (req, isNumeric) => {
     setBranchInput(val);
 
     const matchedBranch = branchOptions.find(
-      (b) =>
-        b.branchCode === val || `${b.branchCode} - ${b.branchName}` === val,
+      (b) => b.branchCode === val || `${b.branchCode} - ${b.branchName}` === val
     );
-    if (matchedBranch) {
-      setSelectedBranchCode(matchedBranch.branchCode);
-    }
+    
+    if (matchedBranch) setSelectedBranchCode(matchedBranch.branchCode);
   };
+
   const handleReset = () => {
     setPlainTextData("");
     setError("");
     setAsciiId("");
-    setReportDate(null);
+    // 3. Reset to our default date as well
+    setReportDate(dayjs("2026-03-30"));
     setBranchInput("");
     setSelectedBranchCode("");
     setSearchBy("bank");
+    
+    if (asciiOptions.length > 0) {
+      setAsciiId(String(asciiOptions[0].id));
+    }
   };
+
   return (
     <Box>
-      <Box>
-        <Paper
+      <Paper
+        sx={{
+          padding: "2%",
+          mb: 3,
+          bgcolor: "rgba(255, 255, 255, 0.4)",
+          backdropFilter: "blur(4px)",
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: 1,
+        }}
+      >
+        <Box
           sx={{
-            padding: "2%",
             mb: 3,
-            bgcolor: "rgba(255, 255, 255, 0.4)",
-            backdropFilter: "blur(4px)",
-            border: "1px solid",
-            borderColor: "divider",
-            borderRadius: 1,
+            p: 2,
+            borderRadius: 2,
+            bgcolor: "background.paper",
+            boxShadow: 2,
+            borderLeft: "6px solid",
+            borderColor: "primary.main",
           }}
         >
-          <Box
-            sx={{
-              mb: 3,
-              p: 2,
-              borderRadius: 2,
-              bgcolor: "background.paper",
-              boxShadow: 2,
-              borderLeft: "6px solid",
-              borderColor: "primary.main",
-            }}
-          >
-            <Stack
-              direction="row"
-              alignItems="center"
-              justifyContent="space-between"
-            >
-              <Stack direction="row" spacing={2} alignItems="center">
-                {/* <AccountSuspensionIcon color="primary" fontSize="large" /> */}
-
-                <Box>
-                  <Typography variant="h6" fontWeight={700} lineHeight={1.2}>
-                    Search ASCII Report
-                  </Typography>
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ mt: 0.5 }}
-                  >
-                    Enter the required details below to retrieve and view ASCII
-                    report records.
-                  </Typography>
-                </Box>
-              </Stack>
-            </Stack>
-          </Box>
-          <form onSubmit={handleSearchFetch}>
-            <Box sx={{ display: "flex" }}>
-              <LocalizationProvider dateAdapter={AdapterDayjs}>
-                <Grid xs={12} md={2} size={2}>
-                  <label>Date</label>
-                  {/* <br></br> */}
-                  {/* <input
-              type="date"
-              value={reportDate}
-              onChange={(e) => setReportDate(e.target.value)}
-              required
-            /> */}
-
-                  <DatePicker
-                    value={reportDate || dayjs()}
-                    onChange={(newValue) => setReportDate(newValue)}
-                    format={"DD-MM-YYYY"}
-                    // disabled={!!plainTextData}
-                    slotProps={{
-                      textField: {
-                        readOnly: false,
-                        sx: {
-                          width: "395px",
-                          flexGrow: 1,
-                          "& .MuiInputBase-input": {
-                            caretColor: "transparent",
-                          },
-                        },
-                      },
-                    }}
-                  />
-                </Grid>
-              </LocalizationProvider>{" "}
-              &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
-              <Grid xs={12} md={2} lg={4} size={2} width={"30%"}>
-                <label>Name of ASCII</label>
-                <Autocomplete
-                  options={asciiOptions || []}
-                  getOptionLabel={(option) =>
-                    option
-                      ? `${option.setAsciiId || ""} ${option.asciiName || ""}`
-                      : ""
-                  }
-                  value={
-                    asciiOptions.find(
-                      (o) => String(o.id) === String(asciiId),
-                    ) || null
-                  }
-                  onChange={(event, newValue) => {
-                    // setAsciiId(newValue ? String(newValue.id) : "");
-                    if (!newValue) {
-                      setAsciiId("");
-                    } else {
-                      setAsciiId(String(newValue.id));
-                    }
-                  }}
-                  onInputChange={(event, newInputValue, reason) => {
-                    handleSearchChange(newInputValue, reason, "ascii");
-                  }}
-                  // disabled={!!plainTextData}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      placeholder="Please select ASCII"
-                      aria-errormessage=". 1232 or ABC"
-                    />
-                  )}
-                />
-              </Grid>
-              &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
-              <Grid xs={12} md={2} lg={4} width={"50%"}>
-                <Typography>Search By</Typography>
-                {/* <Stack direction="column"> */}
-                <Box sx={{ display: "flex" }}>
-                  <Box>
-                    <label>
-                      <input
-                        type="radio"
-                        name="searchBy"
-                        value="bank"
-                        checked={searchBy === "bank"}
-                        onChange={() => setSearchBy("bank")}
-                      />
-                      &nbsp;&nbsp;&nbsp; Bank
-                    </label>
-                    <br></br>
-                    <label>
-                      <input
-                        type="radio"
-                        name="searchBy"
-                        value="branch"
-                        checked={searchBy === "branch"}
-                        onChange={() => setSearchBy("branch")}
-                        disabled={!!plainTextData}
-                      />
-                      &nbsp;&nbsp;&nbsp; Branch
-                    </label>
-                    &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
-                  </Box>
-                  <Box>
-                    {/* </Stack> */}
-                    {searchBy === "branch" && (
-                      <Box sx={{}}>
-                        {/* <Typography component="label" variant="body2">
-                    Branch
-                  </Typography> */}
-                        <Autocomplete
-                          sx={{ width: "20vw" }}
-                          options={branchOptions || []}
-                          getOptionLabel={(option) =>
-                            option
-                              ? `${option.branchName || ""} -${
-                                  option.branchCode || ""
-                                }`
-                              : ""
-                          }
-                          value={
-                            branchOptions.find(
-                              (b) => b.branchCode === selectedBranchCode,
-                            ) || null
-                          }
-                          disabled={
-                            !permissions?.wholebank &&
-                            (user?.isCircle === "N" || permissions?.branch)
-                          }
-                          onInputChange={(e, newInputValue, reason) => {
-                            setBranchInput(newInputValue);
-                            handleSearchChange(newInputValue, reason, "branch");
-                          }}
-                          onChange={(e, selectedOption) => {
-                            if (selectedOption) {
-                              setSelectedBranchCode(selectedOption.branchCode);
-                              setBranchInput(selectedOption.branchName);
-                            } else {
-                              setSelectedBranchCode("");
-                              setBranchInput("");
-                            }
-                          }}
-                          renderInput={(params) => (
-                            <TextField
-                              {...params}
-                              placeholder="Type to search branch..."
-                              required
-                              onChange={handleBranchChange}
-                              slotProps={{
-                                htmlInput: {
-                                  ...params.inputProps,
-                                  maxLength: isNumeric ? 5 : 15,
-                                },
-                              }}
-                            />
-                          )}
-                        />
-                      </Box>
-                    )}
-                  </Box>
-                </Box>
-              </Grid>
-              <Grid xs={12} md={2} lg={2} size={1}>
-                <Box
-                  sx={{
-                    display: "flex",
-                    justifyContent: "end",
-                    marginTop: 2.5,
-                  }}
-                >
-                  <Button
-                    style={styles.btn}
-                    type="submit"
-                    variant="contained"
-                    disabled={loading}
-                    // disabled={
-                    //   !(
-                    //     (reportDate &&
-                    //       asciiId &&
-                    //       setBranchInput &&
-                    //       branchOptions) ||
-                    //     branchInput
-                    //   )
-                    // }
-                  >
-                    {loading ? "fetching..." : "Search"}
-                  </Button>
-                  &nbsp; &nbsp;&nbsp;&nbsp;
-                  <Button
-                    style={styles.btn}
-                    variant="contained"
-                    onClick={handleReset}
-                    disabled={loading}
-                  >
-                    Reset
-                  </Button>
-                </Box>
-              </Grid>
-            </Box>
-          </form>
-          {/* {error && <p>{error}</p>}? */}
-        </Paper>
-      </Box>
-      <Box>
-        <Paper
-          sx={{
-            p: "1% 2%",
-            mb: 2,
-            bgcolor: "rgba(255, 255, 255, 0.4)",
-            backdropFilter: "blur(4px)",
-            border: "1px solid",
-            borderColor: "divider",
-            borderRadius: 1,
-          }}
-        >
-          <Box
-            sx={{
-              display: "flex",
-              justifyContent: "space-between",
-              height: "7vh",
-              borderBottom: "1px solid #fff",
-            }}
-          >
-            <Typography
-              variant="h6"
-              fontWeight={700}
-              lineHeight={1.2}
-              sx={{ p: "1% 0%" }}
-            >
-              View ASCII Report data
+          <Box>
+            <Typography variant="h6" fontWeight={700} lineHeight={1.2}>
+              Search ASCII Report
             </Typography>
-            {plainTextData && (
-              <Button
-                style={styles.download}
-                onClick={handleDownload}
-                variant="contained"
-                sx={{ marginTop: 1 }}
-              >
-                Download ASCII Report
-              </Button>
-            )}
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              Enter the required details below to retrieve and view ASCII report records.
+            </Typography>
           </Box>
+        </Box>
+        
+        {/* Changed HTML form to Box with form styling */}
+        <Box component="form" onSubmit={handleSearchFetch}>
+          <Grid container spacing={3} alignItems="flex-start">
+            
+            {/* Date Field */}
+            <Grid item xs={12} md={3}>
+              <Typography variant="body2" mb={1}>Date</Typography>
+              <LocalizationProvider dateAdapter={AdapterDayjs}>
+                <DatePicker
+                  value={reportDate}
+                  onChange={(newValue) => setReportDate(newValue)}
+                  format="DD-MM-YYYY"
+                  slotProps={{
+                    textField: {
+                      fullWidth: true,
+                      sx: {
+                        "& .MuiInputBase-input": { caretColor: "transparent" },
+                      },
+                    },
+                  }}
+                />
+              </LocalizationProvider>
+            </Grid>
 
-          <Box style={styles.pText}>
-            {plainTextData ? (
-              <pre>{plainTextData}</pre>
-            ) : (
-              <Box sx={{ display: "flex", justifyContent: "center" }}>
-                <p>
-                  <SearchIcon sx={{ fontSize: "3rem", marginLeft: "50%" }} />
+            {/* ASCII Selection Field */}
+            <Grid item xs={12} md={3}>
+              <Typography variant="body2" mb={1}>Name of ASCII</Typography>
+              <Autocomplete
+                options={asciiOptions || []}
+                getOptionLabel={(option) =>
+                  option ? `${option.id || ""} ${option.asciiName || ""}` : ""
+                }
+                value={
+                  asciiOptions.find((o) => String(o.id) === String(asciiId)) || null
+                }
+                onChange={(event, newValue) => {
+                  setAsciiId(newValue ? String(newValue.id) : "");
+                }}
+                onInputChange={(event, newInputValue, reason) => {
+                  handleSearchChange(newInputValue, reason, "ascii");
+                }}
+                renderInput={(params) => (
+                  <TextField {...params} placeholder="Please select ASCII" />
+                )}
+              />
+            </Grid>
 
-                  <br></br>
-                  {loading
-                    ? "Retrieving report content..."
-                    : "No data fetched yet. Fill the form parameter and click search."}
-                </p>
+            {/* Search By Radios & Branch selection */}
+            <Grid item xs={12} md={4}>
+              <Typography variant="body2" mb={1}>Search By</Typography>
+              <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+                
+                {/* MUI Native Radios */}
+                <RadioGroup
+                  row
+                  value={searchBy}
+                  onChange={(e) => setSearchBy(e.target.value)}
+                >
+                  <FormControlLabel value="bank" control={<Radio />} label="Bank" />
+                  <FormControlLabel
+                    value="branch"
+                    control={<Radio />}
+                    label="Branch"
+                    disabled={!!plainTextData}
+                  />
+                </RadioGroup>
+
+                {searchBy === "branch" && (
+                  <Autocomplete
+                    sx={{ width: 220 }}
+                    options={branchOptions || []}
+                    getOptionLabel={(option) =>
+                      option ? `${option.branchName || ""} - ${option.branchCode || ""}` : ""
+                    }
+                    value={
+                      branchOptions.find((b) => b.branchCode === selectedBranchCode) || null
+                    }
+                    disabled={
+                      !permissions?.wholebank &&
+                      (user?.isCircle === "N" || permissions?.branch)
+                    }
+                    onInputChange={(e, newInputValue, reason) => {
+                      setBranchInput(newInputValue);
+                      handleSearchChange(newInputValue, reason, "branch");
+                    }}
+                    onChange={(e, selectedOption) => {
+                      if (selectedOption) {
+                        setSelectedBranchCode(selectedOption.branchCode);
+                        setBranchInput(selectedOption.branchName);
+                      } else {
+                        setSelectedBranchCode("");
+                        setBranchInput("");
+                      }
+                    }}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        placeholder="Search branch..."
+                        required
+                        onChange={handleBranchChange}
+                        slotProps={{
+                          htmlInput: {
+                            ...params.inputProps,
+                            maxLength: isNumeric ? 5 : 15,
+                          },
+                        }}
+                      />
+                    )}
+                  />
+                )}
               </Box>
-            )}
-          </Box>
-        </Paper>
-      </Box>
+            </Grid>
+
+            {/* Action Buttons */}
+            <Grid item xs={12} md={2} display="flex" justifyContent="flex-end" sx={{ mt: 3 }}>
+              <Stack direction="row" spacing={2}>
+                <Button
+                  type="submit"
+                  variant="contained"
+                  disabled={loading}
+                >
+                  {loading ? "Fetching..." : "Search"}
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={handleReset}
+                  disabled={loading}
+                >
+                  Reset
+                </Button>
+              </Stack>
+            </Grid>
+
+          </Grid>
+        </Box>
+      </Paper>
+
+      {/* Results View */}
+      <Paper
+        sx={{
+          p: "1% 2%",
+          mb: 2,
+          bgcolor: "rgba(255, 255, 255, 0.4)",
+          backdropFilter: "blur(4px)",
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: 1,
+        }}
+      >
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            mb: 2,
+            pb: 1,
+            borderBottom: "1px solid",
+            borderColor: "divider",
+          }}
+        >
+          <Typography variant="h6" fontWeight={700} lineHeight={1.2}>
+            View ASCII Report data
+          </Typography>
+          {plainTextData && (
+            <Button
+              onClick={handleDownload}
+              variant="contained"
+            >
+              Download ASCII Report
+            </Button>
+          )}
+        </Box>
+
+        <Box
+          sx={{
+            height: "40vh",
+            overflow: "auto",
+            mt: 2,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: plainTextData ? "flex-start" : "center",
+            alignItems: plainTextData ? "flex-start" : "center",
+          }}
+        >
+          {plainTextData ? (
+            <Box component="pre" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              {plainTextData}
+            </Box>
+          ) : (
+            <Stack alignItems="center" spacing={2} color="text.secondary">
+              <SearchIcon sx={{ fontSize: "3rem" }} />
+              <Typography variant="body1" textAlign="center">
+                {loading
+                  ? "Retrieving report content..."
+                  : "No data fetched yet. Fill the form parameters and click search."}
+              </Typography>
+            </Stack>
+          )}
+        </Box>
+      </Paper>
     </Box>
   );
 };
 
-const styles = {
-  container: {
-    backgroundColor: "rgba(255, 255, 255, 0.15)",
-    backdropFilter: "blur(20px)",
-    padding: "2%",
-    borderRadius: "15px",
-    marginBottom: "2%",
-    // border: `0.5px solid ${theme.palette.primary.light}`,
-  },
-  btn: {
-    marginTop: 5,
-    padding: "8px 40px",
-    borderRadius: "10px",
-    fontSize: "1rem",
-    height: "auto",
-    // fontSize: "1rem",
-  },
-  pText: {
-    height: "40vh",
-    overflow: "auto",
-    marginTop: "10px",
-    // display: "flex",
-    // justifyContent: "center",
-    flexWrap: "wrap",
-    // animation-iteration-count: ce;
-    alignContent: "center",
-  },
-  download: {
-    marginTop: 2,
-    padding: "20px 20px",
-    borderRadius: "10px",
-    // fontSize: "1rem",
-    height: "5vh",
-    width: "12vw",
-  },
-};
 export default AsciiReport;
