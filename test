@@ -11,7 +11,7 @@ import {
   CircularProgress,
   Divider,
 } from "@mui/material";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import dayjs from "dayjs";
 
 // MUI Icons
@@ -21,11 +21,10 @@ import TableChartIcon from "@mui/icons-material/TableChart";
 import ArticleIcon from "@mui/icons-material/Article";
 import ViewListIcon from "@mui/icons-material/ViewList";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import WarningIcon from "@mui/icons-material/Warning";
+import SyncIcon from "@mui/icons-material/Sync";
 import EventBusyIcon from "@mui/icons-material/EventBusy";
-import StorageIcon from "@mui/icons-material/Storage";
 
-// Custom Hooks
+// Custom Hooks (Ensure paths match your project)
 import useApi from "../../hooks/useApi";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
 
@@ -38,27 +37,13 @@ const isLastDayOfMonth = (dateString) => {
   return date.getDate() === lastDayOfMonth;
 };
 
-// --- Constants ---
-const REPORT_DATA = [
-  {
-    id: "YSA",
-    title: "YSA Report",
-    description: "Yield Settlement Analysis",
-  },
-  {
-    id: "PNL",
-    title: "PNL Report",
-    description: "Profit & Loss Statement",
-  },
-];
-
 // --- Sub-Components ---
-const DownloadActions = ({ disabled }) => {
+const DownloadActions = ({ isAvailable, onDownload }) => {
   const formats = [
-    { label: "PDF", icon: <PictureAsPdfIcon />, color: "#d32f2f" },
-    { label: "Excel", icon: <TableChartIcon />, color: "#1b5e20" },
-    { label: "Text", icon: <ArticleIcon />, color: "#424242" },
-    { label: "PSV", icon: <ViewListIcon />, color: "#0277bd" },
+    { id: "PDF", label: "PDF", icon: <PictureAsPdfIcon />, color: "#d32f2f" },
+    { id: "EXCEL", label: "Excel", icon: <TableChartIcon />, color: "#1b5e20" },
+    { id: "TEXT", label: "Text", icon: <ArticleIcon />, color: "#424242" },
+    { id: "PSV", label: "PSV", icon: <ViewListIcon />, color: "#0277bd" },
   ];
 
   return (
@@ -66,27 +51,30 @@ const DownloadActions = ({ disabled }) => {
       {formats.map((format, index) => (
         <Tooltip
           title={
-            disabled ? "Unavailable for failed run" : `Download ${format.label}`
+            !isAvailable 
+              ? "ETL job is running. Downloads unavailable." 
+              : `Download ${format.label}`
           }
-          key={format.label}
+          key={format.id}
           arrow
         >
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.1 }}
-            whileHover={!disabled ? { scale: 1.15, y: -3 } : {}}
-            whileTap={!disabled ? { scale: 0.95 } : {}}
+            whileHover={isAvailable ? { scale: 1.15, y: -3 } : {}}
+            whileTap={isAvailable ? { scale: 0.95 } : {}}
           >
             <IconButton
-              disabled={disabled}
+              disabled={!isAvailable}
+              onClick={() => onDownload(format.id)}
               sx={{
-                bgcolor: disabled
+                bgcolor: !isAvailable
                   ? "action.disabledBackground"
                   : `${format.color}15`,
-                color: disabled ? "action.disabled" : format.color,
+                color: !isAvailable ? "action.disabled" : format.color,
                 "&:hover": {
-                  bgcolor: disabled
+                  bgcolor: !isAvailable
                     ? "action.disabledBackground"
                     : `${format.color}25`,
                 },
@@ -101,7 +89,7 @@ const DownloadActions = ({ disabled }) => {
   );
 };
 
-const ReportCard = ({ report, isRunSuccessful }) => {
+const ReportCard = ({ report, isAvailable, onDownloadReport }) => {
   return (
     <Paper
       elevation={0}
@@ -137,7 +125,10 @@ const ReportCard = ({ report, isRunSuccessful }) => {
         <Typography variant="subtitle2" color="text.secondary">
           Available Formats
         </Typography>
-        <DownloadActions disabled={!isRunSuccessful} />
+        <DownloadActions 
+          isAvailable={isAvailable} 
+          onDownload={(formatType) => onDownloadReport(report.id, formatType)} 
+        />
       </Box>
     </Paper>
   );
@@ -150,37 +141,39 @@ export default function AdhocReports() {
   const showSnackBar = useCustomSnackbar();
   
   const [etlDate, setEtlDate] = useState("");
-  const [runs, setRuns] = useState([]);
-  const [selectedRun, setSelectedRun] = useState(null);
+  const [isAvailableToDownload, setIsAvailableToDownload] = useState(false);
+  const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      // NOTE: Replace "/PS/process/adhoc-metadata" with your actual single API endpoint
-      const response = await callApi("/PS/process/adhoc-metadata", {}, "GET");
+      // 1. Fetch Metadata (ETL Date & Availability Flag)
+      const metaRes = await callApi("/PS/process/adhoc-metadata", {}, "GET");
+      const metaData = metaRes?.data || metaRes;
       
-      const responseData = response?.data || response;
-      const etlRaw = responseData?.etlDate;
-      const fetchedRuns = responseData?.runs || [];
+      const etlRaw = metaData?.etlDate;
+      const availableFlag = metaData?.isAvailableToDownload || false;
 
-      // Format date to strictly string "YYYY-MM-DD" for rendering and utility checks
       const formattedEtlDate = etlRaw 
         ? dayjs(etlRaw.split("T")[0]).format("YYYY-MM-DD") 
         : dayjs().format("YYYY-MM-DD");
         
       setEtlDate(formattedEtlDate);
-      setRuns(fetchedRuns);
+      setIsAvailableToDownload(availableFlag);
 
-      // Auto-select latest run if runs exist
-      if (fetchedRuns.length > 0) {
-        setSelectedRun(fetchedRuns[fetchedRuns.length - 1]);
+      // 2. Fetch Dynamic Reports List
+      // Optimization: Only fetch reports if it's a month-end date
+      if (isLastDayOfMonth(formattedEtlDate)) {
+        const reportsRes = await callApi("/PS/process/adhoc-reports-list", {}, "GET");
+        const reportsData = reportsRes?.data || reportsRes || [];
+        setReports(reportsData);
       }
       
     } catch (e) {
-      console.error("Metadata fetch error:", e);
+      console.error("Data fetch error:", e);
       showSnackBar(
-        "Failed to load ETL metadata. Kindly try again after sometime.",
+        "Failed to load report data. Kindly try again after sometime.",
         "error"
       );
       setEtlDate(dayjs().format("YYYY-MM-DD"));
@@ -194,16 +187,19 @@ export default function AdhocReports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleDownload = (reportId, formatType) => {
+    // This function acts as your Step 4 (Download with whatever type user chooses)
+    // You can wire up your file download API call here.
+    showSnackBar(`Generating fresh ${formatType} data for ${reportId}...`, "info");
+    
+    // Example API Call for download:
+    // callApi(`/PS/process/download?report=${reportId}&type=${formatType}`, {}, "GET")
+    //   .then(...)
+  };
+
   if (loading) {
     return (
-      <Box
-        sx={{
-          display: "flex",
-          height: "100vh",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
+      <Box sx={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center" }}>
         <CircularProgress />
       </Box>
     );
@@ -229,33 +225,15 @@ export default function AdhocReports() {
               bgcolor: "#fafafa",
             }}
           >
-            <motion.div
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ delay: 0.2, type: "spring", stiffness: 150 }}
-            >
-              <EventBusyIcon
-                sx={{
-                  fontSize: 80,
-                  color: "text.secondary",
-                  mb: 3,
-                  opacity: 0.5,
-                }}
-              />
+            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ delay: 0.2, type: "spring", stiffness: 150 }}>
+              <EventBusyIcon sx={{ fontSize: 80, color: "text.secondary", mb: 3, opacity: 0.5 }} />
             </motion.div>
-            <Typography
-              variant="h5"
-              fontWeight="bold"
-              gutterBottom
-              color="text.primary"
-            >
+            <Typography variant="h5" fontWeight="bold" gutterBottom color="text.primary">
               Not a Month-End Cycle
             </Typography>
             <Typography variant="body1" color="text.secondary">
-              Adhoc Reports (YSA and PNL) are strictly generated as part of the
-              month-end activity. The current ETL Date processed is{" "}
-              <strong>{etlDate}</strong>. Please check back during the month-end
-              processing cycle.
+              Adhoc Reports are strictly generated as part of the month-end activity. 
+              The current ETL Date processed is <strong>{etlDate}</strong>. Please check back during the month-end processing cycle.
             </Typography>
           </Paper>
         </motion.div>
@@ -263,45 +241,22 @@ export default function AdhocReports() {
     );
   }
 
-  const hasMultipleRuns = runs.length > 1;
-  const isRunSuccessful = selectedRun?.status === "SUCCESS";
-
   return (
     <Container maxWidth="lg" sx={{ py: 6 }}>
       {/* Page Header */}
-      <motion.div
-        initial={{ opacity: 0, x: -20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ duration: 0.5 }}
-      >
+      <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.5 }}>
         <Box sx={{ mb: 4 }}>
-          <Typography
-            variant="h4"
-            fontWeight="800"
-            color="text.primary"
-            gutterBottom
-          >
+          <Typography variant="h4" fontWeight="800" color="text.primary" gutterBottom>
             Adhoc Reports
           </Typography>
-          <Typography
-            variant="body1"
-            color="text.secondary"
-            sx={{ maxWidth: "800px" }}
-          >
-            View and download your monthly Yield Settlement Analysis (YSA) and
-            Profit & Loss (PNL) statements. These reports are exclusively
-            generated based on the successful runs of the month-end ETL
-            processing.
+          <Typography variant="body1" color="text.secondary" sx={{ maxWidth: "800px" }}>
+            View and download your monthly reports. Data is generated freshly upon request when the month-end ETL processing has completed successfully.
           </Typography>
         </Box>
       </motion.div>
 
-      {/* Global Control Panel (Date & Runs) */}
-      <motion.div
-        initial={{ y: 20, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        transition={{ duration: 0.5, delay: 0.1 }}
-      >
+      {/* Global Status Panel */}
+      <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ duration: 0.5, delay: 0.1 }}>
         <Paper
           elevation={0}
           sx={{
@@ -314,34 +269,13 @@ export default function AdhocReports() {
             boxShadow: "0 4px 20px rgba(0, 0, 0, 0.03)",
           }}
         >
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              flexWrap: "wrap",
-              gap: 2,
-            }}
-          >
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 2 }}>
             <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-              <Box
-                sx={{
-                  p: 1.5,
-                  bgcolor: "primary.50",
-                  color: "primary.main",
-                  borderRadius: 2,
-                  display: "flex",
-                }}
-              >
+              <Box sx={{ p: 1.5, bgcolor: "primary.50", color: "primary.main", borderRadius: 2, display: "flex" }}>
                 <CalendarMonthIcon fontSize="medium" />
               </Box>
               <Box>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  fontWeight="bold"
-                  sx={{ display: "block" }}
-                >
+                <Typography variant="caption" color="text.secondary" fontWeight="bold" sx={{ display: "block" }}>
                   ACTIVE ETL DATE
                 </Typography>
                 <Typography variant="h6" fontWeight="600">
@@ -350,94 +284,21 @@ export default function AdhocReports() {
               </Box>
             </Box>
 
-            {/* Global Run Status Indicator */}
-            {selectedRun && (
-              <Chip
-                icon={isRunSuccessful ? <CheckCircleIcon /> : <WarningIcon />}
-                label={`Global Status: ${selectedRun.status}`}
-                color={isRunSuccessful ? "success" : "error"}
-                variant="outlined"
-                sx={{ fontWeight: "bold" }}
-              />
-            )}
+            {/* Global Availability Status Indicator */}
+            <Chip
+              icon={isAvailableToDownload ? <CheckCircleIcon /> : <SyncIcon sx={{ animation: "spin 2s linear infinite", "@keyframes spin": { "0%": { transform: "rotate(0deg)" }, "100%": { transform: "rotate(360deg)" } } }} />}
+              label={isAvailableToDownload ? "Ready for Download" : "ETL Job Running..."}
+              color={isAvailableToDownload ? "success" : "warning"}
+              variant="outlined"
+              sx={{ fontWeight: "bold", px: 1 }}
+            />
           </Box>
-
-          {/* Global Interactive Run Selector */}
-          <AnimatePresence mode="wait">
-            {hasMultipleRuns && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: "auto", opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                style={{ overflow: "hidden" }}
-              >
-                <Divider sx={{ my: 3 }} />
-                <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                  <StorageIcon color="action" />
-                  <Typography
-                    variant="subtitle2"
-                    fontWeight="bold"
-                    color="text.secondary"
-                  >
-                    SELECT PROCESSING RUN:
-                  </Typography>
-                  <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
-                    {runs.map((run) => {
-                      const isSelected = selectedRun.runId === run.runId;
-                      return (
-                        <motion.div
-                          key={run.runId}
-                          whileHover={{ scale: 1.05 }}
-                          whileTap={{ scale: 0.95 }}
-                          onClick={() => setSelectedRun(run)}
-                          style={{ cursor: "pointer" }}
-                        >
-                          <Box
-                            sx={{
-                              px: 2,
-                              py: 0.75,
-                              borderRadius: "24px",
-                              border: "2px solid",
-                              borderColor: isSelected
-                                ? "primary.main"
-                                : "divider",
-                              bgcolor: isSelected
-                                ? "primary.main"
-                                : "transparent",
-                              color: isSelected ? "white" : "text.primary",
-                              transition: "all 0.2s",
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 1,
-                            }}
-                          >
-                            <Typography
-                              variant="body2"
-                              fontWeight={isSelected ? 700 : 500}
-                            >
-                              Run {run.runId}
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              sx={{ opacity: isSelected ? 0.9 : 0.6 }}
-                            >
-                              ({run.timestamp})
-                            </Typography>
-                          </Box>
-                        </motion.div>
-                      );
-                    })}
-                  </Box>
-                </Box>
-              </motion.div>
-            )}
-          </AnimatePresence>
         </Paper>
       </motion.div>
 
-      {/* Reports Grid (Driven by constant REPORT_DATA) */}
+      {/* Dynamic Reports Grid */}
       <Grid container spacing={4}>
-        {REPORT_DATA.map((report, index) => (
+        {reports.map((report, index) => (
           <Grid item xs={12} md={6} key={report.id}>
             <motion.div
               initial={{ opacity: 0, y: 30 }}
@@ -445,10 +306,21 @@ export default function AdhocReports() {
               transition={{ duration: 0.5, delay: 0.2 + index * 0.1 }}
               style={{ height: "100%" }}
             >
-              <ReportCard report={report} isRunSuccessful={isRunSuccessful} />
+              <ReportCard 
+                report={report} 
+                isAvailable={isAvailableToDownload} 
+                onDownloadReport={handleDownload}
+              />
             </motion.div>
           </Grid>
         ))}
+        {reports.length === 0 && (
+          <Grid item xs={12}>
+            <Typography align="center" color="text.secondary" sx={{ py: 4 }}>
+              No reports configured for this date.
+            </Typography>
+          </Grid>
+        )}
       </Grid>
     </Container>
   );
