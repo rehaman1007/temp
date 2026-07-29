@@ -1,85 +1,66 @@
-package com.fincore.enquiry_service.controller;
+package com.example;
 
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.WebDataBinder;
-import org.springframework.web.bind.annotation.InitBinder;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import javax.naming.InitialContext;
+import javax.naming.Context;
+import javax.servlet.ServletException;
+import javax.servlet.annotation.WebServlet;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.sql.DataSource;
 
-import com.fincore.commonutilities.jwt.JwtUtil;
-import com.fincore.enquiry_service.dto.ApiResponse;
-import com.fincore.enquiry_service.dto.BalanceRequestDTO;
-import com.fincore.enquiry_service.dto.BalanceResponseDTO;
-import com.fincore.enquiry_service.dto.GLBalanceResponseDTO;
-import com.fincore.enquiry_service.dto.GetPayloadDTO;
-import com.fincore.enquiry_service.dto.PaginatedResponseDTO;
-import com.fincore.enquiry_service.service.EnquiryService;
+@WebServlet("/report")
+public class ReportDownload extends HttpServlet {
 
-import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
+    @Override
+    protected void doGet(HttpServletRequest request,
+                         HttpServletResponse response)
+            throws ServletException, IOException {
 
-@RestController
-@RequiredArgsConstructor
-@RequestMapping("/api/balance")
-public class BalanceEnquiryController {
+        response.setContentType("text/plain");
+        PrintWriter out = response.getWriter();
 
-        public final EnquiryService service;
-        private final JwtUtil jwtUtil;
+        try {
+            Context ctx = new InitialContext();
+            DataSource ds = (DataSource) ctx.lookup("jdbc/DigiGOVNonXAPooledDS");
 
-        // --- SECURITY FIX: Explicitly disallow mass assignment on sensitive internal fields ---
-        @InitBinder
-        public void initBinder(WebDataBinder binder) {
-                binder.setDisallowedFields("class.*", "Class.*", "*.class.*", "*.Class.*", "classLoader.*");
+            // Explicitly defining all columns for the query
+            String query = "SELECT Date, Total_no_of_file_generated_in_Digigov, " +
+                           "Total_Transaction_Amount, Transaction_Generation_for_SBI_Account, " +
+                           "Transaction_Generation_for_non_SBI_Account, Extract_Received_for_SBI_Account, " +
+                           "Extract_not_Received_for_SBI_Account, Extract_Received_for_non_SBI_Account, " +
+                           "Extract_not_Received_for_non_SBI_Account, Total_Amount_for_SBI_Account, " +
+                           "Total_Amount_for_SBI_non_Account " +
+                           "FROM [dbo].[RSK_PAYMENT_REPORT]";
+
+            try (Connection con = ds.getConnection();
+                 Statement stmt = con.createStatement();
+                 ResultSet rs = stmt.executeQuery(query)) {
+
+                // Fetching data by column name makes the code robust against DB changes
+                while (rs.next()) {
+                    out.println(
+                            rs.getString("Date") + ", " +
+                            rs.getString("Total_no_of_file_generated_in_Digigov") + ", " +
+                            rs.getString("Total_Transaction_Amount") + ", " +
+                            rs.getString("Transaction_Generation_for_SBI_Account") + ", " +
+                            rs.getString("Transaction_Generation_for_non_SBI_Account") + ", " +
+                            rs.getString("Extract_Received_for_SBI_Account") + ", " +
+                            rs.getString("Extract_not_Received_for_SBI_Account") + ", " +
+                            rs.getString("Extract_Received_for_non_SBI_Account") + ", " +
+                            rs.getString("Extract_not_Received_for_non_SBI_Account") + ", " +
+                            rs.getString("Total_Amount_for_SBI_Account") + ", " +
+                            rs.getString("Total_Amount_for_SBI_non_Account")
+                    );
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace(out);
         }
-
-        @PostMapping("/enquires")
-        public ResponseEntity<ApiResponse<PaginatedResponseDTO<BalanceResponseDTO>>> getBalance(
-                // Added @Valid here to enforce DTO validation rules
-                @RequestBody @Valid BalanceRequestDTO request) {
-
-                PaginatedResponseDTO<BalanceResponseDTO> result = service.getBalanceDetails(request);
-                return ResponseEntity.ok(ApiResponse.success(result, "Balance records fetched Successfully"));
-        }
-
-        @PostMapping("/export")
-        public ResponseEntity<byte[]> exportBalance(
-                @RequestHeader("Authorization") String token,
-                @RequestBody @Valid BalanceRequestDTO request) { // Added @Valid here as well for consistency
-
-                String userId = jwtUtil.getUserIdFromToken(token);
-
-                byte[] bytes = service.exportBalanceToExcel(
-                        request,
-                        userId);
-
-                return ResponseEntity.ok()
-                        .header(
-                                HttpHeaders.CONTENT_DISPOSITION,
-                                "attachment; filename=balance_enquiry.xlsx")
-                        .contentType(
-                                MediaType.parseMediaType(
-                                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-                        .body(bytes);
-        }
-
-        @PostMapping("/whole-balances")
-        public PaginatedResponseDTO<GLBalanceResponseDTO> getGlBalanceReport(
-                @RequestBody @Valid GetPayloadDTO payload) {
-
-                return service.getGlBalanceReport(
-                        payload.getFromDate(),
-                        payload.getToDate(),
-                        payload.getCircle(),
-                        payload.getBranch(),
-                        payload.getCgl(),
-                        payload.getPage(),
-                        payload.getSize(),
-                        payload.getCurrency());
-        }
-
+    }
 }
