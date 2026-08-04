@@ -1,3 +1,903 @@
+import React, { useState, useEffect } from "react";
+import {
+  Box,
+  Typography,
+  Card,
+  Container,
+  Grid, // Using standard Grid or Grid2 depending on MUI v6 setup
+  Grow,
+  Paper,
+  Stack,
+  IconButton,
+  Tooltip,
+  Chip,
+} from "@mui/material";
+import { DescriptionRounded, ArrowForwardRounded } from "@mui/icons-material";
+import { motion } from "framer-motion";
+import dayjs from "dayjs";
+
+// MUI Icons
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+import EventBusyIcon from "@mui/icons-material/EventBusy";
+import DescriptionIcon from "@mui/icons-material/Description";
+import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
+
+// Custom Hooks (Ensure paths match your project)
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import LoadingOverlay from "../../utils/LoadingOverlay";
+import AdhocReportsDialog from "./components/AdhocReportsDialog";
+import downloadFile from "../../utils/DownloadUtils";
+import AdhocReportsPreview from "./components/AdhocReportsPreview";
+import AdhocReportsCard from "./components/AdhocReportsCard";
+
+// --- Date Utility ---
+const isLastDayOfMonth = (dateString) => {
+  if (!dateString) return false;
+  const [day, month, year] = dateString.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  const lastDayOfMonth = new Date(year, month, 0).getDate();
+  return date.getDate() === lastDayOfMonth;
+};
+
+// --- Main Screen ---
+export default function AdhocReports() {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+
+  // All states strictly initialized to null
+  const [etlDate, setEtlDate] = useState(null);
+  const [isAvailableToDownload, setIsAvailableToDownload] = useState(null);
+  const [reports, setReports] = useState(null);
+  const [loading, setLoading] = useState(null);
+  const [isDownloading, setIsDownloading] = useState(null);
+
+  // Preview handling states
+  const [reportPreviewData, setReportPreviewData] = useState(null);
+  const [previewReportDetails, setPreviewReportDetails] = useState(null);
+  const [selectedReport, setSelectedReport] = useState(null);
+
+  const fetchData = async () => {
+    setReportPreviewData(null);
+    setPreviewReportDetails(null);
+    setSelectedReport(null);
+    setLoading(true);
+    try {
+      const etlDetails = await callApi(
+        "/PS/process/waiting-for-approval",
+        {},
+        "GET",
+      );
+      const etlRaw = etlDetails?.data?.etlDate;
+      const availableFlag = etlDetails?.data?.inWaitingState || true;
+
+      const formattedEtlDate = etlRaw
+        ? dayjs(etlRaw.split("T")[0]).format("DD-MM-YYYY")
+        : dayjs().format("DD-MM-YYYY");
+
+      setEtlDate(formattedEtlDate);
+      setIsAvailableToDownload(availableFlag);
+
+      if (isLastDayOfMonth(formattedEtlDate)) {
+        const reportsRes = await callApi("/RS/reports/adhoc-types", {}, "GET");
+        const reportsData = reportsRes?.data || reportsRes || [];
+        setReports(reportsData);
+      } else {
+        setReports([]);
+      }
+    } catch (e) {
+      console.error("Data fetch error:", e);
+      showSnackBar(
+        "Failed to load report data. Kindly try again after sometime.",
+        "error",
+      );
+      setEtlDate(dayjs().format("DD-MM-YYYY"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleDownload = async (reportId, formatType) => {
+    setIsDownloading(true);
+
+    try {
+      const fileName = `${selectedReport.fileName}_${etlDate}`;
+      const payload = {
+        reportId: selectedReport.fileName || "nwsa_report",
+        variantCode: "DATE_WISE",
+        params: { balanceDate: "2026-03-30" },
+      };
+
+      const REPORT_DOWNLOAD_BASE_URL = "/RB/report-builder/view";
+      let endpoint = `${REPORT_DOWNLOAD_BASE_URL}/pdf`; // default fallback
+
+      if (formatType === "excel") endpoint = `${REPORT_DOWNLOAD_BASE_URL}/xlsx`;
+      if (formatType === "test" || formatType === "psv")
+        endpoint = `${REPORT_DOWNLOAD_BASE_URL}/txt`;
+
+      const response = await callApi(endpoint, payload, "POST", "arraybuffer");
+      const blobData = response?.data || response;
+
+      if (formatType === "view") {
+        setReportPreviewData(blobData);
+        setPreviewReportDetails(selectedReport); // Preserve details for the inline viewer
+        setSelectedReport(null); // Closes the dialog instantly
+
+        // Smooth scroll to the PDF viewer container
+        setTimeout(() => {
+          document
+            .getElementById("inline-pdf-viewer")
+            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 300);
+      } else {
+        downloadFile(blobData, formatType, fileName);
+        setSelectedReport(null);
+        showSnackBar(`${fileName} downloaded successfully!`, "success");
+      }
+    } catch (error) {
+      console.error("Download Error:", error);
+      showSnackBar("Failed to download the report. Please try again.", "error");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  return (
+    <>
+      {/* Boolean coercion used here because states initialized as null */}
+      <LoadingOverlay loading={!!loading || !!isDownloading} />
+
+      {/* Adhoc Reports Dialog Modal */}
+      <AdhocReportsDialog
+        selectedReport={selectedReport}
+        setSelectedReport={setSelectedReport}
+        handleDownload={handleDownload}
+        isAvailableToDownload={!!isAvailableToDownload}
+      />
+
+      <Grow in timeout={500}>
+        <Stack spacing={4}>
+          <Box sx={{ width: "100%", p: { xs: 2, sm: 3, md: 4 } }}>
+            <Stack
+              spacing={4}
+              direction="column"
+              alignItems="center"
+              justifyContent="center"
+            >
+              {/* Main Report Container */}
+              <Card
+                sx={{
+                  width: "100%",
+                  borderRadius: 3,
+                  boxShadow: 6,
+                  overflow: "hidden",
+                }}
+              >
+                <Box
+                  sx={{
+                    display: "flex",
+                    flexDirection: { xs: "column", md: "row" },
+                    alignItems: { xs: "flex-start", md: "center" },
+                    justifyContent: "space-between",
+                    gap: 3,
+                    px: { xs: 3, md: 4 },
+                    py: { xs: 3, md: 3 },
+                    background:
+                      "linear-gradient(90deg, #5D3FD3 0%, #7b1fa2 100%)",
+                    color: "white",
+                  }}
+                >
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 2,
+                      flex: 1,
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        borderRadius: "50%",
+                        p: 1.5,
+                        bgcolor: "rgba(255,255,255,0.15)",
+                        display: "flex",
+                      }}
+                    >
+                      <DescriptionIcon
+                        sx={{
+                          width: { xs: 35, md: 45 },
+                          height: { xs: 35, md: 45 },
+                        }}
+                      />
+                    </Box>
+                    <Box>
+                      <Typography variant="h5" fontWeight="bold">
+                        Adhoc Reports Generation
+                      </Typography>
+                      <Typography
+                        variant="body2"
+                        sx={{ opacity: 0.9, mt: 0.5 }}
+                      >
+                        View and download monthly reports as soon as month-end
+                        ETL processing is done and before EOD approval.
+                      </Typography>
+                    </Box>
+                  </Box>
+
+                  <Box
+                    sx={{
+                      bgcolor: "rgba(0,0,0,0.2)",
+                      borderRadius: 3,
+                      p: 2,
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: { xs: "flex-start", md: "flex-end" },
+                      gap: 1,
+                      minWidth: "fit-content",
+                    }}
+                  >
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                      <CalendarMonthIcon
+                        fontSize="small"
+                        sx={{ opacity: 0.8 }}
+                      />
+                      <Typography
+                        variant="caption"
+                        fontWeight="bold"
+                        sx={{ opacity: 0.9, letterSpacing: 0.5 }}
+                      >
+                        ETL Date : {etlDate || "--"}
+                      </Typography>
+                    </Box>
+                  </Box>
+                </Box>
+
+                <Box sx={{ p: { xs: 2, md: 4 } }}>
+                  {!loading && etlDate && !isLastDayOfMonth(etlDate) ? (
+                    <Container maxWidth="sm" sx={{ py: 6 }}>
+                      <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.5 }}
+                      >
+                        <Paper
+                          elevation={0}
+                          sx={{
+                            p: 6,
+                            borderRadius: 4,
+                            textAlign: "center",
+                            border: "1px solid",
+                            borderColor: "divider",
+                            bgcolor: "white",
+                            boxShadow: "0 4px 20px rgba(0,0,0,0.03)",
+                          }}
+                        >
+                          <motion.div
+                            initial={{ scale: 0 }}
+                            animate={{ scale: 1 }}
+                            transition={{
+                              delay: 0.2,
+                              type: "spring",
+                              stiffness: 150,
+                            }}
+                          >
+                            <EventBusyIcon
+                              sx={{
+                                fontSize: 80,
+                                color: "text.secondary",
+                                mb: 3,
+                                opacity: 0.3,
+                              }}
+                            />
+                          </motion.div>
+                          <Typography
+                            variant="h5"
+                            fontWeight="bold"
+                            gutterBottom
+                            color="text.primary"
+                          >
+                            Not a Month-End Cycle
+                          </Typography>
+                          <Typography
+                            variant="body1"
+                            color="text.secondary"
+                            sx={{ mb: 1 }}
+                          >
+                            Adhoc Reports are strictly generated as part of the
+                            month-end activity.
+                          </Typography>
+                          <Typography
+                            variant="body1"
+                            color="text.secondary"
+                            sx={{ mb: 1 }}
+                          >
+                            The current ETL Date processed is{" "}
+                            <strong>{etlDate}</strong>.
+                          </Typography>
+                          <Typography variant="body1" color="text.secondary">
+                            Please check back during the month-end processing
+                            cycle.
+                          </Typography>
+                        </Paper>
+                      </motion.div>
+                    </Container>
+                  ) : (
+                    <>
+                      <Grid container spacing={3}>
+                        {reports?.map((report, index) => (
+                          // Size prop is used directly on Grid
+                          <Grid
+                            size={{ xs: 12, sm: 6, md: 4 }}
+                            key={report.id || index}
+                          >
+                            <motion.div
+                              initial={{ opacity: 0, y: 30 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ duration: 0.4, delay: index * 0.1 }}
+                              style={{ height: "100%" }}
+                            >
+                              <AdhocReportsCard
+                                report={report}
+                                onClick={() => setSelectedReport(report)}
+                              />
+                            </motion.div>
+                          </Grid>
+                        ))}
+
+                        {reports?.length === 0 && (
+                          <Grid size={{ xs: 12 }}>
+                            <Typography
+                              align="center"
+                              color="text.secondary"
+                              sx={{ py: 8 }}
+                            >
+                              No reports configured for this date.
+                            </Typography>
+                          </Grid>
+                        )}
+                      </Grid>
+                      {/* Inline PDF Preview Component below Reports */}
+                      {reportPreviewData && previewReportDetails && (
+                        <Box sx={{ p: 1, mt: 3, pt: 2 }}>
+                          <AdhocReportsPreview
+                            selectedReport={previewReportDetails}
+                            data={reportPreviewData}
+                            onClose={() => {
+                              setReportPreviewData(null);
+                              setPreviewReportDetails(null);
+                            }}
+                            etlDate={etlDate}
+                          />
+                        </Box>
+                      )}
+                    </>
+                  )}
+                </Box>
+              </Card>
+            </Stack>
+          </Box>
+        </Stack>
+      </Grow>
+    </>
+  );
+}
+
+
+
+
+// src/components/AdhocReportsCard.jsx
+import React from "react";
+import { motion } from "framer-motion";
+import { Paper, Box, Typography, IconButton, Tooltip } from "@mui/material";
+import {
+  DescriptionRounded,
+  DownloadRounded,
+  ArrowForwardRounded,
+} from "@mui/icons-material";
+import CustomChip from "../../../utils/CustomChip";
+
+const AdhocReportsCard = ({ report, onClick, onDownload }) => {
+  return (
+    <motion.div
+      whileHover={{
+        y: -6,
+        transition: { duration: 0.3, type: "spring", stiffness: 300 },
+      }}
+      style={{ height: "100%" }}
+    >
+      <Paper
+        onClick={onClick}
+        elevation={0}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onClick();
+          }
+        }}
+        sx={{
+          p: 3,
+          borderRadius: 3,
+          height: "100%",
+          display: "flex",
+          flexDirection: "column",
+          cursor: "pointer",
+          bgcolor: "background.paper",
+          // Soft Shadow Stack
+          boxShadow:
+            "0 4px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px -1px rgba(0, 0, 0, 0.02)",
+          transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+          "&:hover": {
+            boxShadow:
+              "0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 10px 10px -5px rgba(0, 0, 0, 0.01)",
+            "& .card-icon-bg": {
+              transform: "scale(1.1) rotate(-5deg)",
+              bgcolor: "primary.light",
+              color: "primary.contrastText",
+            },
+            "& .action-arrow": { transform: "translateX(5px)", opacity: 1 },
+          },
+          "&:focus-visible": {
+            outline: "2px solid",
+            outlineColor: "primary.main",
+            outlineOffset: 2,
+          },
+        }}
+      >
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            mb: 2,
+          }}
+        >
+          <Box
+            className="card-icon-bg"
+            sx={{
+              p: 1.5,
+              borderRadius: 2.5,
+              bgcolor: "grey.50",
+              color: "primary.main",
+              display: "flex",
+              transition: "all 0.3s ease",
+            }}
+          >
+            <DescriptionRounded fontSize="medium" />
+          </Box>
+          <Tooltip title="Download" arrow>
+            <IconButton
+              size="small"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClick();
+              }}
+              sx={{
+                color: "grey.400",
+                "&:hover": { color: "primary.main", bgcolor: "primary.50" },
+              }}
+            >
+              <DownloadRounded fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        <Box sx={{ flexGrow: 1, mb: 2 }}>
+          <Typography
+            variant="h6"
+            fontWeight="700"
+            color="text.primary"
+            gutterBottom
+            sx={{ fontSize: "1.05rem" }}
+          >
+            {report.reportName}
+          </Typography>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{
+              display: "-webkit-box",
+              WebkitLineClamp: 3,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+              lineHeight: 1.6,
+            }}
+          >
+            {report.reportDescription || "No description available."}
+          </Typography>
+        </Box>
+
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            pt: 1.5,
+          }}
+        >
+          <CustomChip
+            label={report.category || "Report"}
+            size="small"
+            sx={{
+              height: 24,
+              fontSize: "0.7rem",
+              fontWeight: 600,
+              borderRadius: 1,
+              bgcolor: "grey.100",
+              color: "text.secondary",
+            }}
+          />
+          <ArrowForwardRounded
+            className="action-arrow"
+            fontSize="small"
+            sx={{
+              color: "primary.main",
+              opacity: 0,
+              transform: "translateX(0)",
+              transition: "all 0.3s ease",
+            }}
+          />
+        </Box>
+      </Paper>
+    </motion.div>
+  );
+};
+
+export default AdhocReportsCard;
+
+
+import React, { useState, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Dialog,
+  DialogContent,
+  DialogActions,
+  Button,
+  IconButton,
+  Typography,
+  Box,
+  Grid,
+  Paper,
+} from "@mui/material";
+import {
+  Close,
+  DescriptionRounded,
+  PictureAsPdfRounded,
+  TableChartRounded,
+  InsertDriveFileRounded,
+  DownloadRounded,
+  VisibilityRounded,
+  ArticleRounded,
+  PreviewRounded,
+} from "@mui/icons-material";
+
+const getFormatIcon = (format) => {
+  switch (format?.toLowerCase()) {
+    case "pdf":
+      return <PictureAsPdfRounded fontSize="large" color="error" />;
+    case "excel":
+    case "xlsx":
+      return <TableChartRounded fontSize="large" color="success" />;
+    case "psv":
+      return <ArticleRounded fontSize="large" color="info" />;
+    case "view":
+      return <PreviewRounded fontSize="large" color="secondary" />;
+    default:
+      return <InsertDriveFileRounded fontSize="large" color="action" />;
+  }
+};
+
+const AdhocReportsDownloadDialog = ({
+  selectedReport,
+  setSelectedReport,
+  isAvailableToDownload,
+  handleDownload,
+}) => {
+  const [selectedFormat, setSelectedFormat] = useState("view");
+
+  useEffect(() => {
+    if (selectedReport) setSelectedFormat("view");
+  }, [selectedReport]);
+
+  const formatOptions = [
+    { id: "view", label: "Preview Document", ext: "view" },
+    { id: "pdf", label: "PDF Document", ext: ".pdf" },
+    { id: "excel", label: "Excel Spreadsheet", ext: ".xlsx" },
+    { id: "psv", label: "PSV Data", ext: ".psv" },
+  ];
+
+  return (
+    <AnimatePresence>
+      {selectedReport && (
+        <Dialog
+          open={Boolean(selectedReport)}
+          onClose={() => setSelectedReport(null)}
+          maxWidth="md"
+          fullWidth
+          PaperProps={{
+            component: motion.div,
+            initial: { opacity: 0, scale: 0.95, y: 10 },
+            animate: { opacity: 1, scale: 1, y: 0 },
+            exit: { opacity: 0, scale: 0.95, y: 10 },
+            transition: { duration: 0.2 },
+            sx: {
+              borderRadius: 3,
+              overflow: "hidden",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.15)",
+            },
+          }}
+        >
+          <Box
+            sx={{
+              p: 2.5,
+              pb: 1,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <Box
+                sx={{
+                  p: 1.5,
+                  borderRadius: 2,
+                  bgcolor: "primary.50",
+                  color: "primary.main",
+                  display: "flex",
+                }}
+              >
+                <DescriptionRounded fontSize="large" />
+              </Box>
+              <Box>
+                <Typography variant="h6" fontWeight="700" lineHeight={1.2}>
+                  {selectedReport.reportName}
+                </Typography>
+                <Typography variant="body2" color="text.secondary" noWrap>
+                  Choose Report Actions
+                </Typography>
+              </Box>
+            </Box>
+            <IconButton
+              onClick={() => setSelectedReport(null)}
+              size="small"
+              sx={{ color: "text.secondary" }}
+            >
+              <Close />
+            </IconButton>
+          </Box>
+
+          <DialogContent sx={{ pt: 2, pb: 3 }}>
+            <Box>
+              <Typography variant="h6" component="h2" color="text.secondary">
+                Description
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                {selectedReport?.reportDescription ||
+                  "No description available for this report."}
+              </Typography>
+
+              <Typography variant="h6" component="h3" sx={{ mt: 2 }}>
+                Export Options
+              </Typography>
+              <Typography variant="body1" mb={3}>
+                Choose a file format to generate data for this report.
+              </Typography>
+            </Box>
+
+            <Grid container spacing={2}>
+              {formatOptions.map((option) => (
+                <Grid size={{ xs: 12, sm: 3 }} key={option.id}>
+                  <Paper
+                    onClick={() => setSelectedFormat(option.id)}
+                    sx={{
+                      p: 2,
+                      height: "100%",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 1.5,
+                      cursor: "pointer",
+                      border: "2px solid",
+                      borderColor:
+                        selectedFormat === option.id
+                          ? "primary.main"
+                          : "divider",
+                      bgcolor:
+                        selectedFormat === option.id
+                          ? "primary.50"
+                          : "background.paper",
+                      transition: "all 0.2s ease",
+                      "&:hover": {
+                        borderColor: "primary.light",
+                        bgcolor: "primary.50",
+                        transform: "translateY(-2px)",
+                      },
+                    }}
+                  >
+                    {getFormatIcon(option.id)}
+                    <Box textAlign="center">
+                      <Typography variant="subtitle2" fontWeight="700">
+                        {option.ext.toUpperCase()}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {option.label}
+                      </Typography>
+                    </Box>
+                  </Paper>
+                </Grid>
+              ))}
+            </Grid>
+
+            {!isAvailableToDownload && (
+              <Box
+                sx={{
+                  mt: 3,
+                  p: 2,
+                  bgcolor: "warning.light",
+                  borderRadius: 2,
+                  color: "warning.contrastText",
+                }}
+              >
+                <Typography variant="body2" fontWeight="600">
+                  ⚠️ Data not available
+                </Typography>
+                <Typography variant="caption" display="block">
+                  This report cannot be generated at this time. Please try again
+                  later.
+                </Typography>
+              </Box>
+            )}
+          </DialogContent>
+
+          <DialogActions
+            sx={{
+              p: 1.5,
+              gap: 1.5,
+              borderTop: "1px solid",
+              borderColor: "divider",
+            }}
+          >
+            <Button
+              onClick={() => setSelectedReport(null)}
+              variant="outlined"
+              color="inherit"
+              disabled={!isAvailableToDownload}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              disabled={!selectedFormat || !isAvailableToDownload}
+              onClick={() => handleDownload(selectedReport.id, selectedFormat)}
+              startIcon={
+                selectedFormat === "view" ? (
+                  <VisibilityRounded />
+                ) : (
+                  <DownloadRounded />
+                )
+              }
+              sx={{ px: 3, py: 1.2 }}
+            >
+              {selectedFormat === "view"
+                ? "Preview Document"
+                : `Download ${selectedFormat.toUpperCase()}`}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      )}
+    </AnimatePresence>
+  );
+};
+
+export default AdhocReportsDownloadDialog;
+
+
+
+import React from "react";
+import { Box, Typography, IconButton, Card, Paper } from "@mui/material";
+import { Close as CloseIcon, ArticleRounded } from "@mui/icons-material";
+import { motion } from "framer-motion";
+import PDFView from "../../../utils/PDFView";
+
+const AdhocReportsPreview = ({
+  selectedReport,
+  data, // ArrayBuffer or Blob
+  onClose,
+  etlDate,
+}) => {
+  if (!data) return null;
+
+  return (
+    <motion.div
+      id="inline-pdf-viewer"
+      initial={{ opacity: 0, y: 50 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      transition={{ duration: 0.5, type: "spring" }}
+      style={{ width: "100%" }}
+    >
+      <Card
+        sx={{
+          width: "100%",
+          borderRadius: 3,
+          boxShadow: 6,
+          overflow: "hidden",
+        }}
+      >
+        {/* Inline Header mimicking the Main Card */}
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: { xs: "column", md: "row" },
+            alignItems: "center",
+            justifyContent: "space-between",
+            px: { xs: 3, md: 4 },
+            py: 2,
+          }}
+        >
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Box
+              sx={{
+                borderRadius: "50%",
+                bgcolor: "rgba(255,255,255,0.15)",
+                display: "flex",
+              }}
+            >
+              <ArticleRounded sx={{ fontSize: 30 }} />
+            </Box>
+            <Box>
+              <Typography variant="h6" fontWeight="bold">
+                {`Preview of ${etlDate} ${selectedReport?.reportName} Report`}
+              </Typography>
+            </Box>
+          </Box>
+
+          <IconButton
+            onClick={onClose}
+            sx={{
+              color: "white",
+              bgcolor: "rgba(0,0,0,0.2)",
+              "&:hover": { bgcolor: "rgba(0,0,0,0.4)" },
+            }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </Box>
+
+        {/* PDF Container Box */}
+        <Box
+          sx={{
+            height: "800px", // Fixed viewer height mapping
+            width: "100%",
+            p: 1,
+          }}
+        >
+          <Paper
+            elevation={3}
+            sx={{
+              height: "100%",
+              width: "100%",
+              borderRadius: 2,
+              overflow: "hidden",
+            }}
+          >
+            <PDFView reportName={selectedReport?.reportName} data={data} />
+          </Paper>
+        </Box>
+      </Card>
+    </motion.div>
+  );
+};
+
+export default AdhocReportsPreview;
+
+
 import React, { useEffect, useState } from "react";
 import { Box, CircularProgress, Typography } from "@mui/material";
 import { Viewer, Worker } from "@react-pdf-viewer/core";
@@ -35,25 +935,46 @@ const PDFView = ({ data = null }) => {
               padding: "4px",
             }}
           >
-            <div style={{ padding: "0 2px" }}><ShowSearchPopover /></div>
-            <div style={{ padding: "0 2px" }}><GoToPreviousPage /></div>
-            <div style={{ padding: "0 2px", display: "flex", alignItems: "center" }}>
-              <CurrentPageInput /> <span style={{ padding: "0 4px" }}>/</span> <NumberOfPages />
+            <div style={{ padding: "0 2px" }}></div>
+            <div style={{ padding: "0 2px" }}>
+              <GoToPreviousPage />
             </div>
-            <div style={{ padding: "0 2px" }}><GoToNextPage /></div>
-            
+            <div
+              style={{
+                padding: "0 2px",
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              <CurrentPageInput /> <span style={{ padding: "0 4px" }}>/</span>{" "}
+              <NumberOfPages />
+            </div>
+            <div style={{ padding: "0 2px" }}>
+              <GoToNextPage />
+            </div>
+
             {/* Flex Spacer to center the zoom controls */}
             <div style={{ flexGrow: 1 }} />
-            
-            <div style={{ padding: "0 2px" }}><ZoomOut /></div>
-            <div style={{ padding: "0 2px" }}><Zoom /></div>
-            <div style={{ padding: "0 2px" }}><ZoomIn /></div>
-            
+
+            <div style={{ padding: "0 2px" }}>
+              <ZoomOut />
+            </div>
+            <div style={{ padding: "0 2px" }}>
+              <Zoom />
+            </div>
+            <div style={{ padding: "0 2px" }}>
+              <ZoomIn />
+            </div>
+
             {/* Flex Spacer to push the remaining icons to the right */}
             <div style={{ flexGrow: 1 }} />
-            
-            <div style={{ padding: "0 2px" }}><EnterFullScreen /></div>
-            <div style={{ padding: "0 2px" }}><Print /></div>
+
+            <div style={{ padding: "0 2px" }}>
+              <EnterFullScreen />
+            </div>
+            <div style={{ padding: "0 2px" }}>
+              <Print />
+            </div>
           </div>
         );
       }}
@@ -62,13 +983,12 @@ const PDFView = ({ data = null }) => {
 
   // 2. Initialize the plugin with customized sidebar and toolbar
   const defaultLayoutPluginInstance = defaultLayoutPlugin({
-    sidebarTabs: (defaultTabs) => [
-      // defaultTabs[0] is Thumbnails
-      // defaultTabs[1] is Bookmarks (Removed)
-      // defaultTabs[2] is Attachments (Removed)
-      defaultTabs[0], 
-    ],
-    renderToolbar,
+    // sidebarTabs: (defaultTabs) => [
+    //   // defaultTabs[0] is Thumbnails
+    //   // defaultTabs[1] is Bookmarks (Removed)
+    //   // defaultTabs[2] is Attachments (Removed)
+    //   defaultTabs[0],
+    // ],
   });
 
   useEffect(() => {
@@ -92,7 +1012,15 @@ const PDFView = ({ data = null }) => {
   }, [data]);
 
   return (
-    <Box sx={{ height: "100%", width: "100%", display: "flex", justifyContent: "center", alignItems: "center" }}>
+    <Box
+      sx={{
+        height: "100%",
+        width: "100%",
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
       {pdfUrl ? (
         <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
           <Viewer fileUrl={pdfUrl} plugins={[defaultLayoutPluginInstance]} />
