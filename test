@@ -1,5 +1,3 @@
-PDFView.jsx:46 Error loading PDF: Error: getDocument - expected either `data`, `range`, or `url` parameter.
-
 import React, { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import {
@@ -18,92 +16,94 @@ import ZoomOutIcon from "@mui/icons-material/ZoomOut";
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 const PDFView = ({ data = null }) => {
-  console.log("pdfjsLib.version >>", pdfjsLib.version);
   const canvasRef = useRef(null);
   const [pdfDoc, setPdfDoc] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [scale, setScale] = useState(1.5);
   const [loading, setLoading] = useState(true);
 
-  // Load PDF from Blob
+  // 1. Load the PDF Document
   useEffect(() => {
-    if (data) {
-      let blob;
-      if (data instanceof Blob) {
-        blob = data;
-      } else {
-        blob = new Blob([data], { type: "application/pdf" });
-      }
+    if (!data) {
+      setPdfDoc(null);
+      setLoading(false);
+      return;
+    }
 
-      const url = URL.createObjectURL(blob);
+    const blob = data instanceof Blob ? data : new Blob([data], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    let isCancelled = false;
 
-      const loadPDF = async () => {
-        try {
-          setLoading(true);
-          const loadingTask = pdfjsLib.getDocument(url);
-          const pdf = await loadingTask.promise;
+    const loadPDF = async () => {
+      try {
+        setLoading(true);
+        // ✅ Fixed: getDocument requires an object with a 'url' or 'data' property
+        const loadingTask = pdfjsLib.getDocument({ url }); 
+        const pdf = await loadingTask.promise;
+        
+        if (!isCancelled) {
           setPdfDoc(pdf);
           setPageNumber(1);
-        } catch (error) {
-          console.error("Error loading PDF:", error);
-        } finally {
+        }
+      } catch (error) {
+        console.error("Error loading PDF:", error);
+      } finally {
+        if (!isCancelled) {
           setLoading(false);
-          URL.revokeObjectURL(url);
         }
-      };
-
-      loadPDF();
-
-      return () => {
-        setPdfDoc(null);
-      };
-    } else {
-      setPdfDoc(null);
-    }
-  }, [data]);
-
-  // Render page when pdfDoc, pageNumber, or scale changes
-  useEffect(() => {
-    if (data) {
-      let blob;
-      if (data instanceof Blob) {
-        blob = data;
-      } else {
-        blob = new Blob([data], { type: "application/pdf" });
       }
+    };
 
-      const url = URL.createObjectURL(blob);
-      let isCancelled = false;
+    loadPDF();
 
-      const loadPDF = async () => {
-        try {
-          setLoading(true);
-          const loadingTask = pdfjsLib.getDocument({ url }); // ✅ Fixed
-          const pdf = await loadingTask.promise;
-          if (!isCancelled) {
-            setPdfDoc(pdf);
-            setPageNumber(1);
-          }
-        } catch (error) {
-          console.error("Error loading PDF:", error);
-        } finally {
-          if (!isCancelled) {
-            setLoading(false);
-          }
-        }
-      };
-
-      loadPDF();
-
-      return () => {
-        isCancelled = true;
-        setPdfDoc(null);
-        URL.revokeObjectURL(url);
-      };
-    } else {
-      setPdfDoc(null);
-    }
+    return () => {
+      isCancelled = true;
+      URL.revokeObjectURL(url); // Clean up the object URL on unmount
+    };
   }, [data]);
+
+  // 2. Render the Page to Canvas
+  useEffect(() => {
+    if (!pdfDoc || !canvasRef.current) return;
+
+    let renderTask = null;
+
+    const renderPage = async () => {
+      try {
+        const page = await pdfDoc.getPage(pageNumber);
+        const viewport = page.getViewport({ scale });
+        
+        const canvas = canvasRef.current;
+        const context = canvas.getContext("2d");
+
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        const renderContext = {
+          canvasContext: context,
+          viewport: viewport,
+        };
+
+        // Render the page contents into the canvas
+        renderTask = page.render(renderContext);
+        await renderTask.promise;
+      } catch (error) {
+        // Ignore errors caused by cancelling the render task
+        if (error.name !== "RenderingCancelledException") {
+          console.error("Error rendering page:", error);
+        }
+      }
+    };
+
+    renderPage();
+
+    return () => {
+      // Cancel the render task if the user changes pages/zoom before it finishes
+      if (renderTask) {
+        renderTask.cancel();
+      }
+    };
+  }, [pdfDoc, pageNumber, scale]);
 
   if (loading) {
     return (
