@@ -1504,3 +1504,101 @@ public class LedgerExportService {
     }
 }
 
+
+package com.fincore.enquiry_service.service;
+
+import java.time.ZonedDateTime;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.springframework.dao.DataAccessException;
+import org.springframework.stereotype.Service;
+
+import com.fincore.enquiry_service.dto.DownloadsResponseDTO;
+import com.fincore.enquiry_service.dto.MyDownloadsRequestDTO;
+import com.fincore.enquiry_service.exception.UserIdMismatchException;
+import com.fincore.enquiry_service.model.UserDownloads;
+import com.fincore.enquiry_service.model.UserDownloadsData;
+import com.fincore.enquiry_service.repository.UserDownloadsDataRepository;
+import com.fincore.enquiry_service.repository.UserDownloadsRepository;
+
+import jakarta.transaction.Transactional;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
+@Service("MyDownloadsService")
+@RequiredArgsConstructor
+public class MyDownloadsServiceImpl implements MyDownloadsService {
+
+	private final UserDownloadsRepository userDownloadsRepository;
+	private final UserDownloadsDataRepository userDownloadsDataRepository;
+
+	@Override
+	public List<DownloadsResponseDTO> getDownloads(String userId) {
+
+		ZonedDateTime twentyFourHoursAgo = ZonedDateTime.now().minusHours(24);
+
+		// fetching the requests of that user
+		List<UserDownloads> entityList = userDownloadsRepository
+				.findByUserIdAndGeneratedAtGreaterThanOrderByIdDesc(userId, twentyFourHoursAgo);
+
+		// mapping the entity to DTO
+
+		return entityList.stream().map(entity -> {
+			DownloadsResponseDTO dto = new DownloadsResponseDTO();
+			dto.setId(entity.getId());
+			dto.setUserId(entity.getUserId());
+			dto.setFileName(entity.getFileName());
+			dto.setMenuId(entity.getMenuId());
+			dto.setSearchCriteria(entity.getSearchCriteria());
+			dto.setGeneratedAt(entity.getGeneratedAt());
+			return dto;
+		}).collect(Collectors.toList());
+
+	}
+
+	@Override
+	public byte[] download(Long id, String tokenId) {
+		String requestedBy = userDownloadsDataRepository.getUserID(id);
+		if (requestedBy == null) {
+			throw new NullPointerException();
+		} else {
+			if (!requestedBy.equalsIgnoreCase(tokenId)) {
+				throw new UserIdMismatchException(
+						"Access Denied: Security validation failed for this download request.");
+			}
+		}
+
+		return userDownloadsDataRepository.getBlobData(id);
+	}
+
+	@Override
+	@Transactional
+	public Boolean insertRequest(MyDownloadsRequestDTO myDownloadsRequestDTO) {
+		try {
+
+			// inserting the request details in user_downloads table
+			UserDownloads userDownloads = new UserDownloads();
+			userDownloads.setMenuId(myDownloadsRequestDTO.getMenuId());
+			userDownloads.setFileName(myDownloadsRequestDTO.getFileName());
+			userDownloads.setUserId(myDownloadsRequestDTO.getUserId());
+			userDownloads.setSearchCriteria(myDownloadsRequestDTO.getSearchCriteria());
+			// saving the entity
+			userDownloadsRepository.save(userDownloads);
+
+			// inserting the BLOB data in user_downloads_data table with id generated in
+			// above table
+			UserDownloadsData userDownloadsData = new UserDownloadsData();
+
+			userDownloadsData.setDownloadId(userDownloads.getId());
+			userDownloadsData.setFileContent(myDownloadsRequestDTO.getResultData());
+			// saving the entity
+			userDownloadsDataRepository.save(userDownloadsData);
+			return true;
+		} catch (DataAccessException e) {
+			log.error("Failed to save download request", e);
+			return false;
+		}
+	}
+}
