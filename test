@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
+import { useDispatch, useSelector } from "react-redux";
+import { useNavigate } from "react-router-dom";
 import { Box, InputAdornment } from "@mui/material";
 import PersonIcon from "@mui/icons-material/Person";
 import LogoImg from "../../../assets/Logos/Fincore_transperent.svg";
@@ -29,21 +31,17 @@ import {
 } from "./LoginStyles";
 import { resolveConfig } from "../../../config/EnvironmentConfig";
 import Copyright from "../../../components/Copyright";
+import { parseJwt } from "../../../utils/EncryptionUtilities";
+import { loginSuccess } from "../../../store/slices/authSlice";
+import { setMenus, setSelectedMenuItem } from "../../../store/slices/menuSlice";
+import { setTabId } from "../../../store/slices/tabSlice";
 
 export default function LoginPort() {
   const [content, setContent] = useState(null);
 
-  useEffect(() => {
-    const loadContent = async () => {
-      try {
-        const res = await axios.get("/loginContent.json");
-        setContent(res.data);
-      } catch (err) {
-        console.error("Failed to load content JSON:", err);
-      }
-    };
-    loadContent();
-  }, []);
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
+  const menus = useSelector((state) => state.menus.menus);
 
   const [userId, setUserId] = useState("");
   const [error, setError] = useState("");
@@ -59,6 +57,18 @@ export default function LoginPort() {
   const userIdInputRef = useRef(null);
 
   useEffect(() => {
+    const loadContent = async () => {
+      try {
+        const res = await axios.get("/loginContent.json");
+        setContent(res.data);
+      } catch (err) {
+        console.error("Failed to load content JSON:", err);
+      }
+    };
+    loadContent();
+  }, []);
+
+  useEffect(() => {
     const timer = setTimeout(() => {
       if (userIdInputRef.current) {
         userIdInputRef.current.focus();
@@ -66,6 +76,17 @@ export default function LoginPort() {
     }, 100);
     return () => clearTimeout(timer);
   }, []);
+
+  // Post-authentication navigation handler
+  useEffect(() => {
+    if (menus && menus.length > 0 && menus[0]?.route) {
+      if (menus[0].hasChildren) {
+        navigate("/choose-option" + menus[0]?.route);
+      } else {
+        navigate(menus[0]?.route);
+      }
+    }
+  }, [menus, navigate]);
 
   const handleDialogClose = () => {
     setShowErrorDialog(false);
@@ -203,19 +224,49 @@ export default function LoginPort() {
     setOtpData(null);
   };
 
-  const handlePasswordSuccess = (data) => {
-    setOtpData(data);
-    setPage("OTP");
+  // Shared token payload & redux session hydration
+  const handleDirectSessionEstablish = (result) => {
+    if (result?.roleData?.root_menus?.length === 0) {
+      openLoginErrorDialog(
+        "Access Denied",
+        "You don't have enough permissions to access this application.",
+      );
+      return;
+    }
+
+    const user = parseJwt(result.accessToken);
+    const tabId = crypto.randomUUID();
+
+    dispatch(loginSuccess({ token: result.accessToken, user }));
+    localStorage.setItem("payloadEncryptionKey", result.payloadEncryptionKey);
+
+    dispatch(setTabId(tabId));
+    dispatch(setMenus(result.roleData.root_menus));
+    dispatch(setSelectedMenuItem(result.roleData.root_menus[0]));
+
+    const bc = new BroadcastChannel("auth");
+    setTimeout(() => {
+      bc.postMessage({
+        type: "USER_LOGGED_IN",
+        tabId,
+        userId: user.userId,
+      });
+    }, 1000);
+  };
+
+  const handlePasswordSuccess = ({ type, data }) => {
+    if (type === "OTP") {
+      setOtpData(data);
+      setPage("OTP");
+    } else if (type === "DIRECT") {
+      handleDirectSessionEstablish(data);
+    }
   };
 
   if (!content) return null;
 
   return (
     <Root sx={{ justifyContent: "space-between", padding: 0 }}>
-      {/* ADDED RESPONSIVE PADDING HERE 
-        px adds left/right margin on mobile so nothing touches the screen edges.
-        py adds breathing room to the top and bottom.
-      */}
       <Box
         sx={{
           flexGrow: 1,
@@ -227,9 +278,6 @@ export default function LoginPort() {
         }}
       >
         <ContainerInner>
-          {/* ADDED RESPONSIVE GAP HERE
-            Creates vertical spacing between the left-side text and right-side card on mobile.
-          */}
           <Content
             sx={{
               display: "flex",
@@ -246,7 +294,6 @@ export default function LoginPort() {
                   sx={{
                     width: { xs: 100, sm: 130, md: 150 },
                     height: "auto",
-                    // objectFit: "contain",
                   }}
                 />
                 <Box sx={{ textAlign: { xs: "center", md: "left" } }}>
@@ -375,6 +422,7 @@ export default function LoginPort() {
                         otpData={otpData}
                         openLoginErrorDialog={openLoginErrorDialog}
                         onBackToHome={enableEditingBackToHome}
+                        onSessionEstablished={handleDirectSessionEstablish}
                       />
                     </Box>
                   )}
@@ -426,7 +474,6 @@ export default function LoginPort() {
         </ContainerInner>
       </Box>
 
-      {/* FOOTER */}
       <Box sx={{ width: "100%", zIndex: 2 }}>
         <Copyright />
       </Box>
@@ -506,13 +553,19 @@ const LoginWithPassword = ({
 
       const result = response?.data?.data || {};
 
+      // 1. Status 202: Route to OTP Verification Screen
       if (response.status === 202 && response?.data?.success) {
-        // Validation passes; proceed to the OTP screen with the data payload
-        onPasswordSuccess(result);
-      } else {
+        onPasswordSuccess({ type: "OTP", data: result });
+      } 
+      // 2. Status 200: Bypass OTP, Direct Login
+      else if (response.status === 200 && response?.data?.success) {
+        onPasswordSuccess({ type: "DIRECT", data: result });
+      } 
+      // 3. Fallback / Unsuccessful non-exception payload
+      else {
         openLoginErrorDialog(
           "Login Failed",
-          result.message || "Invalid credentials.",
+          result.message || response?.data?.message || "Invalid credentials.",
         );
       }
     } catch (e) {
@@ -586,7 +639,7 @@ const LoginWithPassword = ({
         onClick={onBackToHome}
         sx={{ mt: 2, textTransform: "none", color: "text.secondary" }}
         fullWidth
-        variant="outlines"
+        variant="text"
       >
         Back to User ID
       </Button>
@@ -598,8 +651,6 @@ export default LoginWithPassword;
 
 
 import React, { useState, useEffect, useRef } from "react";
-import { useDispatch, useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
 import { Typography, Button, Box, TextField } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -607,10 +658,6 @@ import EmailIcon from "@mui/icons-material/Email";
 import PhoneAndroidIcon from "@mui/icons-material/PhoneAndroid";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import api from "../../../config/axiosConfig";
-import { parseJwt } from "../../../utils/EncryptionUtilities";
-import { loginSuccess } from "../../../store/slices/authSlice";
-import { setMenus, setSelectedMenuItem } from "../../../store/slices/menuSlice";
-import { setTabId } from "../../../store/slices/tabSlice";
 import { resolveConfig } from "../../../config/EnvironmentConfig";
 import { PrimaryButton } from "./LoginStyles";
 import useCustomSnackbar from "../../../utils/useCustomSnackbar";
@@ -620,6 +667,7 @@ const LoginWithOTP = ({
   otpData,
   openLoginErrorDialog,
   onBackToHome,
+  onSessionEstablished,
 }) => {
   const showSnackbar = useCustomSnackbar();
 
@@ -627,7 +675,7 @@ const LoginWithOTP = ({
   const [isLoading, setIsLoading] = useState(false);
   const [wrongAttempts, setWrongAttempts] = useState(0);
 
-  // --- API Driven Timers & Limits ---
+  // API Driven Timers & Limits
   const [currentTxnId, setCurrentTxnId] = useState(
     otpData?.transactionId || "",
   );
@@ -639,19 +687,14 @@ const LoginWithOTP = ({
     otpData?.resendsRemaining ?? 5,
   );
 
-  const navigate = useNavigate();
-  const dispatch = useDispatch();
-  const menus = useSelector((state) => state.menus.menus);
   const inputRefs = useRef([]);
 
-  // Focus the first input box when the component mounts
   useEffect(() => {
     if (inputRefs.current[0]) {
       inputRefs.current[0].focus();
     }
   }, []);
 
-  // Global Countdown Timer
   useEffect(() => {
     const timer = setInterval(() => {
       setExpiresIn((prev) => (prev > 0 ? prev - 1 : 0));
@@ -660,7 +703,6 @@ const LoginWithOTP = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Formats seconds into MM:SS
   const formatTime = (seconds) => {
     const m = Math.floor(seconds / 60)
       .toString()
@@ -669,19 +711,8 @@ const LoginWithOTP = ({
     return `${m}:${s}`;
   };
 
-  useEffect(() => {
-    if (menus && menus.length > 0 && menus[0]?.route) {
-      if (menus[0].hasChildren) {
-        navigate("/choose-option" + menus[0]?.route);
-      } else {
-        navigate(menus[0]?.route);
-      }
-    }
-  }, [menus, navigate]);
-
   const otpString = otpValues.join("");
 
-  // Helper to extract timer limits from any fresh OTP API response
   const updateTimersFromResponse = (data) => {
     if (data?.transactionId) setCurrentTxnId(data.transactionId);
     if (data?.expiresInSeconds) setExpiresIn(data.expiresInSeconds);
@@ -710,7 +741,6 @@ const LoginWithOTP = ({
       inputRefs.current[0]?.focus();
     } catch (err) {
       console.error("Forced OTP generation fault:", err);
-      // Hard failures still use the dialog to stop user progression
       openLoginErrorDialog(
         "System Error",
         "Failed to cycle a new validation token automatically.",
@@ -773,35 +803,9 @@ const LoginWithOTP = ({
       const result = response?.data?.data || {};
 
       if (isSuccess) {
-        if (result?.roleData?.root_menus?.length === 0) {
-          openLoginErrorDialog(
-            "Access Denied",
-            "You don't have enough permissions to access this application.",
-          );
-          return;
+        if (onSessionEstablished) {
+          onSessionEstablished(result);
         }
-
-        const user = parseJwt(result.accessToken);
-        const tabId = crypto.randomUUID();
-
-        dispatch(loginSuccess({ token: result.accessToken, user }));
-        localStorage.setItem(
-          "payloadEncryptionKey",
-          result.payloadEncryptionKey,
-        );
-
-        dispatch(setTabId(tabId));
-        dispatch(setMenus(result.roleData.root_menus));
-        dispatch(setSelectedMenuItem(result.roleData.root_menus[0]));
-
-        const bc = new BroadcastChannel("auth");
-        setTimeout(() => {
-          bc.postMessage({
-            type: "USER_LOGGED_IN",
-            tabId,
-            userId: user.userId,
-          });
-        }, 1000);
       } else {
         const targetFailures = wrongAttempts + 1;
         setWrongAttempts(targetFailures);
@@ -809,7 +813,6 @@ const LoginWithOTP = ({
         if (targetFailures >= 3) {
           await forceResendOTP();
         } else {
-          // Uses the backend message (e.g., "Invalid OTP. Attempts remaining: 4")
           showSnackbar(
             response?.data?.message ||
               `Invalid code. Attempt ${targetFailures} of 3.`,
@@ -828,7 +831,6 @@ const LoginWithOTP = ({
     }
   };
 
-  // === OTP INPUT LOGIC ===
   const handleOtpChange = (index, e) => {
     const val = e.target.value;
     if (/[^0-9]/.test(val)) return;
@@ -907,7 +909,6 @@ const LoginWithOTP = ({
             Verification code sent securely to:
           </Typography>
 
-          {/* Live Expiry Timer */}
           <Box
             sx={{
               display: "flex",
@@ -944,7 +945,6 @@ const LoginWithOTP = ({
         )}
       </Box>
 
-      {/* STYLISH 6-BOX OTP RENDER */}
       <Box
         sx={{
           display: "flex",
@@ -1019,7 +1019,6 @@ const LoginWithOTP = ({
           Restart Login
         </Button>
 
-        {/* Dynamic Resend Button based on limits and cooldown */}
         <Button
           startIcon={<RefreshIcon />}
           onClick={handleResendClick}
