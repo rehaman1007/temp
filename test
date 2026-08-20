@@ -1,11 +1,19 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Typography, Button, Box, TextField, Stack } from "@mui/material";
+import {
+  Typography,
+  Button,
+  Box,
+  InputBase,
+  Stack,
+  CircularProgress,
+} from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import EmailIcon from "@mui/icons-material/Email";
 import PhoneAndroidIcon from "@mui/icons-material/PhoneAndroid";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
-import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import TimerOffIcon from "@mui/icons-material/TimerOff";
+import BlockIcon from "@mui/icons-material/Block";
 import api from "../../../config/axiosConfig";
 import { resolveConfig } from "../../../config/EnvironmentConfig";
 import { PrimaryButton } from "./LoginStyles";
@@ -20,32 +28,36 @@ const LoginWithOTP = ({
 }) => {
   const showSnackbar = useCustomSnackbar();
 
-  const [otpValues, setOtpValues] = useState(new Array(6).fill(""));
+  const [otpValues, setOtpValues] = useState(["", "", "", "", "", ""]);
   const [isLoading, setIsLoading] = useState(false);
   const [wrongAttempts, setWrongAttempts] = useState(0);
 
   // --- API Driven Timers & Limits ---
   const [currentTxnId, setCurrentTxnId] = useState(
-    otpData?.transactionId || "",
+    otpData?.transactionId || ""
   );
   const [expiresIn, setExpiresIn] = useState(otpData?.expiresInSeconds || 300);
   const [cooldown, setCooldown] = useState(
-    otpData?.resendCooldownSeconds || 30,
+    otpData?.resendCooldownSeconds || 30
   );
   const [resendsLeft, setResendsLeft] = useState(
-    otpData?.resendsRemaining ?? 5,
+    otpData?.resendsRemaining ?? 5
   );
 
   const inputRefs = useRef([]);
 
-  // Auto-focus first input box
+  const isExpired = expiresIn <= 0;
+  const isExhausted = resendsLeft <= 0;
+  const otpString = otpValues.join("");
+
+  // Focus management
   useEffect(() => {
-    if (expiresIn > 0 && inputRefs.current[0]) {
+    if (!isExpired && inputRefs.current[0]) {
       inputRefs.current[0].focus();
     }
-  }, [expiresIn]);
+  }, [isExpired]);
 
-  // Global Countdown Timer
+  // Global Tick Timer
   useEffect(() => {
     const timer = setInterval(() => {
       setExpiresIn((prev) => (prev > 0 ? prev - 1 : 0));
@@ -62,8 +74,6 @@ const LoginWithOTP = ({
     return `${m}:${s}`;
   };
 
-  const otpString = otpValues.join("");
-
   const updateTimersFromResponse = (data) => {
     if (data?.transactionId) setCurrentTxnId(data.transactionId);
     if (data?.expiresInSeconds) setExpiresIn(data.expiresInSeconds);
@@ -79,31 +89,28 @@ const LoginWithOTP = ({
         {
           userId,
           transactionId: currentTxnId,
-        },
+        }
       );
 
       updateTimersFromResponse(res?.data?.data);
       setWrongAttempts(0);
-      setOtpValues(new Array(6).fill(""));
+      setOtpValues(["", "", "", "", "", ""]);
       showSnackbar(
-        "3 invalid attempts. A new OTP has been forcefully sent.",
-        "warning",
+        "3 invalid attempts. A fresh verification code was sent.",
+        "warning"
       );
       inputRefs.current[0]?.focus();
     } catch (err) {
-      console.error("Forced OTP generation fault:", err);
+      console.error("Forced OTP Generation Error:", err);
       openLoginErrorDialog(
-        "System Error",
-        "Failed to cycle a new validation token automatically.",
+        "Session Terminated",
+        "Could not generate a new code. Please restart login."
       );
     }
   };
 
   const handleResendClick = async () => {
-    if (resendsLeft <= 0) {
-      showSnackbar("Maximum manual resend limit reached.", "error");
-      return;
-    }
+    if (isExhausted || cooldown > 0 || isExpired) return;
 
     setIsLoading(true);
     try {
@@ -112,20 +119,20 @@ const LoginWithOTP = ({
         {
           userId,
           transactionId: currentTxnId,
-        },
+        }
       );
 
       updateTimersFromResponse(res?.data?.data);
       setWrongAttempts(0);
-      setOtpValues(new Array(6).fill(""));
+      setOtpValues(["", "", "", "", "", ""]);
       showSnackbar(
-        res?.data?.message || "A new OTP has been dispatched.",
-        "success",
+        res?.data?.message || "A new code has been sent successfully.",
+        "success"
       );
       inputRefs.current[0]?.focus();
     } catch (err) {
       const msg =
-        err.response?.data?.message || "Failed to resend authentication code.";
+        err.response?.data?.message || "Failed to resend verification code.";
       showSnackbar(msg, "error");
     } finally {
       setIsLoading(false);
@@ -133,10 +140,7 @@ const LoginWithOTP = ({
   };
 
   const handleVerifyOTP = async () => {
-    if (otpString.length !== 6) {
-      showSnackbar("Please complete the 6-digit verification code.", "warning");
-      return;
-    }
+    if (otpString.length !== 6 || isExpired) return;
 
     setIsLoading(true);
 
@@ -147,7 +151,7 @@ const LoginWithOTP = ({
           userId,
           transactionId: currentTxnId,
           otp: otpString,
-        },
+        }
       );
 
       const isSuccess = response?.data?.success === true;
@@ -167,148 +171,172 @@ const LoginWithOTP = ({
           showSnackbar(
             response?.data?.message ||
               `Invalid code. Attempt ${targetFailures} of 3.`,
-            "error",
+            "error"
           );
         }
       }
     } catch (e) {
       console.error("OTP Verification Exception:", e);
       const msg =
-        e.response?.data?.message ||
-        "Network exception during verification layer lookup.";
+        e.response?.data?.message || "Verification request failed. Try again.";
       showSnackbar(msg, "error");
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleOtpChange = (index, e) => {
-    const val = e.target.value;
-    if (/[^0-9]/.test(val)) return;
-
-    const newOtpValues = [...otpValues];
-    newOtpValues[index] = val.substring(val.length - 1);
-    setOtpValues(newOtpValues);
-
-    if (val && index < 5) {
-      inputRefs.current[index + 1].focus();
-    }
-  };
-
-  const handleOtpKeyDown = (index, e) => {
+  // Robust Native Key & Focus Management
+  const handleKeyDown = (index, e) => {
     if (e.key === "Backspace") {
-      if (!otpValues[index] && index > 0) {
-        const newOtpValues = [...otpValues];
-        newOtpValues[index - 1] = "";
-        setOtpValues(newOtpValues);
-        inputRefs.current[index - 1].focus();
-      } else if (otpValues[index]) {
-        const newOtpValues = [...otpValues];
-        newOtpValues[index] = "";
-        setOtpValues(newOtpValues);
-      }
-    } else if (e.key === "Enter") {
       e.preventDefault();
-      if (!isLoading && otpString.length === 6 && expiresIn > 0) {
-        handleVerifyOTP();
+      const updated = [...otpValues];
+      if (updated[index]) {
+        updated[index] = "";
+        setOtpValues(updated);
+      } else if (index > 0) {
+        updated[index - 1] = "";
+        setOtpValues(updated);
+        inputRefs.current[index - 1]?.focus();
       }
+    } else if (e.key === "ArrowLeft" && index > 0) {
+      e.preventDefault();
+      inputRefs.current[index - 1]?.focus();
+    } else if (e.key === "ArrowRight" && index < 5) {
+      e.preventDefault();
+      inputRefs.current[index + 1]?.focus();
+    } else if (e.key === "Enter" && otpString.length === 6 && !isLoading) {
+      e.preventDefault();
+      handleVerifyOTP();
     }
   };
 
-  const handleOtpPaste = (e) => {
+  const handleChange = (index, e) => {
+    const rawVal = e.target.value;
+    const digitsOnly = rawVal.replace(/\D/g, "");
+
+    if (!digitsOnly) {
+      const updated = [...otpValues];
+      updated[index] = "";
+      setOtpValues(updated);
+      return;
+    }
+
+    const updated = [...otpValues];
+
+    // Single digit entry
+    if (digitsOnly.length === 1) {
+      updated[index] = digitsOnly;
+      setOtpValues(updated);
+      if (index < 5) {
+        inputRefs.current[index + 1]?.focus();
+      }
+    } 
+    // Paste or multiple fast inputs fallback
+    else {
+      const chars = digitsOnly.split("").slice(0, 6);
+      chars.forEach((char, idx) => {
+        if (index + idx < 6) {
+          updated[index + idx] = char;
+        }
+      });
+      setOtpValues(updated);
+      const nextTarget = Math.min(index + chars.length, 5);
+      inputRefs.current[nextTarget]?.focus();
+    }
+  };
+
+  const handlePaste = (e) => {
     e.preventDefault();
-    const pasteData = e.clipboardData
+    const pasted = e.clipboardData
       .getData("text/plain")
       .replace(/\D/g, "")
       .slice(0, 6);
-    if (!pasteData) return;
+    if (!pasted) return;
 
-    const newOtpValues = [...otpValues];
-    for (let i = 0; i < pasteData.length; i++) {
-      newOtpValues[i] = pasteData[i];
+    const updated = [...otpValues];
+    for (let i = 0; i < pasted.length; i++) {
+      updated[i] = pasted[i];
     }
-    setOtpValues(newOtpValues);
+    setOtpValues(updated);
 
-    const focusIndex = pasteData.length < 6 ? pasteData.length : 5;
-    inputRefs.current[focusIndex]?.focus();
+    const targetIdx = pasted.length < 6 ? pasted.length : 5;
+    inputRefs.current[targetIdx]?.focus();
   };
 
-  const isExpired = expiresIn === 0;
-
   return (
-    <Box sx={{ width: "100%", maxWidth: "100%" }}>
-      {/* Information Header & Badge */}
-      <Box
-        sx={{
-          mb: 3,
-          p: { xs: 1.5, sm: 2 },
-          bgcolor: "rgba(0,0,0,0.03)",
-          borderRadius: 2,
-          border: "1px solid rgba(0,0,0,0.06)",
-        }}
-      >
+    <Box sx={{ width: "100%", maxWidth: "420px", mx: "auto" }}>
+      {/* Dynamic Header Info Card */}
+      {!isExpired && (
         <Box
           sx={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            mb: 1.5,
+            mb: 3,
+            p: 2,
+            borderRadius: 2.5,
+            bgcolor: "rgba(240, 244, 248, 0.6)",
+            border: "1px solid rgba(226, 232, 240, 0.8)",
+            boxShadow: "0 2px 4px rgba(0,0,0,0.02)",
           }}
         >
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            sx={{ fontWeight: 500, fontSize: { xs: "0.8rem", sm: "0.875rem" } }}
-          >
-            {isExpired ? "Status" : "Sent securely to:"}
-          </Typography>
-
-          {/* Fixed-Width Timer to prevent layout jitter */}
           <Box
             sx={{
-              display: "inline-flex",
+              display: "flex",
+              justifyContent: "space-between",
               alignItems: "center",
-              justifyContent: "center",
-              gap: 0.5,
-              width: "80px",
-              py: 0.4,
-              px: 0.8,
-              borderRadius: 1.5,
-              bgcolor: isExpired
-                ? "error.light"
-                : expiresIn > 60
-                  ? "primary.50"
-                  : "warning.50",
-              color: isExpired
-                ? "error.dark"
-                : expiresIn > 60
-                  ? "primary.main"
-                  : "error.main",
+              mb: 1.5,
             }}
           >
-            <AccessTimeIcon sx={{ fontSize: 15 }} />
             <Typography
               variant="caption"
               sx={{
-                fontWeight: 700,
-                fontVariantNumeric: "tabular-nums",
-                letterSpacing: 0.5,
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: 0.6,
+                color: "text.secondary",
               }}
             >
-              {formatTime(expiresIn)}
+              Verification Channel
             </Typography>
-          </Box>
-        </Box>
 
-        {!isExpired && (
+            {/* Stable Monospace Countdown Pill */}
+            <Box
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.5,
+                px: 1,
+                py: 0.25,
+                borderRadius: 1.5,
+                bgcolor: expiresIn > 60 ? "primary.50" : "error.50",
+                color: expiresIn > 60 ? "primary.main" : "error.main",
+                border: "1px solid",
+                borderColor: expiresIn > 60 ? "primary.100" : "error.100",
+              }}
+            >
+              <AccessTimeIcon sx={{ fontSize: 14 }} />
+              <Typography
+                component="span"
+                sx={{
+                  fontFamily: "monospace",
+                  fontWeight: 700,
+                  fontSize: "0.775rem",
+                  width: "36px",
+                  textAlign: "center",
+                }}
+              >
+                {formatTime(expiresIn)}
+              </Typography>
+            </Box>
+          </Box>
+
           <Stack spacing={0.75}>
             {otpData?.maskedMobile && (
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
-                <PhoneAndroidIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                <PhoneAndroidIcon sx={{ fontSize: 16, color: "text.secondary" }} />
                 <Typography
-                  variant="subtitle2"
+                  variant="body2"
+                  fontWeight={500}
                   color="text.primary"
-                  sx={{ fontSize: { xs: "0.8rem", sm: "0.875rem" } }}
+                  sx={{ fontSize: "0.85rem" }}
                 >
                   {otpData.maskedMobile}
                 </Typography>
@@ -316,83 +344,76 @@ const LoginWithOTP = ({
             )}
 
             {otpData?.maskedEmail && (
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
-                <EmailIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                <EmailIcon sx={{ fontSize: 16, color: "text.secondary" }} />
                 <Typography
-                  variant="subtitle2"
+                  variant="body2"
+                  fontWeight={500}
                   color="text.primary"
-                  sx={{
-                    fontSize: { xs: "0.8rem", sm: "0.875rem" },
-                    wordBreak: "break-all",
-                  }}
+                  sx={{ fontSize: "0.85rem", wordBreak: "break-all" }}
                 >
                   {otpData.maskedEmail}
                 </Typography>
               </Box>
             )}
           </Stack>
-        )}
+        </Box>
+      )}
 
-        {isExpired && (
-          <Typography
-            variant="body2"
-            color="error.main"
-            sx={{ fontWeight: 600, fontSize: { xs: "0.825rem", sm: "0.875rem" } }}
-          >
-            Your verification token has timed out.
-          </Typography>
-        )}
-      </Box>
-
-      {/* CONDITIONAL CONTENT: Active State vs Expired State */}
-      {!isExpired ? (
+      {/* STATE 1: Active OTP Entry Flow */}
+      {!isExpired && (
         <>
-          {/* Responsive OTP Grid */}
+          {/* Native High-Performance 6-Cell Grid */}
           <Box
             sx={{
-              display: "flex",
-              justifyContent: "center",
-              gap: { xs: 0.75, sm: 1.25, md: 1.5 },
+              display: "grid",
+              gridTemplateColumns: "repeat(6, 1fr)",
+              gap: { xs: 0.75, sm: 1.25 },
               mb: 3,
             }}
           >
             {otpValues.map((val, idx) => (
-              <TextField
+              <Box
                 key={idx}
-                inputRef={(el) => (inputRefs.current[idx] = el)}
-                value={val}
-                onChange={(e) => handleOtpChange(idx, e)}
-                onKeyDown={(e) => handleOtpKeyDown(idx, e)}
-                onPaste={handleOtpPaste}
-                disabled={isLoading}
-                variant="outlined"
-                inputProps={{
-                  inputMode: "numeric",
-                  pattern: "[0-9]*",
-                  maxLength: 1,
-                }}
                 sx={{
-                  flex: 1,
-                  maxWidth: { xs: "44px", sm: "52px", md: "56px" },
-                  "& .MuiOutlinedInput-root": {
-                    borderRadius: 2,
-                    bgcolor: "background.paper",
-                    height: { xs: "48px", sm: "54px", md: "58px" },
-                    p: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: 2,
+                  bgcolor: "background.paper",
+                  border: "1.5px solid",
+                  borderColor: val ? "primary.main" : "rgba(0, 0, 0, 0.15)",
+                  boxShadow: val ? "0 0 0 3px rgba(25, 118, 210, 0.12)" : "none",
+                  transition: "all 0.15s ease-in-out",
+                  height: { xs: 48, sm: 56 },
+                  "&:focus-within": {
+                    borderColor: "primary.main",
+                    boxShadow: "0 0 0 3px rgba(25, 118, 210, 0.2)",
                   },
-                  "& .MuiOutlinedInput-input": {
-                    textAlign: "center",
-                    fontSize: { xs: "1.1rem", sm: "1.35rem", md: "1.5rem" },
-                    fontWeight: 700,
-                    padding: 0,
-                  },
-                  "& .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline":
-                    {
-                      borderWidth: "2px",
-                      borderColor: "primary.main",
-                    },
                 }}
-              />
+              >
+                <InputBase
+                  inputRef={(el) => (inputRefs.current[idx] = el)}
+                  value={val}
+                  onChange={(e) => handleChange(idx, e)}
+                  onKeyDown={(e) => handleKeyDown(idx, e)}
+                  onPaste={handlePaste}
+                  disabled={isLoading}
+                  inputProps={{
+                    maxLength: 1,
+                    inputMode: "numeric",
+                    pattern: "[0-9]*",
+                    style: {
+                      textAlign: "center",
+                      fontSize: "1.25rem",
+                      fontWeight: 700,
+                      padding: 0,
+                      width: "100%",
+                      height: "100%",
+                    },
+                  }}
+                />
+              </Box>
             ))}
           </Box>
 
@@ -401,18 +422,22 @@ const LoginWithOTP = ({
             variant="contained"
             onClick={handleVerifyOTP}
             disabled={isLoading || otpString.length !== 6}
+            sx={{ py: 1.25, fontSize: "0.95rem" }}
           >
-            {isLoading ? "Verifying..." : "Verify & Sign In"}
+            {isLoading ? (
+              <CircularProgress size={22} color="inherit" />
+            ) : (
+              "Verify & Sign In"
+            )}
           </PrimaryButton>
 
-          {/* Action Row */}
+          {/* Navigation and Resend Row */}
           <Box
             sx={{
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
-              mt: 3,
-              gap: 1,
+              mt: 2.5,
             }}
           >
             <Button
@@ -421,103 +446,104 @@ const LoginWithOTP = ({
               sx={{
                 textTransform: "none",
                 color: "text.secondary",
-                fontSize: { xs: "0.75rem", sm: "0.85rem" },
+                fontSize: "0.825rem",
+                p: 0.5,
               }}
-              size="small"
             >
-              Restart Login
+              Back to User ID
             </Button>
 
-            <Button
-              startIcon={<RefreshIcon />}
-              onClick={handleResendClick}
-              disabled={cooldown > 0 || resendsLeft <= 0 || isLoading}
-              sx={{
-                textTransform: "none",
-                minWidth: "125px",
-                fontVariantNumeric: "tabular-nums",
-                fontSize: { xs: "0.75rem", sm: "0.85rem" },
-              }}
-              size="small"
-            >
-              {resendsLeft <= 0
-                ? "Limit Reached"
-                : cooldown > 0
-                  ? `Resend in ${cooldown}s`
-                  : "Resend OTP"}
-            </Button>
+            {/* Hidden if resend limit exhausted */}
+            {!isExhausted && (
+              <Button
+                startIcon={<RefreshIcon />}
+                onClick={handleResendClick}
+                disabled={cooldown > 0 || isLoading}
+                sx={{
+                  textTransform: "none",
+                  fontSize: "0.825rem",
+                  fontWeight: 600,
+                  p: 0.5,
+                }}
+              >
+                {cooldown > 0 ? (
+                  <Box component="span" sx={{ display: "inline-flex", gap: 0.5 }}>
+                    Resend in
+                    <Typography
+                      component="span"
+                      sx={{
+                        fontFamily: "monospace",
+                        fontWeight: 700,
+                        fontSize: "0.825rem",
+                      }}
+                    >
+                      {cooldown}s
+                    </Typography>
+                  </Box>
+                ) : (
+                  "Resend Code"
+                )}
+              </Button>
+            )}
           </Box>
         </>
-      ) : (
-        /* Expired Session View */
+      )}
+
+      {/* STATE 2: Session Expired View */}
+      {isExpired && (
         <Box
           sx={{
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
             textAlign: "center",
-            py: 2,
+            py: 2.5,
             px: 1,
           }}
         >
           <Box
             sx={{
-              width: 56,
-              height: 56,
+              width: 52,
+              height: 52,
               borderRadius: "50%",
-              bgcolor: "error.light",
+              bgcolor: isExhausted ? "grey.100" : "error.50",
+              color: isExhausted ? "text.secondary" : "error.main",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: "error.main",
               mb: 2,
             }}
           >
-            <WarningAmberIcon sx={{ fontSize: 32 }} />
+            {isExhausted ? (
+              <BlockIcon sx={{ fontSize: 28 }} />
+            ) : (
+              <TimerOffIcon sx={{ fontSize: 28 }} />
+            )}
           </Box>
 
           <Typography variant="h6" fontWeight={700} gutterBottom>
-            Session Expired
+            {isExhausted ? "Attempts Limit Exceeded" : "OTP Token Expired"}
           </Typography>
 
           <Typography
             variant="body2"
             color="text.secondary"
-            sx={{ mb: 3, maxWidth: "320px" }}
+            sx={{ mb: 3, maxWidth: "300px", lineHeight: 1.5 }}
           >
-            The OTP has expired for security reasons. Please request a fresh
-            verification code or return to the login page.
+            {isExhausted
+              ? "You have used all available verification attempts. Please log in again to start a new session."
+              : "Your 6-digit verification code has expired for security reasons. Please return to the login screen."}
           </Typography>
 
-          <Stack spacing={1.5} width="100%">
-            <PrimaryButton
-              fullWidth
-              variant="contained"
-              startIcon={<RefreshIcon />}
-              onClick={handleResendClick}
-              disabled={resendsLeft <= 0 || isLoading}
-            >
-              {isLoading
-                ? "Sending New OTP..."
-                : resendsLeft <= 0
-                  ? "Resend Limit Reached"
-                  : "Request New Code"}
-            </PrimaryButton>
-
-            <Button
-              fullWidth
-              startIcon={<ArrowBackIcon />}
-              onClick={onBackToHome}
-              variant="outlined"
-              sx={{
-                textTransform: "none",
-                borderRadius: 2,
-                py: 1,
-              }}
-            >
-              Back to User ID
-            </Button>
-          </Stack>
+          <PrimaryButton
+            fullWidth
+            variant="contained"
+            startIcon={<ArrowBackIcon />}
+            onClick={onBackToHome}
+            sx={{ py: 1.25 }}
+          >
+            Back to User ID
+          </PrimaryButton>
         </Box>
       )}
     </Box>
