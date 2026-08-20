@@ -12,8 +12,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import EmailIcon from "@mui/icons-material/Email";
 import PhoneAndroidIcon from "@mui/icons-material/PhoneAndroid";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
-import TimerOffIcon from "@mui/icons-material/TimerOff";
-import BlockIcon from "@mui/icons-material/Block";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import api from "../../../config/axiosConfig";
 import { resolveConfig } from "../../../config/EnvironmentConfig";
 import { PrimaryButton } from "./LoginStyles";
@@ -31,6 +30,7 @@ const LoginWithOTP = ({
   const [otpValues, setOtpValues] = useState(["", "", "", "", "", ""]);
   const [isLoading, setIsLoading] = useState(false);
   const [wrongAttempts, setWrongAttempts] = useState(0);
+  const [isSessionUnauthorized, setIsSessionUnauthorized] = useState(false);
 
   // --- API Driven Timers & Limits ---
   const [currentTxnId, setCurrentTxnId] = useState(
@@ -46,7 +46,7 @@ const LoginWithOTP = ({
 
   const inputRefs = useRef([]);
 
-  const isExpired = expiresIn <= 0;
+  const isExpired = expiresIn <= 0 || isSessionUnauthorized;
   const isExhausted = resendsLeft <= 0;
   const otpString = otpValues.join("");
 
@@ -131,9 +131,15 @@ const LoginWithOTP = ({
       );
       inputRefs.current[0]?.focus();
     } catch (err) {
-      const msg =
-        err.response?.data?.message || "Failed to resend verification code.";
-      showSnackbar(msg, "error");
+      const status = err.response?.status;
+      if (status === 401) {
+        setIsSessionUnauthorized(true);
+        setExpiresIn(0);
+      } else {
+        const msg =
+          err.response?.data?.message || "Failed to resend verification code.";
+        showSnackbar(msg, "error");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -176,16 +182,39 @@ const LoginWithOTP = ({
         }
       }
     } catch (e) {
-      console.error("OTP Verification Exception:", e);
-      const msg =
-        e.response?.data?.message || "Verification request failed. Try again.";
-      showSnackbar(msg, "error");
+      const status = e.response?.status;
+
+      // 401: Unauthorized / Expired -> Render expired state
+      if (status === 401) {
+        setIsSessionUnauthorized(true);
+        setExpiresIn(0);
+      } 
+      // 400: Invalid OTP
+      else if (status === 400) {
+        const targetFailures = wrongAttempts + 1;
+        setWrongAttempts(targetFailures);
+
+        if (targetFailures >= 3) {
+          await forceResendOTP();
+        } else {
+          showSnackbar(
+            e.response?.data?.message ||
+              `Invalid OTP. Attempt ${targetFailures} of 3.`,
+            "error"
+          );
+        }
+      } 
+      else {
+        console.error("OTP Verification Exception:", e);
+        const msg =
+          e.response?.data?.message || "Verification request failed. Try again.";
+        showSnackbar(msg, "error");
+      }
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Robust Native Key & Focus Management
   const handleKeyDown = (index, e) => {
     if (e.key === "Backspace") {
       e.preventDefault();
@@ -223,16 +252,13 @@ const LoginWithOTP = ({
 
     const updated = [...otpValues];
 
-    // Single digit entry
     if (digitsOnly.length === 1) {
       updated[index] = digitsOnly;
       setOtpValues(updated);
       if (index < 5) {
         inputRefs.current[index + 1]?.focus();
       }
-    } 
-    // Paste or multiple fast inputs fallback
-    else {
+    } else {
       const chars = digitsOnly.split("").slice(0, 6);
       chars.forEach((char, idx) => {
         if (index + idx < 6) {
@@ -265,78 +291,85 @@ const LoginWithOTP = ({
 
   return (
     <Box sx={{ width: "100%", maxWidth: "420px", mx: "auto" }}>
-      {/* Dynamic Header Info Card */}
-      {!isExpired && (
+      {/* Information Header */}
+      <Box
+        sx={{
+          mb: 3,
+          p: { xs: 1.5, sm: 2 },
+          borderRadius: 2,
+          bgcolor: "rgba(0,0,0,0.03)",
+          border: "1px solid rgba(0,0,0,0.06)",
+        }}
+      >
         <Box
           sx={{
-            mb: 3,
-            p: 2,
-            borderRadius: 2.5,
-            bgcolor: "rgba(240, 244, 248, 0.6)",
-            border: "1px solid rgba(226, 232, 240, 0.8)",
-            boxShadow: "0 2px 4px rgba(0,0,0,0.02)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            mb: 1.5,
           }}
         >
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ fontWeight: 500, fontSize: { xs: "0.8rem", sm: "0.875rem" } }}
+          >
+            {isExpired ? "Status" : "Security Code Sent To"}
+          </Typography>
+
           <Box
             sx={{
-              display: "flex",
-              justifyContent: "space-between",
+              display: "inline-flex",
               alignItems: "center",
-              mb: 1.5,
+              justifyContent: "center",
+              gap: 0.5,
+              width: "76px",
+              py: 0.3,
+              px: 0.8,
+              borderRadius: 1.5,
+              bgcolor: isExpired
+                ? "error.50"
+                : expiresIn > 60
+                  ? "primary.50"
+                  : "warning.50",
+              color: isExpired
+                ? "error.main"
+                : expiresIn > 60
+                  ? "primary.main"
+                  : "error.main",
+              border: "1px solid",
+              borderColor: isExpired
+                ? "error.100"
+                : expiresIn > 60
+                  ? "primary.100"
+                  : "warning.100",
             }}
           >
+            <AccessTimeIcon sx={{ fontSize: 14 }} />
             <Typography
-              variant="caption"
+              component="span"
               sx={{
-                fontWeight: 600,
-                textTransform: "uppercase",
-                letterSpacing: 0.6,
-                color: "text.secondary",
+                fontFamily: "monospace",
+                fontWeight: 700,
+                fontSize: "0.75rem",
+                width: "36px",
+                textAlign: "center",
               }}
             >
-              Verification Channel
+              {formatTime(expiresIn)}
             </Typography>
-
-            {/* Stable Monospace Countdown Pill */}
-            <Box
-              sx={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 0.5,
-                px: 1,
-                py: 0.25,
-                borderRadius: 1.5,
-                bgcolor: expiresIn > 60 ? "primary.50" : "error.50",
-                color: expiresIn > 60 ? "primary.main" : "error.main",
-                border: "1px solid",
-                borderColor: expiresIn > 60 ? "primary.100" : "error.100",
-              }}
-            >
-              <AccessTimeIcon sx={{ fontSize: 14 }} />
-              <Typography
-                component="span"
-                sx={{
-                  fontFamily: "monospace",
-                  fontWeight: 700,
-                  fontSize: "0.775rem",
-                  width: "36px",
-                  textAlign: "center",
-                }}
-              >
-                {formatTime(expiresIn)}
-              </Typography>
-            </Box>
           </Box>
+        </Box>
 
+        {!isExpired && (
           <Stack spacing={0.75}>
             {otpData?.maskedMobile && (
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                <PhoneAndroidIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
+                <PhoneAndroidIcon sx={{ fontSize: 18, color: "text.secondary" }} />
                 <Typography
-                  variant="body2"
-                  fontWeight={500}
+                  variant="subtitle2"
                   color="text.primary"
-                  sx={{ fontSize: "0.85rem" }}
+                  sx={{ fontSize: { xs: "0.8rem", sm: "0.875rem" } }}
                 >
                   {otpData.maskedMobile}
                 </Typography>
@@ -344,26 +377,39 @@ const LoginWithOTP = ({
             )}
 
             {otpData?.maskedEmail && (
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                <EmailIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
+                <EmailIcon sx={{ fontSize: 18, color: "text.secondary" }} />
                 <Typography
-                  variant="body2"
-                  fontWeight={500}
+                  variant="subtitle2"
                   color="text.primary"
-                  sx={{ fontSize: "0.85rem", wordBreak: "break-all" }}
+                  sx={{
+                    fontSize: { xs: "0.8rem", sm: "0.875rem" },
+                    wordBreak: "break-all",
+                  }}
                 >
                   {otpData.maskedEmail}
                 </Typography>
               </Box>
             )}
           </Stack>
-        </Box>
-      )}
+        )}
 
-      {/* STATE 1: Active OTP Entry Flow */}
-      {!isExpired && (
+        {isExpired && (
+          <Typography
+            variant="body2"
+            color="error.main"
+            sx={{ fontWeight: 600, fontSize: { xs: "0.825rem", sm: "0.875rem" } }}
+          >
+            {isSessionUnauthorized
+              ? "Your validation session has expired."
+              : "Your verification token has timed out."}
+          </Typography>
+        )}
+      </Box>
+
+      {/* STATE 1: Active Entry */}
+      {!isExpired ? (
         <>
-          {/* Native High-Performance 6-Cell Grid */}
           <Box
             sx={{
               display: "grid",
@@ -385,7 +431,7 @@ const LoginWithOTP = ({
                   borderColor: val ? "primary.main" : "rgba(0, 0, 0, 0.15)",
                   boxShadow: val ? "0 0 0 3px rgba(25, 118, 210, 0.12)" : "none",
                   transition: "all 0.15s ease-in-out",
-                  height: { xs: 48, sm: 56 },
+                  height: { xs: 48, sm: 54, md: 58 },
                   "&:focus-within": {
                     borderColor: "primary.main",
                     boxShadow: "0 0 0 3px rgba(25, 118, 210, 0.2)",
@@ -431,7 +477,6 @@ const LoginWithOTP = ({
             )}
           </PrimaryButton>
 
-          {/* Navigation and Resend Row */}
           <Box
             sx={{
               display: "flex",
@@ -446,14 +491,14 @@ const LoginWithOTP = ({
               sx={{
                 textTransform: "none",
                 color: "text.secondary",
-                fontSize: "0.825rem",
+                fontSize: { xs: "0.75rem", sm: "0.85rem" },
                 p: 0.5,
               }}
+              size="small"
             >
-              Back to User ID
+              Restart Login
             </Button>
 
-            {/* Hidden if resend limit exhausted */}
             {!isExhausted && (
               <Button
                 startIcon={<RefreshIcon />}
@@ -461,10 +506,11 @@ const LoginWithOTP = ({
                 disabled={cooldown > 0 || isLoading}
                 sx={{
                   textTransform: "none",
-                  fontSize: "0.825rem",
+                  fontSize: { xs: "0.75rem", sm: "0.85rem" },
                   fontWeight: 600,
                   p: 0.5,
                 }}
+                size="small"
               >
                 {cooldown > 0 ? (
                   <Box component="span" sx={{ display: "inline-flex", gap: 0.5 }}>
@@ -474,7 +520,7 @@ const LoginWithOTP = ({
                       sx={{
                         fontFamily: "monospace",
                         fontWeight: 700,
-                        fontSize: "0.825rem",
+                        fontSize: { xs: "0.75rem", sm: "0.85rem" },
                       }}
                     >
                       {cooldown}s
@@ -487,52 +533,46 @@ const LoginWithOTP = ({
             )}
           </Box>
         </>
-      )}
-
-      {/* STATE 2: Session Expired View */}
-      {isExpired && (
+      ) : (
+        /* STATE 2: Expired Clean View */
         <Box
           sx={{
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
             textAlign: "center",
-            py: 2.5,
+            py: 2,
             px: 1,
           }}
         >
           <Box
             sx={{
-              width: 52,
-              height: 52,
+              width: 56,
+              height: 56,
               borderRadius: "50%",
-              bgcolor: isExhausted ? "grey.100" : "error.50",
-              color: isExhausted ? "text.secondary" : "error.main",
+              bgcolor: "error.50",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              color: "error.main",
               mb: 2,
             }}
           >
-            {isExhausted ? (
-              <BlockIcon sx={{ fontSize: 28 }} />
-            ) : (
-              <TimerOffIcon sx={{ fontSize: 28 }} />
-            )}
+            <WarningAmberIcon sx={{ fontSize: 32 }} />
           </Box>
 
           <Typography variant="h6" fontWeight={700} gutterBottom>
-            {isExhausted ? "Attempts Limit Exceeded" : "OTP Token Expired"}
+            Session Expired
           </Typography>
 
           <Typography
             variant="body2"
             color="text.secondary"
-            sx={{ mb: 3, maxWidth: "300px", lineHeight: 1.5 }}
+            sx={{ mb: 3, maxWidth: "320px", lineHeight: 1.5 }}
           >
-            {isExhausted
-              ? "You have used all available verification attempts. Please log in again to start a new session."
-              : "Your 6-digit verification code has expired for security reasons. Please return to the login screen."}
+            {isSessionUnauthorized
+              ? "Your authentication session is no longer active. Please return to the login screen."
+              : "The OTP validity period has expired for security reasons. Please return to the login page to authenticate again."}
           </Typography>
 
           <PrimaryButton
