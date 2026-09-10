@@ -1,420 +1,515 @@
 import {
-  Box,
   Button,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Stack,
+  TextField,
+  Grid,
   Typography,
+  Checkbox,
+  Autocomplete,
+  Divider,
+  List,
+  ListItemIcon,
   Tooltip,
-  IconButton,
+  Box,
 } from "@mui/material";
-import { DataGrid } from "@mui/x-data-grid";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import useApi from "../../hooks/useApi";
-import CancelIcon from "@mui/icons-material/Cancel";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import AddBoxIcon from "@mui/icons-material/AddBox";
-import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
-import EditDocumentIcon from "@mui/icons-material/EditDocument";
-import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import PendingActionsIcon from "@mui/icons-material/PendingActions";
-import BlockFlippedIcon from "@mui/icons-material/BlockFlipped";
-import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import GppBadIcon from "@mui/icons-material/GppBad";
-import SecurityIcon from "@mui/icons-material/Security";
-import {
-  timeStampFormatter,
-  toPascalKebabCase,
-} from "../../utils/CommonUtilities";
-import CustomChip from "../../utils/CustomChip";
-import InfoIcon from "@mui/icons-material/Info";
-import RoleRequestView from "./components/RoleRequestView";
+import { useEffect, useState, useCallback } from "react";
+import * as MuiIcons from "@mui/icons-material";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
+import RestoreIcon from "@mui/icons-material/Restore";
+import { validations } from "../../../utils/Validations";
+import { DndProvider } from "react-dnd";
+import { HTML5Backend } from "react-dnd-html5-backend";
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import DraggablePermissionItem from "./DraggablePermissionItem";
+import _ from "lodash";
 
-function CustomNoRowsOverlay() {
-  return (
-    <Stack height="100%" alignItems="center" justifyContent="center">
-      <InfoIcon sx={{ fontSize: 48, color: "text.secondary", mb: 2 }} />
-      <Typography variant="h6">No Role Requests Found</Typography>
-      <Typography>You have not created any Role requests.</Typography>
-    </Stack>
-  );
-}
+// The list of IDs you want to exclude
+const MENUS_TO_REMOVE = [46, 47];
+const DESCRIPTION_REGEX = /^[a-zA-Z0-9\s/&().,-]*$/;
 
-export default function RoleManagementTab2({ permissions = {} }) {
+export default function RolesDialog({
+  open,
+  form,
+  setForm,
+  fetchRoles,
+  initialForm = {},
+  screenActions = {},
+  onClose,
+  roles = {},
+  roleAccessList = [], // Receive prop here
+}) {
   const { callApi } = useApi();
-  const showSnackBar = useCustomSnackbar();
-  const [isLoading, setIsLoading] = useState(true);
-  const [rows, setRows] = useState([]);
-  const [confirmDialog, setConfirmDialog] = useState(false);
-  const [requestId, setRequestId] = useState(null);
-  const [viewOpen, setViewOpen] = useState(false);
-  const [viewData, setViewData] = useState(null);
-  const [roleAccessList, setRoleAccessList] = useState([]);
+  const snackbar = useCustomSnackbar();
+  const [selectedPermissions, setSelectedPermissions] = useState([]);
+  const [originalOrder, setOriginalOrder] = useState([]);
+  const [isBlocked, setIsBlocked] = useState(form?.roleStatus === "BLOCKED");
+  const [permissionSearch, setPermissionSearch] = useState("");
+  const [allPermissions, setAllPermissions] = useState([]);
 
-  const fetchData = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const response = await callApi("/UM/role/my-role-requests", null, "GET");
-      if (response?.result) {
-        const result = response?.result?.myRequests || [];
-
-        const processedResult = result.map((row, index) => {
-          let parsed = {};
-          try {
-            if (row.requestPayload) {
-              parsed = JSON.parse(row.requestPayload);
-            }
-          } catch (e) {
-            console.error("Failed to parse requestPayload", e);
-          }
-
-          return {
-            ...row,
-            ...parsed,
-            // Fallback ID without using crypto API to satisfy DataGrid requirements
-            gridRowId: row.requestId || `fallback-id-${Date.now()}-${index}`,
-          };
-        });
-        setRows(processedResult);
-      } else {
-        showSnackBar("No requests found", "warning");
-        setRows([]);
-      }
-    } catch (error) {
-      console.error("Something went wrong", error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [callApi, showSnackBar]);
-
-  const fetchRoleAccessList = useCallback(async () => {
-    try {
-      const response = await callApi(
-        "/UM/role/get-role-access-list",
-        {},
-        "GET"
-      );
-      const list = response?.result?.roleAccessList ?? [];
-      setRoleAccessList(list);
-    } catch (error) {
-      console.error("Something went wrong", error);
-      setRoleAccessList([]);
-    }
-  }, [callApi]);
-
-  useEffect(() => {
-    fetchData();
-    fetchRoleAccessList();
-  }, [fetchData, fetchRoleAccessList]);
-
-  const handleCancelRequest = async () => {
-    try {
-      const payload = {
-        requestId,
-        actionFlag: "CANCEL",
-        remarks: "User canceled this Request",
-      };
-      const response = await callApi(
-        "/UM/role/cancel-role-request",
-        payload,
-        "POST"
-      );
-      if (response?.result?.status) {
-        showSnackBar(
-          `Request Id ${requestId} Cancelled Successfully.`,
-          "success"
-        );
-      } else {
-        showSnackBar(
-          response?.message
-            ? response?.message
-            : "Failed to process your cancel request, Kindly try again",
-          "error"
-        );
-      }
-    } catch (error) {
-      console.error(error);
-    } finally {
-      fetchData();
-      setConfirmDialog(false);
-    }
+  const handleStatusToggle = async () => {
+    const newStatus = form.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE";
+    setIsBlocked(!isBlocked);
+    form.roleStatus = newStatus;
   };
 
-  const handleViewClick = (data) => {
-    setViewData(data);
-    setViewOpen(true);
-  };
+  const canSave =
+    (form.roleName || "").length > 2 &&
+    (form.description || "").length > 4 &&
+    Boolean(form.roleAccess) && // Ensuring Role Access is selected
+    selectedPermissions.length > 0;
 
-  const columns = useMemo(
-    () => [
-      { field: "requestId", headerName: "Request Id", flex: 1, minWidth: 150 },
-      { field: "roleName", headerName: "Role Name", flex: 0.5, minWidth: 150 },
-      {
-        field: "description",
-        headerName: "Role Description",
-        flex: 1.5,
-        minWidth: 200,
-      },
-      {
-        field: "roleAccess",
-        headerName: "Access Level",
-        flex: 1,
-        headerAlign: "center",
-        align: "center",
-        sortable: true,
-        filterable: false,
-        disableColumnMenu: true,
-        renderCell: (params) => {
-          const access = roleAccessList.find(
-            (item) => item.accessFlag === params.row.roleAccess
-          );
+  // useEffect(() => {
+  //   console.log("Hey it changed ", form);
+  // }, [form]);
 
-          return (
-            <Tooltip title={access?.accessDescription || ""} placement="top">
-              <CustomChip
-                variant="outlined"
-                size="sm"
-                icon={<SecurityIcon sx={{ width: 15, height: 15 }} />}
-                label={access?.accessName || params.row.roleAccess}
-              />
-            </Tooltip>
-          );
-        },
-      },
-      {
-        field: "requestType",
-        headerName: "Request Type",
-        flex: 0.5,
-        minWidth: 150,
-        align: "center",
-        headerAlign: "center",
-        filterable: false,
-        sortable: false,
-        disableColumnMenu: true,
-        renderCell: (params) => {
-          const val = params.value;
-          const color =
-            val === "CREATE"
-              ? "success"
-              : val === "DELETE"
-              ? "error"
-              : "warning";
-          const icon =
-            val === "CREATE" ? (
-              <AddBoxIcon />
-            ) : val === "DELETE" ? (
-              <AutoDeleteIcon />
-            ) : (
-              <EditDocumentIcon />
-            );
-          return (
-            <CustomChip
-              variant="outlined"
-              icon={icon}
-              label={
-                val === "CREATE"
-                  ? "Added"
-                  : val === "DELETE"
-                  ? "Deleted"
-                  : "Modified"
-              }
-              color={color}
-            />
-          );
-        },
-      },
-      {
-        field: "requestDate",
-        headerName: "Requested Date",
-        flex: 1,
-        minWidth: 200,
-        renderCell: (params) => (
-          <Typography
-            variant="body1"
-            component="span"
-            sx={{ fontSize: "0.9rem" }}
-          >
-            {timeStampFormatter(params.value)}
-          </Typography>
-        ),
-      },
-      {
-        field: "requestStatus",
-        headerName: "Status",
-        minWidth: 150,
-        flex: 0.6,
-        align: "center",
-        headerAlign: "center",
-        filterable: false,
-        sortable: false,
-        disableColumnMenu: true,
-        renderCell: (params) => (
-          <Box
-            sx={{
-              color:
-                params.value === "REJECTED"
-                  ? "error.main"
-                  : params.value === "ACCEPTED"
-                  ? "success.dark"
-                  : params.value === "CANCELED"
-                  ? "info.dark"
-                  : "warning.main",
-            }}
-          >
-            <CustomChip
-              icon={
-                params.value === "ACCEPTED" ? (
-                  <CheckCircleIcon />
-                ) : params.value === "REJECTED" ? (
-                  <BlockFlippedIcon />
-                ) : params.value === "CANCELED" ? (
-                  <GppBadIcon />
-                ) : (
-                  <PendingActionsIcon />
-                )
-              }
-              variant="outlined"
-              label={toPascalKebabCase(params.value)}
-              sx={{
-                color:
-                  params.value === "REJECTED"
-                    ? "error.dark"
-                    : params.value === "ACCEPTED"
-                    ? "success.dark"
-                    : params.value === "CANCELLED"
-                    ? "primary.dark"
-                    : "warning.light",
-                "& .MuiChip-icon": {
-                  color:
-                    params.value === "REJECTED"
-                      ? "error.dark"
-                      : params.value === "ACCEPTED"
-                      ? "success.dark"
-                      : params.value === "CANCELLED"
-                      ? "primary.dark"
-                      : "warning.light",
-                },
-              }}
-            />
-          </Box>
-        ),
-      },
-      {
-        field: "action",
-        headerName: "Actions",
-        flex: 0.6,
-        minWidth: 120,
-        align: "center",
-        headerAlign: "center",
-        filterable: false,
-        sortable: false,
-        disableColumnMenu: true,
-        renderCell: (params) => (
-          <Stack
-            direction="row"
-            spacing={1}
-            justifyContent="center"
-            alignItems="center"
-            sx={{ height: "100%" }}
-          >
-            {permissions.view && (
-              <Tooltip title="View">
-                <IconButton onClick={() => handleViewClick(params.row)}>
-                  <VisibilityIcon />
-                </IconButton>
-              </Tooltip>
-            )}
-            {params.row.requestStatus === "PENDING" && permissions.cancel && (
-              <Tooltip title={"Cancel Request"}>
-                <IconButton
-                  onClick={() => {
-                    setConfirmDialog(true);
-                    setRequestId(params.row.requestId);
-                  }}
-                >
-                  <CancelIcon fontSize="inherit" />
-                </IconButton>
-              </Tooltip>
-            )}
-          </Stack>
-        ),
-      },
-    ],
-    [permissions, roleAccessList] // Fix: Added roleAccessList to dependencies
+  const fetchAllPermissions = useCallback(
+    async (inputForm) => {
+      try {
+        const response = await callApi(
+          `/UM/role/get-all-permissions?roleId=${inputForm.roleId}`,
+          {},
+          "GET",
+        );
+        const permits = response?.result ?? [];
+        const filteredPermissions = permits.filter(
+          (item) => !MENUS_TO_REMOVE.includes(item.id),
+        );
+        setAllPermissions(filteredPermissions);
+      } catch (error) {
+        console.error(error);
+        setAllPermissions([]);
+      }
+    },
+    [callApi],
   );
 
-  const filteredColumns = useMemo(() => {
-    if (permissions.view || permissions.cancel) {
-      return columns;
+  /** Initialize permission order + icons */
+  useEffect(() => {
+    fetchAllPermissions(form);
+    if (open) {
+      if (form?.permissions?.length) {
+        const withOrder = form.permissions.map((p, i) => ({
+          ...p,
+          order: p.order ?? i + 1,
+        }));
+        setSelectedPermissions(withOrder);
+        setOriginalOrder(withOrder);
+      } else {
+        setSelectedPermissions([]);
+        setOriginalOrder([]);
+      }
     }
-    return columns.filter((column) => column.field !== "action");
-  }, [columns, permissions]);
+  }, [fetchAllPermissions, open, form]);
+
+  /** Validation handler */
+  const handleChange = (data, key, e, type) => {
+    let value = e.target.value;
+    if (value && !/^[A-Za-z0-9]$/.test(value[0])) {
+      snackbar("Should not start with special character", "error");
+      return;
+    }
+    const result = validations(type, e.target.value);
+    if (result === "") {
+      setForm({ ...data, [key]: e.target.value });
+    } else {
+      snackbar(result, "warning");
+    }
+  };
+
+  /** Move item via DND */
+  const moveItem = useCallback(
+    (from, to) => {
+      const updated = [...selectedPermissions];
+      const [moved] = updated.splice(from, 1);
+      updated.splice(to, 0, moved);
+      const reOrdered = updated.map((item, idx) => ({
+        ...item,
+        order: idx + 1,
+      }));
+      setSelectedPermissions(reOrdered);
+    },
+    [selectedPermissions],
+  );
+
+  /** Reset to original order */
+  const handleReset = () => setSelectedPermissions(originalOrder);
+
+  /** Handle Autocomplete selection change */
+  const handlePermissionsSelect = (e, newValue) => {
+    const withOrder = newValue.map((p, idx) => ({
+      ...p,
+      order: idx + 1,
+    }));
+    setSelectedPermissions(withOrder);
+  };
+
+  const hasDuplicateRoleData = () => {
+    const name = form.roleName?.trim().toLowerCase();
+    const desc = form.description?.trim().toLowerCase();
+
+    return roles.some((r) => {
+      // Ignore same role while modifying
+      if (form.roleId && r.roleId === form.roleId) return false;
+      const roleNameMatch = r.roleName?.trim().toLowerCase() === name;
+      const roleDescMatch = r.description?.trim().toLowerCase() === desc;
+      return roleNameMatch || roleDescMatch;
+    });
+  };
+
+  /** Save with permissions & order */
+  const handleSave = async () => {
+    if (!form.roleName || !form.description) {
+      snackbar("Kindly fill all the required fields.", "warning");
+      return;
+    }
+
+    if (form.roleName.trim().length < 3) {
+      snackbar("Kindly provide valid role name.", "warning");
+      return;
+    }
+
+    if (!form.roleAccess) {
+      snackbar("Kindly select Role Access.", "warning");
+      return;
+    }
+
+    if (form.description.trim().length < 5) {
+      snackbar("Kindly provide valid role description.", "warning");
+      return;
+    }
+
+    if (selectedPermissions.length < 1) {
+      snackbar(
+        "Please select at least one permission for this role before saving",
+        "warning",
+      );
+      return;
+    }
+
+    // NEW CHECK
+    if (hasDuplicateRoleData()) {
+      snackbar(
+        "Role name or description already exists. Please use unique values.",
+        "warning",
+      );
+      return;
+    }
+
+    const updatedForm = {
+      ...form,
+      permissions: selectedPermissions.map((p) => ({
+        id: p.id,
+        title: p.title,
+        order: p.order,
+        icon: p.icon,
+        description: p.description,
+        menuSubmenu: p.menuSubmenu,
+      })),
+    };
+
+    // Existing "no change" check
+    if (_.isEqual(initialForm, updatedForm)) {
+      snackbar("Kindly modify the data before saving", "warning");
+      return;
+    }
+
+    setForm(updatedForm);
+
+    // new changes by shubhankar to handle backdend validation changes
+    const payload = {
+      requestType: form.roleId ? "MODIFY" : "CREATE",
+      targetRoleId: form.roleId || "",
+      requestPayload: updatedForm,
+    };
+
+    console.log(payload);
+
+    try {
+      const response = await callApi(
+        "/UM/role/create-role-request",
+        payload,
+        "POST",
+      );
+
+      if (response?.statusCode === 201 || response?.message) {
+        snackbar(
+          form.roleId
+            ? "Role update request submitted successfully with request id " +
+                response?.result?.requestId
+            : "Role creation request submitted successfully with request id " +
+                response?.result?.requestId,
+          "success",
+        );
+        onClose();
+        fetchRoles();
+      }
+    } catch (error) {
+      snackbar(error?.message || "Request failed", "error");
+    }
+  };
+
+  /** Render dynamic MUI icon from string name */
+  const renderIcon = (iconName) => {
+    const IconComp = MuiIcons[iconName];
+    return IconComp ? (
+      <IconComp fontSize="small" sx={{ mr: 1 }} />
+    ) : (
+      <MuiIcons.HelpOutline fontSize="small" sx={{ mr: 1 }} />
+    );
+  };
 
   return (
-    <>
-      <Box>
-        <DataGrid
-          rows={rows}
-          loading={isLoading}
-          columns={filteredColumns}
-          disableRowSelectionOnClick
-          pageSizeOptions={[5, 10, 25, 50]}
-          initialState={{
-            pagination: { paginationModel: { pageSize: 10, page: 0 } },
-            // Fix: Changed 'reqDate' to 'requestDate' to match column field
-            sorting: { sortModel: [{ field: "requestDate", sort: "asc" }] },
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle>
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
           }}
-          // Fix: Uses the gridRowId assigned during parsing
-          getRowId={(row) => row.gridRowId}
-          slots={{
-            noRowsOverlay: CustomNoRowsOverlay,
-          }}
-        />
-      </Box>
-
-      {/* View Request Dialog */}
-      <RoleRequestView
-        open={viewOpen}
-        handleClose={() => setViewOpen(false)}
-        data={viewData}
-      />
-
-      <Dialog
-        open={confirmDialog}
-        onClose={() => {
-          setConfirmDialog(false);
-        }}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle sx={{ fontWeight: 600 }}>
-          Cancel Request ID: {requestId}
-        </DialogTitle>
-        <DialogContent>
-          <Typography sx={{ p: 1 }}>
-            Are you sure you want to cancel this request? Please confirm.
+        >
+          <Typography variant="h6" color="primary">
+            {form.roleId ? "Edit " : "Create New "} <b>{form.roleName}</b> Role
           </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            onClick={() => {
-              setConfirmDialog(false);
+          {screenActions.block && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
+            >
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
+                }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+          {screenActions.unblock && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
+            >
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
+                }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+        </Box>
+      </DialogTitle>
+
+      <Divider />
+
+      <DialogContent>
+        <Stack spacing={2}>
+          <Grid container spacing={2}>
+            <Grid size={{ xs: 12, md: 6 }}>
+              <TextField
+                label="Role Name *"
+                value={form.roleName || ""}
+                onChange={(e) =>
+                  handleChange(form, "roleName", e, "inputValue2")
+                }
+                helperText="Allowed 3-20 characters (A-Z, 0-9, spaces, ,()&/-)"
+                error={
+                  form.roleName?.length > 0 &&
+                  (form.roleName.length < 3 ||
+                    !/[A-Za-z0-9]/.test(form.roleName))
+                }
+                fullWidth
+                slotProps={{ htmlInput: { maxLength: 20 } }}
+              />
+            </Grid>
+
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Autocomplete
+                options={roleAccessList}
+                getOptionLabel={(option) =>
+                  typeof option === "string" ? option : option.accessName || ""
+                }
+                value={
+                  roleAccessList.find(
+                    (item) =>
+                      item.accessFlag === form.roleAccess ||
+                      item.accessName === form.roleAccess,
+                  ) || null
+                }
+                onChange={(event, newValue) => {
+                  setForm({
+                    ...form,
+                    roleAccess: newValue ? newValue.accessFlag : "",
+                  });
+                }}
+                isOptionEqualToValue={(option, val) =>
+                  option.accessFlag === (val.accessFlag || val)
+                }
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Role Access *"
+                    placeholder="Select Role Access"
+                    helperText="Choose the access scope for this role"
+                    fullWidth
+                  />
+                )}
+                renderOption={(props, option) => (
+                  <li {...props} key={option.accessFlag}>
+                    <Box>
+                      <Typography variant="body2" fontWeight={600}>
+                        {option.accessName}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {option.accessDescription}
+                      </Typography>
+                    </Box>
+                  </li>
+                )}
+              />
+            </Grid>
+
+            <Grid size={{ xs: 12 }}>
+              <TextField
+                label="Description *"
+                value={form.description || ""}
+                onChange={(e) =>
+                  handleChange(form, "description", e, "inputValue2")
+                }
+                helperText="Allowed 5-200 characters (A-Z, 0-9, spaces, ,()&/-)"
+                error={
+                  form.description?.length > 0 &&
+                  (form.description.length < 5 ||
+                    !DESCRIPTION_REGEX.test(form.description))
+                }
+                fullWidth
+                multiline
+                rows={3}
+                slotProps={{ htmlInput: { maxLength: 200 } }}
+              />
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ my: 1 }} />
+
+          {/* Row 2: Permission autocomplete */}
+          <Autocomplete
+            multiple
+            options={allPermissions}
+            value={selectedPermissions}
+            inputValue={permissionSearch}
+            clearOnBlur={false}
+            disableClearable
+            filterSelectedOptions={false}
+            disableCloseOnSelect
+            onInputChange={(event, newInputValue, reason) => {
+              if (reason === "input") {
+                setPermissionSearch(newInputValue);
+              }
             }}
-            variant="outlined"
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={handleCancelRequest}
-            color="error"
-            variant="contained"
-          >
-            Confirm
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </>
+            onChange={handlePermissionsSelect}
+            isOptionEqualToValue={(opt, val) => opt.id === val.id}
+            getOptionLabel={(option) => option.title}
+            renderOption={(props, option, { selected }) => (
+              <li {...props} key={option.id}>
+                <Checkbox checked={selected} sx={{ mr: 1 }} />
+                <ListItemIcon sx={{ minWidth: 32 }}>
+                  {renderIcon(option.icon)}
+                </ListItemIcon>
+                {`${option.title}${
+                  option.menuSubmenu ? " (" + option.menuSubmenu + ")" : ""
+                }`}
+              </li>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Role Permissions *"
+                helperText="A role must include one or more permissions"
+                fullWidth
+              />
+            )}
+            renderTags={() => null}
+          />
+
+          {/* Row 3: Permission order (DND) */}
+          <Stack spacing={1}>
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
+            >
+              <Typography variant="subtitle2">
+                Allowed Permissions: {selectedPermissions.length}
+              </Typography>
+              <Tooltip title="Reset Permissions">
+                <Button
+                  size="small"
+                  color="primary"
+                  onClick={handleReset}
+                  variant="outlined"
+                  startIcon={<RestoreIcon />}
+                  sx={{ align: "center", height: "100%" }}
+                >
+                  Reset
+                </Button>
+              </Tooltip>
+            </Stack>
+            <DndProvider backend={HTML5Backend}>
+              <List sx={{ minHeight: 400, overflowY: "auto" }}>
+                {selectedPermissions.map((perm, index) => (
+                  <DraggablePermissionItem
+                    key={perm.id}
+                    id={perm.id}
+                    index={index}
+                    title={`${perm.order}. ${perm.title}${
+                      perm.menuSubmenu ? " (" + perm.menuSubmenu + ")" : ""
+                    }`}
+                    icon={renderIcon(perm.icon)}
+                    moveItem={moveItem}
+                  />
+                ))}
+              </List>
+            </DndProvider>
+          </Stack>
+        </Stack>
+      </DialogContent>
+
+      <Divider />
+      <DialogActions sx={{ p: 2 }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!canSave} onClick={handleSave}>
+          {form.roleId ? "Save Changes" : "Create Role"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
