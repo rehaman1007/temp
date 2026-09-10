@@ -1,117 +1,421 @@
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  Typography,
+  Tooltip,
+  IconButton,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import useApi from "../../hooks/useApi";
+import CancelIcon from "@mui/icons-material/Cancel";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import PendingActionsIcon from "@mui/icons-material/PendingActions";
+import BlockFlippedIcon from "@mui/icons-material/BlockFlipped";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import GppBadIcon from "@mui/icons-material/GppBad";
+import SecurityIcon from "@mui/icons-material/Security";
+import {
+  timeStampFormatter,
+  toPascalKebabCase,
+} from "../../utils/CommonUtilities";
+import CustomChip from "../../utils/CustomChip";
+import InfoIcon from "@mui/icons-material/Info";
+import RoleRequestView from "./components/RoleRequestView";
 
-@Entity
-@Table(name = "ROLE_ACCESS")
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class RoleAccess {
-
-    @Id
-    @Column(name = "ACCESS_FLAG", length = 5)
-    private String accessFlag;
-
-    @Column(name = "ACCESS_NAME", length = 100)
-    private String accessName;
-
-    @Column(name = "ACCESS_DESCRIPTION", length = 255)
-    private String accessDescription;
-
-    @Column(name = "ACCESS_STATUS", length = 20)
-    private String accessStatus;
+function CustomNoRowsOverlay() {
+  return (
+    <Stack height="100%" alignItems="center" justifyContent="center">
+      <InfoIcon sx={{ fontSize: 48, color: "text.secondary", mb: 2 }} />
+      <Typography variant="h6">No Role Requests Found</Typography>
+      <Typography>You have not created any Role requests.</Typography>
+    </Stack>
+  );
 }
 
+export default function RoleManagementTab2({ permissions = {} }) {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  const [isLoading, setIsLoading] = useState(true);
+  const [rows, setRows] = useState([]);
+  const [confirmDialog, setConfirmDialog] = useState(false);
+  const [requestId, setRequestId] = useState(null);
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewData, setViewData] = useState(null);
+  const [roleAccessList, setRoleAccessList] = useState([]); // New State
 
+  const fetchData = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const response = await callApi("/UM/role/my-role-requests", null, "GET");
+      if (response?.result) {
+        const result = response?.result?.myRequests || [];
 
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.stereotype.Repository;
-import java.util.List;
-
-@Repository
-public interface RoleAccessRepository extends JpaRepository<RoleAccess, String> {
-    
-    // Spring JPA automatically translates this to: 
-    // SELECT * FROM ROLE_ACCESS WHERE ACCESS_STATUS = ?
-    List<RoleAccess> findByAccessStatusIgnoreCase(String accessStatus);
-}
-
-
-
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
-import java.util.List;
-import java.util.stream.Collectors;
-
-@Service
-@RequiredArgsConstructor
-public class RoleAccessService {
-
-    private final RoleAccessRepository roleAccessRepository;
-
-    public List<RoleAccessDTO> getActiveRoleAccessList() {
-        // Fetch only rows where ACCESS_STATUS is 'Active'
-        List<RoleAccess> activeAccessList = roleAccessRepository.findByAccessStatusIgnoreCase("Active");
-
-        // Convert the Entities into DTOs
-        return activeAccessList.stream()
-            .map(access -> new RoleAccessDTO(
-                    access.getAccessFlag(),
-                    access.getAccessName(),
-                    access.getAccessDescription()
-            ))
-            .collect(Collectors.toList());
+        const processedResult = result.map((row) => {
+          const parsed = JSON.parse(row.requestPayload) || {};
+          return {
+            ...row,
+            ...parsed,
+          };
+        });
+        setRows(processedResult);
+      } else {
+        showSnackBar("No requests found", "warning");
+        setRows([]);
+      }
+    } catch (error) {
+      console.error("Something went wrong", error);
+    } finally {
+      setIsLoading(false);
     }
-}
+  }, [callApi, showSnackBar]);
 
+  // Fetch Role Access Dropdown Data
+  const fetchRoleAccessList = useCallback(async () => {
+    try {
+      const response = await callApi(
+        "/UM/role/get-role-access-list",
+        {},
+        "GET",
+      );
+      const list = response?.result?.roleAccessList ?? [];
+      setRoleAccessList(list);
+    } catch (error) {
+      console.error("Something went wrong", error);
+      setRoleAccessList([]);
+    }
+  }, [callApi]);
 
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-import java.util.List;
+  useEffect(() => {
+    fetchData();
+    fetchRoleAccessList();
+  }, [fetchData, fetchRoleAccessList]);
 
-@RestController
-@RequestMapping("/UM/role")
-@RequiredArgsConstructor
-public class RoleController {
-
-    private final RoleAccessService roleAccessService;
-
-    @GetMapping("/get-role-access-list")
-    public ResponseEntity<ApiResponse<List<RoleAccessDTO>>> getRoleAccessList() {
-        
-        List<RoleAccessDTO> result = roleAccessService.getActiveRoleAccessList();
-        
-        // Wrap response exactly how frontend expects it
-        ApiResponse<List<RoleAccessDTO>> response = new ApiResponse<>(
-                HttpStatus.OK.value(),
-                "Role access list fetched successfully",
-                result
+  const handleCancelRequest = async () => {
+    try {
+      const payload = {
+        requestId,
+        actionFlag: "CANCEL",
+        remarks: "User canceled this Request",
+      };
+      const response = await callApi(
+        "/UM/role/cancel-role-request",
+        payload,
+        "POST",
+      );
+      if (response?.result?.status) {
+        showSnackBar(
+          `Request Id ${requestId} Cancelled Successfully.`,
+          "success",
         );
-
-        return ResponseEntity.ok(response);
+      } else {
+        showSnackBar(
+          response?.message
+            ? response?.message
+            : "Failed to process your cancel request, Kindly try again",
+          "error",
+        );
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      fetchData();
+      setConfirmDialog(false);
     }
+  };
+
+  const handleViewClick = (data) => {
+    console.log(data);
+    setViewData(data);
+    setViewOpen(true);
+  };
+
+  const columns = useMemo(
+    () => [
+      { field: "requestId", headerName: "Request Id", flex: 1, minWidth: 150 },
+      { field: "roleName", headerName: "Role Name", flex: 0.5, minWidth: 150 },
+      {
+        field: "description",
+        headerName: "Role Description",
+        flex: 1.5,
+        minWidth: 200,
+      },
+      {
+        field: "roleAccess",
+        headerName: "Access Level",
+        flex: 1,
+        headerAlign: "center",
+        align: "center",
+        sortable: true,
+        filterable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => {
+          console.log(roleAccessList);
+          const access = roleAccessList.find(
+            (item) => item.accessFlag === params.row.roleAccess,
+          );
+          console.log(access);
+
+          return (
+            <Tooltip title={access?.accessDescription || ""} placement="top">
+              <CustomChip
+                variant="outlined"
+                size="sm"
+                icon={<SecurityIcon sx={{ width: 15, height: 15 }} />}
+                label={access?.accessName || params.row.roleAccess}
+              />
+            </Tooltip>
+          );
+        },
+      },
+      {
+        field: "requestType",
+        headerName: "Request Type",
+        flex: 0.5,
+        minWidth: 150,
+        align: "center",
+        headerAlign: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => {
+          const val = params.value;
+          const color =
+            val === "CREATE"
+              ? "success"
+              : val === "DELETE"
+                ? "error"
+                : "warning";
+          const icon =
+            val === "CREATE" ? (
+              <AddBoxIcon />
+            ) : val === "DELETE" ? (
+              <AutoDeleteIcon />
+            ) : (
+              <EditDocumentIcon />
+            );
+          return (
+            <CustomChip
+              variant="outlined"
+              icon={icon}
+              label={
+                val === "CREATE"
+                  ? "Added"
+                  : val === "DELETE"
+                    ? "Deleted"
+                    : "Modified"
+              }
+              color={color}
+            />
+          );
+        },
+      },
+
+      {
+        field: "requestDate",
+        headerName: "Requested Date",
+        flex: 1,
+        minWidth: 200,
+        renderCell: (params) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{ fontSize: "0.9rem" }}
+          >
+            {timeStampFormatter(params.value)}
+          </Typography>
+        ),
+      },
+
+      {
+        field: "requestStatus",
+        headerName: "Status",
+        minWidth: 150,
+        flex: 0.6,
+        align: "center",
+        headerAlign: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => (
+          <Box
+            sx={{
+              color:
+                params.value === "REJECTED"
+                  ? "error.main"
+                  : params.value === "ACCEPTED"
+                    ? "success.dark"
+                    : params.value === "CANCELED"
+                      ? "info.dark"
+                      : "warning.main",
+            }}
+          >
+            <CustomChip
+              icon={
+                params.value === "ACCEPTED" ? (
+                  <CheckCircleIcon />
+                ) : params.value === "REJECTED" ? (
+                  <BlockFlippedIcon />
+                ) : params.value === "CANCELED" ? (
+                  <GppBadIcon />
+                ) : (
+                  <PendingActionsIcon />
+                )
+              }
+              variant="outlined"
+              label={toPascalKebabCase(params.value)}
+              sx={{
+                color:
+                  params.value === "REJECTED"
+                    ? "error.dark"
+                    : params.value === "ACCEPTED"
+                      ? "success.dark"
+                      : params.value === "CANCELLED"
+                        ? "primary.dark"
+                        : "warning.light",
+
+                "& .MuiChip-icon": {
+                  color:
+                    params.value === "REJECTED"
+                      ? "error.dark"
+                      : params.value === "ACCEPTED"
+                        ? "success.dark"
+                        : params.value === "CANCELLED"
+                          ? "primary.dark"
+                          : "warning.light",
+                },
+              }}
+            />
+          </Box>
+        ),
+      },
+      {
+        field: "action",
+        headerName: "Actions",
+        flex: 0.6,
+        minWidth: 120,
+        align: "center",
+        headerAlign: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => (
+          <Stack
+            direction="row"
+            spacing={1}
+            justifyContent="center"
+            alignItems="center"
+            sx={{ height: "100%" }}
+          >
+            {permissions.view && (
+              <Tooltip title="View">
+                <IconButton
+                  // color="primary"
+                  onClick={() => handleViewClick(params.row)}
+                >
+                  <VisibilityIcon />
+                </IconButton>
+              </Tooltip>
+            )}
+            {params.row.requestStatus === "PENDING" && permissions.cancel && (
+              <Tooltip title={"Cancel Request"}>
+                <IconButton
+                  onClick={() => {
+                    setConfirmDialog(true);
+                    setRequestId(params.row.requestId);
+                  }}
+                >
+                  <CancelIcon fontSize="inherit" />
+                </IconButton>
+              </Tooltip>
+            )}
+          </Stack>
+        ),
+      },
+    ],
+    [permissions],
+  );
+
+  const filteredColumns = useMemo(() => {
+    if (permissions.view || permissions.cancel) {
+      return columns;
+    }
+    // Otherwise, filter out the column where field name is 'action'.
+    else {
+      return columns.filter((column) => column.field !== "action");
+    }
+  }, [columns, permissions]);
+
+  return (
+    <>
+      <Box>
+        <DataGrid
+          rows={rows}
+          loading={isLoading}
+          columns={filteredColumns}
+          disableRowSelectionOnClick
+          pageSizeOptions={[5, 10, 25, 50]}
+          initialState={{
+            pagination: { paginationModel: { pageSize: 10, page: 0 } },
+            sorting: { sortModel: [{ field: "reqDate", sort: "asc" }] },
+          }}
+          getRowId={(row) => row.requestId}
+          slots={{
+            noRowsOverlay: CustomNoRowsOverlay,
+          }}
+        />
+      </Box>
+
+      {/* View Request Dialog */}
+      <RoleRequestView
+        open={viewOpen}
+        handleClose={() => setViewOpen(false)}
+        data={viewData}
+      />
+
+      <Dialog
+        open={confirmDialog}
+        onClose={() => {
+          setConfirmDialog(false);
+        }}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 600 }}>
+          Cancel Request ID: {requestId}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ p: 1 }}>
+            Are you sure you want to cancel this request Please confirm ?
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setConfirmDialog(false);
+            }}
+            variant="outlined"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleCancelRequest}
+            color="error"
+            variant="contained"
+          >
+            Confirm
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
 }
-
-
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class RoleAccessDTO {
-    private String accessFlag;
-    private String accessName;
-    private String accessDescription;
-}
-
