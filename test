@@ -1,337 +1,487 @@
-import React, { useState, useEffect, useCallback } from "react";
 import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
   Button,
-  List,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Stack,
+  TextField,
+  Grid,
   Typography,
+  Checkbox,
+  Autocomplete,
   Divider,
+  List,
+  ListItemIcon,
   Tooltip,
+  Box,
 } from "@mui/material";
+import { useEffect, useState, useCallback } from "react";
+import * as MuiIcons from "@mui/icons-material";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
 import RestoreIcon from "@mui/icons-material/Restore";
+import { validations } from "../../../utils/Validations";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
-import * as MuiIcons from "@mui/icons-material";
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import DraggablePermissionItem from "./DraggablePermissionItem";
+import _ from "lodash";
 
-export default function PermissionsDialog({
+// The list of IDs you want to exclude
+const MENUS_TO_REMOVE = [46, 47];
+const DESCRIPTION_REGEX = /^[a-zA-Z0-9\s/&().,-]*$/;
+
+export default function RolesDialog({
   open,
-  handleSavePermissionOrder,
+  form,
+  setForm,
+  fetchRoles,
+  initialForm = {},
+  screenActions = {},
   onClose,
-  permissions = [],
-  roleName = "",
+  roles = {},
+  roleAccessList = [],
 }) {
-  const [ordered, setOrdered] = useState(permissions);
-  const [original, setOriginal] = useState(permissions);
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
+  const [selectedPermissions, setSelectedPermissions] = useState([]);
+  const [originalOrder, setOriginalOrder] = useState([]);
+  const [isBlocked, setIsBlocked] = useState(form?.roleStatus === "BLOCKED");
+  const [permissionSearch, setPermissionSearch] = useState("");
+  const [allPermissions, setAllPermissions] = useState([]);
 
+  const handleStatusToggle = async () => {
+    const newStatus = form.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE";
+    setIsBlocked(!isBlocked);
+    form.roleStatus = newStatus;
+  };
+
+  const canSave =
+    (form.roleName || "").length > 2 &&
+    (form.description || "").length > 4 &&
+    Boolean(form.roleAccess) &&
+    selectedPermissions.length > 0;
+
+  // Modifed to only take roleId instead of the whole form object
+  const fetchAllPermissions = useCallback(
+    async (roleId) => {
+      try {
+        const response = await callApi(
+          `/UM/role/get-all-permissions?roleId=${roleId || ""}`,
+          {},
+          "GET",
+        );
+        const permits = response?.result ?? [];
+        const filteredPermissions = permits.filter(
+          (item) => !MENUS_TO_REMOVE.includes(item.id),
+        );
+        setAllPermissions(filteredPermissions);
+      } catch (error) {
+        console.error(error);
+        setAllPermissions([]);
+      }
+    },
+    [callApi],
+  );
+
+  /** Initialize permission order + icons */
   useEffect(() => {
-    if (permissions?.length) {
-      const withOrder = permissions.map((p, i) => ({
-        ...p,
-        order: p.order ?? i + 1,
-      }));
-      setOrdered(withOrder);
-      setOriginal(permissions);
-    } else {
-      setOrdered([]);
-      setOriginal([]);
-    }
-  }, [permissions]);
+    // Only run this logic when the dialog opens
+    if (open) {
+      fetchAllPermissions(form?.roleId);
+      setIsBlocked(form?.roleStatus === "BLOCKED"); // Ensure block status resets correctly on new open
 
+      if (form?.permissions?.length) {
+        const withOrder = form.permissions.map((p, i) => ({
+          ...p,
+          order: p.order ?? i + 1,
+        }));
+        setSelectedPermissions(withOrder);
+        setOriginalOrder(withOrder);
+      } else {
+        setSelectedPermissions([]);
+        setOriginalOrder([]);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, fetchAllPermissions]); // Removed 'form' from dependencies to prevent re-renders on typing or saving
+
+  /** Validation handler */
+  const handleChange = (data, key, e, type) => {
+    let value = e.target.value;
+    if (value && !/^[A-Za-z0-9]$/.test(value[0])) {
+      snackbar("Should not start with special character", "error");
+      return;
+    }
+    const result = validations(type, e.target.value);
+    if (result === "") {
+      setForm({ ...data, [key]: e.target.value });
+    } else {
+      snackbar(result, "warning");
+    }
+  };
+
+  /** Move item via DND */
   const moveItem = useCallback(
     (from, to) => {
-      const updated = [...ordered];
+      const updated = [...selectedPermissions];
       const [moved] = updated.splice(from, 1);
       updated.splice(to, 0, moved);
       const reOrdered = updated.map((item, idx) => ({
         ...item,
         order: idx + 1,
       }));
-      setOrdered(reOrdered);
+      setSelectedPermissions(reOrdered);
     },
-    [ordered],
+    [selectedPermissions],
   );
 
-  const handleReset = () => setOrdered(original);
+  /** Reset to original order */
+  const handleReset = () => setSelectedPermissions(originalOrder);
+
+  /** Handle Autocomplete selection change */
+  const handlePermissionsSelect = (e, newValue) => {
+    const withOrder = newValue.map((p, idx) => ({
+      ...p,
+      order: idx + 1,
+    }));
+    setSelectedPermissions(withOrder);
+  };
+
+  const hasDuplicateRoleData = () => {
+    const name = form.roleName?.trim().toLowerCase();
+    const desc = form.description?.trim().toLowerCase();
+
+    return (
+      roles.length > 0 &&
+      roles.some((r) => {
+        if (form.roleId && r.roleId === form.roleId) return false;
+        const roleNameMatch = r.roleName?.trim().toLowerCase() === name;
+        const roleDescMatch = r.description?.trim().toLowerCase() === desc;
+        return roleNameMatch || roleDescMatch;
+      })
+    );
+  };
+
+  /** Save with permissions & order */
+  const handleSave = async () => {
+    if (!form.roleName || !form.description) {
+      snackbar("Kindly fill all the required fields.", "warning");
+      return;
+    }
+
+    if (form.roleName.trim().length < 3) {
+      snackbar("Kindly provide valid role name.", "warning");
+      return;
+    }
+
+    if (!form.roleAccess) {
+      snackbar("Kindly select Role Access.", "warning");
+      return;
+    }
+
+    if (form.description.trim().length < 5) {
+      snackbar("Kindly provide valid role description.", "warning");
+      return;
+    }
+
+    if (selectedPermissions.length < 1) {
+      snackbar(
+        "Please select at least one permission for this role before saving",
+        "warning",
+      );
+      return;
+    }
+
+    if (hasDuplicateRoleData()) {
+      snackbar(
+        "Role name or description already exists. Please use unique values.",
+        "warning",
+      );
+      return;
+    }
+
+    const updatedForm = {
+      ...form,
+      permissions: selectedPermissions.map((p) => ({
+        id: p.id,
+        title: p.title,
+        order: p.order,
+        icon: p.icon,
+        description: p.description,
+        menuSubmenu: p.menuSubmenu,
+      })),
+    };
+
+    if (_.isEqual(initialForm, updatedForm)) {
+      snackbar("Kindly modify the data before saving", "warning");
+      return;
+    }
+
+    setForm(updatedForm);
+
+    const payload = {
+      requestType: form.roleId ? "MODIFY" : "CREATE",
+      targetRoleId: form.roleId || "",
+      requestPayload: updatedForm,
+    };
+    console.log(payload);
+    try {
+      const response = await callApi(
+        "/UM/role/create-role-request",
+        payload,
+        "POST",
+      );
+
+      if (response?.statusCode === 201 || response?.message) {
+        snackbar(
+          form.roleId
+            ? "Role update request submitted successfully with request id " +
+                response?.result?.requestId
+            : "Role creation request submitted successfully with request id " +
+                response?.result?.requestId,
+          "success",
+        );
+        onClose();
+        fetchRoles();
+      }
+    } catch (error) {
+      snackbar(error?.message || "Request failed", "error");
+    }
+  };
 
   /** Render dynamic MUI icon from string name */
   const renderIcon = (iconName) => {
     const IconComp = MuiIcons[iconName];
     return IconComp ? (
-      <IconComp fontSize="small" />
+      <IconComp fontSize="small" sx={{ mr: 1 }} />
     ) : (
-      <MuiIcons.HelpOutline fontSize="small" />
+      <MuiIcons.HelpOutline fontSize="small" sx={{ mr: 1 }} />
     );
   };
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
       <DialogTitle>
-        Permissions for <b>{roleName}</b> Role
-      </DialogTitle>
-      <DialogContent>
-        <Stack
-          direction="row"
-          justifyContent="space-between"
-          alignItems="center"
-          sx={{ m: 1 }}
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
         >
-          <Typography variant="subtitle2">
-            Total Active Permissions: {ordered.length}
+          <Typography variant="h6" color="primary">
+            {form.roleId ? "Edit " : "Create New "} <b>{form.roleName}</b> Role
           </Typography>
-          <Tooltip title="Reset Order">
-            <Button
-              size="small"
-              color="primary"
-              onClick={handleReset}
-              variant="outlined"
-              startIcon={<RestoreIcon />}
-              sx={{ align: "center", height: "100%" }}
+          {screenActions.block && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
             >
-              Reset
-            </Button>
-          </Tooltip>
-        </Stack>
-        <Divider sx={{ mb: 2 }} />
-        <DndProvider backend={HTML5Backend}>
-          {/* Added slight padding to avoid shadow clipping on hover */}
-          <List sx={{ minHeight: 400, overflowY: "auto", px: 0.5 }}>
-            {ordered.map((perm, i) => (
-              <DraggablePermissionItem
-                key={perm.id}
-                perm={perm}
-                index={i}
-                icon={renderIcon(perm.icon)}
-                moveItem={moveItem}
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
+                }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+        </Box>
+      </DialogTitle>
+
+      <Divider />
+
+      <DialogContent>
+        <Stack spacing={2}>
+          <Grid container spacing={2}>
+            <Grid size={{ xs: 12, md: 6 }}>
+              <TextField
+                label="Role Name *"
+                value={form.roleName || ""}
+                onChange={(e) =>
+                  handleChange(form, "roleName", e, "inputValue2")
+                }
+                helperText="Allowed 3-20 characters (A-Z, 0-9, spaces, ,()&/-)"
+                error={
+                  form.roleName?.length > 0 &&
+                  (form.roleName.length < 3 ||
+                    !/[A-Za-z0-9]/.test(form.roleName))
+                }
+                fullWidth
+                slotProps={{ htmlInput: { maxLength: 20 } }}
               />
-            ))}
-          </List>
-        </DndProvider>
+            </Grid>
+
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Autocomplete
+                options={roleAccessList}
+                getOptionLabel={(option) =>
+                  typeof option === "string" ? option : option.accessName || ""
+                }
+                value={
+                  roleAccessList.find(
+                    (item) =>
+                      item.accessFlag === form.roleAccess ||
+                      item.accessName === form.roleAccess,
+                  ) || null
+                }
+                onChange={(event, newValue) => {
+                  setForm({
+                    ...form,
+                    roleAccess: newValue ? newValue.accessFlag : "",
+                  });
+                }}
+                isOptionEqualToValue={(option, val) =>
+                  option.accessFlag === (val.accessFlag || val)
+                }
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Role Access *"
+                    placeholder="Select Role Access"
+                    helperText="Choose the access scope for this role"
+                    fullWidth
+                  />
+                )}
+                renderOption={(props, option) => (
+                  <li {...props} key={option.accessFlag}>
+                    <Box>
+                      <Typography variant="body2" fontWeight={600}>
+                        {option.accessName}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {option.accessDescription}
+                      </Typography>
+                    </Box>
+                  </li>
+                )}
+              />
+            </Grid>
+
+            <Grid size={{ xs: 12 }}>
+              <TextField
+                label="Description *"
+                value={form.description || ""}
+                onChange={(e) =>
+                  handleChange(form, "description", e, "inputValue2")
+                }
+                helperText="Allowed 5-200 characters (A-Z, 0-9, spaces, ,()&/-)"
+                error={
+                  form.description?.length > 0 &&
+                  (form.description.length < 5 ||
+                    !DESCRIPTION_REGEX.test(form.description))
+                }
+                fullWidth
+                multiline
+                rows={3}
+                slotProps={{ htmlInput: { maxLength: 200 } }}
+              />
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ my: 1 }} />
+
+          <Autocomplete
+            multiple
+            options={allPermissions}
+            value={selectedPermissions}
+            inputValue={permissionSearch}
+            clearOnBlur={false}
+            disableClearable
+            filterSelectedOptions={false}
+            disableCloseOnSelect
+            onInputChange={(event, newInputValue, reason) => {
+              if (reason === "input") {
+                setPermissionSearch(newInputValue);
+              }
+            }}
+            onChange={handlePermissionsSelect}
+            isOptionEqualToValue={(opt, val) => opt.id === val.id}
+            getOptionLabel={(option) => option.title}
+            renderOption={(props, option, { selected }) => (
+              <li {...props} key={option.id}>
+                <Checkbox checked={selected} sx={{ mr: 1 }} />
+                <ListItemIcon sx={{ minWidth: 32 }}>
+                  {renderIcon(option.icon)}
+                </ListItemIcon>
+                {`${option.title}${
+                  option.menuSubmenu ? " (" + option.menuSubmenu + ")" : ""
+                }`}
+              </li>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Role Permissions *"
+                helperText="A role must include one or more permissions"
+                fullWidth
+              />
+            )}
+            renderTags={() => null}
+          />
+
+          <Stack spacing={1}>
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
+            >
+              <Typography variant="subtitle2">
+                Allowed Permissions: {selectedPermissions.length}
+              </Typography>
+              <Tooltip title="Reset Permissions">
+                <Button
+                  size="small"
+                  color="primary"
+                  onClick={handleReset}
+                  variant="outlined"
+                  startIcon={<RestoreIcon />}
+                  sx={{ align: "center", height: "100%" }}
+                >
+                  Reset
+                </Button>
+              </Tooltip>
+            </Stack>
+            <DndProvider backend={HTML5Backend}>
+              <List sx={{ minHeight: 400, overflowY: "auto" }}>
+                {selectedPermissions.map((perm, index) => (
+                  <DraggablePermissionItem
+                    key={perm.id}
+                    id={perm.id}
+                    index={index}
+                    title={`${perm.order}. ${perm.title}${
+                      perm.menuSubmenu ? " (" + perm.menuSubmenu + ")" : ""
+                    }`}
+                    icon={renderIcon(perm.icon)}
+                    moveItem={moveItem}
+                  />
+                ))}
+              </List>
+            </DndProvider>
+          </Stack>
+        </Stack>
       </DialogContent>
-      <DialogActions>
-        <Button
-          onClick={() => {
-            handleReset();
-            onClose();
-          }}
-        >
-          Cancel
-        </Button>
-        <Button
-          variant="contained"
-          onClick={() => {
-            handleSavePermissionOrder(ordered, original);
-          }}
-        >
-          Save Order
+
+      <Divider />
+      <DialogActions sx={{ p: 2 }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!canSave} onClick={handleSave}>
+          {form.roleId ? "Save Changes" : "Create Role"}
         </Button>
       </DialogActions>
     </Dialog>
-  );
-}
-
-
-
-import { useRef } from "react";
-import { useDrag, useDrop } from "react-dnd";
-import {
-  ListItem,
-  ListItemIcon,
-  Box,
-  Typography,
-  IconButton,
-  Chip,
-  Stack,
-  Tooltip,
-} from "@mui/material";
-import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import LockPersonIcon from "@mui/icons-material/LockPerson";
-
-const ItemType = "PERMISSION_ITEM";
-
-export default function DraggablePermissionItem({
-  perm,
-  index,
-  icon,
-  moveItem,
-}) {
-  const ref = useRef(null);
-
-  // --- Drag and drop setup ---
-  const [, drop] = useDrop({
-    accept: ItemType,
-    hover(item, monitor) {
-      if (!ref.current) return;
-      const dragIndex = item.index;
-      const hoverIndex = index;
-      if (dragIndex === hoverIndex) return;
-
-      const hoverBoundingRect = ref.current?.getBoundingClientRect();
-      const hoverMiddleY =
-        (hoverBoundingRect.bottom - hoverBoundingRect.top) / 2;
-      const clientOffset = monitor.getClientOffset();
-      const hoverClientY = clientOffset.y - hoverBoundingRect.top;
-
-      if (dragIndex < hoverIndex && hoverClientY < hoverMiddleY) return;
-      if (dragIndex > hoverIndex && hoverClientY > hoverMiddleY) return;
-
-      moveItem(dragIndex, hoverIndex);
-      item.index = hoverIndex;
-    },
-  });
-
-  const [{ isDragging }, drag] = useDrag({
-    type: ItemType,
-    item: { id: perm.id, index },
-    collect: (monitor) => ({
-      isDragging: monitor.isDragging(),
-    }),
-  });
-
-  drag(drop(ref));
-
-  // Destructure variables for UI logic
-  const isRestricted = perm.isRestricted === "Y";
-  const actions = perm.menuAction
-    ? perm.menuAction.split("|").filter(Boolean)
-    : [];
-
-  return (
-    <ListItem
-      ref={ref}
-      sx={{
-        opacity: isDragging ? 0.3 : 1,
-        // Distinct styling for restricted vs normal screens
-        border: isRestricted ? "1px solid #ffcdd2" : "1px solid #e0e0e0",
-        borderRadius: "8px",
-        mb: 1.5,
-        p: 1.5,
-        display: "flex",
-        alignItems: "flex-start",
-        bgcolor: isRestricted ? "#ffebee" : "background.paper",
-        cursor: "move",
-        transition: "all 0.2s ease-in-out",
-        "&:hover": {
-          boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
-        },
-      }}
-    >
-      {/* Left Column: Drag Handle & Order Number */}
-      <Stack alignItems="center" mr={2} mt={0.5}>
-        <IconButton
-          size="small"
-          sx={{ cursor: "grab", color: "text.disabled", p: 0.5 }}
-        >
-          <DragIndicatorIcon />
-        </IconButton>
-        <Typography variant="caption" fontWeight="bold" color="text.secondary">
-          #{perm.order}
-        </Typography>
-      </Stack>
-
-      {/* Main Content Area */}
-      <Box flexGrow={1} overflow="hidden">
-        {/* Header Row: Icon, Titles, Badges */}
-        <Stack
-          direction="row"
-          alignItems="center"
-          spacing={1}
-          mb={0.5}
-          flexWrap="wrap"
-          useFlexGap
-        >
-          <ListItemIcon
-            sx={{
-              minWidth: "auto",
-              color: isRestricted ? "error.main" : "primary.main",
-            }}
-          >
-            {icon}
-          </ListItemIcon>
-
-          {/* Fallback to title if no submenu exists */}
-          <Typography
-            variant="subtitle1"
-            fontWeight="600"
-            sx={{ wordBreak: "break-word" }}
-          >
-            {perm.menuSubmenu ? perm.menuSubmenu : perm.title}
-          </Typography>
-
-          {/* Show parent title category as a chip if we displayed the submenu as main title */}
-          {perm.menuSubmenu && (
-            <Chip
-              label={perm.title}
-              size="small"
-              sx={{
-                height: 20,
-                fontSize: "0.65rem",
-                bgcolor: isRestricted ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.06)",
-              }}
-            />
-          )}
-
-          {/* Special UI Badge for Restricted Items */}
-          {isRestricted && (
-            <Tooltip title="This screen has restricted access mapped only for specific roles.">
-              <Chip
-                icon={<LockPersonIcon sx={{ fontSize: "14px !important" }} />}
-                label="Restricted"
-                size="small"
-                color="error"
-                variant="outlined"
-                sx={{
-                  height: 20,
-                  fontSize: "0.65rem",
-                  "& .MuiChip-icon": { ml: 0.5 },
-                  bgcolor: "#fff",
-                }}
-              />
-            </Tooltip>
-          )}
-        </Stack>
-
-        {/* Dynamic Description (Truncated to 2 lines) */}
-        {perm.description && (
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            sx={{
-              mb: 1.5,
-              display: "-webkit-box",
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: "vertical",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-          >
-            {perm.description}
-          </Typography>
-        )}
-
-        {/* Action Level Permissions */}
-        {actions.length > 0 && (
-          <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap>
-            {actions.map((act, idx) => (
-              <Chip
-                key={idx}
-                label={act.charAt(0).toUpperCase() + act.slice(1)} // Capitalizes view -> View
-                size="small"
-                sx={{
-                  height: 22,
-                  fontSize: "0.7rem",
-                  bgcolor: isRestricted ? "white" : "action.selected",
-                  border: "1px solid",
-                  borderColor: isRestricted ? "error.light" : "divider",
-                }}
-              />
-            ))}
-          </Stack>
-        )}
-      </Box>
-    </ListItem>
   );
 }
