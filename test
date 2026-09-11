@@ -1,74 +1,95 @@
-import { useCallback, useEffect, useState } from "react";
+Also Fix my RoleApprovals same as RoleManagementTab2 by showing role access name and description based on flag
+
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  Typography,
+  Tooltip,
+  IconButton,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import useApi from "../../hooks/useApi";
+import CancelIcon from "@mui/icons-material/Cancel";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
 import useCustomSnackbar from "../../utils/useCustomSnackbar";
-import { Box, Fab, Paper, Typography, styled } from "@mui/material";
-import _ from "lodash";
-import PermissionsDialog from "./components/PermissionsDialog";
-import RolesTable from "./components/RolesTable";
-import RolesDialog from "./components/RolesDialog";
-import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
-import { RollTab1Addicon } from "./roleManagementStyles";
+import PendingActionsIcon from "@mui/icons-material/PendingActions";
+import BlockFlippedIcon from "@mui/icons-material/BlockFlipped";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import GppBadIcon from "@mui/icons-material/GppBad";
+import SecurityIcon from "@mui/icons-material/Security";
+import {
+  timeStampFormatter,
+  toPascalKebabCase,
+} from "../../utils/CommonUtilities";
+import CustomChip from "../../utils/CustomChip";
+import InfoIcon from "@mui/icons-material/Info";
+import RoleRequestView from "./components/RoleRequestView";
 
-const OverlayBox = styled(Box)(() => ({
-  display: "flex",
-  flexDirection: "column",
-  height: "100%",
-  justifyContent: "center",
-  alignItems: "center",
-}));
-
-const CustomNoRowsOverlay = () => {
+function CustomNoRowsOverlay() {
   return (
-    <OverlayBox>
-      <ErrorOutlineIcon fontSize="large" />
-      <Typography variant="h5" fontSize="1.2rem">
-        Data is not available
-      </Typography>
-    </OverlayBox>
+    <Stack height="100%" alignItems="center" justifyContent="center">
+      <InfoIcon sx={{ fontSize: 48, color: "text.secondary", mb: 2 }} />
+      <Typography variant="h6">No Role Requests Found</Typography>
+      <Typography>You have not created any Role requests.</Typography>
+    </Stack>
   );
-};
+}
 
-export default function RoleManagementTab1(props) {
-  const screenActions = props?.permissions || {};
+export default function RoleManagementTab2({ permissions = {} }) {
   const { callApi } = useApi();
-  const snackbar = useCustomSnackbar();
-  const emptyForm = {
-    roleId: "",
-    roleName: "",
-    description: "",
-    roleAccess: null, 
-    roleStatus: "ACTIVE",
-    permissions: [],
-  };
+  const showSnackBar = useCustomSnackbar();
+  const [isLoading, setIsLoading] = useState(true);
   const [rows, setRows] = useState([]);
-  const [form, setForm] = useState(emptyForm);
-  const [initialForm, setInitialForm] = useState(emptyForm);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [permDialogOpen, setPermDialogOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState(false);
+  const [requestId, setRequestId] = useState(null);
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewData, setViewData] = useState(null);
   const [roleAccessList, setRoleAccessList] = useState([]);
 
-  const fetchRoles = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     setIsLoading(true);
-    setPermDialogOpen(false);
-    setDialogOpen(false);
     try {
-      const data = await callApi(
-        "/UM/role/get-roles",
-        { permissions: true },
-        "GET",
-      );
+      const response = await callApi("/UM/role/my-role-requests", null, "GET");
+      if (response?.result) {
+        const result = response?.result?.myRequests || [];
 
-      const roles = data?.result?.roles ?? [];
-      setRows(roles);
-    } catch (e) {
-      console.error(e);
-      setRows([]);
-      snackbar("Failed to fetch roles. Check API or network.", "error");
+        const processedResult = result.map((row, index) => {
+          let parsed = {};
+          try {
+            if (row.requestPayload) {
+              parsed = JSON.parse(row.requestPayload);
+            }
+          } catch (e) {
+            console.error("Failed to parse requestPayload", e);
+          }
+
+          return {
+            ...row,
+            ...parsed,
+            // Fallback ID without using crypto API to satisfy DataGrid requirements
+            gridRowId: row.requestId || `fallback-id-${Date.now()}-${index}`,
+          };
+        });
+        setRows(processedResult);
+      } else {
+        showSnackBar("No requests found", "warning");
+        setRows([]);
+      }
+    } catch (error) {
+      console.error("Something went wrong", error);
     } finally {
       setIsLoading(false);
     }
-  }, [callApi, snackbar]);
+  }, [callApi, showSnackBar]);
 
   const fetchRoleAccessList = useCallback(async () => {
     try {
@@ -80,165 +101,77 @@ export default function RoleManagementTab1(props) {
       const list = response?.result?.roleAccessList ?? [];
       setRoleAccessList(list);
     } catch (error) {
-      console.error("Failed to fetch role access list:", error);
+      console.error("Something went wrong", error);
       setRoleAccessList([]);
     }
   }, [callApi]);
 
   useEffect(() => {
-    fetchRoles();
-    fetchRoleAccessList(); 
-  }, [fetchRoles, fetchRoleAccessList]);
+    fetchData();
+    fetchRoleAccessList();
+  }, [fetchData, fetchRoleAccessList]);
 
-  const handleEditRow = (row, isEdit) => {
-    setForm({ ...row });
-    setInitialForm({ ...row });
-    isEdit ? setDialogOpen(true) : setPermDialogOpen(true);
-  };
-
-  const handleSavePermissionOrder = async (ordered, original) => {
-    const isSameOrder = _.isEqual(original, ordered);
-
-    if (isSameOrder) {
-      snackbar("Kindly Change the order before saving it", "warning");
-      return;
-    }
-
+  const handleCancelRequest = async () => {
     try {
       const payload = {
-        selectedRole: form?.roleId,
-        permissions: ordered,
+        requestId,
+        actionFlag: "CANCEL",
+        remarks: "User canceled this Request",
       };
-      console.log(payload);
       const response = await callApi(
-        "/UM/role/save-permission-order",
+        "/UM/role/cancel-role-request",
         payload,
-        "PATCH",
+        "POST",
       );
-      snackbar(response?.message, "success");
-    } catch (err) {
-      console.error(err);
-      snackbar("Error while processing request", "error");
+      if (response?.result?.status) {
+        showSnackBar(
+          `Request Id ${requestId} Cancelled Successfully.`,
+          "success",
+        );
+      } else {
+        showSnackBar(
+          response?.message
+            ? response?.message
+            : "Failed to process your cancel request, Kindly try again",
+          "error",
+        );
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      fetchData();
+      setConfirmDialog(false);
     }
-    fetchRoles();
   };
 
-  return (
-    <Box>
-      <RolesTable
-        rows={rows}
-        isLoading={isLoading}
-        onEditRow={(row, isEdit) => handleEditRow(row, isEdit)}
-        screenActions={screenActions}
-        roleAccessList={roleAccessList}
-      />
-
-      <RolesDialog
-        open={dialogOpen}
-        form={form}
-        setForm={setForm}
-        fetchRoles={fetchRoles}
-        initialForm={initialForm}
-        screenActions={screenActions}
-        onClose={() => setDialogOpen(false)}
-        roles={rows}
-        roleAccessList={roleAccessList}
-      />
-
-      <PermissionsDialog
-        open={permDialogOpen}
-        handleSavePermissionOrder={(ordered, original) =>
-          handleSavePermissionOrder(ordered, original)
-        }
-        onClose={() => {
-          setPermDialogOpen(false);
-        }}
-        permissions={form?.permissions || []}
-        roleName={form?.roleName || ""}
-      />
-
-      {screenActions.create && (
-        <Fab
-          color="primary"
-          variant="extended"
-          onClick={() => {
-            setForm(emptyForm);
-            setDialogOpen(true);
-          }}
-          sx={{
-            position: "fixed",
-            bottom: 15,
-            right: 30,
-            borderRadius: 1,
-          }}
-        >
-          <RollTab1Addicon />
-          Create Role
-        </Fab>
-      )}
-    </Box>
+  const handleViewClick = useCallback(
+    (data) => {
+      console.log(data);
+      const access = roleAccessList.find(
+        (item) => item.accessFlag === data.roleAccess,
+      );
+      const newData = { ...data, ...access };
+      console.log(newData);
+      setViewData(newData);
+      setViewOpen(true);
+    },
+    [roleAccessList],
   );
-}
 
-
-import {
-  Box,
-  Chip,
-  IconButton,
-  Stack,
-  Tooltip,
-  Typography,
-  styled,
-} from "@mui/material";
-import { DataGrid } from "@mui/x-data-grid";
-import EditIcon from "@mui/icons-material/Edit";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import SecurityIcon from "@mui/icons-material/Security";
-import CustomChip from "../../../utils/CustomChip";
-import { useMemo } from "react";
-import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
-
-const OverlayBox = styled(Box)(() => ({
-  display: "flex",
-  flexDirection: "column",
-  height: "100%",
-  justifyContent: "center",
-  alignItems: "center",
-}));
-
-const CustomNoRowsOverlay = () => {
-  return (
-    <OverlayBox>
-      <ErrorOutlineIcon fontSize="large" />
-      <Typography variant="h5" fontSize="1.2rem">
-        Data is not available
-      </Typography>
-    </OverlayBox>
-  );
-};
-
-export default function RolesTable({
-  rows,
-  isLoading,
-  onEditRow,
-  screenActions,
-  roleAccessList = [],
-}) {
   const columns = useMemo(
     () => [
       {
-        field: "roleName",
-        headerName: "Role",
-        flex: 0.8,
+        field: "requestId",
+        headerName: "Request Id",
+        flex: 0.5,
         minWidth: 150,
-        align: "left",
-        headerAlign: "left",
       },
+      { field: "roleName", headerName: "Role Name", flex: 0.7, minWidth: 150 },
       {
         field: "description",
         headerName: "Role Description",
-        flex: 3,
-        minWidth: 500,
+        flex: 1.5,
+        minWidth: 200,
       },
       {
         field: "roleAccess",
@@ -250,33 +183,147 @@ export default function RolesTable({
         filterable: false,
         disableColumnMenu: true,
         renderCell: (params) => {
-          // Robust comparison: stringify and trim to handle unexpected data types or spaces
-          const access = roleAccessList?.find(
-            (item) => String(item.accessFlag).trim() === String(params.row.roleAccess).trim()
+          const access = roleAccessList.find(
+            (item) => item.accessFlag === params.row.roleAccess,
           );
 
           return (
             <Tooltip title={access?.accessDescription || ""} placement="top">
-              {/* Span wrapper prevents MUI Ref errors when wrapping custom functional components in Tooltips */}
-              <span>
-                <CustomChip
-                  variant="outlined"
-                  size="sm"
-                  icon={<SecurityIcon sx={{ width: 15, height: 15 }} />}
-                  label={access?.accessName || params.row.roleAccess || "NA"}
-                />
-              </span>
+              <CustomChip
+                variant="outlined"
+                size="sm"
+                icon={<SecurityIcon sx={{ width: 15, height: 15 }} />}
+                label={access?.accessName || params.row.roleAccess || "NA"}
+              />
             </Tooltip>
           );
         },
       },
       {
+        field: "requestType",
+        headerName: "Request Type",
+        flex: 0.5,
+        minWidth: 150,
+        align: "center",
+        headerAlign: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => {
+          const val = params.value;
+          const color =
+            val === "CREATE"
+              ? "success"
+              : val === "DELETE"
+                ? "error"
+                : "warning";
+          const icon =
+            val === "CREATE" ? (
+              <AddBoxIcon />
+            ) : val === "DELETE" ? (
+              <AutoDeleteIcon />
+            ) : (
+              <EditDocumentIcon />
+            );
+          return (
+            <CustomChip
+              variant="outlined"
+              icon={icon}
+              label={
+                val === "CREATE"
+                  ? "Added"
+                  : val === "DELETE"
+                    ? "Deleted"
+                    : "Modified"
+              }
+              color={color}
+            />
+          );
+        },
+      },
+      {
+        field: "requestDate",
+        headerName: "Requested Date",
+        flex: 1,
+        minWidth: 200,
+        renderCell: (params) => (
+          <Typography
+            variant="body1"
+            component="span"
+            sx={{ fontSize: "0.9rem" }}
+          >
+            {timeStampFormatter(params.value)}
+          </Typography>
+        ),
+      },
+      {
+        field: "requestStatus",
+        headerName: "Status",
+        minWidth: 150,
+        flex: 0.6,
+        align: "center",
+        headerAlign: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => (
+          <Box
+            sx={{
+              color:
+                params.value === "REJECTED"
+                  ? "error.main"
+                  : params.value === "ACCEPTED"
+                    ? "success.dark"
+                    : params.value === "CANCELED"
+                      ? "info.dark"
+                      : "warning.main",
+            }}
+          >
+            <CustomChip
+              icon={
+                params.value === "ACCEPTED" ? (
+                  <CheckCircleIcon />
+                ) : params.value === "REJECTED" ? (
+                  <BlockFlippedIcon />
+                ) : params.value === "CANCELED" ? (
+                  <GppBadIcon />
+                ) : (
+                  <PendingActionsIcon />
+                )
+              }
+              variant="outlined"
+              label={toPascalKebabCase(params.value)}
+              sx={{
+                color:
+                  params.value === "REJECTED"
+                    ? "error.dark"
+                    : params.value === "ACCEPTED"
+                      ? "success.dark"
+                      : params.value === "CANCELLED"
+                        ? "primary.dark"
+                        : "warning.light",
+                "& .MuiChip-icon": {
+                  color:
+                    params.value === "REJECTED"
+                      ? "error.dark"
+                      : params.value === "ACCEPTED"
+                        ? "success.dark"
+                        : params.value === "CANCELLED"
+                          ? "primary.dark"
+                          : "warning.light",
+                },
+              }}
+            />
+          </Box>
+        ),
+      },
+      {
         field: "action",
         headerName: "Actions",
-        flex: 0.7,
-        minWidth: 150,
-        headerAlign: "center",
+        flex: 0.6,
+        minWidth: 120,
         align: "center",
+        headerAlign: "center",
         filterable: false,
         sortable: false,
         disableColumnMenu: true,
@@ -288,23 +335,22 @@ export default function RolesTable({
             alignItems="center"
             sx={{ height: "100%" }}
           >
-            <Tooltip title="View Permissions">
-              <IconButton
-                onClick={() => {
-                  onEditRow(params.row, false);
-                }}
-              >
-                <VisibilityIcon fontSize="inherit" />
-              </IconButton>
-            </Tooltip>
-
-            {screenActions.modify && (
-              <Tooltip title="Edit Role">
+            {permissions.view && (
+              <Tooltip title="View">
+                <IconButton onClick={() => handleViewClick(params.row)}>
+                  <VisibilityIcon />
+                </IconButton>
+              </Tooltip>
+            )}
+            {params.row.requestStatus === "PENDING" && permissions.cancel && (
+              <Tooltip title={"Cancel Request"}>
                 <IconButton
-                  color="primary"
-                  onClick={() => onEditRow(params.row, true)}
+                  onClick={() => {
+                    setConfirmDialog(true);
+                    setRequestId(params.row.requestId);
+                  }}
                 >
-                  <EditIcon fontSize="inherit" />
+                  <CancelIcon fontSize="inherit" />
                 </IconButton>
               </Tooltip>
             )}
@@ -312,36 +358,499 @@ export default function RolesTable({
         ),
       },
     ],
-    [onEditRow, roleAccessList, screenActions.modify],
+    [handleViewClick, permissions.cancel, permissions.view, roleAccessList], // Fix: Added roleAccessList to dependencies
   );
 
   const filteredColumns = useMemo(() => {
-    if (screenActions.modify) {
+    if (permissions.view || permissions.cancel) {
       return columns;
     }
     return columns.filter((column) => column.field !== "action");
-  }, [screenActions.modify, columns]); // Added columns to dependencies to prevent stale state
+  }, [columns, permissions]);
 
   return (
-    <DataGrid
-      rows={rows}
-      columns={filteredColumns}
-      disableRowSelectionOnClick
-      pageSizeOptions={[5, 10, 25, 50]}
-      getRowId={(row) => row.roleId}
-      loading={isLoading}
-      initialState={{
-        pagination: { paginationModel: { pageSize: 10, page: 0 } },
-        sorting: { sortModel: [{ field: "roleId", sort: "asc" }] },
-      }}
-      slots={{
-        noRowsOverlay: CustomNoRowsOverlay,
-      }}
-      slotProps={{
-        loadingOverlay: {
-          variant: "skeleton",
+    <>
+      <Box>
+        <DataGrid
+          rows={rows}
+          loading={isLoading}
+          columns={filteredColumns}
+          disableRowSelectionOnClick
+          pageSizeOptions={[5, 10, 25, 50]}
+          initialState={{
+            pagination: { paginationModel: { pageSize: 10, page: 0 } },
+            sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
+          }}
+          // Fix: Uses the gridRowId assigned during parsing
+          getRowId={(row) => row.gridRowId}
+          slots={{
+            noRowsOverlay: CustomNoRowsOverlay,
+          }}
+        />
+      </Box>
+
+      {/* View Request Dialog */}
+      <RoleRequestView
+        open={viewOpen}
+        handleClose={() => setViewOpen(false)}
+        data={viewData}
+      />
+
+      <Dialog
+        open={confirmDialog}
+        onClose={() => {
+          setConfirmDialog(false);
+        }}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 600 }}>
+          Cancel Request ID: {requestId}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ p: 1 }}>
+            Are you sure you want to cancel this request? Please confirm.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setConfirmDialog(false);
+            }}
+            variant="outlined"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleCancelRequest}
+            color="error"
+            variant="contained"
+          >
+            Confirm
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+}
+
+
+
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  Box,
+  Card,
+  Divider,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+  Typography,
+  Button,
+  Stack,
+  Tooltip,
+  IconButton,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import { Check, Clear, Visibility } from "@mui/icons-material";
+import AddBoxIcon from "@mui/icons-material/AddBox";
+import InfoIcon from "@mui/icons-material/Info";
+import AutoDeleteIcon from "@mui/icons-material/AutoDelete";
+import EditDocumentIcon from "@mui/icons-material/EditDocument";
+import AccountCircleIcon from "@mui/icons-material/AccountCircle";
+import { useSelector } from "react-redux";
+
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import RequestAnalytics from "../common/RequestAnalytics";
+import {
+  timeStampFormatter,
+  toPascalKebabCase,
+} from "../../utils/CommonUtilities";
+import CustomChip from "../../utils/CustomChip";
+import { styles } from "../common/CommonRequestScreenStyles";
+import LoadingOverlay from "../../utils/LoadingOverlay";
+import RoleRequestView from "./components/RoleRequestView";
+
+const REMARKS_REGEX = /^(?!.* {2})[a-zA-Z0-9\s/&(),.-]*$/;
+
+export default function RoleApprovals() {
+  const selectedMenuItem = useSelector((s) => s.menus.selectedMenuItem);
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+
+  const [rows, setRows] = useState([]);
+  const [remarks, setRemarks] = useState("");
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewData, setViewData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [dataGridLoading, setDataGridLoading] = useState(true);
+  const [confirmDialog, setConfirmDialog] = useState(false);
+  const [selectedType, setSelectedType] = useState(null);
+  const [selectedRequestId, setSelectedRequestId] = useState(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const response = await callApi(
+        "/UM/role/pending-role-requests",
+        {},
+        "GET",
+      );
+      const result = response?.result?.pendingRequests || [];
+      const processedResult = result.map((row) => {
+        const parsed = JSON.parse(row?.requestPayload || "") || {};
+        const status =
+          row.requestType === "CREATE"
+            ? "ADD"
+            : row.requestType === "MODIFY"
+              ? "UPDATE"
+              : row.requestType;
+        return {
+          ...row,
+          ...parsed,
+          changeType: status,
+          reqStatus: row.requestStatus,
+          reqDate: row.requestDate,
+        };
+      });
+      setRows(processedResult);
+    } catch (err) {
+      console.error(err);
+      showSnackBar(err.message || "Error fetching data", "error");
+    } finally {
+      setDataGridLoading(false);
+    }
+  }, [callApi, showSnackBar]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  const closeConfirmDialog = useCallback(() => {
+    setRemarks("");
+    setConfirmDialog(false);
+  }, []);
+
+  const handleConfirm = async () => {
+    if (selectedType === "reject" && remarks.trim().length < 5) {
+      showSnackBar(
+        "Please provide minimum 5 characters remarks before rejecting",
+        "warning",
+      );
+      return;
+    }
+    setLoading(true);
+
+    try {
+      const payload = {
+        requestId: selectedRequestId,
+        actionFlag: selectedType,
+        remarks: selectedType === "reject" ? remarks.trim() : "No Remarks",
+      };
+
+      const res = await callApi(
+        "/UM/role/role-request-action",
+        payload,
+        "POST",
+      );
+
+      if (res?.result?.status) {
+        showSnackBar(
+          `Request Id ${selectedRequestId} ${
+            selectedType === "reject" ? "Rejected" : "Approved"
+          } Successfully`,
+          "success",
+        );
+        fetchData();
+      } else {
+        showSnackBar("Failed to process request", "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showSnackBar("Error while processing request", "error");
+    } finally {
+      closeConfirmDialog();
+      setLoading(false);
+    }
+  };
+
+  const openConfirmDialog = useCallback((type, rowId) => {
+    setSelectedType(type);
+    setSelectedRequestId(rowId);
+    setConfirmDialog(true);
+  }, []);
+
+  const handleRemarksChange = useCallback(
+    (e) => {
+      const value = e.target.value;
+
+      if (value && !/^[A-Za-z0-9]$/.test(value[0])) {
+        showSnackBar("Should not start with a special character", "error");
+        return;
+      }
+
+      const error = REMARKS_REGEX.test(value)
+        ? ""
+        : "Only alphabets, spaces (single spaces only between words) and ,()&,/-. are allowed!";
+
+      if (error) {
+        showSnackBar(error, "error");
+        return;
+      }
+
+      setRemarks(value);
+    },
+    [showSnackBar],
+  );
+
+  // Memoized columns with minWidths added for mobile responsiveness
+  const columns = useMemo(
+    () => [
+      {
+        field: "requestId",
+        headerName: "Request Id",
+        flex: 0.5,
+        minWidth: 130,
+      },
+      { field: "roleName", headerName: "Role Name", flex: 0.5, minWidth: 150 },
+      {
+        field: "description",
+        headerName: "Role Description",
+        flex: 1.2,
+        minWidth: 220,
+      },
+      {
+        field: "requestType",
+        headerName: "Type",
+        flex: 0.6,
+        minWidth: 120,
+        headerAlign: "center",
+        align: "center",
+        renderCell: (params) => {
+          const val = params.value;
+          return (
+            <CustomChip
+              icon={
+                val === "CREATE" ? (
+                  <AddBoxIcon />
+                ) : val === "DELETE" ? (
+                  <AutoDeleteIcon />
+                ) : (
+                  <EditDocumentIcon />
+                )
+              }
+              label={toPascalKebabCase(val)}
+              color={
+                val === "CREATE"
+                  ? "success"
+                  : val === "DELETE"
+                    ? "error"
+                    : "warning"
+              }
+              size="small"
+              variant="outlined"
+            />
+          );
         },
-      }}
-    />
+      },
+      {
+        field: "requestorUserId",
+        headerName: "Creator",
+        flex: 0.8,
+        minWidth: 150,
+        headerAlign: "center",
+        align: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => (
+          <CustomChip
+            icon={<AccountCircleIcon />}
+            size="small"
+            color="info"
+            label={params.value}
+            variant="outlined"
+          />
+        ),
+      },
+      {
+        field: "requestDate",
+        headerName: "Requested Date",
+        flex: 1,
+        minWidth: 210,
+        disableColumnMenu: true,
+        renderCell: (p) => (
+          <Typography variant="body1" component="span" sx={styles.requestDate}>
+            {timeStampFormatter(p.value)}
+          </Typography>
+        ),
+      },
+      {
+        field: "actions",
+        headerName: "Actions",
+        flex: 0.7,
+        minWidth: 160,
+        headerAlign: "center",
+        align: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (p) => (
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            justifyContent="center"
+            sx={{ height: "100%" }}
+          >
+            <Tooltip title="View">
+              <IconButton
+                onClick={() => {
+                  setViewData(p.row);
+                  setViewOpen(true);
+                }}
+              >
+                <Visibility />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title="Approve">
+              <IconButton
+                color="success"
+                onClick={() => openConfirmDialog("accept", p.row.requestId)}
+              >
+                <Check />
+              </IconButton>
+            </Tooltip>
+
+            <Tooltip title="Reject">
+              <IconButton
+                color="error"
+                onClick={() => openConfirmDialog("reject", p.row.requestId)}
+              >
+                <Clear />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+        ),
+      },
+    ],
+    [openConfirmDialog],
+  );
+
+  return (
+    <Box sx={styles.container}>
+      {/* Unified Card Container */}
+      <Card
+        sx={{
+          width: "100%",
+          boxShadow: 3,
+          borderRadius: 2,
+          bgcolor: "background.paper",
+          overflow: "hidden", // Prevents DataGrid from spilling over rounded corners
+        }}
+      >
+        <RequestAnalytics data={rows} />
+
+        {/* Divider clearly separates the charts from the grid */}
+        <Divider />
+
+        <DataGrid
+          rows={rows}
+          columns={columns}
+          loading={dataGridLoading}
+          disableRowSelectionOnClick
+          pageSizeOptions={[5, 10, 25, 50]}
+          initialState={{
+            pagination: { paginationModel: { pageSize: 5, page: 0 } },
+            sorting: { sortModel: [{ field: "reqDate", sort: "desc" }] },
+          }}
+          getRowId={(row) => row.requestId}
+          sx={{
+            ...styles.dataGrid,
+            border: "none", // Removes outline to blend into card
+            "& .MuiDataGrid-columnHeaders": {
+              borderTop: "none",
+            },
+          }}
+          slots={{
+            noRowsOverlay: () => (
+              <Stack height="100%" alignItems="center" justifyContent="center">
+                <InfoIcon
+                  sx={{ fontSize: 48, color: "text.secondary", mb: 2 }}
+                />
+                <Typography variant="h6">No Pending Requests Found</Typography>
+                <Typography>
+                  All {selectedMenuItem?.title} have been processed.
+                </Typography>
+              </Stack>
+            ),
+          }}
+        />
+      </Card>
+
+      {/* Role Request View Modal */}
+      <RoleRequestView
+        open={viewOpen}
+        handleClose={() => setViewOpen(false)}
+        data={viewData}
+      />
+
+      {/* Confirmation Dialog */}
+      <Dialog
+        open={confirmDialog}
+        onClose={closeConfirmDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 600 }}>
+          {selectedType === "accept" ? "Confirm Approval" : "Confirm Rejection"}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ p: 1 }}>
+            {selectedType === "accept"
+              ? "Are you sure you want to approve this request?"
+              : "Are you sure you want to reject this request? Please enter remarks."}
+          </Typography>
+          {selectedType === "reject" && (
+            <TextField
+              fullWidth
+              label="Rejection Remarks *"
+              value={remarks}
+              onChange={handleRemarksChange}
+              multiline
+              rows={2}
+              margin="dense"
+              slotProps={{
+                htmlInput: {
+                  maxLength: 100,
+                },
+              }}
+              helperText={
+                remarks?.length > 0 && remarks?.length < 5
+                  ? "Enter at least 5 characters"
+                  : "Allowed 5-100 characters (alphabets, numbers, spaces,()&,/-.)"
+              }
+              error={remarks?.length > 0 && remarks?.length < 5}
+            />
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeConfirmDialog} variant="outlined">
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirm}
+            color={selectedType === "accept" ? "success" : "error"}
+            variant="contained"
+          >
+            {selectedType === "accept" ? "Approve" : "Reject"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <LoadingOverlay loading={loading} />
+    </Box>
   );
 }
