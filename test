@@ -1,484 +1,351 @@
-import {
-  Button,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  Stack,
-  TextField,
-  Grid,
-  Typography,
-  Checkbox,
-  Autocomplete,
-  Divider,
-  List,
-  ListItemIcon,
-  Tooltip,
-  Box,
-} from "@mui/material";
-import { useEffect, useState, useCallback } from "react";
-import * as MuiIcons from "@mui/icons-material";
-import LockOpenIcon from "@mui/icons-material/LockOpen";
-import RestoreIcon from "@mui/icons-material/Restore";
-import { validations } from "../../../utils/Validations";
-import { DndProvider } from "react-dnd";
-import { HTML5Backend } from "react-dnd-html5-backend";
-import useApi from "../../../hooks/useApi";
-import useCustomSnackbar from "../../../utils/useCustomSnackbar";
-import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
-import DraggablePermissionItem from "./DraggablePermissionItem";
+import { useCallback, useEffect, useState } from "react";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { Box, Fab, Paper, Typography, styled } from "@mui/material";
 import _ from "lodash";
+import PermissionsDialog from "./components/PermissionsDialog";
+import RolesTable from "./components/RolesTable";
+import RolesDialog from "./components/RolesDialog";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import { RollTab1Addicon } from "./roleManagementStyles";
 
-// The list of IDs you want to exclude
-const MENUS_TO_REMOVE = [46, 47];
-const DESCRIPTION_REGEX = /^[a-zA-Z0-9\s/&().,-]*$/;
+const OverlayBox = styled(Box)(() => ({
+  display: "flex",
+  flexDirection: "column",
+  height: "100%",
+  justifyContent: "center",
+  alignItems: "center",
+}));
 
-export default function RolesDialog({
-  open,
-  form,
-  setForm,
-  fetchRoles,
-  initialForm = {},
-  screenActions = {},
-  onClose,
-  roles = {},
-  roleAccessList = [], 
-}) {
+const CustomNoRowsOverlay = () => {
+  return (
+    <OverlayBox>
+      <ErrorOutlineIcon fontSize="large" />
+      <Typography variant="h5" fontSize="1.2rem">
+        Data is not available
+      </Typography>
+    </OverlayBox>
+  );
+};
+
+export default function RoleManagementTab1(props) {
+  const screenActions = props?.permissions || {};
   const { callApi } = useApi();
   const snackbar = useCustomSnackbar();
-  const [selectedPermissions, setSelectedPermissions] = useState([]);
-  const [originalOrder, setOriginalOrder] = useState([]);
-  const [isBlocked, setIsBlocked] = useState(form?.roleStatus === "BLOCKED");
-  const [permissionSearch, setPermissionSearch] = useState("");
-  const [allPermissions, setAllPermissions] = useState([]);
-
-  const handleStatusToggle = async () => {
-    const newStatus = form.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE";
-    setIsBlocked(!isBlocked);
-    form.roleStatus = newStatus;
+  const emptyForm = {
+    roleId: "",
+    roleName: "",
+    description: "",
+    roleAccess: null, // Initialized roleAccess
+    roleStatus: "ACTIVE",
+    permissions: [],
   };
+  const [rows, setRows] = useState([]);
+  const [form, setForm] = useState(emptyForm);
+  const [initialForm, setInitialForm] = useState(emptyForm);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [permDialogOpen, setPermDialogOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [roleAccessList, setRoleAccessList] = useState([]); // New State
 
-  const canSave =
-    (form.roleName || "").length > 2 &&
-    (form.description || "").length > 4 &&
-    Boolean(form.roleAccess) && 
-    selectedPermissions.length > 0;
-
-  // Modifed to only take roleId instead of the whole form object
-  const fetchAllPermissions = useCallback(
-    async (roleId) => {
-      try {
-        const response = await callApi(
-          `/UM/role/get-all-permissions?roleId=${roleId || ""}`,
-          {},
-          "GET",
-        );
-        const permits = response?.result ?? [];
-        const filteredPermissions = permits.filter(
-          (item) => !MENUS_TO_REMOVE.includes(item.id),
-        );
-        setAllPermissions(filteredPermissions);
-      } catch (error) {
-        console.error(error);
-        setAllPermissions([]);
-      }
-    },
-    [callApi],
-  );
-
-  /** Initialize permission order + icons */
-  useEffect(() => {
-    // Only run this logic when the dialog opens
-    if (open) {
-      fetchAllPermissions(form?.roleId);
-      setIsBlocked(form?.roleStatus === "BLOCKED"); // Ensure block status resets correctly on new open
-      
-      if (form?.permissions?.length) {
-        const withOrder = form.permissions.map((p, i) => ({
-          ...p,
-          order: p.order ?? i + 1,
-        }));
-        setSelectedPermissions(withOrder);
-        setOriginalOrder(withOrder);
-      } else {
-        setSelectedPermissions([]);
-        setOriginalOrder([]);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, fetchAllPermissions]); // Removed 'form' from dependencies to prevent re-renders on typing or saving
-
-  /** Validation handler */
-  const handleChange = (data, key, e, type) => {
-    let value = e.target.value;
-    if (value && !/^[A-Za-z0-9]$/.test(value[0])) {
-      snackbar("Should not start with special character", "error");
-      return;
-    }
-    const result = validations(type, e.target.value);
-    if (result === "") {
-      setForm({ ...data, [key]: e.target.value });
-    } else {
-      snackbar(result, "warning");
-    }
-  };
-
-  /** Move item via DND */
-  const moveItem = useCallback(
-    (from, to) => {
-      const updated = [...selectedPermissions];
-      const [moved] = updated.splice(from, 1);
-      updated.splice(to, 0, moved);
-      const reOrdered = updated.map((item, idx) => ({
-        ...item,
-        order: idx + 1,
-      }));
-      setSelectedPermissions(reOrdered);
-    },
-    [selectedPermissions],
-  );
-
-  /** Reset to original order */
-  const handleReset = () => setSelectedPermissions(originalOrder);
-
-  /** Handle Autocomplete selection change */
-  const handlePermissionsSelect = (e, newValue) => {
-    const withOrder = newValue.map((p, idx) => ({
-      ...p,
-      order: idx + 1,
-    }));
-    setSelectedPermissions(withOrder);
-  };
-
-  const hasDuplicateRoleData = () => {
-    const name = form.roleName?.trim().toLowerCase();
-    const desc = form.description?.trim().toLowerCase();
-
-    return roles.length > 0 && roles.some((r) => {
-      if (form.roleId && r.roleId === form.roleId) return false;
-      const roleNameMatch = r.roleName?.trim().toLowerCase() === name;
-      const roleDescMatch = r.description?.trim().toLowerCase() === desc;
-      return roleNameMatch || roleDescMatch;
-    });
-  };
-
-  /** Save with permissions & order */
-  const handleSave = async () => {
-    if (!form.roleName || !form.description) {
-      snackbar("Kindly fill all the required fields.", "warning");
-      return;
-    }
-
-    if (form.roleName.trim().length < 3) {
-      snackbar("Kindly provide valid role name.", "warning");
-      return;
-    }
-
-    if (!form.roleAccess) {
-      snackbar("Kindly select Role Access.", "warning");
-      return;
-    }
-
-    if (form.description.trim().length < 5) {
-      snackbar("Kindly provide valid role description.", "warning");
-      return;
-    }
-
-    if (selectedPermissions.length < 1) {
-      snackbar(
-        "Please select at least one permission for this role before saving",
-        "warning",
+  // Fetch Roles Table Data
+  const fetchRoles = useCallback(async () => {
+    setIsLoading(true);
+    setPermDialogOpen(false);
+    setDialogOpen(false);
+    try {
+      const data = await callApi(
+        "/UM/role/get-roles",
+        { permissions: true },
+        "GET",
       );
-      return;
+
+      const roles = data?.result?.roles ?? [];
+      setRows(roles);
+    } catch (e) {
+      console.error(e);
+      setRows([]);
+      snackbar("Failed to fetch roles. Check API or network.", "error");
+    } finally {
+      setIsLoading(false);
     }
+  }, [callApi, snackbar]);
 
-    if (hasDuplicateRoleData()) {
-      snackbar(
-        "Role name or description already exists. Please use unique values.",
-        "warning",
-      );
-      return;
-    }
-
-    const updatedForm = {
-      ...form,
-      permissions: selectedPermissions.map((p) => ({
-        id: p.id,
-        title: p.title,
-        order: p.order,
-        icon: p.icon,
-        description: p.description,
-        menuSubmenu: p.menuSubmenu,
-      })),
-    };
-
-    if (_.isEqual(initialForm, updatedForm)) {
-      snackbar("Kindly modify the data before saving", "warning");
-      return;
-    }
-
-    setForm(updatedForm);
-
-    const payload = {
-      requestType: form.roleId ? "MODIFY" : "CREATE",
-      targetRoleId: form.roleId || "",
-      requestPayload: updatedForm,
-    };
-
+  // Fetch Role Access Dropdown Data
+  const fetchRoleAccessList = useCallback(async () => {
     try {
       const response = await callApi(
-        "/UM/role/create-role-request",
-        payload,
-        "POST",
+        "/UM/role/get-role-access-list",
+        {},
+        "GET",
       );
-
-      if (response?.statusCode === 201 || response?.message) {
-        snackbar(
-          form.roleId
-            ? "Role update request submitted successfully with request id " +
-                response?.result?.requestId
-            : "Role creation request submitted successfully with request id " +
-                response?.result?.requestId,
-          "success",
-        );
-        onClose();
-        fetchRoles();
-      }
+      const list = response?.result?.roleAccessList ?? [];
+      setRoleAccessList(list);
     } catch (error) {
-      snackbar(error?.message || "Request failed", "error");
+      console.error("Failed to fetch role access list:", error);
+      setRoleAccessList([]);
     }
+  }, [callApi]);
+
+  useEffect(() => {
+    fetchRoles();
+    fetchRoleAccessList(); // Trigger access list fetch on mount
+  }, [fetchRoles, fetchRoleAccessList]);
+
+  const handleEditRow = (row, isEdit) => {
+    setForm({ ...row });
+    setInitialForm({ ...row });
+    isEdit ? setDialogOpen(true) : setPermDialogOpen(true);
   };
 
-  /** Render dynamic MUI icon from string name */
-  const renderIcon = (iconName) => {
-    const IconComp = MuiIcons[iconName];
-    return IconComp ? (
-      <IconComp fontSize="small" sx={{ mr: 1 }} />
-    ) : (
-      <MuiIcons.HelpOutline fontSize="small" sx={{ mr: 1 }} />
-    );
+  const handleSavePermissionOrder = async (ordered, original) => {
+    const isSameOrder = _.isEqual(original, ordered);
+
+    if (isSameOrder) {
+      snackbar("Kindly Change the order before saving it", "warning");
+      return;
+    }
+
+    try {
+      const payload = {
+        selectedRole: form?.roleId,
+        permissions: ordered,
+      };
+      console.log(payload);
+      const response = await callApi(
+        "/UM/role/save-permission-order",
+        payload,
+        "PATCH",
+      );
+      snackbar(response?.message, "success");
+    } catch (err) {
+      console.error(err);
+      snackbar("Error while processing request", "error");
+    }
+    fetchRoles();
   };
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle>
-        <Box
+    <Box>
+      <RolesTable
+        rows={rows}
+        isLoading={isLoading}
+        onEditRow={(row, isEdit) => handleEditRow(row, isEdit)}
+        screenActions={screenActions}
+        roleAccessList={roleAccessList}
+      />
+
+      <RolesDialog
+        open={dialogOpen}
+        form={form}
+        setForm={setForm}
+        fetchRoles={fetchRoles}
+        initialForm={initialForm}
+        screenActions={screenActions}
+        onClose={() => setDialogOpen(false)}
+        roles={rows}
+        roleAccessList={roleAccessList} // Pass to dialog component
+      />
+
+      <PermissionsDialog
+        open={permDialogOpen}
+        handleSavePermissionOrder={(ordered, original) =>
+          handleSavePermissionOrder(ordered, original)
+        }
+        onClose={() => {
+          setPermDialogOpen(false);
+        }}
+        permissions={form?.permissions || []}
+        roleName={form?.roleName || ""}
+      />
+
+      {screenActions.create && (
+        <Fab
+          color="primary"
+          variant="extended"
+          onClick={() => {
+            setForm(emptyForm);
+            setDialogOpen(true);
+          }}
           sx={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
+            position: "fixed",
+            bottom: 15,
+            right: 30,
+            borderRadius: 1,
           }}
         >
-          <Typography variant="h6" color="primary">
-            {form.roleId ? "Edit " : "Create New "} <b>{form.roleName}</b> Role
-          </Typography>
-          {screenActions.block && form.roleId && (
-            <Tooltip
-              title={
-                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
-              }
-            >
-              <Button
-                size="small"
-                color="secondary"
-                onClick={handleStatusToggle}
+          <RollTab1Addicon />
+          Create Role
+        </Fab>
+      )}
+    </Box>
+  );
+}
+
+
+
+import {
+  Box,
+  Chip,
+  IconButton,
+  Stack,
+  Tooltip,
+  Typography,
+  styled,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import EditIcon from "@mui/icons-material/Edit";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import SecurityIcon from "@mui/icons-material/Security";
+import CustomChip from "../../../utils/CustomChip";
+import { useMemo } from "react";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+
+const OverlayBox = styled(Box)(() => ({
+  display: "flex",
+  flexDirection: "column",
+  height: "100%",
+  justifyContent: "center",
+  alignItems: "center",
+}));
+
+const CustomNoRowsOverlay = () => {
+  return (
+    <OverlayBox>
+      <ErrorOutlineIcon fontSize="large" />
+      <Typography variant="h5" fontSize="1.2rem">
+        Data is not available
+      </Typography>
+    </OverlayBox>
+  );
+};
+
+export default function RolesTable({
+  rows,
+  isLoading,
+  onEditRow,
+  screenActions,
+  roleAccessList = [],
+}) {
+  const columns = useMemo(
+    () => [
+      {
+        field: "roleName",
+        headerName: "Role",
+        flex: 0.8,
+        minWidth: 150,
+        align: "left",
+        headerAlign: "left",
+      },
+      {
+        field: "description",
+        headerName: "Role Description",
+        flex: 3,
+        minWidth: 500,
+      },
+
+      {
+        field: "roleAccess",
+        headerName: "Access Level",
+        flex: 0.7,
+        headerAlign: "center",
+        align: "center",
+        sortable: true,
+        filterable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => {
+          const access = roleAccessList.find(
+            (item) => item.accessFlag === params.row.roleAccess,
+          );
+
+          return (
+            <Tooltip title={access?.accessDescription || ""} placement="top">
+              <CustomChip
                 variant="outlined"
-                startIcon={
-                  !isBlocked ? (
-                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
-                  ) : (
-                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
-                  )
-                }
-                sx={{ align: "center", height: "100%" }}
-              >
-                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
-              </Button>
+                size="sm"
+                icon={<SecurityIcon sx={{ width: 15, height: 15 }} />}
+                label={access?.accessName || params.row.roleAccess || "NA"}
+              />
             </Tooltip>
-          )}
-        </Box>
-      </DialogTitle>
-
-      <Divider />
-
-      <DialogContent>
-        <Stack spacing={2}>
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 12, md: 6 }}>
-              <TextField
-                label="Role Name *"
-                value={form.roleName || ""}
-                onChange={(e) =>
-                  handleChange(form, "roleName", e, "inputValue2")
-                }
-                helperText="Allowed 3-20 characters (A-Z, 0-9, spaces, ,()&/-)"
-                error={
-                  form.roleName?.length > 0 &&
-                  (form.roleName.length < 3 ||
-                    !/[A-Za-z0-9]/.test(form.roleName))
-                }
-                fullWidth
-                slotProps={{ htmlInput: { maxLength: 20 } }}
-              />
-            </Grid>
-
-            <Grid size={{ xs: 12, md: 6 }}>
-              <Autocomplete
-                options={roleAccessList}
-                getOptionLabel={(option) =>
-                  typeof option === "string" ? option : option.accessName || ""
-                }
-                value={
-                  roleAccessList.find(
-                    (item) =>
-                      item.accessFlag === form.roleAccess ||
-                      item.accessName === form.roleAccess,
-                  ) || null
-                }
-                onChange={(event, newValue) => {
-                  setForm({
-                    ...form,
-                    roleAccess: newValue ? newValue.accessFlag : "",
-                  });
+          );
+        },
+      },
+      {
+        field: "action",
+        headerName: "Actions",
+        flex: 0.7,
+        minWidth: 150,
+        headerAlign: "center",
+        align: "center",
+        filterable: false,
+        sortable: false,
+        disableColumnMenu: true,
+        renderCell: (params) => (
+          <Stack
+            direction="row"
+            spacing={1}
+            justifyContent="center"
+            alignItems="center"
+            sx={{ height: "100%" }}
+          >
+            <Tooltip title="View Permissions">
+              <IconButton
+                onClick={() => {
+                  onEditRow(params.row, false);
                 }}
-                isOptionEqualToValue={(option, val) =>
-                  option.accessFlag === (val.accessFlag || val)
-                }
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    label="Role Access *"
-                    placeholder="Select Role Access"
-                    helperText="Choose the access scope for this role"
-                    fullWidth
-                  />
-                )}
-                renderOption={(props, option) => (
-                  <li {...props} key={option.accessFlag}>
-                    <Box>
-                      <Typography variant="body2" fontWeight={600}>
-                        {option.accessName}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {option.accessDescription}
-                      </Typography>
-                    </Box>
-                  </li>
-                )}
-              />
-            </Grid>
+              >
+                <VisibilityIcon fontSize="inherit" />
+              </IconButton>
+            </Tooltip>
 
-            <Grid size={{ xs: 12 }}>
-              <TextField
-                label="Description *"
-                value={form.description || ""}
-                onChange={(e) =>
-                  handleChange(form, "description", e, "inputValue2")
-                }
-                helperText="Allowed 5-200 characters (A-Z, 0-9, spaces, ,()&/-)"
-                error={
-                  form.description?.length > 0 &&
-                  (form.description.length < 5 ||
-                    !DESCRIPTION_REGEX.test(form.description))
-                }
-                fullWidth
-                multiline
-                rows={3}
-                slotProps={{ htmlInput: { maxLength: 200 } }}
-              />
-            </Grid>
-          </Grid>
-
-          <Divider sx={{ my: 1 }} />
-
-          <Autocomplete
-            multiple
-            options={allPermissions}
-            value={selectedPermissions}
-            inputValue={permissionSearch}
-            clearOnBlur={false}
-            disableClearable
-            filterSelectedOptions={false}
-            disableCloseOnSelect
-            onInputChange={(event, newInputValue, reason) => {
-              if (reason === "input") {
-                setPermissionSearch(newInputValue);
-              }
-            }}
-            onChange={handlePermissionsSelect}
-            isOptionEqualToValue={(opt, val) => opt.id === val.id}
-            getOptionLabel={(option) => option.title}
-            renderOption={(props, option, { selected }) => (
-              <li {...props} key={option.id}>
-                <Checkbox checked={selected} sx={{ mr: 1 }} />
-                <ListItemIcon sx={{ minWidth: 32 }}>
-                  {renderIcon(option.icon)}
-                </ListItemIcon>
-                {`${option.title}${
-                  option.menuSubmenu ? " (" + option.menuSubmenu + ")" : ""
-                }`}
-              </li>
-            )}
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                label="Role Permissions *"
-                helperText="A role must include one or more permissions"
-                fullWidth
-              />
-            )}
-            renderTags={() => null}
-          />
-
-          <Stack spacing={1}>
-            <Stack
-              direction="row"
-              justifyContent="space-between"
-              alignItems="center"
-            >
-              <Typography variant="subtitle2">
-                Allowed Permissions: {selectedPermissions.length}
-              </Typography>
-              <Tooltip title="Reset Permissions">
-                <Button
-                  size="small"
+            {screenActions.modify && (
+              <Tooltip title="Edit Role">
+                <IconButton
                   color="primary"
-                  onClick={handleReset}
-                  variant="outlined"
-                  startIcon={<RestoreIcon />}
-                  sx={{ align: "center", height: "100%" }}
+                  onClick={() => onEditRow(params.row, true)}
                 >
-                  Reset
-                </Button>
+                  <EditIcon fontSize="inherit" />
+                </IconButton>
               </Tooltip>
-            </Stack>
-            <DndProvider backend={HTML5Backend}>
-              <List sx={{ minHeight: 400, overflowY: "auto" }}>
-                {selectedPermissions.map((perm, index) => (
-                  <DraggablePermissionItem
-                    key={perm.id}
-                    id={perm.id}
-                    index={index}
-                    title={`${perm.order}. ${perm.title}${
-                      perm.menuSubmenu ? " (" + perm.menuSubmenu + ")" : ""
-                    }`}
-                    icon={renderIcon(perm.icon)}
-                    moveItem={moveItem}
-                  />
-                ))}
-              </List>
-            </DndProvider>
+            )}
           </Stack>
-        </Stack>
-      </DialogContent>
+        ),
+      },
+    ],
+    [onEditRow, roleAccessList, screenActions.modify],
+  );
 
-      <Divider />
-      <DialogActions sx={{ p: 2 }}>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={!canSave} onClick={handleSave}>
-          {form.roleId ? "Save Changes" : "Create Role"}
-        </Button>
-      </DialogActions>
-    </Dialog>
+  const filteredColumns = useMemo(() => {
+    if (screenActions.modify) {
+      return columns;
+    }
+    // Otherwise, filter out the column where field name is 'action'.
+    else {
+      return columns.filter((column) => column.field !== "action");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screenActions.modify]);
+
+  return (
+    <DataGrid
+      rows={rows}
+      columns={filteredColumns}
+      disableRowSelectionOnClick
+      pageSizeOptions={[5, 10, 25, 50]}
+      getRowId={(row) => row.roleId}
+      loading={isLoading}
+      initialState={{
+        pagination: { paginationModel: { pageSize: 10, page: 0 } },
+        sorting: { sortModel: [{ field: "roleId", sort: "asc" }] },
+      }}
+      slots={{
+        noRowsOverlay: CustomNoRowsOverlay,
+      }}
+      slotProps={{
+        loadingOverlay: {
+          variant: "skeleton",
+        },
+      }}
+    />
   );
 }
