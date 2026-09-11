@@ -1,6 +1,394 @@
-<Autocomplete
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  TextField,
+  Grid,
+  Typography,
+  Checkbox,
+  Autocomplete,
+  Divider,
+  List,
+  ListItemIcon,
+  Tooltip,
+  Box,
+  Chip,
+} from "@mui/material";
+import { useEffect, useState, useCallback } from "react";
+import * as MuiIcons from "@mui/icons-material";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
+import RestoreIcon from "@mui/icons-material/Restore";
+import { validations } from "../../../utils/Validations";
+import { DndProvider } from "react-dnd";
+import { HTML5Backend } from "react-dnd-html5-backend";
+import useApi from "../../../hooks/useApi";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import DraggablePermissionItem from "./DraggablePermissionItem";
+import _ from "lodash";
+
+// The list of IDs you want to exclude
+const MENUS_TO_REMOVE = [46, 47];
+const DESCRIPTION_REGEX = /^[a-zA-Z0-9\s/&().,-]*$/;
+
+export default function RolesDialog({
+  open,
+  form,
+  setForm,
+  fetchRoles,
+  initialForm = {},
+  screenActions = {},
+  onClose,
+  roles = {},
+  roleAccessList = [],
+}) {
+  const { callApi } = useApi();
+  const snackbar = useCustomSnackbar();
+  const [selectedPermissions, setSelectedPermissions] = useState([]);
+  const [originalOrder, setOriginalOrder] = useState([]);
+  const [isBlocked, setIsBlocked] = useState(form?.roleStatus === "BLOCKED");
+  const [permissionSearch, setPermissionSearch] = useState("");
+  const [allPermissions, setAllPermissions] = useState([]);
+
+  const handleStatusToggle = async () => {
+    const newStatus = form.roleStatus === "ACTIVE" ? "BLOCKED" : "ACTIVE";
+    setIsBlocked(!isBlocked);
+    form.roleStatus = newStatus;
+  };
+
+  const canSave =
+    (form.roleName || "").length > 2 &&
+    (form.description || "").length > 4 &&
+    Boolean(form.roleAccess) &&
+    selectedPermissions.length > 0;
+
+  const fetchAllPermissions = useCallback(
+    async (roleId) => {
+      try {
+        const response = await callApi(
+          `/UM/role/get-all-permissions?roleId=${roleId || ""}`,
+          {},
+          "GET",
+        );
+        const permits = response?.result ?? [];
+        const filteredPermissions = permits.filter(
+          (item) => !MENUS_TO_REMOVE.includes(item.id),
+        );
+        setAllPermissions(filteredPermissions);
+      } catch (error) {
+        console.error(error);
+        setAllPermissions([]);
+      }
+    },
+    [callApi],
+  );
+
+  useEffect(() => {
+    if (open) {
+      fetchAllPermissions(form?.roleId);
+      setIsBlocked(form?.roleStatus === "BLOCKED");
+
+      if (form?.permissions?.length) {
+        const withOrder = form.permissions.map((p, i) => ({
+          ...p,
+          order: p.order ?? i + 1,
+        }));
+        setSelectedPermissions(withOrder);
+        setOriginalOrder(withOrder);
+      } else {
+        setSelectedPermissions([]);
+        setOriginalOrder([]);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, fetchAllPermissions]);
+
+  const handleChange = (data, key, e, type) => {
+    let value = e.target.value;
+    if (value && !/^[A-Za-z0-9]$/.test(value[0])) {
+      snackbar("Should not start with special character", "error");
+      return;
+    }
+    const result = validations(type, e.target.value);
+    if (result === "") {
+      setForm({ ...data, [key]: e.target.value });
+    } else {
+      snackbar(result, "warning");
+    }
+  };
+
+  const moveItem = useCallback(
+    (from, to) => {
+      const updated = [...selectedPermissions];
+      const [moved] = updated.splice(from, 1);
+      updated.splice(to, 0, moved);
+      const reOrdered = updated.map((item, idx) => ({
+        ...item,
+        order: idx + 1,
+      }));
+      setSelectedPermissions(reOrdered);
+    },
+    [selectedPermissions],
+  );
+
+  const handleReset = () => setSelectedPermissions(originalOrder);
+
+  const handlePermissionsSelect = (e, newValue) => {
+    const withOrder = newValue.map((p, idx) => ({
+      ...p,
+      order: idx + 1,
+    }));
+    setSelectedPermissions(withOrder);
+  };
+
+  const hasDuplicateRoleData = () => {
+    const name = form.roleName?.trim().toLowerCase();
+    const desc = form.description?.trim().toLowerCase();
+
+    return (
+      roles.length > 0 &&
+      roles.some((r) => {
+        if (form.roleId && r.roleId === form.roleId) return false;
+        const roleNameMatch = r.roleName?.trim().toLowerCase() === name;
+        const roleDescMatch = r.description?.trim().toLowerCase() === desc;
+        return roleNameMatch || roleDescMatch;
+      })
+    );
+  };
+
+  const handleSave = async () => {
+    if (!form.roleName || !form.description) {
+      snackbar("Kindly fill all the required fields.", "warning");
+      return;
+    }
+
+    if (form.roleName.trim().length < 3) {
+      snackbar("Kindly provide valid role name.", "warning");
+      return;
+    }
+
+    if (!form.roleAccess) {
+      snackbar("Kindly select Role Access.", "warning");
+      return;
+    }
+
+    if (form.description.trim().length < 5) {
+      snackbar("Kindly provide valid role description.", "warning");
+      return;
+    }
+
+    if (selectedPermissions.length < 1) {
+      snackbar(
+        "Please select at least one permission for this role before saving",
+        "warning",
+      );
+      return;
+    }
+
+    if (hasDuplicateRoleData()) {
+      snackbar(
+        "Role name or description already exists. Please use unique values.",
+        "warning",
+      );
+      return;
+    }
+
+    const updatedForm = {
+      ...form,
+      permissions: selectedPermissions.map((p) => ({
+        id: p.id,
+        title: p.title,
+        order: p.order,
+        icon: p.icon,
+        description: p.description,
+        menuSubmenu: p.menuSubmenu,
+      })),
+    };
+
+    if (_.isEqual(initialForm, updatedForm)) {
+      snackbar("Kindly modify the data before saving", "warning");
+      return;
+    }
+
+    setForm(updatedForm);
+
+    const payload = {
+      requestType: form.roleId ? "MODIFY" : "CREATE",
+      targetRoleId: form.roleId || "",
+      requestPayload: updatedForm,
+    };
+
+    try {
+      const response = await callApi(
+        "/UM/role/create-role-request",
+        payload,
+        "POST",
+      );
+
+      if (response?.statusCode === 201 || response?.message) {
+        snackbar(
+          form.roleId
+            ? "Role update request submitted successfully with request id " +
+                response?.result?.requestId
+            : "Role creation request submitted successfully with request id " +
+                response?.result?.requestId,
+          "success",
+        );
+        onClose();
+        fetchRoles();
+      }
+    } catch (error) {
+      snackbar(error?.message || "Request failed", "error");
+    }
+  };
+
+  const renderIcon = (iconName) => {
+    const IconComp = MuiIcons[iconName];
+    return IconComp ? (
+      <IconComp fontSize="small" />
+    ) : (
+      <MuiIcons.HelpOutline fontSize="small" />
+    );
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle>
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <Typography variant="h6" color="primary">
+            {form.roleId ? "Edit " : "Create New "} <b>{form.roleName}</b> Role
+          </Typography>
+          {screenActions.block && form.roleId && (
+            <Tooltip
+              title={
+                (!isBlocked ? "Block " : "Un-Block ") + form.roleName + " Role"
+              }
+            >
+              <Button
+                size="small"
+                color="secondary"
+                onClick={handleStatusToggle}
+                variant="outlined"
+                startIcon={
+                  !isBlocked ? (
+                    <LockOutlinedIcon color="error" sx={{ mr: 0.5 }} />
+                  ) : (
+                    <LockOpenIcon color="success" sx={{ mr: 0.5 }} />
+                  )
+                }
+                sx={{ align: "center", height: "100%" }}
+              >
+                {!isBlocked ? "BLOCK" : "UN-BLOCK"}
+              </Button>
+            </Tooltip>
+          )}
+        </Box>
+      </DialogTitle>
+
+      <Divider />
+
+      <DialogContent>
+        <Stack spacing={2}>
+          <Grid container spacing={2}>
+            <Grid size={{ xs: 12, md: 6 }}>
+              <TextField
+                label="Role Name *"
+                value={form.roleName || ""}
+                onChange={(e) =>
+                  handleChange(form, "roleName", e, "inputValue2")
+                }
+                helperText="Allowed 3-20 characters (A-Z, 0-9, spaces, ,()&/-)"
+                error={
+                  form.roleName?.length > 0 &&
+                  (form.roleName.length < 3 ||
+                    !/[A-Za-z0-9]/.test(form.roleName))
+                }
+                fullWidth
+                slotProps={{ htmlInput: { maxLength: 20 } }}
+              />
+            </Grid>
+
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Autocomplete
+                options={roleAccessList}
+                getOptionLabel={(option) =>
+                  typeof option === "string" ? option : option.accessName || ""
+                }
+                value={
+                  roleAccessList.find(
+                    (item) =>
+                      item.accessFlag === form.roleAccess ||
+                      item.accessName === form.roleAccess,
+                  ) || null
+                }
+                onChange={(event, newValue) => {
+                  setForm({
+                    ...form,
+                    roleAccess: newValue ? newValue.accessFlag : "",
+                  });
+                }}
+                isOptionEqualToValue={(option, val) =>
+                  option.accessFlag === (val.accessFlag || val)
+                }
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Role Access *"
+                    placeholder="Select Role Access"
+                    helperText="Choose the access scope for this role"
+                    fullWidth
+                  />
+                )}
+                renderOption={(props, option) => (
+                  <li {...props} key={option.accessFlag}>
+                    <Box>
+                      <Typography variant="body2" fontWeight={600}>
+                        {option.accessName}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {option.accessDescription}
+                      </Typography>
+                    </Box>
+                  </li>
+                )}
+              />
+            </Grid>
+
+            <Grid size={{ xs: 12 }}>
+              <TextField
+                label="Description *"
+                value={form.description || ""}
+                onChange={(e) =>
+                  handleChange(form, "description", e, "inputValue2")
+                }
+                helperText="Allowed 5-200 characters (A-Z, 0-9, spaces, ,()&/-)"
+                error={
+                  form.description?.length > 0 &&
+                  (form.description.length < 5 ||
+                    !DESCRIPTION_REGEX.test(form.description))
+                }
+                fullWidth
+                multiline
+                rows={3}
+                slotProps={{ htmlInput: { maxLength: 200 } }}
+              />
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ my: 1 }} />
+
+          <Autocomplete
             multiple
-            autoHighlight // Added autoHighlight as requested
+            autoHighlight 
             options={allPermissions}
             value={selectedPermissions}
             inputValue={permissionSearch}
@@ -21,111 +409,107 @@
                 : option.title
             }
             renderOption={(props, option, { selected }) => {
-              const isRestricted = option.isRestricted === "Y";
-              const actions = option.menuAction
-                ? option.menuAction.split("|").filter(Boolean)
-                : [];
+              // Extract key to avoid console warnings, leaving the rest to be spread
+              const { key, ...optionProps } = props;
+              
+              // Robust check for restricted flag (Handles "Y", "y", or actual boolean true)
+              const isRestricted =
+                option.isRestricted === "Y" ||
+                option.isRestricted === "y" ||
+                option.isRestricted === true;
+
+              // Robust parsing for actions (handles arrays or comma/pipe separated strings)
+              let actions = [];
+              if (Array.isArray(option.menuAction)) {
+                actions = option.menuAction;
+              } else if (typeof option.menuAction === "string") {
+                actions = option.menuAction.split(/[|,]/).filter(Boolean);
+              }
 
               return (
                 <li
-                  {...props}
-                  key={option.id}
+                  key={key || option.id}
+                  {...optionProps}
                   style={{
-                    alignItems: "flex-start",
-                    paddingTop: 8,
-                    paddingBottom: 8,
+                    ...optionProps.style,
+                    alignItems: "flex-start", // Overrides MUI's flex-center
+                    padding: "8px 16px",
                     borderBottom: "1px solid #f0f0f0",
                   }}
                 >
-                  <Checkbox
-                    checked={selected}
-                    sx={{ mr: 1, p: 0.5, mt: -0.5 }}
-                  />
-                  <Box
-                    display="flex"
-                    flexDirection="column"
-                    gap={0.5}
-                    width="100%"
-                  >
-                    {/* Top Row: Title, Submenu Chip, Restricted Badge */}
-                    <Box
-                      display="flex"
-                      alignItems="center"
-                      gap={1}
-                      flexWrap="wrap"
-                    >
-                      <ListItemIcon
-                        sx={{
-                          minWidth: "auto",
-                          color: isRestricted ? "warning.main" : "primary.main",
-                        }}
-                      >
-                        {renderIcon(option.icon)}
-                      </ListItemIcon>
-
-                      <Typography
-                        variant="body2"
-                        fontWeight={selected ? 600 : 400}
-                      >
-                        {option.menuSubmenu ? option.menuSubmenu : option.title}
-                      </Typography>
-
-                      {option.menuSubmenu && (
-                        <Chip
-                          label={option.title}
-                          size="small"
+                  {/* Creating a totally new flex scope inside the LI prevents MUI from breaking the layout */}
+                  <Box display="flex" width="100%" alignItems="flex-start">
+                    <Checkbox checked={selected} sx={{ mr: 1.5, p: 0, mt: 0.2 }} />
+                    
+                    <Box display="flex" flexDirection="column" gap={0.5} width="100%">
+                      {/* Top Row: Title, Submenu Chip, Restricted Badge */}
+                      <Box display="flex" alignItems="center" gap={1} flexWrap="wrap">
+                        <ListItemIcon
                           sx={{
-                            height: 20,
-                            fontSize: "0.65rem",
-                            bgcolor: "rgba(0,0,0,0.06)",
+                            minWidth: "auto",
+                            color: isRestricted ? "error.main" : "primary.main",
                           }}
-                        />
-                      )}
+                        >
+                          {renderIcon(option.icon)}
+                        </ListItemIcon>
 
-                      {isRestricted && (
-                        <Chip
-                          icon={
-                            <LockOutlinedIcon
-                              sx={{ fontSize: "14px !important" }}
-                            />
-                          }
-                          label="Restricted"
-                          size="small"
-                          color="warning"
-                          variant="outlined"
-                          sx={{
-                            height: 20,
-                            fontSize: "0.65rem",
-                            "& .MuiChip-icon": { ml: 0.5 },
-                          }}
-                        />
-                      )}
-                    </Box>
+                        <Typography variant="body2" fontWeight={selected ? 600 : 400}>
+                          {option.menuSubmenu ? option.menuSubmenu : option.title}
+                        </Typography>
 
-                    {/* Bottom Row: Actions */}
-                    {actions.length > 0 && (
-                      <Stack
-                        direction="row"
-                        spacing={0.5}
-                        flexWrap="wrap"
-                        sx={{ ml: 4 }}
-                      >
-                        {actions.map((act, idx) => (
+                        {option.menuSubmenu && (
                           <Chip
-                            key={idx}
-                            label={act.charAt(0).toUpperCase() + act.slice(1)}
+                            label={option.title}
                             size="small"
                             sx={{
-                              height: 18,
+                              height: 20,
                               fontSize: "0.65rem",
-                              bgcolor: "action.selected",
-                              border: "1px solid",
-                              borderColor: "divider",
+                              bgcolor: "rgba(0,0,0,0.06)",
                             }}
                           />
-                        ))}
-                      </Stack>
-                    )}
+                        )}
+
+                        {isRestricted && (
+                          <Chip
+                            icon={<LockOutlinedIcon sx={{ fontSize: "14px !important" }} />}
+                            label="Restricted"
+                            size="small"
+                            color="error" // Matching drag item styling
+                            variant="outlined"
+                            sx={{
+                              height: 20,
+                              fontSize: "0.65rem",
+                              "& .MuiChip-icon": { ml: 0.5 },
+                            }}
+                          />
+                        )}
+                      </Box>
+
+                      {/* Bottom Row: Actions */}
+                      {actions.length > 0 && (
+                        <Stack
+                          direction="row"
+                          spacing={0.5}
+                          flexWrap="wrap"
+                          sx={{ ml: 4 }}
+                        >
+                          {actions.map((act, idx) => (
+                            <Chip
+                              key={idx}
+                              label={act.charAt(0).toUpperCase() + act.slice(1)}
+                              size="small"
+                              sx={{
+                                height: 18,
+                                fontSize: "0.65rem",
+                                bgcolor: "action.selected",
+                                border: "1px solid",
+                                borderColor: "divider",
+                              }}
+                            />
+                          ))}
+                        </Stack>
+                      )}
+                    </Box>
                   </Box>
                 </li>
               );
@@ -140,3 +524,53 @@
             )}
             renderTags={() => null}
           />
+
+          <Stack spacing={1}>
+            <Stack
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
+            >
+              <Typography variant="subtitle2">
+                Allowed Permissions: {selectedPermissions.length}
+              </Typography>
+              <Tooltip title="Reset Permissions">
+                <Button
+                  size="small"
+                  color="primary"
+                  onClick={handleReset}
+                  variant="outlined"
+                  startIcon={<RestoreIcon />}
+                  sx={{ align: "center", height: "100%" }}
+                >
+                  Reset
+                </Button>
+              </Tooltip>
+            </Stack>
+            <DndProvider backend={HTML5Backend}>
+              <List sx={{ minHeight: 400, overflowY: "auto", px: 0.5 }}>
+                {selectedPermissions.map((perm, index) => (
+                  <DraggablePermissionItem
+                    key={perm.id}
+                    perm={perm}
+                    index={index}
+                    icon={renderIcon(perm.icon)}
+                    moveItem={moveItem}
+                  />
+                ))}
+              </List>
+            </DndProvider>
+          </Stack>
+        </Stack>
+      </DialogContent>
+
+      <Divider />
+      <DialogActions sx={{ p: 2 }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" disabled={!canSave} onClick={handleSave}>
+          {form.roleId ? "Save Changes" : "Create Role"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
