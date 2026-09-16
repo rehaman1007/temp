@@ -1,605 +1,666 @@
-import React, {
-  useContext,
-  useEffect,
-  useState,
-  useMemo,
-  useCallback,
-} from "react";
-import { useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
-import { AuthContext } from "../context/AuthContext";
-import { userAvatarCreator } from "../utils/userUtilities";
-
-// MUI Icons
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
-  AccountTree,
-  Business,
-  Close,
-  Email,
-  Help,
-  Logout,
-  Phone,
-  Link as LinkIcon,
-  ContentCopy,
-  VisibilityOff,
-  Home,
-  Visibility,
-  Check,
-  Public,
-  Tag,
-  Security,
-  Badge,
-} from "@mui/icons-material";
-
-// MUI Components
-import {
-  Avatar,
   Box,
-  Card,
-  CardContent,
-  Drawer,
-  IconButton,
-  Button,
-  Stack,
+  Paper,
   Typography,
-  useTheme,
-  useMediaQuery,
-  Tooltip,
-  Divider,
-  List,
-  ListItem,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
+  Stack,
+  Autocomplete,
+  TextField,
+  Chip,
 } from "@mui/material";
-import CustomChip from "../utils/CustomChip";
+import { DatePicker, LocalizationProvider } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
+import ManageSearchOutlinedIcon from "@mui/icons-material/ManageSearchOutlined";
+import SearchIcon from "@mui/icons-material/Search";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import { useSelector } from "react-redux";
+import dayjs from "dayjs";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import BalanceDateWiseTable from "./Components/BalanceDateWiseTable";
+import { StyledButton } from "./Components/BalanceDifferenceStyles";
+import downloadFile from "../../utils/DownloadUtils";
 
-// --- Helper Functions ---
-const formatCode = (code, length) => {
-  if (code === undefined || code === null || code === "") return "N/A";
-  return String(code).padStart(length, "0");
-};
+export default function BalanceParticularSearchScreen() {
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
 
-const maskPhoneNumber = (phone, isVisible) => {
-  if (!phone) return "N/A";
-  if (isVisible) return phone;
-  const visibleDigits = phone.slice(-4);
-  const maskedSection = "X".repeat(Math.max(0, phone.length - 4));
-  return `${maskedSection}${visibleDigits}`;
-};
+  const user = useSelector((s) => s.auth.user);
+  const branchCodeStr = String(user?.branch || "").padStart(5, "0");
 
-// --- Reusable UI Component for Info Rows ---
-// eslint-disable-next-line no-unused-vars
-const DetailRow = ({ icon: Icon, label, value }) => (
-  <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2 }}>
-    <Icon sx={{ color: "text.secondary", fontSize: 20, mt: 0.5 }} />
-    <Box>
-      {label && (
-        <Typography
-          variant="caption"
-          color="text.secondary"
-          sx={{ display: "block", mb: 0.25 }}
-        >
-          {label}
-        </Typography>
-      )}
-      <Typography variant="body2" sx={{ fontWeight: 500, lineHeight: 1.4 }}>
-        {value}
-      </Typography>
-    </Box>
-  </Box>
-);
+  const [rows, setRows] = useState([]);
+  const [rowCount, setRowCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const [filtersExpanded, setFiltersExpanded] = useState(true);
+  const [exportLoading, setExportLoading] = useState(false);
 
-const ProfileDrawer = ({ profileDrawerOpen, setProfileDrawerOpen }) => {
-  const user = useSelector((state) => state.auth.user);
-  const navigate = useNavigate();
-  const { logout } = useContext(AuthContext);
-  const theme = useTheme();
-  const isMobileOrTablet = useMediaQuery(theme.breakpoints.down("md"));
+  const [etlDate, setEtlDate] = useState(null);
+  const [glcc, setGlcc] = useState("");
+  const [glccValidated, setGlccValidated] = useState(false);
+  const [glccLoading, setGlccLoading] = useState(false);
 
-  // States
-  const [showPhone, setShowPhone] = useState(false);
-  const [emailCopied, setEmailCopied] = useState(false);
+  const [branch, setBranch] = useState(
+    user?.roleAccess === "B"
+      ? `${branchCodeStr}-${user?.branchName || ""}`
+      : "",
+  );
+  const [branchInput, setBranchInput] = useState("");
+  const [branches, setBranches] = useState([]);
 
-  // Memoized Display Values
-  const userName = useMemo(
-    () =>
-      [user?.firstName, user?.middleName, user?.lastName]
-        .filter(Boolean)
-        .join(" "),
-    [user],
+  const [currency, setCurrency] = useState("");
+  const [currencyInput, setCurrencyInput] = useState("");
+  const [currencies, setCurrencies] = useState([]);
+
+  const [cgl, setCgl] = useState("");
+  const [cglInput, setCglInput] = useState("");
+  const [cgls, setCgls] = useState([]);
+
+  const [paginationModel, setPaginationModel] = useState({
+    page: 0,
+    pageSize: 25,
+  });
+
+  const MIN_ALLOWED_DATE = useMemo(() => dayjs("2026-03-31"), []);
+
+  const fetchCurrencies = useCallback(async () => {
+    try {
+      const res = await callApi(
+        "/CM/common-master/currency-code-name-only",
+        null,
+        "GET",
+      );
+      setCurrencies(
+        (res?.data || []).sort((a, b) =>
+          a.currencyCode === "INR"
+            ? -1
+            : b.currencyCode === "INR"
+              ? 1
+              : a.currencyName.localeCompare(b.currencyName),
+        ),
+      );
+    } catch {
+      showSnackBar("Currency data not available", "error");
+    }
+  }, [callApi, showSnackBar]);
+
+  const fetchSearchData = useCallback(
+    async (type, term) => {
+      if (!term || term.length < 3) return;
+      try {
+        let circleValue = "";
+
+        switch (user?.roleAccess) {
+          case "W":
+            circleValue = "null";
+            break;
+          case "C":
+          case "B":
+            circleValue = user?.circleCode;
+            break;
+          default:
+            circleValue = "";
+        }
+
+        const url =
+          type === "branch"
+            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(term)}&circleCode=${circleValue || ""}`
+            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(term)}`;
+        const res = await callApi(url, null, "GET");
+        if (type === "branch")
+          setBranches((res?.data || []).map((i) => `${i.code}-${i.name}`));
+        else
+          setCgls(
+            (res?.data || []).map((i) => `${i.cglNumber} - ${i.description}`),
+          );
+      } catch (e) {
+        console.error(e);
+      }
+    },
+    [callApi, user],
   );
 
-  const branchDisplay = useMemo(
-    () =>
-      user?.branchName
-        ? `${user.branchName} (${formatCode(user.branch, 5)})`
-        : "N/A",
-    [user?.branchName, user?.branch],
-  );
-
-  const circleDisplay = useMemo(
-    () =>
-      user?.circleName
-        ? `${user.circleName} (${formatCode(user.circleCode, 3)})`
-        : "N/A",
-    [user?.circleName, user?.circleCode],
-  );
-
-  // Dynamically combine address (Removed Zone and NMR as per request)
-  const combinedAddress = useMemo(() => {
-    const parts = [
-      user?.address,
-      user?.city,
-      user?.stateName,
-      user?.pincode ? `PIN: ${user.pincode}` : null,
-    ].filter(Boolean);
-
-    return parts.length > 0 ? parts.join(", ") : "N/A";
-  }, [user]);
-
-  // Handlers
-  const handleCopyEmail = () => {
-    if (user?.email) {
-      navigator.clipboard.writeText(user.email);
-      setEmailCopied(true);
-      setTimeout(() => setEmailCopied(false), 2000);
+  const validateGlcc = async (value) => {
+    try {
+      setGlccLoading(true);
+      const response = await callApi(
+        "/CM/common-master/validate-glcc",
+        { glcc: value },
+        "POST",
+      );
+      const data = response?.data;
+      if (data?.valid) {
+        setBranch(`${data.branchCode}-${data.branchName?.trim() || ""}`);
+        setBranchInput(`${data.branchCode}-${data.branchName?.trim() || ""}`);
+        setCurrency(data.currencyCode);
+        setCurrencyInput(data.currencyCode);
+        setCgl(`${data.cglNumber} - ${data.cglDescription}`);
+        setCglInput(`${data.cglNumber} - ${data.cglDescription}`);
+        setGlccValidated(true);
+      } else {
+        setGlccValidated(false);
+        setBranch("");
+        setBranchInput("");
+        setCurrency("");
+        setCurrencyInput("");
+        setCgl("");
+        setCglInput("");
+        showSnackBar(data?.errors?.join(", ") || "Invalid GLCC", "error");
+      }
+    } catch (error) {
+      setGlccValidated(false);
+      setBranch("");
+      setBranchInput("");
+      setCurrency("");
+      setCurrencyInput("");
+      setCgl("");
+      setCglInput("");
+      const errors =
+        error?.response?.data?.data?.errors || error?.response?.data?.errors;
+      showSnackBar(errors?.join(", ") || "Invalid GLCC", "error");
+    } finally {
+      setGlccLoading(false);
     }
   };
 
-  const closeDrawer = useCallback(
-    () => setProfileDrawerOpen(false),
-    [setProfileDrawerOpen],
+  useEffect(() => {
+    fetchCurrencies();
+  }, [fetchCurrencies]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await callApi("/PS/file/fincore-date", {}, "GET");
+        const raw =
+          res?.data?.userDate || res?.data?.etlDate || res?.date || "";
+        if (raw) setEtlDate(dayjs(raw.split("T")[0]));
+      } catch (e) {
+        console.error("ETL Date Error:", e);
+      }
+    })();
+  }, [callApi]);
+
+  const fetchData = useCallback(
+    async (page = 0, size = 25) => {
+      if (!etlDate) return;
+      try {
+        setLoading(true);
+        const payload = {
+          fromDate: etlDate.format("YYYY-MM-DD"),
+          toDate: etlDate.format("YYYY-MM-DD"),
+          branchCode: branch?.split("-")[0] || null,
+          currency: currency || null,
+          cgl: cgl?.split(" - ")[0] || null,
+        };
+        const res = await callApi(
+          `/ES/differences/search?page=${page}&size=${size}`,
+          payload,
+          "POST",
+        );
+        const content = res?.data?.content || res?.content || [];
+        setRows(
+          content.map((item, index) => ({
+            ...item,
+            id: item.id || `row-${page}-${index}`,
+            GLCC_VAL: `${item.branchCode || ""} ${item.currency || ""} ${item.cgl || ""}`,
+          })),
+        );
+        setRowCount(res?.data?.page?.totalElements || 0);
+      } catch (e) {
+        console.error(e);
+        setRows([]);
+        setRowCount(0);
+        showSnackBar("No records found", "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [callApi, etlDate, branch, currency, cgl, showSnackBar],
   );
 
-  // Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (event) => {
-      if (
-        !isMobileOrTablet &&
-        event.altKey &&
-        event.key.toLowerCase() === "l"
-      ) {
-        event.preventDefault();
-        logout();
-      }
-      if (event.key === "Escape" && profileDrawerOpen) {
-        closeDrawer();
-      }
-    };
+  const handleExport = async () => {
+    try {
+      setExportLoading(true);
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [logout, profileDrawerOpen, isMobileOrTablet, closeDrawer]);
+      const payload = {
+        reconRunDate: etlDate.format("YYYY-MM-DD"),
+        branchCode: branch?.split("-")[0],
+        currency: currency,
+        cgl: cgl?.split(" - ")[0],
+      };
+
+      const downloadResponse = await callApi(
+        "/ES/differences/export",
+        payload,
+        "POST",
+        "arraybuffer",
+      );
+
+      const fileName = `Balance_Compare_Difference_${etlDate.format("DD-MM-YYYY")}`;
+
+      if (downloadResponse && downloadResponse?.byteLength > 0) {
+        downloadFile(downloadResponse, "excel", fileName);
+        return;
+      }
+    } catch (error) {
+      console.error("Something Went Wrong!!", error);
+      showSnackBar("Download Failed", "error");
+    } finally {
+      setExportLoading(false);
+    }
+  };
+  const handleSearch = () => {
+    setSearched(true);
+    setFiltersExpanded(false);
+    setPaginationModel((p) => ({ ...p, page: 0 }));
+  };
+
+  useEffect(() => {
+    if (searched && !filtersExpanded)
+      fetchData(paginationModel.page, paginationModel.pageSize);
+  }, [
+    searched,
+    filtersExpanded,
+    paginationModel.page,
+    paginationModel.pageSize,
+    fetchData,
+  ]);
+
+  const handleReset = () => {
+    setRows([]);
+    setRowCount(0);
+    setGlcc("");
+    setGlccValidated(false);
+    setGlccLoading(false);
+    setBranch(
+      user?.roleAccess === "B"
+        ? `${branchCodeStr}-${user?.branchName || ""}`
+        : "",
+    );
+    setBranchInput("");
+    setCurrency("");
+    setCurrencyInput("");
+    setCgl("");
+    setCglInput("");
+    setBranches([]);
+    setCgls([]);
+    setSearched(false);
+    setFiltersExpanded(true);
+    setPaginationModel({ page: 0, pageSize: 25 });
+  };
+
+  const chipSx = {
+    height: 28,
+    borderRadius: 1.5,
+    fontSize: "11px",
+    fontWeight: 600,
+    color: "#58469f",
+    borderColor: "rgba(88,70,159,.28)",
+    bgcolor: "rgba(88,70,159,.035)",
+  };
 
   return (
-    <Drawer
-      anchor="right"
-      open={profileDrawerOpen}
-      onClose={closeDrawer}
-      sx={{
-        "& .MuiDrawer-paper": {
-          // THIS IS THE FIX: Responsive width layout
-          width: { xs: "85vw", sm: 350, md: 400 },
-          maxWidth: "100vw",
-          boxSizing: "border-box",
-          display: "flex",
-          flexDirection: "column",
-        },
-      }}
-    >
-      {/* HEADER */}
-      <Box
+    <Box sx={{ p: { xs: 1, sm: 2 } }}>
+      <Paper
+        elevation={0}
         sx={{
-          p: { xs: 2, sm: 3 }, // FIXED: Responsive padding
-          borderBottom: "1px solid #E2E8F0",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
+          p: { xs: 1.5, sm: 2.5 },
+          mt: { xs: -1, sm: -2 },
+          mb: 3,
+          bgcolor: "rgba(255,255,255,.4)",
+          backdropFilter: "blur(4px)",
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: { xs: 2, sm: 3 },
+          overflow: "hidden",
         }}
       >
-        <Typography variant="h6" fontWeight={700}>
-          Profile
-        </Typography>
-        <IconButton size="small" onClick={closeDrawer} sx={{ ml: 1 }}>
-          <Close />
-        </IconButton>
-      </Box>
-
-      {/* Content */}
-      <Box sx={{ p: { xs: 2, sm: 3 }, overflowY: "auto", flex: 1 }}>
-        {/* User Identity Section */}
-        <Box sx={{ display: "flex", flexDirection: "column" }}>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 1.5 }}>
-            <Avatar
-              sx={{
-                width: 72,
-                height: 72,
-                color: "primary.contrastText",
-                backgroundColor: "primary.main",
-                fontSize: "1.75rem",
-                fontWeight: 600,
-                boxShadow: theme.shadows[2],
-              }}
-            >
-              {userAvatarCreator(user)}
-            </Avatar>
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography
-                variant="h6"
-                sx={{ fontWeight: 700, lineHeight: 1.2, mb: 0.25 }}
-                noWrap
-              >
-                {userName}
-              </Typography>
-              <Typography variant="body2" color="text.secondary" noWrap>
-                ID: {user?.userId || "N/A"}
-              </Typography>
-            </Box>
-          </Box>
-
-          {/* Role Box */}
-          <Box
-            sx={{
-              p: 1.5,
-              mb: 1,
-              borderRadius: 2,
-              backgroundColor: (theme) => `${theme.palette.info.main}14`,
-              borderLeft: "5px solid",
-              borderColor: "info.main",
-              display: "flex",
-              alignItems: "center",
-              gap: 1.5,
-            }}
+        <Box
+          sx={{
+            p: { xs: 1.5, sm: 2 },
+            borderRadius: 2,
+            bgcolor: "background.paper",
+            boxShadow: 2,
+            border: "1px solid",
+            borderColor: "divider",
+            borderLeft: "6px solid",
+            borderLeftColor: "primary.main",
+          }}
+        >
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            alignItems={{ xs: "flex-start", sm: "center" }}
+            justifyContent="space-between"
+            spacing={2}
           >
-            <Badge sx={{ fontSize: 22, color: "info.main", flexShrink: 0 }} />
-            <Box sx={{ minWidth: 0 }}>
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: 700, lineHeight: 1.3 }}
-                noWrap
-              >
-                {user?.roleName || "UNKNOWN"}
-              </Typography>
-              {user?.roleDescription && (
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  noWrap
-                  sx={{ lineHeight: 1.3 }}
-                >
-                  {user.roleDescription}
-                </Typography>
-              )}
-            </Box>
-          </Box>
-
-          {/* Access Box */}
-          <Box
-            sx={{
-              p: 1.5,
-              mb: 1,
-              borderRadius: 2,
-              backgroundColor: (theme) => `${theme.palette.warning.main}14`,
-              borderLeft: "5px solid",
-              borderColor: "warning.main",
-              display: "flex",
-              alignItems: "center",
-              gap: 1.5,
-            }}
-          >
-            <Security
-              sx={{ fontSize: 22, color: "warning.main", flexShrink: 0 }}
-            />
-            <Box sx={{ minWidth: 0 }}>
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: 700, lineHeight: 1.3 }}
-                noWrap
-              >
-                {user?.accessName || "UNASSIGNED"} Access
-              </Typography>
-              {user?.accessDescription && (
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  noWrap
-                  sx={{ lineHeight: 1.3 }}
-                >
-                  {user.accessDescription}
-                </Typography>
-              )}
-            </Box>
-          </Box>
-        </Box>
-
-        {/* Service Information */}
-        <Card sx={{ mb: 1.5, boxShadow: "none", border: "1px solid #E2E8F0" }}>
-          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
-            <Typography
-              variant="subtitle2"
-              color="primary"
-              sx={{
-                fontWeight: 700,
-                fontSize: "0.7rem",
-                letterSpacing: "1px",
-              }}
-            >
-              SERVICE INFORMATION
-            </Typography>
-            <Divider sx={{ mt: 1, mb: 1 }} />
-            <Stack spacing={2}>
-              <DetailRow icon={Business} label="Branch" value={branchDisplay} />
-              <DetailRow
-                icon={AccountTree}
-                label="Circle"
-                value={circleDisplay}
+            <Stack direction="row" spacing={2} alignItems="center">
+              <CalendarMonthIcon
+                color="primary"
+                sx={{ fontSize: { xs: 30, sm: 36 }, flexShrink: 0 }}
               />
-              <DetailRow
-                icon={Public}
-                label="Zone"
-                value={user?.zoneName || "N/A"}
-              />
-              {/* <DetailRow
-                icon={Tag}
-                label="NMR Code"
-                value={user?.nmrCode || "N/A"}
-              /> */}
-              <DetailRow
-                icon={Home}
-                label="Address & Location"
-                value={combinedAddress}
-              />
-            </Stack>
-          </CardContent>
-        </Card>
-
-        {/* Contact Information */}
-        <Card sx={{ mb: 1.5, boxShadow: "none", border: "1px solid #E2E8F0" }}>
-          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
-            <Typography
-              variant="subtitle2"
-              color="primary"
-              sx={{
-                fontWeight: 700,
-                mb: 1.5,
-                fontSize: "0.7rem",
-                letterSpacing: "1px",
-              }}
-            >
-              CONTACT INFORMATION
-            </Typography>
-            <Divider sx={{ mt: 1, mb: 1 }} />
-            <Stack spacing={2}>
-              {/* Email Row */}
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 1.5,
-                }}
-              >
-                <Box
-                  sx={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 1.5,
-                    overflow: "hidden",
-                  }}
-                >
-                  <Email sx={{ color: "text.secondary", fontSize: 18 }} />
-                  <Box sx={{ minWidth: 0 }}>
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ display: "block", lineHeight: 1 }}
-                    >
-                      Email
-                    </Typography>
-                    <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
-                      {user?.email || "N/A"}
-                    </Typography>
-                  </Box>
-                </Box>
-                <Tooltip title={emailCopied ? "Copied!" : "Copy Email"}>
-                  <IconButton
-                    onClick={handleCopyEmail}
-                    size="small"
+              <Box sx={{ minWidth: 0 }}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography
+                    variant="subtitle1"
+                    fontWeight={700}
                     sx={{
-                      color: emailCopied ? "success.main" : "text.secondary",
+                      fontSize: { xs: ".95rem", sm: "1rem", md: "1.05rem" },
                     }}
                   >
-                    {emailCopied ? (
-                      <Check fontSize="small" />
-                    ) : (
-                      <ContentCopy fontSize="small" />
-                    )}
-                  </IconButton>
-                </Tooltip>
-              </Box>
-
-              {/* Phone Row */}
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-              >
-                <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-                  <Phone sx={{ color: "text.secondary", fontSize: 18 }} />
-                  <Box>
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ display: "block", lineHeight: 1 }}
-                    >
-                      Contact No
-                    </Typography>
-                    <Typography
-                      variant="body2"
-                      sx={{ fontSize: "0.875rem", letterSpacing: "2px" }}
-                    >
-                      {maskPhoneNumber(user?.phoneNumber, showPhone)}
-                    </Typography>
-                  </Box>
-                </Box>
-                <Tooltip title="Hold to reveal">
-                  <IconButton
-                    onMouseDown={() => setShowPhone(true)}
-                    onMouseUp={() => setShowPhone(false)}
-                    onMouseLeave={() => setShowPhone(false)}
-                    onTouchStart={() => setShowPhone(true)}
-                    onTouchEnd={() => setShowPhone(false)}
-                    size="small"
-                    sx={{ color: "text.secondary" }}
+                    Date Wise Balance Search
+                  </Typography>
+                  <Typography
+                    sx={{
+                      px: 1,
+                      py: 0.25,
+                      borderRadius: 1.5,
+                      bgcolor: "rgba(88,70,159,.08)",
+                      color: "primary.main",
+                      fontSize: ".7rem",
+                      fontWeight: 700,
+                    }}
                   >
-                    {showPhone ? (
-                      <Visibility fontSize="small" />
-                    ) : (
-                      <VisibilityOff fontSize="small" />
-                    )}
-                  </IconButton>
-                </Tooltip>
+                    Date Wise
+                  </Typography>
+                </Stack>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ mt: 0.3, fontSize: { xs: ".75rem", sm: ".82rem" } }}
+                >
+                  View balance differences for a selected date and track
+                  reconciliation history.
+                </Typography>
               </Box>
             </Stack>
-          </CardContent>
-        </Card>
 
-        {/* Footer Actions */}
-        <Box>
-          {/* Help & SCORE */}
-          <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
-            <Box
-              onClick={() => {
-                navigate("/help");
-                closeDrawer();
-              }}
-              sx={{
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 0.75,
-                py: 1,
-                px: 1,
-                borderRadius: "10px",
-                cursor: "pointer",
-                border: "1px solid #E2E8F0",
-                color: "text.primary",
-                fontWeight: 600,
-                fontSize: "0.8rem",
-                transition: "all 0.2s ease",
-                "&:hover": {
-                  borderColor: "primary.main",
-                  backgroundColor: (theme) => `${theme.palette.primary.main}0A`,
-                },
-              }}
-            >
-              <Help sx={{ fontSize: 18, color: "primary.main" }} />
-              Help
-            </Box>
-
-            <Box
-              component="a"
-              href="https://score.sbi/"
-              target="_blank"
-              rel="noopener noreferrer"
-              sx={{
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 0.75,
-                py: 1,
-                px: 1.5,
-                borderRadius: "10px",
-                cursor: "pointer",
-                border: "1px solid #E2E8F0",
-                color: "text.primary",
-                fontWeight: 600,
-                fontSize: "0.8rem",
-                transition: "all 0.2s ease",
-                textDecoration: "none",
-                "&:hover": {
-                  borderColor: "primary.main",
-                  backgroundColor: (theme) => `${theme.palette.primary.main}0A`,
-                },
-              }}
-            >
-              <LinkIcon sx={{ fontSize: 18, color: "primary.main" }} />
-              SCORE
-            </Box>
-          </Stack>
-
-          {/* Sign Out */}
-          <Box
-            onClick={logout}
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-              p: 1,
-              borderRadius: "12px",
-              cursor: "pointer",
-              borderLeft: "4px solid transparent",
-              transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-              color: "error.main",
-              "&:hover": {
-                backgroundColor: (theme) => `${theme.palette.error.main}14`,
-                borderLeftColor: "error.main",
-                "& .logout-icon": {
-                  transform: "translateX(3px)",
-                  color: "error.dark",
-                },
-                "& .shortcut-hint": {
-                  opacity: 1,
-                  transform: "scale(1.05)",
-                  backgroundColor: "error.main",
-                  color: "white",
-                },
-              },
-            }}
-          >
-            <Logout
-              className="logout-icon"
-              sx={{
-                fontSize: 18,
-                color: "error.light",
-                transition: "transform 0.3s ease",
-              }}
-            />
-            <Typography
-              variant="body2"
-              sx={{ fontWeight: 700, letterSpacing: "0.3px", flex: 1 }}
-            >
-              Sign Out
-            </Typography>
-            {!isMobileOrTablet && (
-              <Box
-                className="shortcut-hint"
+            {searched && (
+              <StyledButton
+                variant="contained"
+                startIcon={<ManageSearchOutlinedIcon />}
+                onClick={() => setFiltersExpanded(true)}
                 sx={{
-                  fontSize: "9px",
-                  fontWeight: 800,
-                  px: 1,
-                  py: 0.3,
-                  borderRadius: "6px",
-                  border: "1px solid",
-                  borderColor: "divider",
-                  opacity: 0.6,
-                  transition: "all 0.3s ease",
-                  textTransform: "uppercase",
+                  textTransform: "none",
+                  borderRadius: "8px",
+                  fontWeight: 600,
+                  minWidth: { xs: "100%", sm: 140 },
+                  width: { xs: "100%", sm: "auto" },
+                  height: { xs: 38, sm: 32 },
                 }}
               >
-                Alt + L
-              </Box>
+                Edit Filters
+              </StyledButton>
             )}
-          </Box>
+          </Stack>
         </Box>
-      </Box>
-    </Drawer>
-  );
-};
 
-export default ProfileDrawer;
+        {searched && (
+          <Stack
+            direction="row"
+            spacing={0.8}
+            flexWrap="wrap"
+            useFlexGap
+            sx={{ mt: 1.5, px: 0.5 }}
+          >
+            <Chip
+              label={`Date: ${etlDate?.format("DD-MM-YYYY") || "-"}`}
+              variant="outlined"
+              size="small"
+              sx={chipSx}
+            />
+            {glcc && (
+              <Chip
+                label={`GLCC: ${glcc}`}
+                variant="outlined"
+                size="small"
+                sx={chipSx}
+              />
+            )}
+            <Chip
+              label={`Branch: ${branch || "-"}`}
+              variant="outlined"
+              size="small"
+              sx={chipSx}
+            />
+            <Chip
+              label={`Currency: ${currency || "-"}`}
+              variant="outlined"
+              size="small"
+              sx={chipSx}
+            />
+            <Chip
+              label={`CGL: ${cgl || "-"}`}
+              variant="outlined"
+              size="small"
+              sx={chipSx}
+            />
+          </Stack>
+        )}
+
+        {filtersExpanded && (
+          <Box sx={{ mt: 3 }}>
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: {
+                  xs: "1fr",
+                  sm: "repeat(2,1fr)",
+                  md: "repeat(4,1fr)",
+                },
+                gap: 2,
+              }}
+            >
+              {user?.roleAccess !== "B" && (
+                <TextField
+                  label="GLCC (Optional)"
+                  fullWidth
+                  value={glcc}
+                  placeholder="Enter 18 Characters GLCC"
+                  InputLabelProps={{ shrink: true }}
+                  inputProps={{ maxLength: 18 }}
+                  disabled={glccLoading}
+                  onChange={(e) => {
+                    const value = e.target.value.toUpperCase();
+                    if (!/^[A-Z0-9]*$/.test(value)) {
+                      showSnackBar(
+                        "Invalid GLCC format. Only letters and numbers are allowed.",
+                        "warning",
+                      );
+                      return;
+                    }
+                    if (value.length <= 5 && !/^\d*$/.test(value)) {
+                      showSnackBar(
+                        "Invalid GLCC format. Enter 5 digits, followed by 3 letters, and then 10 digits.",
+                        "warning",
+                      );
+                      return;
+                    }
+                    if (
+                      value.length > 5 &&
+                      value.length <= 8 &&
+                      !/^\d{5}[A-Z]*$/.test(value)
+                    ) {
+                      showSnackBar(
+                        "Invalid GLCC format. Enter 5 digits, followed by 3 letters, and then 10 digits.",
+                        "warning",
+                      );
+                      return;
+                    }
+                    if (value.length > 8 && !/^\d{5}[A-Z]{3}\d*$/.test(value)) {
+                      showSnackBar(
+                        "Invalid GLCC format. Enter 5 digits, followed by 3 letters, and then 10 digits.",
+                        "warning",
+                      );
+                      return;
+                    }
+                    setGlcc(value);
+                    setGlccValidated(false);
+                    setBranch("");
+                    setBranchInput("");
+                    setCurrency("");
+                    setCurrencyInput("");
+                    setCgl("");
+                    setCglInput("");
+                    if (value.length === 18) validateGlcc(value);
+                  }}
+                />
+              )}
+
+              <Autocomplete
+                autoHighlight
+                forcePopupIcon={false}
+                disabled={glccValidated || user?.roleAccess === "B"}
+                value={branch}
+                inputValue={branchInput}
+                options={branches}
+                noOptionsText={
+                  branchInput.length < 3
+                    ? "Please enter at least 3 characters"
+                    : "No Options"
+                }
+                onInputChange={(e, value, reason) => {
+                  setBranchInput(value);
+                  if (reason === "input" && value.length >= 3)
+                    fetchSearchData("branch", value);
+                }}
+                onChange={(e, value) => setBranch(value || "")}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Branch Code or Name*"
+                    placeholder="eg. 12345 or ABC"
+                    fullWidth
+                    InputLabelProps={{ shrink: true }}
+                  />
+                )}
+              />
+
+              <Autocomplete
+                autoHighlight
+                disabled={glccValidated}
+                options={currencies}
+                value={
+                  currencies.find((c) => c.currencyCode === currency) || null
+                }
+                inputValue={currencyInput}
+                getOptionLabel={(o) =>
+                  o ? `${o.currencyCode} (${o.currencyName})` : ""
+                }
+                onInputChange={(e, value) => setCurrencyInput(value)}
+                onChange={(e, value) => {
+                  setCurrency(value?.currencyCode || "");
+                  setCurrencyInput(
+                    value
+                      ? `${value.currencyCode} - ${value.currencyName}`
+                      : "",
+                  );
+                }}
+                onOpen={fetchCurrencies}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Currency*"
+                    placeholder="Please select Currency"
+                    fullWidth
+                    InputLabelProps={{ shrink: true }}
+                  />
+                )}
+              />
+
+              <Autocomplete
+                autoHighlight
+                forcePopupIcon={false}
+                disabled={glccValidated}
+                value={cgl}
+                inputValue={cglInput}
+                options={cgls}
+                noOptionsText={
+                  cglInput.length < 3
+                    ? "Please enter at least 3 characters"
+                    : "No Options"
+                }
+                onInputChange={(e, value, reason) => {
+                  setCglInput(value);
+                  if (reason === "input" && value.length >= 3)
+                    fetchSearchData("cgl", value);
+                }}
+                onChange={(e, value) => {
+                  setCgl(value || "");
+                  setCglInput(value || "");
+                }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="CGL*"
+                    placeholder="eg. 9999999999"
+                    fullWidth
+                    InputLabelProps={{ shrink: true }}
+                  />
+                )}
+              />
+
+              <LocalizationProvider dateAdapter={AdapterDayjs}>
+                <DatePicker
+                  value={etlDate}
+                  format="DD-MM-YYYY"
+                  minDate={MIN_ALLOWED_DATE}
+                  maxDate={etlDate}
+                  onChange={setEtlDate}
+                  slotProps={{
+                    textField: {
+                      label: "ETL Date*",
+                      fullWidth: true,
+                      InputLabelProps: { shrink: true },
+                      placeholder: "DD-MM-YYYY",
+                    },
+                  }}
+                />
+              </LocalizationProvider>
+            </Box>
+
+            <Box
+              sx={{
+                display: "flex",
+                justifyContent: { xs: "stretch", sm: "flex-end" },
+                gap: 1.5,
+                mt: -5,
+              }}
+            >
+              <StyledButton
+                variant="contained"
+                startIcon={<RestartAltIcon />}
+                onClick={handleReset}
+                sx={{ flex: { xs: 1, sm: "unset" }, textTransform: "none" }}
+              >
+                Reset
+              </StyledButton>
+              <StyledButton
+                variant="contained"
+                startIcon={<SearchIcon />}
+                disabled={!etlDate || !branch || !currency || !cgl}
+                onClick={handleSearch}
+                sx={{ flex: { xs: 1, sm: "unset" }, textTransform: "none" }}
+              >
+                Search
+              </StyledButton>
+            </Box>
+          </Box>
+        )}
+      </Paper>
+
+      {searched && (
+        <BalanceDateWiseTable
+          rows={rows}
+          loading={loading}
+          totalElements={rowCount}
+          paginationModel={paginationModel}
+          setPaginationModel={setPaginationModel}
+          onHistory={() => {}}
+          onExport={handleExport}
+          exportLoading={exportLoading}
+        />
+      )}
+    </Box>
+  );
+}
