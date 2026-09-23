@@ -1,150 +1,500 @@
-const GlifReportsStyles = (theme) => ({
-  rootBox: {
-    width: "100%",
-    p: { xs: 2, sm: 3, md: 4 },
-  },
+import React, { useEffect, useState } from "react";
+import {
+  Box,
+  Card,
+  Stack,
+  Typography,
+  TextField,
+  Button,
+  Grow,
+  CircularProgress,
+  LinearProgress,
+  Fade,
+} from "@mui/material";
+import { useTheme } from "@mui/material/styles";
 
-  card: {
-    width: "100%",
-    borderRadius: 3,
-    boxShadow: 6,
-    overflow: "hidden",
-  },
+import Autocomplete from "@mui/material/Autocomplete";
+import { LocalizationProvider, DatePicker } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import dayjs from "dayjs";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
+import { useSelector } from "react-redux";
 
-  headerContainer: {
-    display: "flex",
-    flexDirection: { xs: "column", sm: "row" },
-    alignItems: "center",
-    gap: 2,
-    px: { xs: 2, md: 3 },
-    py: { xs: 2, md: 2.5 },
-    background: "linear-gradient(90deg, #5D3FD3 0%, #7b1fa2 50%)",
-    color: "white",
-  },
+import DescriptionIcon from "@mui/icons-material/Description";
+import {
+  CloudDownloadTwoTone,
+  LooksOne,
+  LooksTwo,
+  Looks3,
+  Looks4,
+} from "@mui/icons-material";
+import CustomChip from "../../utils/CustomChip";
+import GlifReportsStyles from "./GlifReportsStyles"; // Your styles file
 
-  headerIconWrapper: {
-    borderRadius: "50%",
-    p: 1.5,
-    bgcolor: "rgba(255,255,255,0.12)",
-    display: "flex",
-  },
+const moduleType = "BRANCH_WISE";
 
-  summaryIcon: {
-    width: { xs: 40, sm: 50, md: 60 },
-    height: { xs: 40, sm: 50, md: 60 },
-  },
+export default function BranchWiseReports() {
+  const user = useSelector((state) => state.auth.user);
+  const { callApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+  
+  const theme = useTheme();
+  const styles = GlifReportsStyles(theme);
 
-  headerTextBox: {
-    flex: 1,
-  },
+  const [minDate, setMinDate] = useState(dayjs("2020-01-01"));
 
-  noteContainer: {
-    p: 2,
-  },
+  /* ---------------- MASTER DATA ---------------- */
+  const [branchList, setBranchList] = useState([]);
+  const [reportList, setReportList] = useState([]);
 
-  stepsStack: {
-    mt: 2,
-  },
+  /* ---------------- SELECTED VALUES ---------------- */
+  const [branch, setBranch] = useState(null);
+  const [selectedReport, setReport] = useState(null);
+  const [selectedDate, setReportDate] = useState(null);
 
-  inputOuterBox: {
-    display: "flex",
-    justifyContent: "center",
-    width: "100%",
-  },
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [branchLoading, setBranchLoading] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [branchHasMore, setBranchHasMore] = useState(true);
+  const [branchOpen, setBranchOpen] = useState(false);
 
-  inputInnerBox: {
-    display: "flex",
-    flexDirection: {
-      xs: "column",
-      sm: "column",
-      md: "row",
-    },
-    gap: 3,
-    width: {
-      xs: "100%",
-      sm: "100%",
-      md: "85%",
-      lg: "70%",
-    },
-    p: 2,
-  },
+  const [dateError, setDateError] = useState(null);
 
-  formControl: {
-    width: {
-      xs: "100%",
-      sm: "100%",
-      md: "50%",
-    },
-  },
+  const branchListRef = React.useRef(null);
+  const branchScrollTopRef = React.useRef(0);
+  const skipNextCloseRef = React.useRef(false);
 
-  buttonContainer: {
-    width: "100%",
-    textAlign: "center",
-    p: 2,
-  },
+  const [branchSize, setBranchSize] = useState(20);
+  const [isLoading, setIsLoading] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
 
-  downloadButton: {
-    width: {
-      xs: "100%",
-      sm: "100%",
-      md: "auto",
-    },
-    minWidth: {
-      md: 220,
-    },
-    height: 50,
-  },
+  const downloadedMB =
+    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
 
-  progressContainer: {
-    mt: 3,
-    width: {
-      xs: "100%",
-      sm: "100%",
-      md: "85%",
-      lg: "70%",
-    },
-    mx: "auto",
-  },
+  const disableInputs = isLoading || isDownloading;
+  const isRoleB = user?.roleAccess === "B";
 
-  progressHeader: {
-    display: "flex",
-    flexDirection: {
-      xs: "column",
-      sm: "row",
-    },
-    alignItems: {
-      xs: "flex-start",
-      sm: "center",
-    },
-    gap: 2,
-    p: 2,
-    borderRadius: 2,
-    bgcolor: "grey.100",
-  },
+  /* ---------------- INITIAL LOAD & ROLE LOGIC ---------------- */
+  useEffect(() => {
+    if (isRoleB) {
+      const assignedBranch = {
+        branchCode: user.branchCode,
+        branchName: user.branchName || "Assigned Branch",
+      };
+      setBranchList([assignedBranch]);
+      setBranch(assignedBranch);
+    } else {
+      fetchBranches(20);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
-  progressIconWrapper: {
-    p: 1,
-    borderRadius: "50%",
-    bgcolor: "primary.main",
-    color: "white",
-    display: "flex",
-  },
+  /* ---------------- API CALLS ---------------- */
+  const fetchBranches = async (size = 20) => {
+    if (branchLoading) return;
 
-  progressHeaderTextBox: {
-    flex: 1,
-  },
+    try {
+      setBranchLoading(true);
 
-  progressBar: {
-    mt: 1,
-    height: 8,
-    borderRadius: 999,
-    overflow: "hidden",
-    bgcolor: theme.palette.mode === "light" ? "grey.200" : "grey.800",
-  },
+      let url = `/CM/common-master/indian-foreign-branches?size=${size}`;
+      
+      if (user?.roleAccess === "C" && user?.circleCode) {
+        url += `&circleCode=${user.circleCode}`;
+      }
 
-  innerDownloadIcon: {
-    fontSize: 22,
-  },
-});
+      const res = await callApi(url, null, "GET");
 
-export default GlifReportsStyles;
+      const branches = res?.data?.data || res?.data || [];
+      setBranchList(branches);
+      setBranchHasMore(branches.length === size);
+      setBranchSize(size);
+    } catch (e) {
+      console.error(e);
+      setBranchList([]);
+    } finally {
+      setBranchLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!branch?.branchCode) return;
+
+    setReportList([]);
+    setReport(null);
+    setReportDate(null);
+    fetchReports(branch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branch]);
+
+  const fetchReports = async (branch) => {
+    try {
+      setReportLoading(true);
+      
+      const payload = {
+        moduleType: moduleType,
+        branchCode: branch?.branchCode,
+        roleId: user?.role,
+      };
+
+      const res = await callApi("/RS/reports/types", payload, "POST");
+      const reports = res?.data || [];
+      setReportList(reports);
+
+      if (reports.length > 0 && reports[0].selectedDate) {
+        setMinDate(dayjs(reports[0].selectedDate).startOf("day"));
+      }
+    } catch {
+      setReportList([]);
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  /* ---------------- DOWNLOAD LOGIC ---------------- */
+  const handleFetchReportData = async () => {
+    if (!selectedReport?.fileName || !selectedDate) return;
+
+    if (dateError) {
+      showSnackBar(getErrorMessage(dateError), "error");
+      return;
+    }
+
+    setIsLoading(true);
+    setIsDownloading(true);
+    setDownloadedBytes(0);
+
+    const payload = {
+      moduleType: moduleType,
+      fileName: selectedReport.fileName,
+      branchCode: branch.branchCode,
+      date: selectedDate.format("YYYY-MM-DD"),
+      roleId: user.role,
+    };
+
+    try {
+      const response = await callApi(
+        "/RS/reports/download",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          onDownloadProgress: (event) => {
+            setIsDownloading(true);
+            if (event && typeof event.loaded === "number") {
+              setDownloadedBytes(event.loaded);
+            }
+          },
+        },
+        false
+      );
+
+      if (response.data && response.data.size > 22) {
+        const contentDisposition =
+          response.headers["content-disposition"] ||
+          response.headers["Content-Disposition"];
+
+        let filename = "report.zip";
+        if (
+          contentDisposition &&
+          contentDisposition.indexOf("attachment") !== -1
+        ) {
+          const filenameMatch = contentDisposition.match(/filename="(.+?)"/);
+          if (filenameMatch && filenameMatch.length > 1) {
+            filename = filenameMatch[1];
+          }
+        }
+
+        const downloadUrl = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+        showSnackBar(`Reports "${filename}" downloaded successfully`, "success");
+      } else {
+        showSnackBar("No reports found", "warning");
+      }
+    } catch (error) {
+      console.log("error", error);
+
+      if (error && error instanceof Blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const errorJson = JSON.parse(reader.result);
+            console.error(errorJson.message);
+            showSnackBar(errorJson.message || "No reports found", "error");
+          } catch (e) {
+            console.error(e);
+            showSnackBar("Something went wrong, kindly try again.", "error");
+          }
+        };
+        reader.readAsText(error);
+      } else {
+        showSnackBar("Network Error: Could not connect to server", "error");
+      }
+    } finally {
+      setIsLoading(false);
+      setIsDownloading(false);
+      setDownloadedBytes(0);
+    }
+  };
+
+  const getErrorMessage = (error) => {
+    const minDateStr = minDate?.isValid()
+      ? minDate.format("DD/MM/YYYY")
+      : "Allowed Min Date";
+
+    switch (error) {
+      case "maxDate":
+        return "Date cannot be in the future (Today is max)";
+      case "minDate":
+        return `Date cannot be prior to ${minDateStr}`;
+      case "invalidDate":
+        return "Invalid date (Check day for this month)";
+      default:
+        return `Allowed Range: ${minDateStr} - Today`;
+    }
+  };
+
+  useEffect(() => {
+    if (branchListRef.current && branchScrollTopRef.current > 0) {
+      branchListRef.current.scrollTop = branchScrollTopRef.current;
+    }
+  }, [branchList]);
+
+  const branchListBox = React.forwardRef(function branchListBox(props, ref) {
+    const { children, ...other } = props;
+    return (
+      <ul
+        ref={(node) => {
+          branchListRef.current = node;
+          if (typeof ref === "function") ref(node);
+          else if (ref) ref.current = node;
+        }}
+        {...other}
+      >
+        {children}
+
+        {branchHasMore && !branchLoading && !isRoleB && (
+          <li
+            style={{
+              textAlign: "center",
+              padding: "12px",
+              cursor: "pointer",
+              fontWeight: 600,
+              color: "#1976d2",
+            }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              skipNextCloseRef.current = true;
+              if (branchListRef.current) {
+                branchScrollTopRef.current = branchListRef.current.scrollTop;
+              }
+            }}
+            onClick={() => {
+              fetchBranches(branchSize + 20);
+              setTimeout(() => {
+                skipNextCloseRef.current = false;
+              }, 0);
+            }}
+          >
+            Show more branches...
+          </li>
+        )}
+      </ul>
+    );
+  });
+
+  /* ---------------- UI ---------------- */
+  return (
+    <Grow in timeout={500}>
+      <Box sx={styles.rootBox} display="flex" justifyContent="center">
+        <Stack spacing={4} sx={{ width: "100%", maxWidth: 1550 }}>
+          <Card sx={styles.card}>
+            
+            {/* Header Section */}
+            <Box sx={styles.headerContainer}>
+              <Box sx={styles.headerIconWrapper}>
+                <DescriptionIcon sx={styles.summaryIcon} />
+              </Box>
+              <Box sx={styles.headerTextBox}>
+                <Typography variant="h5" fontWeight="bold" sx={styles.headerTitle}>
+                  Branch Wise Reports Generation
+                </Typography>
+                <Typography variant="body2" sx={{ mt: 0.5, color: "rgba(255, 255, 255, 0.9)" }}>
+                  Choose a specific required Branch, Report type and Date using the criteria below to download reports
+                </Typography>
+              </Box>
+            </Box>
+
+            {/* Note and Steps Section */}
+            <Box sx={styles.noteContainer}>
+              <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic", mb: 1.5 }}>
+                Note: The generated reports cannot be viewed on-screen it can only be downloaded.
+              </Typography>
+              <Stack
+                direction="row"
+                spacing={2}
+                sx={{
+                  ...styles.stepsStack,
+                  flexWrap: "wrap",
+                  gap: { xs: 1.5, sm: 2 },
+                  "& > *": { margin: "0 !important", marginBottom: "8px !important" }, 
+                }}
+              >
+                {isRoleB ? (
+                  <>
+                    <CustomChip label="Select a report" variant="outlined" icon={<LooksOne />} color="info" />
+                    <CustomChip label="Select the report date" variant="outlined" icon={<LooksTwo />} color="info" />
+                    <CustomChip label="Click Fetch & Download button" variant="outlined" icon={<Looks3 />} color="info" />
+                  </>
+                ) : (
+                  <>
+                    <CustomChip label="Select Branch" variant="outlined" icon={<LooksOne />} color="info" />
+                    <CustomChip label="Select a report" variant="outlined" icon={<LooksTwo />} color="info" />
+                    <CustomChip label="Select the report date" variant="outlined" icon={<Looks3 />} color="info" />
+                    <CustomChip label="Click Fetch & Download button" variant="outlined" icon={<Looks4 />} color="info" />
+                  </>
+                )}
+              </Stack>
+            </Box>
+
+            {/* 3 Inputs Section (Single Row on MD and larger, Stacked on smaller screens) */}
+            <Box sx={styles.inputOuterBox}>
+              <Box sx={{ ...styles.inputInnerBox, width: { xs: "100%", md: "95%", lg: "90%" } }}>
+                <Autocomplete
+                  sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
+                  value={branch}
+                  options={Array.isArray(branchList) ? branchList : []}
+                  loading={branchLoading}
+                  disabled={isRoleB || branchLoading}
+                  ListboxComponent={branchListBox}
+                  open={branchOpen}
+                  onOpen={() => setBranchOpen(true)}
+                  onClose={(e, reason) => {
+                    if (skipNextCloseRef.current && reason === "blur") return;
+                    setBranchOpen(false);
+                  }}
+                  onChange={(e, v) => {
+                    setBranch(v);
+                    setBranchOpen(false);
+                  }}
+                  getOptionLabel={(o) => o?.branchCode ? `${o.branchCode} - ${o.branchName}` : ""}
+                  isOptionEqualToValue={(o, v) => o?.branchCode === v?.branchCode}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Select Branch *"
+                      InputProps={{
+                        ...params.InputProps,
+                        endAdornment: (
+                          <>
+                            {branchLoading && <CircularProgress color="inherit" size={18} />}
+                            {params.InputProps.endAdornment}
+                          </>
+                        ),
+                      }}
+                    />
+                  )}
+                />
+
+                <Autocomplete
+                  sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
+                  value={selectedReport}
+                  options={reportList}
+                  loading={reportLoading}
+                  disabled={!branch || reportLoading}
+                  getOptionLabel={(o) => o?.reportName || ""}
+                  isOptionEqualToValue={(o, v) => o.id === v.id}
+                  onChange={(e, v) => setReport(v)}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Select a report *"
+                      InputProps={{
+                        ...params.InputProps,
+                        endAdornment: (
+                          <>
+                            {reportLoading && <CircularProgress color="inherit" size={20} />}
+                            {params.InputProps.endAdornment}
+                          </>
+                        ),
+                      }}
+                    />
+                  )}
+                />
+
+                <LocalizationProvider dateAdapter={AdapterDayjs}>
+                  <DatePicker
+                    sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
+                    label="Select report date *"
+                    format="DD/MM/YYYY"
+                    minDate={minDate}
+                    maxDate={dayjs().endOf("day")}
+                    value={selectedDate}
+                    onChange={(v) => setReportDate(v)}
+                    onError={(err) => setDateError(err)}
+                    disabled={!branch}
+                    slotProps={{
+                      textField: {
+                        fullWidth: true,
+                        error: !!dateError,
+                        helperText: dateError ? getErrorMessage(dateError) : "",
+                      },
+                    }}
+                  />
+                </LocalizationProvider>
+              </Box>
+            </Box>
+
+            {/* Fetch & Download Section */}
+            <Box sx={styles.buttonContainer}>
+              <Button
+                sx={styles.downloadButton}
+                endIcon={<CloudDownloadTwoTone />}
+                variant="contained"
+                onClick={handleFetchReportData}
+                disabled={disableInputs || !selectedReport || !selectedDate || !!dateError}
+              >
+                {isDownloading ? "Downloading..." : "Fetch & Download"}
+              </Button>
+
+              <Fade in={isDownloading} unmountOnExit>
+                <Box sx={styles.progressContainer}>
+                  <Box sx={styles.progressHeader}>
+                    <Box sx={styles.progressIconWrapper}>
+                      <CloudDownloadTwoTone sx={styles.innerDownloadIcon} />
+                    </Box>
+                    <Box sx={styles.progressHeaderTextBox}>
+                      <Typography variant="body2" fontWeight={600}>
+                        Searching {selectedReport?.reportName ?? "the selected report"} for the period{" "}
+                        {selectedDate?.isValid() ? selectedDate.format("YYYY-MM-DD") : "an unknown period"} is in progress.
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={styles.progressCaption}>
+                        {downloadedMB
+                          ? `Streaming report data… ${downloadedMB} MB received`
+                          : "Preparing your report stream…"}
+                      </Typography>
+                    </Box>
+
+                    {downloadedMB && (
+                      <CustomChip color="error" label={`${downloadedMB} MB downloaded`} variant="filled" />
+                    )}
+                  </Box>
+                  <LinearProgress variant="indeterminate" sx={styles.progressBar} />
+                </Box>
+              </Fade>
+            </Box>
+            
+          </Card>
+        </Stack>
+      </Box>
+    </Grow>
+  );
+}
