@@ -1,3 +1,54 @@
+const fetchSearchData = useCallback(
+    async (type, term) => {
+      try {
+        setLoading((prev) => ({ ...prev, [type]: true }));
+
+        let circleValue = "";
+
+        switch (user?.roleAccess) {
+          case "W":
+            circleValue = "null";
+            break;
+          case "C":
+          case "B":
+            circleValue = user?.circleCode;
+            break;
+          default:
+            circleValue = "";
+        }
+
+        const url =
+          type === "branch"
+            ? `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(
+                term,
+              )}&circleCode=${circleValue || ""}`
+            : `/CM/common-master/cgl-code-description-only?q=${encodeURIComponent(
+                term,
+              )}`;
+
+        const result = await callApi(url, null, "GET");
+
+        if (result?.data?.length > 0) {
+          if (type === "branch") {
+            setBranches(result.data.map((i) => `${i.code} - ${i.name}`));
+          } else {
+            setCgls(
+              result.data.map((i) => `${i.cglNumber} - ${i.description}`),
+            );
+          }
+        } else {
+          showSnackBar("Data not available", "error");
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading((prev) => ({ ...prev, [type]: false }));
+      }
+    },
+    [callApi, user, showSnackBar],
+  );
+
+
 import React, { useEffect, useState } from "react";
 import {
   Box,
@@ -38,11 +89,11 @@ export default function BranchWiseReports() {
   const user = useSelector((state) => state.auth.user);
   const { callApi } = useApi();
   const showSnackBar = useCustomSnackbar();
-  
+
   const theme = useTheme();
   const styles = GlifReportsStyles(theme);
 
-  const [minDate, setMinDate] = useState(dayjs("2020-01-01"));
+  const [minDate, setMinDate] = useState(dayjs("2026-03-31"));
 
   /* ---------------- MASTER DATA ---------------- */
   const [branchList, setBranchList] = useState([]);
@@ -55,8 +106,6 @@ export default function BranchWiseReports() {
 
   const [isDownloading, setIsDownloading] = useState(false);
   const [branchLoading, setBranchLoading] = useState(false);
-  const [reportLoading, setReportLoading] = useState(false);
-  const [branchHasMore, setBranchHasMore] = useState(true);
   const [branchOpen, setBranchOpen] = useState(false);
 
   const [dateError, setDateError] = useState(null);
@@ -65,7 +114,6 @@ export default function BranchWiseReports() {
   const branchScrollTopRef = React.useRef(0);
   const skipNextCloseRef = React.useRef(false);
 
-  const [branchSize, setBranchSize] = useState(20);
   const [isLoading, setIsLoading] = useState(false);
   const [downloadedBytes, setDownloadedBytes] = useState(0);
 
@@ -79,8 +127,8 @@ export default function BranchWiseReports() {
   useEffect(() => {
     if (isRoleB) {
       const assignedBranch = {
-        branchCode: user.branchCode,
-        branchName: user.branchName || "Assigned Branch",
+        branchCode: String(user?.branch ?? "").padStart(5, "0"),
+        branchName: user?.branchName || "Unknown",
       };
       setBranchList([assignedBranch]);
       setBranch(assignedBranch);
@@ -91,24 +139,21 @@ export default function BranchWiseReports() {
   }, [user]);
 
   /* ---------------- API CALLS ---------------- */
-  const fetchBranches = async (size = 20) => {
+  const fetchBranches = async (term) => {
     if (branchLoading) return;
 
     try {
       setBranchLoading(true);
 
-      let url = `/CM/common-master/indian-foreign-branches?size=${size}`;
-      
-      if (user?.roleAccess === "C" && user?.circleCode) {
-        url += `&circleCode=${user.circleCode}`;
-      }
+      // let url = `/CM/common-master/indian-foreign-branches?size=${size}`;
+      const url = `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(
+        term,
+      )}`;
 
       const res = await callApi(url, null, "GET");
 
       const branches = res?.data?.data || res?.data || [];
       setBranchList(branches);
-      setBranchHasMore(branches.length === size);
-      setBranchSize(size);
     } catch (e) {
       console.error(e);
       setBranchList([]);
@@ -129,8 +174,6 @@ export default function BranchWiseReports() {
 
   const fetchReports = async (branch) => {
     try {
-      setReportLoading(true);
-      
       const payload = {
         moduleType: moduleType,
         branchCode: branch?.branchCode,
@@ -144,10 +187,10 @@ export default function BranchWiseReports() {
       if (reports.length > 0 && reports[0].selectedDate) {
         setMinDate(dayjs(reports[0].selectedDate).startOf("day"));
       }
-    } catch {
+    } catch (error) {
+      console.error(error);
       setReportList([]);
-    } finally {
-      setReportLoading(false);
+      showSnackBar("Unable to load reports. Please try again later.", "error");
     }
   };
 
@@ -187,7 +230,7 @@ export default function BranchWiseReports() {
             }
           },
         },
-        false
+        false,
       );
 
       if (response.data && response.data.size > 22) {
@@ -214,7 +257,10 @@ export default function BranchWiseReports() {
         a.click();
         a.remove();
         window.URL.revokeObjectURL(downloadUrl);
-        showSnackBar(`Reports "${filename}" downloaded successfully`, "success");
+        showSnackBar(
+          `Reports "${filename}" downloaded successfully`,
+          "success",
+        );
       } else {
         showSnackBar("No reports found", "warning");
       }
@@ -317,26 +363,38 @@ export default function BranchWiseReports() {
       <Box sx={styles.rootBox} display="flex" justifyContent="center">
         <Stack spacing={4} sx={{ width: "100%", maxWidth: 1550 }}>
           <Card sx={styles.card}>
-            
             {/* Header Section */}
             <Box sx={styles.headerContainer}>
               <Box sx={styles.headerIconWrapper}>
                 <DescriptionIcon sx={styles.summaryIcon} />
               </Box>
               <Box sx={styles.headerTextBox}>
-                <Typography variant="h5" fontWeight="bold" sx={styles.headerTitle}>
+                <Typography
+                  variant="h5"
+                  fontWeight="bold"
+                  sx={styles.headerTitle}
+                >
                   Branch Wise Reports Generation
                 </Typography>
-                <Typography variant="body2" sx={{ mt: 0.5, color: "rgba(255, 255, 255, 0.9)" }}>
-                  Choose a specific required Branch, Report type and Date using the criteria below to download reports
+                <Typography
+                  variant="body2"
+                  sx={{ mt: 0.5, color: "rgba(255, 255, 255, 0.9)" }}
+                >
+                  Choose a specific required Branch, Report type and Date using
+                  the criteria below to download reports
                 </Typography>
               </Box>
             </Box>
 
             {/* Note and Steps Section */}
             <Box sx={styles.noteContainer}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic", mb: 1.5 }}>
-                Note: The generated reports cannot be viewed on-screen it can only be downloaded.
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ fontStyle: "italic", mb: 1.5 }}
+              >
+                Note: The generated reports cannot be viewed on-screen it can
+                only be downloaded.
               </Typography>
               <Stack
                 direction="row"
@@ -345,21 +403,59 @@ export default function BranchWiseReports() {
                   ...styles.stepsStack,
                   flexWrap: "wrap",
                   gap: { xs: 1.5, sm: 2 },
-                  "& > *": { margin: "0 !important", marginBottom: "8px !important" }, 
+                  "& > *": {
+                    margin: "0 !important",
+                    marginBottom: "8px !important",
+                  },
                 }}
               >
                 {isRoleB ? (
                   <>
-                    <CustomChip label="Select a report" variant="outlined" icon={<LooksOne />} color="info" />
-                    <CustomChip label="Select the report date" variant="outlined" icon={<LooksTwo />} color="info" />
-                    <CustomChip label="Click Fetch & Download button" variant="outlined" icon={<Looks3 />} color="info" />
+                    <CustomChip
+                      label="Select a report"
+                      variant="outlined"
+                      icon={<LooksOne />}
+                      color="info"
+                    />
+                    <CustomChip
+                      label="Select the report date"
+                      variant="outlined"
+                      icon={<LooksTwo />}
+                      color="info"
+                    />
+                    <CustomChip
+                      label="Click Fetch & Download button"
+                      variant="outlined"
+                      icon={<Looks3 />}
+                      color="info"
+                    />
                   </>
                 ) : (
                   <>
-                    <CustomChip label="Select Branch" variant="outlined" icon={<LooksOne />} color="info" />
-                    <CustomChip label="Select a report" variant="outlined" icon={<LooksTwo />} color="info" />
-                    <CustomChip label="Select the report date" variant="outlined" icon={<Looks3 />} color="info" />
-                    <CustomChip label="Click Fetch & Download button" variant="outlined" icon={<Looks4 />} color="info" />
+                    <CustomChip
+                      label="Select Branch"
+                      variant="outlined"
+                      icon={<LooksOne />}
+                      color="info"
+                    />
+                    <CustomChip
+                      label="Select a report"
+                      variant="outlined"
+                      icon={<LooksTwo />}
+                      color="info"
+                    />
+                    <CustomChip
+                      label="Select the report date"
+                      variant="outlined"
+                      icon={<Looks3 />}
+                      color="info"
+                    />
+                    <CustomChip
+                      label="Click Fetch & Download button"
+                      variant="outlined"
+                      icon={<Looks4 />}
+                      color="info"
+                    />
                   </>
                 )}
               </Stack>
@@ -367,7 +463,12 @@ export default function BranchWiseReports() {
 
             {/* 3 Inputs Section (Single Row on MD and larger, Stacked on smaller screens) */}
             <Box sx={styles.inputOuterBox}>
-              <Box sx={{ ...styles.inputInnerBox, width: { xs: "100%", md: "95%", lg: "90%" } }}>
+              <Box
+                sx={{
+                  ...styles.inputInnerBox,
+                  width: { xs: "100%", md: "95%", lg: "90%" },
+                }}
+              >
                 <Autocomplete
                   sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
                   value={branch}
@@ -385,20 +486,18 @@ export default function BranchWiseReports() {
                     setBranch(v);
                     setBranchOpen(false);
                   }}
-                  getOptionLabel={(o) => o?.branchCode ? `${o.branchCode} - ${o.branchName}` : ""}
-                  isOptionEqualToValue={(o, v) => o?.branchCode === v?.branchCode}
+                  getOptionLabel={(o) =>
+                    o?.branchCode ? `${o.branchCode} - ${o.branchName}` : ""
+                  }
+                  isOptionEqualToValue={(o, v) =>
+                    o?.branchCode === v?.branchCode
+                  }
                   renderInput={(params) => (
                     <TextField
                       {...params}
                       label="Select Branch *"
                       InputProps={{
                         ...params.InputProps,
-                        endAdornment: (
-                          <>
-                            {branchLoading && <CircularProgress color="inherit" size={18} />}
-                            {params.InputProps.endAdornment}
-                          </>
-                        ),
                       }}
                     />
                   )}
@@ -408,8 +507,6 @@ export default function BranchWiseReports() {
                   sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
                   value={selectedReport}
                   options={reportList}
-                  loading={reportLoading}
-                  disabled={!branch || reportLoading}
                   getOptionLabel={(o) => o?.reportName || ""}
                   isOptionEqualToValue={(o, v) => o.id === v.id}
                   onChange={(e, v) => setReport(v)}
@@ -419,12 +516,6 @@ export default function BranchWiseReports() {
                       label="Select a report *"
                       InputProps={{
                         ...params.InputProps,
-                        endAdornment: (
-                          <>
-                            {reportLoading && <CircularProgress color="inherit" size={20} />}
-                            {params.InputProps.endAdornment}
-                          </>
-                        ),
                       }}
                     />
                   )}
@@ -434,13 +525,12 @@ export default function BranchWiseReports() {
                   <DatePicker
                     sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
                     label="Select report date *"
-                    format="DD/MM/YYYY"
+                    format="DD-MM-YYYY"
                     minDate={minDate}
                     maxDate={dayjs().endOf("day")}
                     value={selectedDate}
                     onChange={(v) => setReportDate(v)}
                     onError={(err) => setDateError(err)}
-                    disabled={!branch}
                     slotProps={{
                       textField: {
                         fullWidth: true,
@@ -460,7 +550,12 @@ export default function BranchWiseReports() {
                 endIcon={<CloudDownloadTwoTone />}
                 variant="contained"
                 onClick={handleFetchReportData}
-                disabled={disableInputs || !selectedReport || !selectedDate || !!dateError}
+                disabled={
+                  disableInputs ||
+                  !selectedReport ||
+                  !selectedDate ||
+                  !!dateError
+                }
               >
                 {isDownloading ? "Downloading..." : "Fetch & Download"}
               </Button>
@@ -473,10 +568,19 @@ export default function BranchWiseReports() {
                     </Box>
                     <Box sx={styles.progressHeaderTextBox}>
                       <Typography variant="body2" fontWeight={600}>
-                        Searching {selectedReport?.reportName ?? "the selected report"} for the period{" "}
-                        {selectedDate?.isValid() ? selectedDate.format("YYYY-MM-DD") : "an unknown period"} is in progress.
+                        Searching{" "}
+                        {selectedReport?.reportName ?? "the selected report"}{" "}
+                        for the period{" "}
+                        {selectedDate?.isValid()
+                          ? selectedDate.format("YYYY-MM-DD")
+                          : "an unknown period"}{" "}
+                        is in progress.
                       </Typography>
-                      <Typography variant="caption" color="text.secondary" sx={styles.progressCaption}>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={styles.progressCaption}
+                      >
                         {downloadedMB
                           ? `Streaming report data… ${downloadedMB} MB received`
                           : "Preparing your report stream…"}
@@ -484,14 +588,20 @@ export default function BranchWiseReports() {
                     </Box>
 
                     {downloadedMB && (
-                      <CustomChip color="error" label={`${downloadedMB} MB downloaded`} variant="filled" />
+                      <CustomChip
+                        color="error"
+                        label={`${downloadedMB} MB downloaded`}
+                        variant="filled"
+                      />
                     )}
                   </Box>
-                  <LinearProgress variant="indeterminate" sx={styles.progressBar} />
+                  <LinearProgress
+                    variant="indeterminate"
+                    sx={styles.progressBar}
+                  />
                 </Box>
               </Fade>
             </Box>
-            
           </Card>
         </Stack>
       </Box>
