@@ -11,6 +11,7 @@ const useApi = () => {
   const [loading, setLoading] = useState(false);
 
   const activeRequests = useRef(new Set());
+  const latestController = useRef(null); // <-- Track the latest request
   const location = useLocation();
 
   const menus = useSelector((state) => state.menus.menus);
@@ -40,6 +41,16 @@ const useApi = () => {
   const cancelAllRequests = useCallback(() => {
     activeRequests.current.forEach((controller) => controller.abort());
     activeRequests.current.clear();
+    latestController.current = null;
+  }, []);
+
+  // NEW: Cancel only the most recent API call
+  const cancelApi = useCallback(() => {
+    if (latestController.current) {
+      latestController.current.abort();
+      activeRequests.current.delete(latestController.current);
+      latestController.current = null;
+    }
   }, []);
 
   useEffect(() => () => cancelAllRequests(), [cancelAllRequests]);
@@ -57,7 +68,6 @@ const useApi = () => {
       setLoading(true);
       setError(null);
 
-      // Build final URL using service resolution
       const parts = url.split("/");
       const service = parts[1];
       const resolved = resolveConfig(`/${service}`);
@@ -66,6 +76,7 @@ const useApi = () => {
 
       const controller = new AbortController();
       activeRequests.current.add(controller);
+      latestController.current = controller; // <-- Set as the latest request
 
       try {
         const config = {
@@ -74,7 +85,7 @@ const useApi = () => {
           data: method !== "GET" ? payload : undefined,
           params: method === "GET" ? payload : undefined,
           responseType,
-          signal: controller.signal,
+          signal: controller.signal, // Attach the abort signal
           headers: {
             "Content-Type": contentType,
             "X-Request-Type": xRequestType,
@@ -91,13 +102,15 @@ const useApi = () => {
       } catch (err) {
         setError(err);
 
+        // Safely pass cancellation errors back to the component without logging them as standard API errors
+        if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
+          throw err;
+        }
+
         if (err?.response?.status !== 401) {
           if (responseType == "arraybuffer") {
             const decoder = new TextDecoder("utf-8");
-
-            // 2. Decode the ArrayBuffer (or a TypedArray view of it) into a string
             const jsonString = decoder.decode(err?.response?.data);
-            // 3. Parse the string into a JSON object
             const jsonObject = JSON.parse(jsonString);
             throw jsonObject;
           }
@@ -112,13 +125,16 @@ const useApi = () => {
         throw err?.response?.data || err?.response;
       } finally {
         activeRequests.current.delete(controller);
+        if (latestController.current === controller) {
+          latestController.current = null;
+        }
         setLoading(false);
       }
     },
     [xRequestType],
   );
 
-  return { data, error, loading, callApi, cancelAllRequests };
+  return { data, error, loading, callApi, cancelAllRequests, cancelApi };
 };
 
 export default useApi;
