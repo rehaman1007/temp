@@ -1,140 +1,615 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import React, { useEffect, useState } from "react";
+import {
+  Box,
+  Card,
+  Stack,
+  Typography,
+  TextField,
+  Button,
+  Grow,
+  CircularProgress,
+  LinearProgress,
+  Fade,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  Tooltip,
+  IconButton,
+} from "@mui/material";
+import { useTheme } from "@mui/material/styles";
+
+import Autocomplete from "@mui/material/Autocomplete";
+import { LocalizationProvider, DatePicker } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import dayjs from "dayjs";
+import useApi from "../../hooks/useApi";
+import useCustomSnackbar from "../../utils/useCustomSnackbar";
 import { useSelector } from "react-redux";
-import { useLocation } from "react-router-dom";
-import api from "../config/axiosConfig";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { convertToKebabCase } from "../utils/CommonUtilities";
 
-const useApi = () => {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(false);
+import DescriptionIcon from "@mui/icons-material/Description";
+import {
+  CloudDownloadTwoTone,
+  LooksOne,
+  LooksTwo,
+  Looks3,
+  Looks4,
+  Looks5,
+  PictureAsPdf,
+  Article,
+  TableChart,
+  FolderZip,
+  Cancel as CancelIcon,
+} from "@mui/icons-material";
+import CustomChip from "../../utils/CustomChip";
+import GlifReportsStyles from "./GlifReportsStyles";
 
-  const activeRequests = useRef(new Set());
-  const latestController = useRef(null); // <-- Track the latest request
-  const location = useLocation();
+const moduleType = "BRANCH_WISE";
+const BRANCH_REGEX = /^[a-zA-Z0-9\s]*$/;
+const INVALID_BRANCH_MSG = "Special characters are not allowed in branch search.";
 
-  const menus = useSelector((state) => state.menus.menus);
-  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
+// Helper to check if string contains only digits
+const isNumeric = (str) => /^\d+$/.test(str);
 
-  const findMenuItem = useCallback((items, route) => {
-    if (!items?.length) return null;
-    for (const item of items) {
-      if (item.route === route) return item;
-      if (item.children?.length) {
-        if (route.includes("/choose-option/")) {
-          const param = route.split("/choose-option/")[1];
-          if (param === convertToKebabCase(item.title)) return item;
-        }
-        const found = findMenuItem(item.children, route);
-        if (found) return found;
+export default function BranchWiseReports() {
+  const user = useSelector((state) => state.auth.user);
+  const { callApi, cancelApi } = useApi();
+  const showSnackBar = useCustomSnackbar();
+
+  const theme = useTheme();
+  const styles = GlifReportsStyles(theme);
+
+  const [minDate, setMinDate] = useState(dayjs("2026-03-31"));
+
+  /* ---------------- MASTER DATA ---------------- */
+  const [branchList, setBranchList] = useState([]);
+  const [reportList, setReportList] = useState([]);
+
+  /* ---------------- SELECTED VALUES ---------------- */
+  const [branch, setBranch] = useState(null);
+  const [branchInput, setBranchInput] = useState("");
+  const [selectedReport, setReport] = useState(null);
+  const [selectedDate, setReportDate] = useState(null);
+  const [reportFormat, setReportFormat] = useState("pdf");
+
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [branchLoading, setBranchLoading] = useState(false);
+  const [branchOpen, setBranchOpen] = useState(false);
+
+  const [dateError, setDateError] = useState(null);
+
+  const [isLoading, setIsLoading] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+
+  const downloadedMB =
+    downloadedBytes > 0 ? (downloadedBytes / (1024 * 1024)).toFixed(2) : null;
+
+  const disableInputs = isLoading || isDownloading;
+  const isRoleB = user?.roleAccess === "B";
+
+  /* ---------------- INITIAL LOAD & ROLE LOGIC ---------------- */
+  useEffect(() => {
+    if (isRoleB) {
+      const assignedBranchCode = String(user?.branch ?? "").padStart(5, "0");
+      const assignedBranchName = user?.branchName || "Unknown";
+      const assignedBranch = {
+        branchCode: assignedBranchCode,
+        branchName: assignedBranchName,
+      };
+
+      setBranchList([assignedBranch]);
+      setBranch(assignedBranch);
+      setBranchInput(`${assignedBranchCode} - ${assignedBranchName}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  /* ---------------- API CALLS ---------------- */
+  const fetchBranches = async (term) => {
+    try {
+      setBranchLoading(true);
+
+      let circleValue = "";
+      switch (user?.roleAccess) {
+        case "W":
+          circleValue = "null";
+          break;
+        case "C":
+        case "B":
+          circleValue = user?.circleCode;
+          break;
+        default:
+          circleValue = "";
       }
+
+      const url = `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(
+        term
+      )}&circleCode=${circleValue || ""}`;
+
+      const res = await callApi(url, null, "GET");
+
+      if (res?.data?.length > 0) {
+        const mappedBranches = res.data.map((i) => ({
+          branchCode: i.code,
+          branchName: i.name,
+        }));
+        setBranchList(mappedBranches);
+      } else {
+        setBranchList([]);
+      }
+    } catch (e) {
+      console.error(e);
+      setBranchList([]);
+    } finally {
+      setBranchLoading(false);
     }
-    return null;
-  }, []);
+  };
 
-  const xRequestType = (() => {
-    const currentMenu = findMenuItem(menus, location.pathname);
-    return currentMenu?.requestType || selectedMenuItem?.requestType || "*";
-  })();
+  useEffect(() => {
+    if (!branch?.branchCode) return;
 
-  const cancelAllRequests = useCallback(() => {
-    activeRequests.current.forEach((controller) => controller.abort());
-    activeRequests.current.clear();
-    latestController.current = null;
-  }, []);
+    setReportList([]);
+    setReport(null);
+    setReportDate(null);
+    fetchReports(branch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branch]);
 
-  // NEW: Cancel only the most recent API call
-  const cancelApi = useCallback(() => {
-    if (latestController.current) {
-      latestController.current.abort();
-      activeRequests.current.delete(latestController.current);
-      latestController.current = null;
+  const fetchReports = async (branch) => {
+    try {
+      const payload = {
+        moduleType: moduleType,
+        branchCode: branch?.branchCode,
+        roleId: user?.role,
+      };
+
+      const res = await callApi("/RS/reports/types", payload, "POST");
+      const reports = res?.data || [];
+      setReportList(reports);
+
+      if (reports.length > 0 && reports[0].selectedDate) {
+        setMinDate(dayjs(reports[0].selectedDate).startOf("day"));
+      }
+    } catch (error) {
+      console.error(error);
+      setReportList([]);
+      showSnackBar("Unable to load reports. Please try again later.", "error");
     }
-  }, []);
+  };
 
-  useEffect(() => () => cancelAllRequests(), [cancelAllRequests]);
+  /* ---------------- DOWNLOAD LOGIC ---------------- */
+  const handleFetchReportData = async () => {
+    if (!selectedReport?.fileName || !selectedDate) return;
 
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true,
-    ) => {
-      setLoading(true);
-      setError(null);
+    if (dateError) {
+      showSnackBar(getErrorMessage(dateError), "error");
+      return;
+    }
 
-      const parts = url.split("/");
-      const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
-      parts[1] = resolved;
-      const finalUrl = parts.slice(1).join("/");
+    setIsLoading(true);
+    setIsDownloading(true);
+    setDownloadedBytes(0);
 
-      const controller = new AbortController();
-      activeRequests.current.add(controller);
-      latestController.current = controller; // <-- Set as the latest request
+    const payload = {
+      moduleType: moduleType,
+      fileName: selectedReport.fileName,
+      branchCode: branch.branchCode,
+      date: selectedDate.format("YYYY-MM-DD"),
+      roleId: user.role,
+      format: reportFormat,
+    };
 
-      try {
-        const config = {
-          method,
-          url: finalUrl,
-          data: method !== "GET" ? payload : undefined,
-          params: method === "GET" ? payload : undefined,
-          responseType,
-          signal: controller.signal, // Attach the abort signal
-          headers: {
-            "Content-Type": contentType,
-            "X-Request-Type": xRequestType,
-            ...(extraConfig.headers || {}),
+    try {
+      const response = await callApi(
+        "/RS/reports/download",
+        payload,
+        "POST",
+        "blob",
+        "application/json",
+        {
+          onDownloadProgress: (event) => {
+            setIsDownloading(true);
+            if (event && typeof event.loaded === "number") {
+              setDownloadedBytes(event.loaded);
+            }
           },
-          ...extraConfig,
+        },
+        false
+      );
+
+      if (response.data && response.data.size > 22) {
+        const contentDisposition =
+          response.headers["content-disposition"] ||
+          response.headers["Content-Disposition"];
+
+        const getFallbackExtension = (fmt) => {
+          if (fmt === "excel") return "xlsx";
+          if (fmt === "text") return "txt";
+          return fmt;
         };
 
-        const response = await api(config);
-        setData(response.data);
-        return returnDataOnly || responseType == "json"
-          ? response.data
-          : response;
-      } catch (err) {
-        setError(err);
+        let filename = `report.${getFallbackExtension(reportFormat)}`;
 
-        // Safely pass cancellation errors back to the component without logging them as standard API errors
-        if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
-          throw err;
-        }
-
-        if (err?.response?.status !== 401) {
-          if (responseType == "arraybuffer") {
-            const decoder = new TextDecoder("utf-8");
-            const jsonString = decoder.decode(err?.response?.data);
-            const jsonObject = JSON.parse(jsonString);
-            throw jsonObject;
+        if (contentDisposition && contentDisposition.indexOf("attachment") !== -1) {
+          const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (filenameMatch && filenameMatch.length > 1) {
+            filename = filenameMatch[1];
           }
-
-          console.error(
-            err.response?.data?.message ||
-              err.response?.data?.error ||
-              "An error occurred",
-          );
         }
 
-        throw err?.response?.data || err?.response;
-      } finally {
-        activeRequests.current.delete(controller);
-        if (latestController.current === controller) {
-          latestController.current = null;
-        }
-        setLoading(false);
+        const downloadUrl = window.URL.createObjectURL(response.data);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+        showSnackBar(`Report "${filename}" downloaded successfully`, "success");
+      } else {
+        showSnackBar("No reports found", "warning");
       }
-    },
-    [xRequestType],
+    } catch (error) {
+      if (error?.name === "CanceledError" || error?.code === "ERR_CANCELED") {
+        console.log("Download cancelled by user.");
+        return;
+      }
+
+      console.error("error", error);
+
+      if (error && error instanceof Blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const errorJson = JSON.parse(reader.result);
+            console.error(errorJson.message);
+            showSnackBar(errorJson.message || "No reports found", "error");
+          } catch (e) {
+            console.error(e);
+            showSnackBar("Something went wrong, kindly try again.", "error");
+          }
+        };
+        reader.readAsText(error);
+      } else {
+        showSnackBar("Network Error: Could not connect to server", "error");
+      }
+    } finally {
+      setIsLoading(false);
+      setIsDownloading(false);
+      setDownloadedBytes(0);
+    }
+  };
+
+  const handleCancelDownload = () => {
+    cancelApi();
+    setIsLoading(false);
+    setIsDownloading(false);
+    setDownloadedBytes(0);
+    showSnackBar("Download cancelled", "info");
+  };
+
+  const getErrorMessage = (error) => {
+    const minDateStr = minDate?.isValid()
+      ? minDate.format("DD/MM/YYYY")
+      : "Allowed Min Date";
+
+    switch (error) {
+      case "maxDate":
+        return "Date cannot be in the future (Today is max)";
+      case "minDate":
+        return `Date cannot be prior to ${minDateStr}`;
+      case "invalidDate":
+        return "Invalid date (Check day for this month)";
+      default:
+        return `Allowed Range: ${minDateStr} - Today`;
+    }
+  };
+
+  /* ---------------- UI ---------------- */
+  return (
+    <Grow in timeout={500}>
+      <Box sx={styles.rootBox} display="flex" justifyContent="center">
+        <Stack spacing={4} sx={{ width: "100%", maxWidth: 1550 }}>
+          <Card sx={styles.card}>
+            {/* Header Section */}
+            <Box sx={styles.headerContainer}>
+              <Box sx={styles.headerIconWrapper}>
+                <DescriptionIcon sx={styles.summaryIcon} />
+              </Box>
+              <Box sx={styles.headerTextBox}>
+                <Typography variant="h5" fontWeight="bold" sx={styles.headerTitle}>
+                  Branch Wise Reports Generation
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{ mt: 0.5, color: "rgba(255, 255, 255, 0.9)" }}
+                >
+                  Choose a specific required Branch, Report type, Date and Format using the criteria below to download reports
+                </Typography>
+              </Box>
+            </Box>
+
+            {/* Note and Steps Section */}
+            <Box sx={styles.noteContainer}>
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ fontStyle: "italic", mb: 1.5 }}
+              >
+                Note: The generated reports cannot be viewed on-screen it can only be downloaded.
+              </Typography>
+              <Stack
+                direction="row"
+                spacing={2}
+                sx={{
+                  ...styles.stepsStack,
+                  flexWrap: "wrap",
+                  gap: { xs: 1.5, sm: 2 },
+                  "& > *": { margin: "0 !important", marginBottom: "8px !important" },
+                }}
+              >
+                {isRoleB ? (
+                  <>
+                    <CustomChip label="Select a report" variant="outlined" icon={<LooksOne />} color="info" />
+                    <CustomChip label="Select the report date" variant="outlined" icon={<LooksTwo />} color="info" />
+                    <CustomChip label="Choose report format" variant="outlined" icon={<Looks3 />} color="info" />
+                    <CustomChip label="Click Fetch & Download button" variant="outlined" icon={<Looks4 />} color="info" />
+                  </>
+                ) : (
+                  <>
+                    <CustomChip label="Select Branch" variant="outlined" icon={<LooksOne />} color="info" />
+                    <CustomChip label="Select a report" variant="outlined" icon={<LooksTwo />} color="info" />
+                    <CustomChip label="Select the report date" variant="outlined" icon={<Looks3 />} color="info" />
+                    <CustomChip label="Choose report format" variant="outlined" icon={<Looks4 />} color="info" />
+                    <CustomChip label="Click Fetch & Download button" variant="outlined" icon={<Looks5 />} color="info" />
+                  </>
+                )}
+              </Stack>
+            </Box>
+
+            {/* 3 Inputs Section */}
+            <Box sx={styles.inputOuterBox}>
+              <Box sx={{ ...styles.inputInnerBox, width: { xs: "100%", md: "95%", lg: "90%" } }}>
+                <Autocomplete
+                  sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
+                  autoHighlight
+                  disabled={isRoleB || branchLoading}
+                  value={branch}
+                  forcePopupIcon={false}
+                  clearIcon={branchInput ? undefined : null}
+                  options={Array.isArray(branchList) ? branchList : []}
+                  noOptionsText={
+                    branchInput.length < 3 ? "Please enter at least 3 characters" : "No Options"
+                  }
+                  inputValue={branchInput}
+                  loading={branchInput.length >= 3 && branchLoading}
+                  open={branchOpen}
+                  onOpen={() => setBranchOpen(true)}
+                  onClose={() => setBranchOpen(false)}
+                  onInputChange={(e, value, reason) => {
+                    if (reason === "input" && !BRANCH_REGEX.test(value)) {
+                      showSnackBar(INVALID_BRANCH_MSG, "warning");
+                      return;
+                    }
+                    setBranchInput(value);
+                    if (reason === "input") {
+                      if (value.length >= 3) {
+                        fetchBranches(value);
+                      } else {
+                        setBranchList([]);
+                      }
+                    } else if (reason === "clear") {
+                      setBranchList([]);
+                      setBranch(null);
+                    }
+                  }}
+                  onChange={(e, v) => {
+                    setBranch(v);
+                    setBranchInput(v ? `${v.branchCode} - ${v.branchName}` : "");
+                    setBranchOpen(false);
+                  }}
+                  getOptionLabel={(o) => o?.branchCode ? `${o.branchCode} - ${o.branchName}` : ""}
+                  isOptionEqualToValue={(o, v) => o?.branchCode === v?.branchCode}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Branch Code or Name *"
+                      fullWidth
+                      InputLabelProps={{ shrink: true }}
+                      placeholder="eg. 12345 or ABC"
+                      InputProps={{
+                        ...params.InputProps,
+                        endAdornment: (
+                          <>
+                            {branchLoading ? <CircularProgress color="inherit" size={20} /> : null}
+                            {params.InputProps.endAdornment}
+                          </>
+                        ),
+                      }}
+                      slotProps={{
+                        htmlInput: {
+                          ...params.inputProps,
+                          maxLength: isNumeric(params.inputProps.value) ? 5 : 15,
+                        },
+                      }}
+                    />
+                  )}
+                />
+
+                <Autocomplete
+                  sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
+                  value={selectedReport}
+                  options={reportList}
+                  getOptionLabel={(o) => o?.reportName || ""}
+                  isOptionEqualToValue={(o, v) => o.id === v.id}
+                  onChange={(e, v) => setReport(v)}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Select a report *"
+                      InputProps={{
+                        ...params.InputProps,
+                      }}
+                    />
+                  )}
+                />
+
+                <LocalizationProvider dateAdapter={AdapterDayjs}>
+                  <DatePicker
+                    sx={{ flex: 1, minWidth: { xs: "100%", md: 0 } }}
+                    label="Select report date *"
+                    format="DD-MM-YYYY"
+                    minDate={minDate}
+                    maxDate={dayjs().endOf("day")}
+                    value={selectedDate}
+                    onChange={(v) => setReportDate(v)}
+                    onError={(err) => setDateError(err)}
+                    slotProps={{
+                      textField: {
+                        fullWidth: true,
+                        error: !!dateError,
+                        helperText: dateError ? getErrorMessage(dateError) : "",
+                      },
+                    }}
+                  />
+                </LocalizationProvider>
+              </Box>
+            </Box>
+
+            {/* Report Format Radio Group Section */}
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                mt: 2,
+                mb: 1,
+              }}
+            >
+              <Typography
+                variant="subtitle2"
+                color="text.secondary"
+                sx={{ mb: 1, fontWeight: 600 }}
+              >
+                Select Download Format:
+              </Typography>
+              <RadioGroup
+                row
+                value={reportFormat}
+                onChange={(e) => setReportFormat(e.target.value)}
+                sx={{ justifyContent: "center" }}
+              >
+                <FormControlLabel
+                  value="pdf"
+                  control={<Radio />}
+                  label={
+                    <Stack direction="row" alignItems="center" gap={0.5}>
+                      <PictureAsPdf color="error" /> PDF
+                    </Stack>
+                  }
+                  sx={{ mr: { xs: 2, sm: 4 } }}
+                />
+                <FormControlLabel
+                  value="excel"
+                  control={<Radio />}
+                  label={
+                    <Stack direction="row" alignItems="center" gap={0.5}>
+                      <TableChart color="success" /> Excel
+                    </Stack>
+                  }
+                  sx={{ mr: { xs: 2, sm: 4 } }}
+                />
+                <FormControlLabel
+                  value="text"
+                  control={<Radio />}
+                  label={
+                    <Stack direction="row" alignItems="center" gap={0.5}>
+                      <Article color="primary" /> Text
+                    </Stack>
+                  }
+                  sx={{ mr: { xs: 2, sm: 4 } }}
+                />
+                <FormControlLabel
+                  value="zip"
+                  control={<Radio />}
+                  label={
+                    <Stack direction="row" alignItems="center" gap={0.5}>
+                      <FolderZip color="warning" /> Zip
+                    </Stack>
+                  }
+                />
+              </RadioGroup>
+            </Box>
+
+            {/* Fetch & Download Section */}
+            <Box sx={{ ...styles.buttonContainer, pt: 1 }}>
+              <Button
+                sx={styles.downloadButton}
+                endIcon={<CloudDownloadTwoTone />}
+                variant="contained"
+                onClick={handleFetchReportData}
+                disabled={disableInputs || !selectedReport || !selectedDate || !!dateError}
+              >
+                {isDownloading ? "Downloading..." : "Fetch & Download"}
+              </Button>
+
+              <Fade in={isDownloading} unmountOnExit>
+                <Box sx={styles.progressContainer}>
+                  <Box
+                    sx={{
+                      ...styles.progressHeader,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 2,
+                    }}
+                  >
+                    {/* Left: Progress info */}
+                    <Box sx={{ display: "flex", gap: 2, alignItems: "center", flex: 1 }}>
+                      <Box sx={styles.progressIconWrapper}>
+                        <CloudDownloadTwoTone sx={styles.innerDownloadIcon} />
+                      </Box>
+                      <Box sx={styles.progressHeaderTextBox}>
+                        <Typography variant="body2" fontWeight={600}>
+                          Searching {selectedReport?.reportName ?? "the selected report"} for the period{" "}
+                          {selectedDate?.isValid() ? selectedDate.format("YYYY-MM-DD") : "an unknown period"} is in progress.
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={styles.progressCaption}>
+                          {downloadedMB
+                            ? `Streaming report data… ${downloadedMB} MB received`
+                            : "Preparing your report stream…"}
+                        </Typography>
+                      </Box>
+                    </Box>
+
+                    {/* Right: Chip + Cancel Icon Button with Tooltip */}
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                      {downloadedMB && (
+                        <CustomChip
+                          color="error"
+                          label={`${downloadedMB} MB`}
+                          variant="filled"
+                        />
+                      )}
+
+                      <Tooltip title="Cancel download and change criteria" arrow>
+                        <IconButton
+                          color="error"
+                          onClick={handleCancelDownload}
+                          aria-label="cancel download"
+                          size="small"
+                        >
+                          <CancelIcon fontSize="medium" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+                  </Box>
+                  <LinearProgress variant="indeterminate" sx={styles.progressBar} />
+                </Box>
+              </Fade>
+            </Box>
+          </Card>
+        </Stack>
+      </Box>
+    </Grow>
   );
-
-  return { data, error, loading, callApi, cancelAllRequests, cancelApi };
-};
-
-export default useApi;
+}
