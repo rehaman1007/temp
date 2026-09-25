@@ -16,6 +16,10 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.*;
 import java.sql.Timestamp;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.Clob;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -30,8 +34,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import java.nio.charset.StandardCharsets;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -64,6 +66,19 @@ public class AdminSupportServiceImpl implements AdminSupportService {
             throw new SecurityException("SQL contains invalid, non-printable, or restricted characters.");
         }
         return sql;
+    }
+
+    /**
+     * =========================================================
+     * CLOB RESOLUTION HELPER
+     * =========================================================
+     */
+    private Object resolveClobValue(ResultSet rs, int index) throws SQLException {
+        Object value = rs.getObject(index);
+        if (value instanceof Clob clob) {
+            return clob.getSubString(1, (int) clob.length());
+        }
+        return value;
     }
 
     /**
@@ -151,7 +166,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                     while (rs.next()) {
                         Map<String, Object> row = new LinkedHashMap<>();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.put(metaData.getColumnLabel(i), rs.getObject(i));
+                            // Extract values utilizing the CLOB handler to be safe during UI fetch as well
+                            row.put(metaData.getColumnLabel(i), resolveClobValue(rs, i));
                         }
                         rawRows.add(row);
                     }
@@ -346,8 +362,18 @@ public class AdminSupportServiceImpl implements AdminSupportService {
     public ResponseEntity<Resource> exportData(AdminSupportDTO dto, String userId, HttpServletRequest request) {
 
         // SECURITY FIX: Validate input SQL before processing
-        String sql = validateAndSanitizeSql(dto.getSql().trim());
-        dto.setSql(sql);
+        String rawSql = dto.getSql() == null ? "" : validateAndSanitizeSql(dto.getSql().trim());
+        
+        // BUG FIX: Strip semicolons from the export query using the existing parser. 
+        // Oracle JDBC throws ORA-00911 if a query ends with a semicolon.
+        List<String> cleanStatements = parseSqlStatements(rawSql);
+        
+        if (cleanStatements.size() != 1) {
+            throw new RuntimeException("Export requires exactly one valid SQL statement.");
+        }
+        
+        String sql = cleanStatements.get(0);
+        dto.setSql(sql); // Update the DTO with the clean, semicolon-free SQL
 
         if (!isSelectQuery(sql)) {
             throw new RuntimeException("Only SELECT/CTE queries can be exported");
@@ -525,7 +551,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
             String column = meta.getColumnName(i);
             String columnType = meta.getColumnTypeName(i);
 
-            Object value = rs.getObject(i);
+            // FIX: Extract CLOB content safely
+            Object value = resolveClobValue(rs, i);
             columns.append(column);
 
             if (value == null) {
@@ -546,7 +573,7 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
             } else if ("DATE".equalsIgnoreCase(columnType)) {
 
-                Date date = rs.getDate(i);
+                java.sql.Date date = rs.getDate(i);
                 values.append("TO_DATE('").append(date).append("','YYYY-MM-DD')");
 
             } else {
@@ -632,7 +659,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                         Row row = sheet.createRow(rowNum.getAndIncrement());
 
                         for (int i = 1; i <= cols; i++) {
-                            Object value = rs.getObject(i);
+                            // FIX: Extract CLOB content safely
+                            Object value = resolveClobValue(rs, i);
                             row.createCell(i - 1).setCellValue(value == null ? "" : value.toString());
                         }
 
@@ -662,7 +690,17 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      */
     private ResponseEntity<Resource> exportJson(String sql) {
         try {
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+            // FIX: Switch from queryForList to explicit RowMapper to handle CLOB mapping
+            List<Map<String, Object>> rows = jdbcTemplate.query(sql, (rs, rowNum) -> {
+                ResultSetMetaData meta = rs.getMetaData();
+                int cols = meta.getColumnCount();
+                Map<String, Object> map = new LinkedHashMap<>();
+                for (int i = 1; i <= cols; i++) {
+                    map.put(meta.getColumnLabel(i), resolveClobValue(rs, i));
+                }
+                return map;
+            });
+            
             ObjectMapper mapper = new ObjectMapper();
             byte[] bytes = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(rows);
             return downloadFile(bytes, "export.json", MediaType.APPLICATION_JSON_VALUE);
@@ -708,7 +746,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                         if (i > 1) {
                             csv.append(",");
                         }
-                        csv.append(csvEscape(rs.getObject(i)));
+                        // FIX: Extract CLOB content safely before escaping
+                        csv.append(csvEscape(resolveClobValue(rs, i)));
                     }
 
                     csv.append("\n");
