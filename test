@@ -18,7 +18,6 @@ import java.io.*;
 import java.sql.Timestamp;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
-import java.sql.Clob;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
@@ -70,14 +69,33 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
     /**
      * =========================================================
-     * CLOB RESOLUTION HELPER
+     * SAFE CLOB EXTRACTOR FOR EXPORTS
      * =========================================================
      */
-    private Object resolveClobValue(ResultSet rs, int index) throws SQLException {
+    private Object getSafeExportValue(ResultSet rs, int index, ResultSetMetaData meta) throws SQLException {
+        int columnType = meta.getColumnType(index);
+        String typeName = meta.getColumnTypeName(index);
+
+        // Standard JDBC way to get String directly from CLOB columns
+        if (columnType == java.sql.Types.CLOB || columnType == java.sql.Types.NCLOB ||
+                (typeName != null && typeName.toUpperCase().contains("CLOB"))) {
+            return rs.getString(index);
+        }
+
         Object value = rs.getObject(index);
-        if (value instanceof Clob clob) {
+        if (value == null) {
+            return null;
+        }
+
+        // Fallback for aggressive Oracle wrapping
+        if (value instanceof java.sql.Clob clob) {
             return clob.getSubString(1, (int) clob.length());
         }
+        
+        if (value.getClass().getName().toUpperCase().contains("CLOB")) {
+            return rs.getString(index);
+        }
+
         return value;
     }
 
@@ -163,11 +181,11 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                         }
                     }
 
+                    // Reverted back to exact original working logic for UI execution
                     while (rs.next()) {
                         Map<String, Object> row = new LinkedHashMap<>();
                         for (int i = 1; i <= columnCount; i++) {
-                            // Extract values utilizing the CLOB handler to be safe during UI fetch as well
-                            row.put(metaData.getColumnLabel(i), resolveClobValue(rs, i));
+                            row.put(metaData.getColumnLabel(i), rs.getObject(i));
                         }
                         rawRows.add(row);
                     }
@@ -364,16 +382,9 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         // SECURITY FIX: Validate input SQL before processing
         String rawSql = dto.getSql() == null ? "" : validateAndSanitizeSql(dto.getSql().trim());
         
-        // BUG FIX: Strip semicolons from the export query using the existing parser. 
-        // Oracle JDBC throws ORA-00911 if a query ends with a semicolon.
-        List<String> cleanStatements = parseSqlStatements(rawSql);
-        
-        if (cleanStatements.size() != 1) {
-            throw new RuntimeException("Export requires exactly one valid SQL statement.");
-        }
-        
-        String sql = cleanStatements.get(0);
-        dto.setSql(sql); // Update the DTO with the clean, semicolon-free SQL
+        // BUG FIX: Strip trailing semicolons which cause ORA-00911 when running queries directly.
+        String sql = rawSql.replaceAll("(?s);+\\s*$", "");
+        dto.setSql(sql); 
 
         if (!isSelectQuery(sql)) {
             throw new RuntimeException("Only SELECT/CTE queries can be exported");
@@ -551,8 +562,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
             String column = meta.getColumnName(i);
             String columnType = meta.getColumnTypeName(i);
 
-            // FIX: Extract CLOB content safely
-            Object value = resolveClobValue(rs, i);
+            // FIX: Safely retrieve Export value (Handles CLOBs properly)
+            Object value = getSafeExportValue(rs, i, meta);
             columns.append(column);
 
             if (value == null) {
@@ -645,31 +656,31 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                         return ps;
                     },
                     rs -> {
-                        ResultSetMetaData meta = rs.getMetaData();
-                        int cols = meta.getColumnCount();
-
-                        if (rowNum.get() == 0) {
-                            Row header = sheet.createRow(0);
+                        try {
+                            ResultSetMetaData meta = rs.getMetaData();
+                            int cols = meta.getColumnCount();
+    
+                            if (rowNum.get() == 0) {
+                                Row header = sheet.createRow(0);
+                                for (int i = 1; i <= cols; i++) {
+                                    header.createCell(i - 1).setCellValue(meta.getColumnLabel(i));
+                                }
+                                rowNum.incrementAndGet();
+                            }
+    
+                            Row row = sheet.createRow(rowNum.getAndIncrement());
+    
                             for (int i = 1; i <= cols; i++) {
-                                header.createCell(i - 1).setCellValue(meta.getColumnLabel(i));
+                                // FIX: Safely retrieve Export value (Handles CLOBs properly)
+                                Object value = getSafeExportValue(rs, i, meta);
+                                row.createCell(i - 1).setCellValue(value == null ? "" : value.toString());
                             }
-                            rowNum.incrementAndGet();
-                        }
-
-                        Row row = sheet.createRow(rowNum.getAndIncrement());
-
-                        for (int i = 1; i <= cols; i++) {
-                            // FIX: Extract CLOB content safely
-                            Object value = resolveClobValue(rs, i);
-                            row.createCell(i - 1).setCellValue(value == null ? "" : value.toString());
-                        }
-
-                        if (rowNum.get() % 5000 == 0) {
-                            try {
+    
+                            if (rowNum.get() % 5000 == 0) {
                                 sheet.flushRows(500);
-                            } catch (IOException e) {
-                                throw new RuntimeException(e);
                             }
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
                         }
                     });
 
@@ -690,13 +701,17 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      */
     private ResponseEntity<Resource> exportJson(String sql) {
         try {
-            // FIX: Switch from queryForList to explicit RowMapper to handle CLOB mapping
+            // FIX: Explicit RowMapper to handle CLOBs before conversion
             List<Map<String, Object>> rows = jdbcTemplate.query(sql, (rs, rowNum) -> {
                 ResultSetMetaData meta = rs.getMetaData();
                 int cols = meta.getColumnCount();
                 Map<String, Object> map = new LinkedHashMap<>();
                 for (int i = 1; i <= cols; i++) {
-                    map.put(meta.getColumnLabel(i), resolveClobValue(rs, i));
+                    try {
+                        map.put(meta.getColumnLabel(i), getSafeExportValue(rs, i, meta));
+                    } catch (SQLException e) {
+                        throw new RuntimeException(e);
+                    }
                 }
                 return map;
             });
@@ -726,31 +741,35 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                     return ps;
                 },
                 rs -> {
-                    ResultSetMetaData meta = rs.getMetaData();
-                    int cols = meta.getColumnCount();
-
-                    /* HEADER */
-                    if (!headerWritten[0]) {
+                    try {
+                        ResultSetMetaData meta = rs.getMetaData();
+                        int cols = meta.getColumnCount();
+    
+                        /* HEADER */
+                        if (!headerWritten[0]) {
+                            for (int i = 1; i <= cols; i++) {
+                                if (i > 1) {
+                                    csv.append(",");
+                                }
+                                csv.append(csvEscape(meta.getColumnLabel(i)));
+                            }
+                            csv.append("\n");
+                            headerWritten[0] = true;
+                        }
+    
+                        /* DATA */
                         for (int i = 1; i <= cols; i++) {
                             if (i > 1) {
                                 csv.append(",");
                             }
-                            csv.append(csvEscape(meta.getColumnLabel(i)));
+                            // FIX: Safely retrieve Export value (Handles CLOBs properly)
+                            csv.append(csvEscape(getSafeExportValue(rs, i, meta)));
                         }
+    
                         csv.append("\n");
-                        headerWritten[0] = true;
+                    } catch (SQLException e) {
+                        throw new RuntimeException(e);
                     }
-
-                    /* DATA */
-                    for (int i = 1; i <= cols; i++) {
-                        if (i > 1) {
-                            csv.append(",");
-                        }
-                        // FIX: Extract CLOB content safely before escaping
-                        csv.append(csvEscape(resolveClobValue(rs, i)));
-                    }
-
-                    csv.append("\n");
                 });
 
         return downloadFile(csv.toString().getBytes(StandardCharsets.UTF_8), "export.csv", "text/csv");
