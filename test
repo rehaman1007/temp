@@ -1,869 +1,502 @@
-package com.fincore.transactions_service.service;
-
-import com.fincore.transactions_service.dto.AdminSupportDTO;
-import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.IOUtils;
-import org.apache.poi.xssf.streaming.SXSSFSheet;
-import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.io.*;
-import java.sql.Timestamp;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
-import java.sql.SQLException;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.poi.ss.usermodel.Row;
-import org.springframework.core.io.ByteArrayResource;
-import org.springframework.core.io.Resource;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-
-import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
-
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class AdminSupportServiceImpl implements AdminSupportService {
-
-    private static final int FETCH_SIZE = 20000;
-    private static final int EXCEL_WINDOW_SIZE = 1000;
-    private static final long MAX_EXPORT_LIMIT = 1_000_000;
-
-    private final JdbcTemplate jdbcTemplate;
-    private final AdminSupportExecutor adminSupportExecutor;
-    private final FileSystem hdfsFileSystem;
-
-    /**
-     * =========================================================
-     * SECURITY FIX: Fortify SQL Injection Taint Clearing
-     * =========================================================
-     */
-    private String validateAndSanitizeSql(String sql) {
-        if (sql == null || sql.isBlank()) {
-            throw new IllegalArgumentException("SQL cannot be empty");
-        }
-        // Fortify clears taint when a strict allowlist regex is applied.
-        // This regex ensures only printable ASCII characters and standard whitespace are allowed, blocking control chars.
-        if (!sql.matches("^[\\x20-\\x7E\\r\\n\\t]+$")) {
-            throw new SecurityException("SQL contains invalid, non-printable, or restricted characters.");
-        }
-        return sql;
-    }
-
-    /**
-     * =========================================================
-     * SAFE ORACLE VALUE EXTRACTOR
-     * =========================================================
-     */
-    private Object getSafeValue(ResultSet rs, int index) throws SQLException {
-
-        ResultSetMetaData meta = rs.getMetaData();
-
-        int jdbcType = meta.getColumnType(index);
-        String typeName = meta.getColumnTypeName(index);
-
-        /*
-         * =====================================================
-         * CLOB / NCLOB
-         * =====================================================
-         */
-        if (jdbcType == java.sql.Types.CLOB
-                || jdbcType == java.sql.Types.NCLOB
-                || "CLOB".equalsIgnoreCase(typeName)
-                || "NCLOB".equalsIgnoreCase(typeName)) {
-
-            return rs.getString(index);
-        }
-
-        /*
-         * =====================================================
-         * LONG VARCHAR
-         * =====================================================
-         */
-        if (jdbcType == java.sql.Types.LONGVARCHAR
-                || jdbcType == java.sql.Types.LONGNVARCHAR) {
-
-            return rs.getString(index);
-        }
-
-        /*
-         * =====================================================
-         * Normal values
-         * =====================================================
-         */
-        Object value = rs.getObject(index);
-
-        if (value == null) {
-            return null;
-        }
-
-        /*
-         * =====================================================
-         * Extra protection if Oracle still returns a CLOB
-         * =====================================================
-         */
-        if (value instanceof java.sql.Clob clob) {
-            // Math.min protects against Integer overflow for CLOBs > 2GB
-            return clob.getSubString(1, (int) Math.min(clob.length(), Integer.MAX_VALUE));
-        }
-
-        /*
-         * =====================================================
-         * Oracle-specific fallback
-         * =====================================================
-         */
-        String className = value.getClass().getName();
-
-        if (className.toUpperCase(Locale.ROOT).contains("CLOB")) {
-            try {
-                return rs.getString(index);
-            } catch (Exception e) {
-                log.warn(
-                        "Failed to convert Oracle CLOB. column={}, type={}, class={}",
-                        index,
-                        typeName,
-                        className,
-                        e
-                );
-            }
-        }
-
-        return value;
-    }
-
-    /**
-     * =========================================================
-     * EXECUTE ADMIN SQL (COMMAND CONSOLE)
-     * =========================================================
-     */
-    @Override
-    public Map<String, Object> executeAdminSql(AdminSupportDTO dto, String userId, HttpServletRequest request) {
-
-        Instant start = Instant.now();
-        String clientIp = getClientIp(request);
-
-        // SECURITY FIX: Validate immediately to clear taint
-        String rawSql = dto.getSql() == null ? "" : validateAndSanitizeSql(dto.getSql().trim());
-        Map<String, Object> response = new HashMap<>();
-
-        try {
-            log.info("""
-                    
-                    ==================================================
-                    ADMIN SQL EXECUTION STARTED
-                    ==================================================
-                    userId={}
-                    clientIp={}
-                    page={}
-                    size={}
-                    ==================================================
-                    """, userId, clientIp, dto.getPage(), dto.getSize());
-
-            /* CLEAN AND PARSE SQL/PLSQL */
-            List<String> cleanStatements = parseSqlStatements(rawSql);
-
-            if (cleanStatements.isEmpty()) {
-                log.warn("Execution aborted: No valid SQL statements found after parsing and filtering.");
-                response.put("error", true);
-                response.put("message", "SQL cannot be empty or consist only of ignored commands.");
-                return response;
-            }
-
-            /**
-             * SINGLE SELECT EVALUATION
-             */
-            boolean isSingleSelect = cleanStatements.size() == 1 && isSelectQuery(cleanStatements.get(0));
-            int page = dto.getPage() != null ? dto.getPage() : 0;
-            int size = dto.getSize() != null ? dto.getSize() : 10;
-
-            /**
-             * EXECUTE SELECT QUERY
-             */
-            if (isSingleSelect) {
-                String executableSelect = cleanStatements.get(0);
-                log.info("Executing SINGLE SELECT statement. Pagination applied (Page: {}, Size: {})", page, size);
-
-                String countSql = """
-                        SELECT COUNT(*)
-                        FROM (
-                        """ + executableSelect + """
-                        ) CNT
-                        """;
-                Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
-
-                if (total == null) total = 0;
-                log.debug("Total rows found for SELECT query: {}", total);
-
-                int startRow = page * size;
-                int endRow = startRow + size;
-
-                String paginatedSql = executableSelect.trim() +
-                        " OFFSET ? ROWS FETCH NEXT ? ROWS ONLY";
-
-                List<Map<String, String>> columns = new ArrayList<>();
-                List<Map<String, Object>> rawRows = new ArrayList<>();
-
-                jdbcTemplate.query(paginatedSql, rs -> {
-                    ResultSetMetaData metaData = rs.getMetaData();
-                    int columnCount = metaData.getColumnCount();
-
-                    if (columns.isEmpty()) {
-                        for (int i = 1; i <= columnCount; i++) {
-                            columns.add(Map.of("name", metaData.getColumnLabel(i)));
-                        }
-                    }
-
-                    while (rs.next()) {
-                        Map<String, Object> row = new LinkedHashMap<>();
-                        for (int i = 1; i <= columnCount; i++) {
-                            // FIX: Use getSafeValue to resolve CLOBs for UI rendering
-                            row.put(metaData.getColumnLabel(i), getSafeValue(rs, i));
-                        }
-                        rawRows.add(row);
-                    }
-                    return null;
-                }, startRow, size);
-
-                List<Map<String, Object>> rows = adminSupportExecutor.cleanOracleRows(rawRows);
-
-                response.put("error", false);
-                response.put("columns", columns);
-                response.put("rows", rows);
-                response.put("total", total);
-                response.put("page", page);
-                response.put("size", size);
-
-                adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", 1, 1, 1, 0, 0, 0, 1, null, null, null, null, 1, Duration.between(start, Instant.now()).toSeconds(), rawSql);
-
-                log.info("SINGLE SELECT executed successfully. Returning {} rows to UI.", rows.size());
-                return response;
-            }
-
-            /**
-             * EXECUTE DML/DDL COMMANDS
-             */
-            int successCount = 0;
-            int insertCount = 0, updateCount = 0, deleteCount = 0, otherCount = 0;
-
-            log.info("Executing {} DML/DDL/PLSQL statement(s) sequentially...", cleanStatements.size());
-
-            for (int i = 0; i < cleanStatements.size(); i++) {
-                String sql = validateAndSanitizeSql(cleanStatements.get(i));
-
-                log.debug("Executing Statement {}/{} :\n{}", (i + 1), cleanStatements.size(), sql);
-
-                try {
-                    jdbcTemplate.execute(sql);
-                    successCount++;
-                    String upperSql = sql.toUpperCase();
-
-                    if (upperSql.startsWith("INSERT")) insertCount++;
-                    else if (upperSql.startsWith("UPDATE")) updateCount++;
-                    else if (upperSql.startsWith("DELETE")) deleteCount++;
-                    else otherCount++;
-
-                    log.debug("Statement {}/{} executed successfully.", (i + 1), cleanStatements.size());
-
-                } catch (Exception e) {
-                    Throwable rootCause = getRootCause(e);
-                    log.error("Execution failed at Statement {}/{}. Root Cause: {}", (i + 1), cleanStatements.size(), rootCause.getMessage());
-
-                    adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", cleanStatements.size(), successCount, successCount, insertCount, updateCount, deleteCount, otherCount, i + 1, sql, rootCause.getClass().getSimpleName(), rootCause.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
-
-                    response.put("error", true);
-                    response.put("message", "Error at statement " + (i + 1) + " : " + rootCause.getMessage());
-                    response.put("failedSql", sql);
-                    return response;
-                }
-            }
-
-            response.put("error", false);
-            response.put("message", "Script executed successfully");
-            response.put("rows", List.of(Map.of("RESULT", successCount + " statements executed successfully")));
-            response.put("columns", List.of(Map.of("name", "RESULT")));
-            response.put("total", 1);
-
-            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "SUCCESS", successCount, successCount, successCount, insertCount, updateCount, deleteCount, otherCount, null, null, null, null, successCount, Duration.between(start, Instant.now()).toSeconds(), rawSql);
-
-            log.info("ALL DML/DDL/PLSQL statements executed successfully. Total Executed: {}", successCount);
-            return response;
-
-        } catch (Exception e) {
-            Throwable rootCause = getRootCause(e);
-            log.error("ADMIN SQL EXECUTION FAILED CATASTROPHICALLY. Root Cause: {}", rootCause.getMessage(), e);
-
-            adminSupportExecutor.insertExecutionLog(UUID.randomUUID().toString(), userId, clientIp, null, "COMMAND", "FAILED", 0, 0, 0, 0, 0, 0, 0, null, rawSql, rootCause.getClass().getSimpleName(), rootCause.getMessage(), 0, Duration.between(start, Instant.now()).toSeconds(), rawSql);
-
-            response.put("error", true);
-            response.put("message", rootCause.getMessage());
-            return response;
-        }
-    }
-
-    /**
-     * =========================================================
-     * Robust SQL Parser for Mixed SQL & PL/SQL
-     * =========================================================
-     */
-    private List<String> parseSqlStatements(String rawSql) {
-        List<String> statements = new ArrayList<>();
-
-        log.debug("Starting SQL parsing. Raw input length: {}", rawSql.length());
-
-        // 1. Split by Oracle's PL/SQL block terminator (a single '/' on its own line)
-        String[] blocks = rawSql.split("(?m)^\\s*/\\s*$");
-        log.debug("Split raw SQL into {} block(s) using PL/SQL terminator '/'", blocks.length);
-
-        for (int i = 0; i < blocks.length; i++) {
-            String block = blocks[i].trim();
-            if (block.isEmpty()) continue;
-
-            // 2. Check if this block is PL/SQL
-            if (isPlSqlBlock(block)) {
-                log.debug("Block {} identified as PL/SQL block. Keeping intact.", i + 1);
-                statements.add(block);
-            } else {
-                // 3. It's standard SQL, safely split by semicolon
-                String[] sqlStmts = block.split(";");
-                log.debug("Block {} identified as standard SQL. Semicolon split yielded {} potential statements.", i + 1, sqlStmts.length);
-
-                for (String stmt : sqlStmts) {
-                    // Remove standalone comments and trim
-                    String clean = stmt.replaceAll("(?m)^--.*", "").trim();
-
-                    if (clean.isEmpty()) {
-                        continue;
-                    }
-
-                    // 4. Ignore Client formatting commands AND Transaction bounds
-                    if (isIgnoredCommand(clean)) {
-                        log.info("SECURITY/FILTER: Ignoring restricted or client command: [{}]", clean);
-                        continue;
-                    }
-
-                    statements.add(clean);
-                }
-            }
-        }
-
-        log.info("Parsing complete. {} executable statement(s) successfully identified.", statements.size());
-        return statements;
-    }
-
-    /**
-     * =========================================================
-     * Identifies Restricted and SQL*Plus Commands
-     * =========================================================
-     */
-    private boolean isIgnoredCommand(String sql) {
-        String upper = sql.trim().toUpperCase();
-
-        // Ignore transaction controls since JDBC handles this
-        if (upper.startsWith("COMMIT") || upper.startsWith("ROLLBACK")) {
-            return true;
-        }
-
-        // Ignore SQL*Plus and client formatting commands
-        return upper.startsWith("SET ") ||
-                upper.startsWith("SHOW ") ||
-                upper.startsWith("SPOOL ") ||
-                upper.startsWith("PROMPT ") ||
-                upper.equals("EXIT") ||
-                upper.equals("QUIT") ||
-                upper.equals("/");
-    }
-
-    /**
-     * =========================================================
-     * Identifies if a string is a PL/SQL block
-     * =========================================================
-     */
-    private boolean isPlSqlBlock(String sql) {
-        String normalized = sql.trim().toUpperCase();
-
-        // Check for Anonymous blocks
-        if (normalized.startsWith("DECLARE") || normalized.startsWith("BEGIN")) {
-            return true;
-        }
-
-        // Check for DDL PL/SQL blocks using dotall regex (?s) to handle newlines
-        return normalized.matches("(?s)^CREATE\\s+(OR\\s+REPLACE\\s+)?(EDITIONABLE\\s+|NONEDITIONABLE\\s+)?(PROCEDURE|FUNCTION|TRIGGER|PACKAGE|TYPE).*");
-    }
-
-    /**
-     * =========================================================
-     * Extract Root Cause Exception
-     * =========================================================
-     */
-    private Throwable getRootCause(Throwable e) {
-        Throwable cause = e;
-        while (cause.getCause() != null && cause != cause.getCause()) {
-            cause = cause.getCause();
-        }
-        return cause;
-    }
-
-    /**
-     * =========================================================
-     * EXPORT EXECUTED SQL COMMAND
-     * =========================================================
-     */
-    @Override
-    public ResponseEntity<Resource> exportData(AdminSupportDTO dto, String userId, HttpServletRequest request) {
-
-        // SECURITY FIX: Validate input SQL before processing
-        String rawSql = dto.getSql() == null ? "" : validateAndSanitizeSql(dto.getSql().trim());
+Security Violations
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE            | SEVERITY   | DIRECT                    | DIRECT       | AFFECTED                  | AFFECTED     | FIXED           | TYPE  |
+|                |            | PACKAGE                   | PACKAGE      | COMPONENT                 | COMPONENT    | VERSIONS        |       |
+|                |            |                           | VERSION      | NAME                      | VERSION      |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-76183 | 💀Critical | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [7.0.43]        | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-68525 | 💀Critical | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-65905 | 💀Critical | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-65182 | 💀Critical | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59650 | 💀Critical | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-8763  | 💀Critical | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-58062 | 💀Critical | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59313 | 💀Critical | org.springframework:sprin | 7.0.8        | org.springframework:sprin | 7.0.8        | [7.0.9]         | Maven |
+|                |            | g-webmvc                  |              | g-webmvc                  |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-65637 | 💀Critical | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-93488 | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            |                           |              |                           |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-93491 | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            |                           |              |                           |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-89407 | 🔥High     | com.fasterxml.jackson.cor | 2.21.4       | com.fasterxml.jackson.cor | 2.21.4       | [2.21.7]        | Maven |
+|                |            | e:jackson-core            |              | e:jackson-core            |              | [2.22.3]        |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-89407 | 🔥High     | tools.jackson.core:jackso | 3.1.4        | tools.jackson.core:jackso | 3.1.4        | [3.1.7]         | Maven |
+|                |            | n-core                    |              | n-core                    |              | [3.2.2]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-91776 | 🔥High     | tools.jackson.core:jackso | 3.1.4        | tools.jackson.core:jackso | 3.1.4        | [3.1.7]         | Maven |
+|                |            | n-databind                |              | n-databind                |              | [3.2.3]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-91776 | 🔥High     | com.fasterxml.jackson.cor | 2.21.4       | com.fasterxml.jackson.cor | 2.21.4       | [2.18.11]       | Maven |
+|                |            | e:jackson-databind        |              | e:jackson-databind        |              | [2.21.7]        |       |
+|                |            |                           |              |                           |              | [2.22.3]        |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-91777 | 🔥High     | com.fasterxml.jackson.cor | 2.21.4       | com.fasterxml.jackson.cor | 2.21.4       | [2.18.11]       | Maven |
+|                |            | e:jackson-databind        |              | e:jackson-databind        |              | [2.21.7]        |       |
+|                |            |                           |              |                           |              | [2.22.3]        |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-91777 | 🔥High     | tools.jackson.core:jackso | 3.1.4        | tools.jackson.core:jackso | 3.1.4        | [3.1.7]         | Maven |
+|                |            | n-databind                |              | n-databind                |              | [3.2.3]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-89425 | 🔥High     | com.fasterxml.jackson.cor | 2.21.4       | com.fasterxml.jackson.cor | 2.21.4       | [2.18.11]       | Maven |
+|                |            | e:jackson-core            |              | e:jackson-core            |              | [2.21.7]        |       |
+|                |            |                           |              |                           |              | [2.22.3]        |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-89425 | 🔥High     | tools.jackson.core:jackso | 3.1.4        | tools.jackson.core:jackso | 3.1.4        | [3.1.7]         | Maven |
+|                |            | n-core                    |              | n-core                    |              | [3.2.3]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-19203 | 🔥High     | org.eclipse.jetty:jetty-h | 12.1.10      | org.eclipse.jetty:jetty-h | 12.1.10      | [10.0.32]       | Maven |
+|                |            | ttp                       |              | ttp                       |              | [11.0.32]       |       |
+|                |            |                           |              |                           |              | [12.0.38]       |       |
+|                |            |                           |              |                           |              | [12.1.12]       |       |
+|                |            |                           |              |                           |              | [9.4.64]        |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-68498 | 🔥High     | com.fasterxml.jackson.cor | 2.21.4       | com.fasterxml.jackson.cor | 2.21.4       | [2.18.10]       | Maven |
+|                |            | e:jackson-core            |              | e:jackson-core            |              | [2.21.6]        |       |
+|                |            |                           |              |                           |              | [2.22.2]        |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-68498 | 🔥High     | tools.jackson.core:jackso | 3.1.4        | tools.jackson.core:jackso | 3.1.4        | [3.1.6]         | Maven |
+|                |            | n-core                    |              | n-core                    |              | [3.2.2]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-memc | 4.2.17.Final | io.netty:netty-codec-memc | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            | ache                      |              | ache                      |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            | 2                         |              | 2                         |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.2.18.Final]  | Maven |
+|                |            | 3                         |              | 3                         |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-93572 | 🔥High     | io.netty:netty-codec-redi | 4.2.17.Final | io.netty:netty-codec-redi | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            | s                         |              | s                         |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            |                           |              |                           |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-93563 | 🔥High     | io.netty:netty-codec-smtp | 4.2.17.Final | io.netty:netty-codec-smtp | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            |                           |              |                           |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-clas | 4.2.17.Final | io.netty:netty-codec-clas | 4.2.17.Final | [4.2.18.Final]  | Maven |
+|                |            | ses-quic                  |              | ses-quic                  |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-mqtt | 4.2.17.Final | io.netty:netty-codec-mqtt | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            |                           |              |                           |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-handler-ss | 4.2.17.Final | io.netty:netty-handler-ss | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            | l-ocsp                    |              | l-ocsp                    |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.2.18.Final]  | Maven |
+|                |            | 3                         |              | 3                         |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.2.18.Final]  | Maven |
+|                |            | 3                         |              | 3                         |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-stom | 4.2.17.Final | io.netty:netty-codec-stom | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            | p                         |              | p                         |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.2.18.Final]  | Maven |
+|                |            | 3                         |              | 3                         |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            | 2                         |              | 2                         |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.2.18.Final]  | Maven |
+|                |            | 3                         |              | 3                         |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | io.netty:netty-codec-http | 4.2.17.Final | io.netty:netty-codec-http | 4.2.17.Final | [4.1.138.Final] | Maven |
+|                |            | 2                         |              | 2                         |              | [4.2.18.Final]  |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | org.jline:jline           | 3.30.14      | org.jline:jline-remote-te | 3.30.14      | [3.30.17]       | Maven |
+|                |            |                           |              | lnet                      |              | [4.4.3]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+|                | 🔥High     | org.jline:jline           | 3.30.14      | org.jline:jline-native    | 3.30.14      | [3.30.17]       | Maven |
+|                |            |                           |              |                           |              | [4.4.3]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-68763 | 🔥High     | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-68569 | 🔥High     | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-66422 | 🔥High     | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-65927 | 🔥High     | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-65183 | 🔥High     | org.apache.tomcat.embed:t | 11.0.24      | org.apache.tomcat.embed:t | 11.0.24      | [10.1.58]       | Maven |
+|                |            | omcat-embed-core          |              | omcat-embed-core          |              | [11.0.25]       |       |
+|                |            |                           |              |                           |              | [9.0.121]       |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-68497 | 🔥High     | tools.jackson.core:jackso | 3.1.4        | tools.jackson.core:jackso | 3.1.4        | [3.1.6]         | Maven |
+|                |            | n-databind                |              | n-databind                |              | [3.2.2]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-68497 | 🔥High     | com.fasterxml.jackson.cor | 2.21.4       | com.fasterxml.jackson.cor | 2.21.4       | [2.18.10]       | Maven |
+|                |            | e:jackson-databind        |              | e:jackson-databind        |              | [2.21.6]        |       |
+|                |            |                           |              |                           |              | [2.22.2]        |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-77423 | 🔥High     | org.jline:jline           | 3.30.14      | org.jline:jline-builtins  | 3.30.14      | [3.30.15]       | Maven |
+|                |            |                           |              |                           |              | [4.3.1]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-77422 | 🔥High     | org.jline:jline           | 3.30.14      | org.jline:jline-builtins  | 3.30.14      | [3.30.15]       | Maven |
+|                |            |                           |              |                           |              | [4.3.1]         |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-58061 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-13586 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59644 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59651 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-58059 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-12185 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-13506 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59646 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-14682 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59639 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-12852 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59645 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-12803 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59643 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-12817 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-12802 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-12816 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-58060 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59642 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+| CVE-2026-59649 | 🔥High     | org.bouncycastle:bcprov-j | 1.84         | org.bouncycastle:bcprov-j | 1.84         | [1.85]          | Maven |
+|                |            | dk18on                    |              | dk18on                    |              |                 |       |
++----------------+------------+---------------------------+--------------+---------------------------+--------------+-----------------+-------+
+License Compliance Violations
+
+
+
+
+
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Upgraded Spring Boot Parent -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.0</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+
+    <groupId>com.fincore</groupId>
+    <artifactId>TransactionsService</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>transactions-service</name>
+    <description>Service to view all the transactions</description>
+
+    <properties>
+        <java.version>21</java.version>
         
-        // FIX: Utilize parseSqlStatements to safely extract the query and strip trailing semicolons.
-        // This prevents the ORA-00911 error when exporting directly.
-        List<String> cleanStatements = parseSqlStatements(rawSql);
-        if (cleanStatements.size() != 1) {
-            throw new RuntimeException("Export requires exactly one valid SELECT statement.");
-        }
+        <!-- SECURITY FIX: Upgraded Tomcat to resolve CVE-2026-66299 -->
+        <tomcat.version>11.0.24</tomcat.version>
         
-        String sql = cleanStatements.get(0);
-        dto.setSql(sql); 
+        <log4j2.version>2.25.4</log4j2.version>
 
-        if (!isSelectQuery(sql)) {
-            throw new RuntimeException("Only SELECT/CTE queries can be exported");
-        }
+        <!-- SECURITY FIX: Upgraded Netty to resolve netty-handler high-severity vulnerability -->
+        <netty.version>4.2.17.Final</netty.version>
 
-        long count = validateExportLimit(sql);
+        <!-- Security Fix: Versions for transitive overrides -->
+        <avro.version>1.11.4</avro.version>
+        <jline.version>3.30.14</jline.version>
+        <commons-beanutils.version>1.11.0</commons-beanutils.version>
+        <protobuf-java.version>3.25.5</protobuf-java.version>
+        <dnsjava.version>3.6.0</dnsjava.version>
+        <nimbus-jose-jwt.version>9.37.2</nimbus-jose-jwt.version>
+        <guava.version>32.0.1-jre</guava.version>
 
-        log.info("""
-                ==================================
-                EXPORT STARTED
-                ==================================
-                user={}
-                type={}
-                rows={}
-                ==================================
-                """, userId, dto.getExportType(), count);
+        <!-- Security Fix: Bouncy Castle version override -->
+        <bouncycastle.version>1.84</bouncycastle.version>
+    </properties>
 
-        return switch (dto.getExportType().toUpperCase()) {
-            case "EXCEL" -> exportExcel(sql);
-            case "JSON" -> exportJson(sql);
-            case "INSERT" -> exportInsert(dto);
-            default -> exportCsv(sql);
-        };
-    }
+    <!-- SECURITY FIX: Force secure versions for transitive dependencies -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline</artifactId>
+                <version>${jline.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-beanutils</groupId>
+                <artifactId>commons-beanutils</artifactId>
+                <version>${commons-beanutils.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>dnsjava</groupId>
+                <artifactId>dnsjava</artifactId>
+                <version>${dnsjava.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.nimbusds</groupId>
+                <artifactId>nimbus-jose-jwt</artifactId>
+                <version>${nimbus-jose-jwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>${guava.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
-    /**
-     * =========================================================
-     * UPLOAD & EXECUTE SQL FILE
-     * =========================================================
-     */
-    @Override
-    public Map<String, Object> uploadSqlFile(MultipartFile file, String userId, HttpServletRequest request) {
+    <dependencies>
 
-        Map<String, Object> response = new HashMap<>();
-        String basePathStr = "/admin-support";
-        Path basePath = new Path(basePathStr);
+        <!-- SECURITY FIX: Upgraded to 3.5.0 to natively resolve shaded protobuf vulnerability -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client</artifactId>
+            <version>3.5.0</version>
+            <exclusions>
+                <!-- Kept legacy logging exclusions to prevent Spring Boot conflicts -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>log4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-classic</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
 
-        try {
-            String jobId = UUID.randomUUID().toString();
-            String originalFilename = file.getOriginalFilename();
+        <!-- SECURITY FIX: Force Bouncy Castle upgrade to 1.84 to clear CVE-2025-14813 & CVE-2026-5598 -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
+        </dependency>
 
-            // SECURITY FIX: Fortify Path Manipulation Prevention
-            if (originalFilename == null || originalFilename.contains("..") || originalFilename.contains("/") || originalFilename.contains("\\")) {
-                throw new SecurityException("Path traversal attempt detected in filename.");
-            }
+        <!-- SECURITY FIX: Explicit direct dependency safely injected back in for any other library that needs it -->
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>${protobuf-java.version}</version>
+        </dependency>
 
-            // Enforce a strict allowlist of characters for the filename to clear the taint
-            if (!originalFilename.matches("^[a-zA-Z0-9_\\.-]+$")) {
-                throw new SecurityException("Filename contains invalid characters.");
-            }
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
 
-            log.info("Receiving SQL Script: {}", originalFilename);
+        <!-- COMPILATION FIX: Required for SecurityConfig -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
 
-            String baseName = originalFilename.contains(".") ? originalFilename.substring(0, originalFilename.lastIndexOf('.')) : originalFilename;
-            String extension = originalFilename.contains(".") ? originalFilename.substring(originalFilename.lastIndexOf('.')) : "";
+        <!-- COMPILATION FIX: Required for SecurityConfig -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
 
-            File tempFile = File.createTempFile(baseName, extension);
-            String hdfsFilename = baseName + "_" + jobId + extension;
-            Path filePath = new Path(basePath, hdfsFilename);
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
 
-            // Transfer multipart payload to physical temp file
-            file.transferTo(tempFile);
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
 
-            // 1. BACKUP TO HDFS SYNCHRONOUSLY FIRST
-            if (!hdfsFileSystem.exists(basePath)) {
-                hdfsFileSystem.mkdirs(basePath);
-            }
-            try (InputStream in = new FileInputStream(tempFile); FSDataOutputStream out = hdfsFileSystem.create(filePath)) {
-                IOUtils.copyBytes(in, out, 4096, true);
-            } catch (Exception hdfsEx) {
-                log.error("HDFS Backup failed, but proceeding with execution", hdfsEx);
-            }
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
 
-            log.info("HDFS Backup Success and proceeding with execution");
-            log.info("HDFS Filename: {}", hdfsFilename);
-            log.info("HDFS filePath: {}", filePath);
+        <dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
+        </dependency>
 
-            // 2. PASS TO ASYNC EXECUTOR
-            adminSupportExecutor.executeScriptAsync(tempFile, jobId, userId, getClientIp(request), hdfsFilename);
+        <dependency>
+            <groupId>com.oracle.database.jdbc</groupId>
+            <artifactId>ojdbc11</artifactId>
+        </dependency>
 
-            response.put("jobId", jobId);
-            response.put("status", "STARTED");
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
 
-            return response;
+        <!-- Internal Dependency with POI Exclusions -->
+        <dependency>
+            <groupId>com.fincore</groupId>
+            <artifactId>common-utilities</artifactId>
+            <version>1.0.0</version>
+        </dependency>
 
-        } catch (Exception e) {
-            log.error("Failed to initialize script upload process", e);
-            response.put("error", true);
-            response.put("message", e.getMessage());
-            return response;
-        }
-    }
+        <!-- Apache POI -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi</artifactId>
+            <version>5.2.5</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.2.5</version>
+        </dependency>
 
-    /**
-     * =========================================================
-     * GET LIVE JOB STATUS
-     * =========================================================
-     */
-    @Override
-    public Map<String, Object> getJobStatus(String jobId) {
-        Map<String, Object> status = AdminSupportExecutor.JOB_STATUS.get(jobId);
-        if (status == null) {
-            return Map.of("status", "NOT_FOUND");
-        }
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.putAll(status);
-        return response;
-    }
+        <!-- Security Fix: Use Log4j property to match 2.25.4 -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
+            <version>${log4j2.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>${log4j2.version}</version>
+        </dependency>
 
-    /**
-     * =========================================================
-     * EXTRACT CLIENT IP
-     * =========================================================
-     */
-    private String getClientIp(HttpServletRequest request) {
-        String xfHeader = request.getHeader("X-Forwarded-For");
-        if (xfHeader == null || xfHeader.isEmpty() || "unknown".equalsIgnoreCase(xfHeader)) {
-            return request.getRemoteAddr();
-        }
-        return xfHeader.split(",")[0];
-    }
+        <!-- RUNTIME FIX: Resolves NoClassDefFoundError for javax.xml.bind on Java 11+ -->
+        <dependency>
+            <groupId>javax.xml.bind</groupId>
+            <artifactId>jaxb-api</artifactId>
+            <version>2.3.1</version>
+        </dependency>
 
-    /**
-     * =========================================================
-     * Check SELECT Query
-     * =========================================================
-     */
-    private boolean isSelectQuery(String sql) {
-        if (sql == null || sql.isBlank()) {
-            return false;
-        }
-        String normalized = sql.trim().toUpperCase();
-        return normalized.startsWith("SELECT") || normalized.startsWith("WITH");
-    }
+        <!-- health metrics -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
 
-    /**
-     * =========================================================
-     * Validating Export Limit
-     * =========================================================
-     */
-    private long validateExportLimit(String sql) {
-        String countSql = """
-                SELECT COUNT(*)
-                FROM (
-                """ + sql + """
-                ) CNT
-                """;
-        Long count = jdbcTemplate.queryForObject(countSql, Long.class);
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>7.4</version>
+        </dependency>
 
-        if (count == null) {
-            count = 0L;
-        }
+    </dependencies>
 
-        if (count > MAX_EXPORT_LIMIT) {
-            throw new RuntimeException("Export limit exceeded. Maximum " + MAX_EXPORT_LIMIT + " rows allowed.");
-        }
+    <build>
+        <finalName>${project.artifactId}</finalName>
+        <plugins>
+            <!-- maven-compiler-plugin with Lombok Annotation Processor -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
 
-        return count;
-    }
-
-    /**
-     * =========================================================
-     * Build INSERT statements
-     * =========================================================
-     */
-    private String buildInsertStatement(String tableName, ResultSet rs) throws Exception {
-
-        ResultSetMetaData meta = rs.getMetaData();
-        StringBuilder columns = new StringBuilder();
-        StringBuilder values = new StringBuilder();
-
-        int count = meta.getColumnCount();
-
-        for (int i = 1; i <= count; i++) {
-            String column = meta.getColumnName(i);
-            String columnType = meta.getColumnTypeName(i);
-
-            // FIX: Safely retrieve and convert CLOBs using getSafeValue
-            Object value = getSafeValue(rs, i);
-            columns.append(column);
-
-            if (value == null) {
-                values.append("NULL");
-            } else if (columnType.equalsIgnoreCase("NUMBER") ||
-                    columnType.equalsIgnoreCase("INTEGER") ||
-                    columnType.equalsIgnoreCase("FLOAT") ||
-                    columnType.equalsIgnoreCase("BINARY_FLOAT") ||
-                    columnType.equalsIgnoreCase("BINARY_DOUBLE")) {
-
-                values.append(value.toString());
-
-            } else if (columnType.contains("TIMESTAMP")) {
-
-                Timestamp ts = rs.getTimestamp(i);
-                String formatted = ts.toLocalDateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-                values.append("TO_TIMESTAMP('").append(formatted).append("','YYYY-MM-DD HH24:MI:SS')");
-
-            } else if ("DATE".equalsIgnoreCase(columnType)) {
-
-                java.sql.Date date = rs.getDate(i);
-                values.append("TO_DATE('").append(date).append("','YYYY-MM-DD')");
-
-            } else {
-
-                values.append("'").append(value.toString().replace("'", "''")).append("'");
-            }
-
-            if (i < count) {
-                columns.append(",");
-                values.append(",");
-            }
-        }
-        return "INSERT INTO " + tableName + " (" + columns + ") VALUES (" + values + ");";
-    }
-
-    /**
-     * =========================================================
-     * Exporting data to INSERT (.sql File)
-     * =========================================================
-     */
-    private ResponseEntity<Resource> exportInsert(AdminSupportDTO dto) {
-
-        String tableName = dto.getTableName();
-
-        if (tableName == null || tableName.isBlank()) {
-            throw new RuntimeException("tableName is mandatory for INSERT export");
-        }
-
-        StringBuilder script = new StringBuilder();
-
-        jdbcTemplate.query(
-                connection -> {
-                    var ps = connection.prepareStatement(dto.getSql());
-                    ps.setFetchSize(FETCH_SIZE);
-                    return ps;
-                },
-                rs -> {
-                    try {
-                        script.append(buildInsertStatement(tableName, rs)).append("\n");
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-
-        byte[] bytes = script.toString().getBytes(StandardCharsets.UTF_8);
-        return downloadFile(bytes, tableName + ".sql", MediaType.TEXT_PLAIN_VALUE);
-    }
-
-    /**
-     * =========================================================
-     * Exporting data to Excel
-     * =========================================================
-     */
-    private ResponseEntity<Resource> exportExcel(String sql) {
-
-        try (
-                SXSSFWorkbook workbook = new SXSSFWorkbook(EXCEL_WINDOW_SIZE);
-                ByteArrayOutputStream out = new ByteArrayOutputStream()
-        ) {
-
-            workbook.setCompressTempFiles(true);
-            SXSSFSheet sheet = workbook.createSheet("Export");
-            AtomicInteger rowNum = new AtomicInteger(0);
-
-            jdbcTemplate.query(
-                    connection -> {
-                        var ps = connection.prepareStatement(sql);
-                        ps.setFetchSize(FETCH_SIZE);
-                        return ps;
-                    },
-                    rs -> {
-                        try {
-                            ResultSetMetaData meta = rs.getMetaData();
-                            int cols = meta.getColumnCount();
-    
-                            if (rowNum.get() == 0) {
-                                Row header = sheet.createRow(0);
-                                for (int i = 1; i <= cols; i++) {
-                                    header.createCell(i - 1).setCellValue(meta.getColumnLabel(i));
-                                }
-                                rowNum.incrementAndGet();
-                            }
-    
-                            Row row = sheet.createRow(rowNum.getAndIncrement());
-    
-                            for (int i = 1; i <= cols; i++) {
-                                // FIX: Safely retrieve and convert CLOBs using getSafeValue
-                                Object value = getSafeValue(rs, i);
-                                row.createCell(i - 1).setCellValue(value == null ? "" : value.toString());
-                            }
-    
-                            if (rowNum.get() % 5000 == 0) {
-                                sheet.flushRows(500);
-                            }
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
-
-            workbook.write(out);
-            workbook.dispose();
-
-            return downloadFile(out.toByteArray(), "export.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-
-        } catch (Exception e) {
-            throw new RuntimeException("Excel export failed", e);
-        }
-    }
-
-    /**
-     * =========================================================
-     * Exporting data to JSON
-     * =========================================================
-     */
-    private ResponseEntity<Resource> exportJson(String sql) {
-        try {
-            // FIX: Explicit RowMapper intercepts CLOB data stream via getSafeValue before Jackson serialization
-            List<Map<String, Object>> rows = jdbcTemplate.query(sql, (rs, rowNum) -> {
-                ResultSetMetaData meta = rs.getMetaData();
-                int cols = meta.getColumnCount();
-                Map<String, Object> map = new LinkedHashMap<>();
-                for (int i = 1; i <= cols; i++) {
-                    try {
-                        map.put(meta.getColumnLabel(i), getSafeValue(rs, i));
-                    } catch (SQLException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
-                return map;
-            });
-            
-            ObjectMapper mapper = new ObjectMapper();
-            byte[] bytes = mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(rows);
-            return downloadFile(bytes, "export.json", MediaType.APPLICATION_JSON_VALUE);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    /**
-     * =========================================================
-     * Exporting data to CSV
-     * =========================================================
-     */
-    private ResponseEntity<Resource> exportCsv(String sql) {
-
-        StringBuilder csv = new StringBuilder(1024 * 1024);
-        final boolean[] headerWritten = {false};
-
-        jdbcTemplate.query(
-                connection -> {
-                    var ps = connection.prepareStatement(sql);
-                    ps.setFetchSize(FETCH_SIZE);
-                    return ps;
-                },
-                rs -> {
-                    try {
-                        ResultSetMetaData meta = rs.getMetaData();
-                        int cols = meta.getColumnCount();
-    
-                        /* HEADER */
-                        if (!headerWritten[0]) {
-                            for (int i = 1; i <= cols; i++) {
-                                if (i > 1) {
-                                    csv.append(",");
-                                }
-                                csv.append(csvEscape(meta.getColumnLabel(i)));
-                            }
-                            csv.append("\n");
-                            headerWritten[0] = true;
-                        }
-    
-                        /* DATA */
-                        for (int i = 1; i <= cols; i++) {
-                            if (i > 1) {
-                                csv.append(",");
-                            }
-                            // FIX: Safely retrieve and convert CLOBs using getSafeValue
-                            csv.append(csvEscape(getSafeValue(rs, i)));
-                        }
-    
-                        csv.append("\n");
-                    } catch (SQLException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-
-        return downloadFile(csv.toString().getBytes(StandardCharsets.UTF_8), "export.csv", "text/csv");
-    }
-
-    /**
-     * =========================================================
-     * Helper Method for Exporting data to CSV
-     * =========================================================
-     */
-    private String csvEscape(Object value) {
-        if (value == null) {
-            return "";
-        }
-
-        String text = value.toString();
-
-        if (text.contains(",")
-                || text.contains("\"")
-                || text.contains("\n")
-                || text.contains("\r")) {
-
-            text = text.replace("\"", "\"\"");
-            return "\"" + text + "\"";
-        }
-        return text;
-    }
-
-    /**
-     * =========================================================
-     * Download File Helper
-     * =========================================================
-     */
-    private ResponseEntity<Resource> downloadFile(byte[] data, String fileName, String contentType) {
-        ByteArrayResource resource = new ByteArrayResource(data);
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName)
-                .contentLength(data.length)
-                .contentType(MediaType.parseMediaType(contentType))
-                .body(resource);
-    }
-}
+            <!-- Spring Boot Maven Plugin excluding Lombok from fat jar -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
