@@ -69,31 +69,28 @@ public class AdminSupportServiceImpl implements AdminSupportService {
 
     /**
      * =========================================================
-     * SAFE CLOB EXTRACTOR FOR EXPORTS
+     * BULLETPROOF CLOB EXTRACTOR
      * =========================================================
      */
-    private Object getSafeExportValue(ResultSet rs, int index, ResultSetMetaData meta) throws SQLException {
-        int columnType = meta.getColumnType(index);
-        String typeName = meta.getColumnTypeName(index);
-
-        // Standard JDBC way to get String directly from CLOB columns
-        if (columnType == java.sql.Types.CLOB || columnType == java.sql.Types.NCLOB ||
-                (typeName != null && typeName.toUpperCase().contains("CLOB"))) {
-            return rs.getString(index);
-        }
-
+    private Object getSafeValue(ResultSet rs, int index) throws SQLException {
         Object value = rs.getObject(index);
+        
         if (value == null) {
             return null;
         }
 
-        // Fallback for aggressive Oracle wrapping
+        // 1. Intercept standard JDBC Clob interfaces
         if (value instanceof java.sql.Clob clob) {
             return clob.getSubString(1, (int) clob.length());
         }
         
+        // 2. Fallback for Oracle-specific classloader wrapping
         if (value.getClass().getName().toUpperCase().contains("CLOB")) {
-            return rs.getString(index);
+            try {
+                return rs.getString(index);
+            } catch (Exception e) {
+                log.warn("Failed to extract CLOB using getString for column {}", index);
+            }
         }
 
         return value;
@@ -181,11 +178,11 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                         }
                     }
 
-                    // Reverted back to exact original working logic for UI execution
                     while (rs.next()) {
                         Map<String, Object> row = new LinkedHashMap<>();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.put(metaData.getColumnLabel(i), rs.getObject(i));
+                            // FIX: Safely extract text to prevent CLOB memory addresses in the UI
+                            row.put(metaData.getColumnLabel(i), getSafeValue(rs, i));
                         }
                         rawRows.add(row);
                     }
@@ -382,8 +379,13 @@ public class AdminSupportServiceImpl implements AdminSupportService {
         // SECURITY FIX: Validate input SQL before processing
         String rawSql = dto.getSql() == null ? "" : validateAndSanitizeSql(dto.getSql().trim());
         
-        // BUG FIX: Strip trailing semicolons which cause ORA-00911 when running queries directly.
-        String sql = rawSql.replaceAll("(?s);+\\s*$", "");
+        // FIX: Utilize parseSqlStatements to safely strip semicolons and validate structure
+        List<String> cleanStatements = parseSqlStatements(rawSql);
+        if (cleanStatements.size() != 1) {
+            throw new RuntimeException("Export requires exactly one valid SELECT statement.");
+        }
+        
+        String sql = cleanStatements.get(0);
         dto.setSql(sql); 
 
         if (!isSelectQuery(sql)) {
@@ -562,8 +564,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
             String column = meta.getColumnName(i);
             String columnType = meta.getColumnTypeName(i);
 
-            // FIX: Safely retrieve Export value (Handles CLOBs properly)
-            Object value = getSafeExportValue(rs, i, meta);
+            // FIX: Safely retrieve and convert CLOBs
+            Object value = getSafeValue(rs, i);
             columns.append(column);
 
             if (value == null) {
@@ -671,8 +673,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                             Row row = sheet.createRow(rowNum.getAndIncrement());
     
                             for (int i = 1; i <= cols; i++) {
-                                // FIX: Safely retrieve Export value (Handles CLOBs properly)
-                                Object value = getSafeExportValue(rs, i, meta);
+                                // FIX: Safely retrieve and convert CLOBs
+                                Object value = getSafeValue(rs, i);
                                 row.createCell(i - 1).setCellValue(value == null ? "" : value.toString());
                             }
     
@@ -701,14 +703,14 @@ public class AdminSupportServiceImpl implements AdminSupportService {
      */
     private ResponseEntity<Resource> exportJson(String sql) {
         try {
-            // FIX: Explicit RowMapper to handle CLOBs before conversion
+            // FIX: Explicit RowMapper intercepts CLOB data stream before Jackson serialization
             List<Map<String, Object>> rows = jdbcTemplate.query(sql, (rs, rowNum) -> {
                 ResultSetMetaData meta = rs.getMetaData();
                 int cols = meta.getColumnCount();
                 Map<String, Object> map = new LinkedHashMap<>();
                 for (int i = 1; i <= cols; i++) {
                     try {
-                        map.put(meta.getColumnLabel(i), getSafeExportValue(rs, i, meta));
+                        map.put(meta.getColumnLabel(i), getSafeValue(rs, i));
                     } catch (SQLException e) {
                         throw new RuntimeException(e);
                     }
@@ -762,8 +764,8 @@ public class AdminSupportServiceImpl implements AdminSupportService {
                             if (i > 1) {
                                 csv.append(",");
                             }
-                            // FIX: Safely retrieve Export value (Handles CLOBs properly)
-                            csv.append(csvEscape(getSafeExportValue(rs, i, meta)));
+                            // FIX: Safely retrieve and convert CLOBs
+                            csv.append(csvEscape(getSafeValue(rs, i)));
                         }
     
                         csv.append("\n");
