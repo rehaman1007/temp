@@ -14,6 +14,16 @@ import { logoutSuccess } from "../store/slices/authSlice";
 import api from "../config/axiosConfig";
 import { resolveConfig } from "../config/EnvironmentConfig";
 
+// NEW: Import Material UI components for the Rate Limit Dialog
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Button,
+} from "@mui/material";
+
 export const AuthContext = createContext();
 
 const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
@@ -23,10 +33,17 @@ const WARNING_TIME = INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000; // 30s
 export const AuthProvider = ({ children }) => {
   const dispatch = useDispatch();
   const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+  
+  // Existing session states
   const [warningOpen, setWarningOpen] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
   const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [sessionReason, setSessionReason] = useState("");
+  
+  // NEW: State for 429 Rate Limit Dialog
+  const [rateLimitDialogOpen, setRateLimitDialogOpen] = useState(false);
+  const [rateLimitMessage, setRateLimitMessage] = useState("");
+
   const inactivityTimerRef = useRef(null);
   const warningTimerRef = useRef(null);
   const countdownRef = useRef(null);
@@ -43,7 +60,7 @@ export const AuthProvider = ({ children }) => {
     async (reason = "USER_INITIATED") => {
       clearAllTimers();
 
-      // CHANGE THIS: Always show the dialog regardless of the reason
+      // Always show the dialog regardless of the reason
       setSessionReason(reason);
       setSessionDialogOpen(true);
 
@@ -64,11 +81,11 @@ export const AuthProvider = ({ children }) => {
   const startInactivityTimer = useCallback(() => {
     clearAllTimers();
     if (!isAuthenticated) return;
-    //  Warning timer (fires at 30s)
+    // Warning timer (fires at 30s)
     warningTimerRef.current = setTimeout(() => {
       setSecondsLeft(WARNING_SECONDS);
       setWarningOpen(true);
-      //  Start countdown immediately
+      // Start countdown immediately
       countdownRef.current = setInterval(() => {
         setSecondsLeft((prev) => {
           if (prev <= 1) {
@@ -80,7 +97,7 @@ export const AuthProvider = ({ children }) => {
         });
       }, 1000);
     }, WARNING_TIME);
-    //  Hard logout backup (optional safety)
+    // Hard logout backup (optional safety)
     inactivityTimerRef.current = setTimeout(() => {
       performLogout("SESSION_TIMEOUT");
     }, INACTIVITY_TIMEOUT);
@@ -96,7 +113,7 @@ export const AuthProvider = ({ children }) => {
     [isAuthenticated, sessionDialogOpen, startInactivityTimer],
   );
 
-  // --- Main Effect (FIXED DEPENDENCIES) ---
+  // --- Main Effect ---
   useEffect(() => {
     if (!isAuthenticated) {
       clearAllTimers();
@@ -111,7 +128,7 @@ export const AuthProvider = ({ children }) => {
       onActivity.cancel();
       clearAllTimers();
     };
-  }, [isAuthenticated]); //  FIXED: removed unstable deps
+  }, [isAuthenticated]);
 
   // --- Cross-tab / forced logout ---
   useEffect(() => {
@@ -122,6 +139,21 @@ export const AuthProvider = ({ children }) => {
     return () =>
       window.removeEventListener("auth:session-expired", handleSessionEvent);
   }, [performLogout]);
+
+  // --- NEW: Global Rate Limit (429) Listener ---
+  useEffect(() => {
+    const handleRateLimitEvent = (e) => {
+      setRateLimitMessage(
+        e.detail?.message || "Too many requests. Please try again later."
+      );
+      setRateLimitDialogOpen(true);
+    };
+
+    window.addEventListener("api:rate-limit", handleRateLimitEvent);
+    return () =>
+      window.removeEventListener("api:rate-limit", handleRateLimitEvent);
+  }, []);
+
   return (
     <AuthContext.Provider
       value={{
@@ -130,6 +162,8 @@ export const AuthProvider = ({ children }) => {
       }}
     >
       {children}
+      
+      {/* Existing Dialogs */}
       <SessionWarningDialog
         open={warningOpen}
         secondsLeft={secondsLeft}
@@ -138,6 +172,7 @@ export const AuthProvider = ({ children }) => {
           startInactivityTimer();
         }}
       />
+      
       <SessionDialog
         open={sessionDialogOpen}
         reason={sessionReason}
@@ -146,6 +181,77 @@ export const AuthProvider = ({ children }) => {
           // window.location.reload();
         }}
       />
+
+      {/* NEW: Rate Limit Dialog */}
+      <Dialog 
+        open={rateLimitDialogOpen} 
+        onClose={() => setRateLimitDialogOpen(false)}
+        aria-labelledby="rate-limit-dialog-title"
+      >
+        <DialogTitle id="rate-limit-dialog-title">
+          Too Many Requests
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {rateLimitMessage}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => setRateLimitDialogOpen(false)} 
+            color="primary" 
+            variant="contained" 
+            autoFocus
+          >
+            Got it
+          </Button>
+        </DialogActions>
+      </Dialog>
     </AuthContext.Provider>
   );
 };
+
+
+import RateLimitDialog from "../components/RateLimitDialog";
+
+
+
+export const AuthProvider = ({ children }) => {
+  // ... existing states ...
+  const [rateLimitDialogOpen, setRateLimitDialogOpen] = useState(false);
+  const [rateLimitMessage, setRateLimitMessage] = useState("");
+
+
+  // Listen for 429 Rate Limit events globally
+  useEffect(() => {
+    const handleRateLimitEvent = (e) => {
+      setRateLimitMessage(
+        e.detail?.message || "Too many requests. Please try again later."
+      );
+      setRateLimitDialogOpen(true);
+    };
+
+    window.addEventListener("api:rate-limit", handleRateLimitEvent);
+    return () =>
+      window.removeEventListener("api:rate-limit", handleRateLimitEvent);
+  }, []);
+
+
+  return (
+    <AuthContext.Provider ...>
+      {children}
+      
+      {/* ... existing dialogs ... */}
+      <SessionWarningDialog ... />
+      <SessionDialog ... />
+
+      {/* NEW RATE LIMIT DIALOG */}
+      <RateLimitDialog
+        open={rateLimitDialogOpen}
+        message={rateLimitMessage}
+        onClose={() => setRateLimitDialogOpen(false)}
+      />
+      
+    </AuthContext.Provider>
+  );
+
