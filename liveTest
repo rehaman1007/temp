@@ -1,116 +1,151 @@
-api.interceptors.response.use(
-  // ... (keep your existing response success handler) ...
-  
-  async (error) => {
-    const originalRequest = error.config;
+import React, {
+  createContext,
+  useEffect,
+  useRef,
+  useCallback,
+  useState,
+} from "react";
 
-    // Safety check to prevent infinite loops
-    if (!originalRequest || originalRequest._retryCount > 2) {
-      return Promise.reject(error);
-    }
+import { useDispatch, useSelector } from "react-redux";
+import { throttle } from "lodash";
+import SessionDialog from "../components/SessionDialog";
+import SessionWarningDialog from "../components/SessionWarningDialog";
+import { logoutSuccess } from "../store/slices/authSlice";
+import api from "../config/axiosConfig";
+import { resolveConfig } from "../config/EnvironmentConfig";
 
-    // Extract Error Details
-    const status = error.response?.status;
-    const errorCode = error.response?.data?.error || error.response?.data?.code;
+export const AuthContext = createContext();
 
-    // ---------------------------------------------------------
-    // SCENARIO 1: Concurrent Login / Session Invalidated
-    // ---------------------------------------------------------
-    // ... (keep existing code) ...
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
+const WARNING_SECONDS = 30;
+const WARNING_TIME = INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000; // 30s
 
-    // ---------------------------------------------------------
-    // SCENARIO 2: Access Token Expired (Try Refresh)
-    // ---------------------------------------------------------
-    // ... (keep existing code) ...
+export const AuthProvider = ({ children }) => {
+  const dispatch = useDispatch();
+  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
+  const [sessionReason, setSessionReason] = useState("");
+  const inactivityTimerRef = useRef(null);
+  const warningTimerRef = useRef(null);
+  const countdownRef = useRef(null);
 
-    // ---------------------------------------------------------
-    // SCENARIO 3: Rate Limiting / Too Many Requests (429)
-    // ---------------------------------------------------------
-    if (status === 429) {
-      // NOTE: Axios lowercases header keys automatically
-      const retryTime = 
-        error.response?.headers['retry-after'] || 
-        error.response?.headers['x-retry-time'] || 
-        "a few minutes";
+  // --- Clear all timers ---
+  const clearAllTimers = useCallback(() => {
+    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+  }, []);
 
-      const rateLimitMsg = `Too many requests. Please try again after ${retryTime}.`;
+  // --- Perform Logout ---
+  const performLogout = useCallback(
+    async (reason = "USER_INITIATED") => {
+      clearAllTimers();
 
-      // 1. Dispatch global event (Listen to this in App.js to show a global Toast/Dialog)
-      window.dispatchEvent(
-        new CustomEvent("api:rate-limit", {
-          detail: { message: rateLimitMsg, retryTime },
-        })
-      );
+      // CHANGE THIS: Always show the dialog regardless of the reason
+      setSessionReason(reason);
+      setSessionDialogOpen(true);
 
-      // 2. Format the error data so the caller gets a readable message
-      if (!error.response.data) {
-        error.response.data = {};
-      }
-      error.response.data.message = error.response.data.message || rateLimitMsg;
-
-      return Promise.reject(error);
-    }
-
-    return Promise.reject(error);
-  }
-);
-
-
-
-// ... (keep existing hook setup code) ...
-
-      } catch (err) {
-        setError(err);
-
-        // Safely pass cancellation errors back to the component
-        if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
-          throw err;
-        }
-
-        // --- NEW: Handle 429 Locally for Hook Consumers ---
-        if (err?.response?.status === 429) {
-          const retryTime = 
-            err.response.headers['retry-after'] || 
-            err.response.headers['x-retry-time'] || 
-            "a few minutes";
-            
-          const msg = `Too many requests. Please retry after: ${retryTime}.`;
-          console.error(msg);
-          
-          // Throw a standardized object back to the component
-          throw { status: 429, message: msg, ...err?.response?.data };
-        }
-        // --------------------------------------------------
-
-        if (err?.response?.status !== 401) {
-          if (responseType == "arraybuffer") {
-            const decoder = new TextDecoder("utf-8");
-            const jsonString = decoder.decode(err?.response?.data);
-            const jsonObject = JSON.parse(jsonString);
-            throw jsonObject;
-          }
-
-          console.error(
-            err.response?.data?.message ||
-              err.response?.data?.error ||
-              "An error occurred",
-          );
-        }
-
-        throw err?.response?.data || err?.response;
+      try {
+        await api.post(`${resolveConfig("/LS")}/auth/logout`);
+      } catch (e) {
+        console.error(e);
       } finally {
-// ... (keep remaining finally block code) ...
+        localStorage.clear();
+        dispatch(logoutSuccess());
+        setWarningOpen(false);
+      }
+    },
+    [dispatch, clearAllTimers],
+  );
 
+  // --- Start inactivity timers ---
+  const startInactivityTimer = useCallback(() => {
+    clearAllTimers();
+    if (!isAuthenticated) return;
+    //  Warning timer (fires at 30s)
+    warningTimerRef.current = setTimeout(() => {
+      setSecondsLeft(WARNING_SECONDS);
+      setWarningOpen(true);
+      //  Start countdown immediately
+      countdownRef.current = setInterval(() => {
+        setSecondsLeft((prev) => {
+          if (prev <= 1) {
+            clearInterval(countdownRef.current);
+            performLogout("SESSION_TIMEOUT");
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }, WARNING_TIME);
+    //  Hard logout backup (optional safety)
+    inactivityTimerRef.current = setTimeout(() => {
+      performLogout("SESSION_TIMEOUT");
+    }, INACTIVITY_TIMEOUT);
+  }, [isAuthenticated, clearAllTimers, performLogout]);
 
+  // --- User Activity Listener ---
+  const onActivity = useCallback(
+    throttle(() => {
+      if (!isAuthenticated || sessionDialogOpen) return;
+      setWarningOpen(false);
+      startInactivityTimer();
+    }, 2000),
+    [isAuthenticated, sessionDialogOpen, startInactivityTimer],
+  );
 
-// Example in App.js or a Global Layout Component
-useEffect(() => {
-  const handleRateLimit = (event) => {
-    const { message } = event.detail;
-    // Show your global Material UI Snackbar, Toast, or Dialog here
-    // alert(message); 
-  };
+  // --- Main Effect (FIXED DEPENDENCIES) ---
+  useEffect(() => {
+    if (!isAuthenticated) {
+      clearAllTimers();
+      setWarningOpen(false);
+      return;
+    }
+    startInactivityTimer();
+    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+    events.forEach((e) => window.addEventListener(e, onActivity));
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, onActivity));
+      onActivity.cancel();
+      clearAllTimers();
+    };
+  }, [isAuthenticated]); //  FIXED: removed unstable deps
 
-  window.addEventListener("api:rate-limit", handleRateLimit);
-  return () => window.removeEventListener("api:rate-limit", handleRateLimit);
-}, []);
+  // --- Cross-tab / forced logout ---
+  useEffect(() => {
+    const handleSessionEvent = (e) => {
+      performLogout(e.detail?.reason || "SESSION_EXPIRED");
+    };
+    window.addEventListener("auth:session-expired", handleSessionEvent);
+    return () =>
+      window.removeEventListener("auth:session-expired", handleSessionEvent);
+  }, [performLogout]);
+  return (
+    <AuthContext.Provider
+      value={{
+        logout: () => performLogout("USER_INITIATED"),
+        triggerSessionDialog: (reason) => performLogout(reason),
+      }}
+    >
+      {children}
+      <SessionWarningDialog
+        open={warningOpen}
+        secondsLeft={secondsLeft}
+        onContinue={() => {
+          setWarningOpen(false);
+          startInactivityTimer();
+        }}
+      />
+      <SessionDialog
+        open={sessionDialogOpen}
+        reason={sessionReason}
+        onConfirm={() => {
+          setSessionDialogOpen(false);
+          // window.location.reload();
+        }}
+      />
+    </AuthContext.Provider>
+  );
+};
