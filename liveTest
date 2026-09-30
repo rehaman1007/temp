@@ -1,145 +1,6 @@
-import axios from "axios";
-import { resolveConfig } from "../config/EnvironmentConfig"; // Ensure this path is correct
-import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
-import { parseJwt } from "../utils/EncryptionUtilities";
-import { encryptPayload, decryptPayload } from "../utils/cryptoUtil";
-
-let store; // Will hold the Redux store reference
-
-// Inject store from App.js or index.js to avoid circular dependency
-export const injectStore = (_store) => {
-  store = _store;
-};
-
-// Create a Singleton Axios Instance
-const api = axios.create({
-  baseURL: "", // Base URL
-  withCredentials: true, // IMPORTANT: Allows sending/receiving HttpOnly Cookies
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
-
-// Create a Singleton Axios Instance
-const authClient = axios.create({
-  baseURL: "", // Base URL
-  withCredentials: true, // IMPORTANT: Allows sending/receiving HttpOnly Cookies
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
-
-// --- Request Interceptor ---
-api.interceptors.request.use(
-  async (config) => {
-    // 1. Get Token from Redux Store
-    const state = store?.getState();
-    const token = state?.auth?.token;
-
-    // 2. Attach Authorization Header
-    const isRefreshRequest = config.url?.includes("/auth/refresh-token");
-    if (!isRefreshRequest && token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-
-    // 3. Attach Context Header (X-Request-Type) if passed in config
-    // The hook will pass this in, or defaults to '*'
-    if (!config.headers["X-Request-Type"]) {
-      config.headers["X-Request-Type"] = "*";
-    }
-
-    // 4. Encrypt POST/PUT/PATCH request payloads
-
-    const excludedUrls = [
-      "/auth/refresh-token",
-      "/auth/start-prod",
-      "/auth/login",
-      "/auth/check-user",
-      "/admin-support/admin-execute",
-      "/admin-support/upload-script",
-      "/report-builder",
-      "/template-config",
-      "/reports/types",
-      "/reports/download",
-    ];
-
-    const shouldSkipEncryption = excludedUrls.some((url) =>
-      config.url?.includes(url),
-    );
-
-    if (
-      !shouldSkipEncryption &&
-      ["post", "put", "patch"].includes(config.method?.toLowerCase()) &&
-      config.data &&
-      !(config.data instanceof FormData)
-    ) {
-      const state = store?.getState();
-
-      const sessionKey =
-        state?.auth?.payloadEncryptionKey ||
-        localStorage.getItem("payloadEncryptionKey");
-
-      if (sessionKey) {
-        const encryptedString = await encryptPayload(config.data, sessionKey);
-
-        config.data = encryptedString;
-
-        config.headers["X-Encrypted-Payload"] = "true";
-
-        config.headers["Content-Type"] = "application/json";
-      }
-    }
-    return config;
-  },
-  (error) => Promise.reject(error),
-);
-
-// --- Response Interceptor ---
-let isRefreshing = false;
-let failedQueue = [];
-
-const processQueue = (error, token = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
-};
-
 api.interceptors.response.use(
-  async (response) => {
-    const isEncrypted = response.headers["x-encrypted-response"] === "true";
-
-    if (isEncrypted && response.data) {
-      const state = store?.getState();
-
-      const sessionKey =
-        state?.auth?.payloadEncryptionKey ||
-        localStorage.getItem("payloadEncryptionKey");
-
-      if (sessionKey) {
-        try {
-          const decryptedJsonString = await decryptPayload(
-            response.data.encryptedResponse,
-            sessionKey,
-          );
-
-          response.data = JSON.parse(decryptedJsonString);
-          console.log("decrypted reponse:", response.data);
-        } catch (error) {
-          console.error("Failed to decrypt response", error);
-
-          return Promise.reject(error);
-        }
-      }
-    }
-
-    return response;
-  },
-
+  // ... (keep your existing response success handler) ...
+  
   async (error) => {
     const originalRequest = error.config;
 
@@ -155,213 +16,71 @@ api.interceptors.response.use(
     // ---------------------------------------------------------
     // SCENARIO 1: Concurrent Login / Session Invalidated
     // ---------------------------------------------------------
-    if (
-      status === 401 &&
-      (errorCode === "CONCURRENT_LOGIN" ||
-        errorCode === "SESSION_EXPIRED" ||
-        errorCode === "INVALID_TOKEN")
-    ) {
-      // Do NOT attempt refresh. The session is dead.
-      // We dispatch a custom event that AuthContext listens to for the Dialog
-      window.dispatchEvent(
-        new CustomEvent("auth:session-expired", {
-          detail: { reason: errorCode },
-        }),
-      );
-
-      // Clear local state immediately
-      store.dispatch(logoutSuccess());
-      return Promise.reject(error);
-    }
+    // ... (keep existing code) ...
 
     // ---------------------------------------------------------
     // SCENARIO 2: Access Token Expired (Try Refresh)
     // ---------------------------------------------------------
-    if (
-      status === 401 &&
-      errorCode === "TOKEN_EXPIRED" &&
-      !originalRequest._retry
-    ) {
-      if (isRefreshing) {
-        // If already refreshing, queue this request
-        return new Promise(function (resolve, reject) {
-          failedQueue.push({
-            resolve: (token) => {
-              originalRequest.headers["Authorization"] = "Bearer " + token;
-              resolve(api(originalRequest));
-            },
-            reject: (err) => {
-              reject(err);
-            },
-          });
-        });
+    // ... (keep existing code) ...
+
+    // ---------------------------------------------------------
+    // SCENARIO 3: Rate Limiting / Too Many Requests (429)
+    // ---------------------------------------------------------
+    if (status === 429) {
+      // NOTE: Axios lowercases header keys automatically
+      const retryTime = 
+        error.response?.headers['retry-after'] || 
+        error.response?.headers['x-retry-time'] || 
+        "a few minutes";
+
+      const rateLimitMsg = `Too many requests. Please try again after ${retryTime}.`;
+
+      // 1. Dispatch global event (Listen to this in App.js to show a global Toast/Dialog)
+      window.dispatchEvent(
+        new CustomEvent("api:rate-limit", {
+          detail: { message: rateLimitMsg, retryTime },
+        })
+      );
+
+      // 2. Format the error data so the caller gets a readable message
+      if (!error.response.data) {
+        error.response.data = {};
       }
+      error.response.data.message = error.response.data.message || rateLimitMsg;
 
-      originalRequest._retry = true;
-      isRefreshing = true;
-
-      try {
-        // Call Backend Refresh Endpoint
-        // Note: We don't send the refresh token in body; backend reads the Cookie
-        const response = await authClient.post(
-          `${resolveConfig("/LS") || ""}/auth/refresh-token`,
-          {},
-        );
-
-        // const { accessToken } = response?.data?.data || "";
-        const { accessToken, payloadEncryptionKey } =
-          response?.data?.data || {};
-
-        if (payloadEncryptionKey) {
-          localStorage.setItem("payloadEncryptionKey", payloadEncryptionKey);
-        }
-
-        if (accessToken) {
-          // 1. Update Redux
-          const user = parseJwt(accessToken);
-          store.dispatch(tokenRefreshed({ token: accessToken, user }));
-          api.defaults.headers.common.Authorization = `Bearer ${accessToken}`;
-
-          // 2. Process Queue
-          processQueue(null, accessToken);
-
-          // 3. Retry Original Request
-          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
-          return api(originalRequest);
-        } else {
-          throw new Error("No access token returned");
-        }
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        store.dispatch(logoutSuccess());
-        window.dispatchEvent(
-          new CustomEvent("auth:session-expired", {
-            detail: { reason: "SESSION_EXPIRED" },
-          }),
-        );
-        return Promise.reject(refreshError);
-      } finally {
-        isRefreshing = false;
-      }
+      return Promise.reject(error);
     }
 
     return Promise.reject(error);
-  },
+  }
 );
 
-export default api;
 
 
+// ... (keep existing hook setup code) ...
 
-
-import { useState, useCallback, useRef, useEffect } from "react";
-import { useSelector } from "react-redux";
-import { useLocation } from "react-router-dom";
-import api from "../config/axiosConfig";
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { convertToKebabCase } from "../utils/CommonUtilities";
-
-const useApi = () => {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(false);
-
-  const activeRequests = useRef(new Set());
-  const latestController = useRef(null); // <-- Track the latest request
-  const location = useLocation();
-
-  const menus = useSelector((state) => state.menus.menus);
-  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
-
-  const findMenuItem = useCallback((items, route) => {
-    if (!items?.length) return null;
-    for (const item of items) {
-      if (item.route === route) return item;
-      if (item.children?.length) {
-        if (route.includes("/choose-option/")) {
-          const param = route.split("/choose-option/")[1];
-          if (param === convertToKebabCase(item.title)) return item;
-        }
-        const found = findMenuItem(item.children, route);
-        if (found) return found;
-      }
-    }
-    return null;
-  }, []);
-
-  const xRequestType = (() => {
-    const currentMenu = findMenuItem(menus, location.pathname);
-    return currentMenu?.requestType || selectedMenuItem?.requestType || "*";
-  })();
-
-  const cancelAllRequests = useCallback(() => {
-    activeRequests.current.forEach((controller) => controller.abort());
-    activeRequests.current.clear();
-    latestController.current = null;
-  }, []);
-
-  // NEW: Cancel only the most recent API call
-  const cancelApi = useCallback(() => {
-    if (latestController.current) {
-      latestController.current.abort();
-      activeRequests.current.delete(latestController.current);
-      latestController.current = null;
-    }
-  }, []);
-
-  useEffect(() => () => cancelAllRequests(), [cancelAllRequests]);
-
-  const callApi = useCallback(
-    async (
-      url,
-      payload = null,
-      method = "GET",
-      responseType = "json",
-      contentType = "application/json",
-      extraConfig = {},
-      returnDataOnly = true,
-    ) => {
-      setLoading(true);
-      setError(null);
-
-      const parts = url.split("/");
-      const service = parts[1];
-      const resolved = resolveConfig(`/${service}`);
-      parts[1] = resolved;
-      const finalUrl = parts.slice(1).join("/");
-
-      const controller = new AbortController();
-      activeRequests.current.add(controller);
-      latestController.current = controller; // <-- Set as the latest request
-
-      try {
-        const config = {
-          method,
-          url: finalUrl,
-          data: method !== "GET" ? payload : undefined,
-          params: method === "GET" ? payload : undefined,
-          responseType,
-          signal: controller.signal, // Attach the abort signal
-          headers: {
-            "Content-Type": contentType,
-            "X-Request-Type": xRequestType,
-            ...(extraConfig.headers || {}),
-          },
-          ...extraConfig,
-        };
-
-        const response = await api(config);
-        setData(response.data);
-        return returnDataOnly || responseType == "json"
-          ? response.data
-          : response;
       } catch (err) {
         setError(err);
 
-        // Safely pass cancellation errors back to the component without logging them as standard API errors
+        // Safely pass cancellation errors back to the component
         if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
           throw err;
         }
+
+        // --- NEW: Handle 429 Locally for Hook Consumers ---
+        if (err?.response?.status === 429) {
+          const retryTime = 
+            err.response.headers['retry-after'] || 
+            err.response.headers['x-retry-time'] || 
+            "a few minutes";
+            
+          const msg = `Too many requests. Please retry after: ${retryTime}.`;
+          console.error(msg);
+          
+          // Throw a standardized object back to the component
+          throw { status: 429, message: msg, ...err?.response?.data };
+        }
+        // --------------------------------------------------
 
         if (err?.response?.status !== 401) {
           if (responseType == "arraybuffer") {
@@ -380,18 +99,18 @@ const useApi = () => {
 
         throw err?.response?.data || err?.response;
       } finally {
-        activeRequests.current.delete(controller);
-        if (latestController.current === controller) {
-          latestController.current = null;
-        }
-        setLoading(false);
-      }
-    },
-    [xRequestType],
-  );
+// ... (keep remaining finally block code) ...
 
-  return { data, error, loading, callApi, cancelAllRequests, cancelApi };
-};
 
-export default useApi;
 
+// Example in App.js or a Global Layout Component
+useEffect(() => {
+  const handleRateLimit = (event) => {
+    const { message } = event.detail;
+    // Show your global Material UI Snackbar, Toast, or Dialog here
+    // alert(message); 
+  };
+
+  window.addEventListener("api:rate-limit", handleRateLimit);
+  return () => window.removeEventListener("api:rate-limit", handleRateLimit);
+}, []);
