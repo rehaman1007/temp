@@ -1,66 +1,599 @@
-package com.example;
+import React, { useEffect, useRef, useState } from "react";
+import axios from "axios";
+import api from "../../../config/axiosConfig";
+import { useDispatch, useSelector } from "react-redux";
+import { useNavigate } from "react-router-dom";
+import { Box, InputAdornment, IconButton } from "@mui/material";
+import PersonIcon from "@mui/icons-material/Person";
+import LockIcon from "@mui/icons-material/Lock";
+import Visibility from "@mui/icons-material/Visibility";
+import VisibilityOff from "@mui/icons-material/VisibilityOff";
+import JSEncrypt from "jsencrypt";
+import LogoImg from "../../../assets/Logos/Fincore_transperent.svg";
+import LoginErrorDialog from "./LoginErrorDialog";
+import LoginWithOTP from "./LoginWithOTP";
+import fTitle from "../../../assets/Logos/Fincore_title.png";
+import UpdatePassword from "./UpdatePassword";
+import {
+  Root,
+  ContainerInner,
+  Content,
+  LeftCol,
+  RightCol,
+  LogoWrap,
+  BrandSub,
+  BigHeading,
+  SubText,
+  FeatureList,
+  FeatureItem,
+  Bullet,
+  GlassCard,
+  FormTitle,
+  StyledTextField,
+  PrimaryButton,
+  SubHeadingText,
+} from "./LoginStyles";
+import { resolveConfig } from "../../../config/EnvironmentConfig";
+import Copyright from "../../../components/Copyright";
+import { parseJwt } from "../../../utils/EncryptionUtilities";
+import { loginSuccess } from "../../../store/slices/authSlice";
+import { setMenus, setSelectedMenuItem } from "../../../store/slices/menuSlice";
+import { setTabId } from "../../../store/slices/tabSlice";
 
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
-import javax.naming.InitialContext;
-import javax.naming.Context;
-import javax.servlet.ServletException;
-import javax.servlet.annotation.WebServlet;
-import javax.servlet.http.HttpServlet;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-import javax.sql.DataSource;
+export default function LoginPort() {
+  const [content, setContent] = useState(null);
+  const { appVersion, publicKey } = useSelector((state) => state.appConfig);
 
-@WebServlet("/report")
-public class ReportDownload extends HttpServlet {
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
+  const menus = useSelector((state) => state.menus.menus);
 
-    @Override
-    protected void doGet(HttpServletRequest request,
-                         HttpServletResponse response)
-            throws ServletException, IOException {
+  const [userId, setUserId] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
 
-        response.setContentType("text/plain");
-        PrintWriter out = response.getWriter();
+  const [error, setError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
 
-        try {
-            Context ctx = new InitialContext();
-            DataSource ds = (DataSource) ctx.lookup("jdbc/DigiGOVNonXAPooledDS");
+  const [page, setPage] = useState("HOME"); // HOME | UPDATE | OTP
+  const [dialogHeading, setDialogHeading] = useState("");
+  const [dialogContent, setDialogContent] = useState("");
+  const [showErrorDialog, setShowErrorDialog] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [userIdDisabled, setUserIdDisabled] = useState(false);
+  const [otpData, setOtpData] = useState(null);
 
-            // Explicitly defining all columns for the query
-            String query = "SELECT Date, Total_no_of_file_generated_in_Digigov, " +
-                           "Total_Transaction_Amount, Transaction_Generation_for_SBI_Account, " +
-                           "Transaction_Generation_for_non_SBI_Account, Extract_Received_for_SBI_Account, " +
-                           "Extract_not_Received_for_SBI_Account, Extract_Received_for_non_SBI_Account, " +
-                           "Extract_not_Received_for_non_SBI_Account, Total_Amount_for_SBI_Account, " +
-                           "Total_Amount_for_SBI_non_Account " +
-                           "FROM [dbo].[RSK_PAYMENT_REPORT]";
+  const userIdInputRef = useRef(null);
+  const passwordInputRef = useRef(null);
 
-            try (Connection con = ds.getConnection();
-                 Statement stmt = con.createStatement();
-                 ResultSet rs = stmt.executeQuery(query)) {
+  // Load static content JSON
+  useEffect(() => {
+    const loadContent = async () => {
+      try {
+        const res = await axios.get("/loginContent.json");
+        setContent(res.data);
+      } catch (err) {
+        console.error("Failed to load content JSON:", err);
+      }
+    };
+    loadContent();
+  }, []);
 
-                // Fetching data by column name makes the code robust against DB changes
-                while (rs.next()) {
-                    out.println(
-                            rs.getString("Date") + ", " +
-                            rs.getString("Total_no_of_file_generated_in_Digigov") + ", " +
-                            rs.getString("Total_Transaction_Amount") + ", " +
-                            rs.getString("Transaction_Generation_for_SBI_Account") + ", " +
-                            rs.getString("Transaction_Generation_for_non_SBI_Account") + ", " +
-                            rs.getString("Extract_Received_for_SBI_Account") + ", " +
-                            rs.getString("Extract_not_Received_for_SBI_Account") + ", " +
-                            rs.getString("Extract_Received_for_non_SBI_Account") + ", " +
-                            rs.getString("Extract_not_Received_for_non_SBI_Account") + ", " +
-                            rs.getString("Total_Amount_for_SBI_Account") + ", " +
-                            rs.getString("Total_Amount_for_SBI_non_Account")
-                    );
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace(out);
-        }
+  // Focus User ID initially
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (userIdInputRef.current && page === "HOME") {
+        userIdInputRef.current.focus();
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [page]);
+
+  // Post-authentication navigation handler
+  useEffect(() => {
+    if (menus && menus.length > 0 && menus[0]?.route) {
+      if (menus[0].hasChildren) {
+        navigate("/choose-option" + menus[0]?.route);
+      } else {
+        navigate(menus[0]?.route);
+      }
     }
+  }, [menus, navigate]);
+
+  const handleDialogClose = () => {
+    setShowErrorDialog(false);
+    setDialogHeading("");
+    setDialogContent("");
+  };
+
+  const openLoginErrorDialog = (heading, content) => {
+    setDialogHeading(heading);
+    setDialogContent(content);
+    setShowErrorDialog(true);
+  };
+
+  const validateId = (id) => {
+    if (!id) return false;
+    const v = id.trim().toLowerCase();
+    const regex = /^(?:\d{7}|v\d{7}|tcs\d{7}|tcsv\d{7})$/;
+    return regex.test(v);
+  };
+
+  const handleUserIdChange = (raw) => {
+    if (userIdDisabled) return;
+    let val = (raw || "").replace(/\s+/g, "");
+    const m = val.match(/^([A-Za-z]*)(.*)$/);
+    let prefixCandidate = (m && m[1]) || "";
+    let rest = (m && m[2]) || "";
+
+    const prefixLow = prefixCandidate.toLowerCase();
+    const allowedPrefixList = ["", "t", "tc", "tcs", "tcsv", "v"];
+    if (!allowedPrefixList.some((p) => prefixLow?.startsWith(p))) {
+      prefixCandidate = "";
+    }
+
+    const prefix = prefixCandidate;
+    let digitsPart = rest.replace(/\D/g, "");
+    if (digitsPart.length > 7) digitsPart = digitsPart.slice(0, 7);
+
+    const newVal = prefix + digitsPart;
+    if (
+      digitsPart.length < 8 &&
+      allowedPrefixList.some((p) => p.startsWith(prefix?.toLowerCase()))
+    ) {
+      setUserId(newVal);
+    }
+    if (error) setError("");
+  };
+
+  const handleUserIdPaste = (e) => {
+    e.preventDefault();
+    const paste = (e.clipboardData || window.clipboardData).getData("text");
+    handleUserIdChange(paste);
+  };
+
+  // Unified Login & Validation Execution
+  const handleLogin = async (e) => {
+    if (e) e.preventDefault();
+
+    setError("");
+    setPasswordError("");
+
+    if (!validateId(userId)) {
+      setError("Invalid User ID");
+      userIdInputRef.current?.focus();
+      return;
+    }
+
+    // FIX: Enforce minimum 8 characters validation explicitly 
+    // so hitting 'Enter' doesn't bypass the button's disabled state
+    if (!password || password.trim().length < 8) {
+      setPasswordError("Password must be at least 8 characters.");
+      passwordInputRef.current?.focus();
+      return;
+    }
+
+    if (!publicKey) {
+      openLoginErrorDialog(
+        "Security Loading",
+        "Encryption key is still loading or failed. Please refresh the page.",
+      );
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const payloadUserId = userId.trim();
+
+      // Encrypt the password using the fetched key
+      const encryptor = new JSEncrypt();
+      encryptor.setPublicKey(publicKey);
+      const encryptedPassword = encryptor.encrypt(password);
+
+      if (!encryptedPassword) {
+        throw new Error("Encryption failed.");
+      }
+
+      const res = await api.post(`${resolveConfig("/LS")}/auth/login`, {
+        userId: payloadUserId,
+        password: encryptedPassword,
+      });
+
+      const result = res?.data?.data || {};
+
+      // 1. Check for legacy checkUser conditions included in login payload response
+      if (result?.userStatus === "RESTRICTED") {
+        openLoginErrorDialog(
+          "Access Restricted",
+          "This system is restricted to use FinCore, Please contact the administrator.",
+        );
+        return;
+      }
+      if (result?.userStatus === "INVALID") {
+        setError(result?.message || "User ID does not exist");
+        return;
+      }
+      if (result?.passwordLoginStatus === "INACTIVE") {
+        openLoginErrorDialog(
+          "Password Locked!",
+          "You cannot login using password currently. Please contact the administrator.",
+        );
+        return;
+      }
+      if (result?.updatePassword === true) {
+        setPage("UPDATE");
+        setUserIdDisabled(true);
+        return;
+      }
+
+      // 2. Validate Headers & Route to Success/OTP
+      if (!result.payloadEncryptionKey) {
+        result.payloadEncryptionKey = res.headers["x-payload-key"];
+      }
+
+      if (res.status === 202 && res?.data?.success) {
+        setOtpData(result);
+        setPage("OTP");
+      } else if (res.status === 200 && res?.data?.success) {
+        handleDirectSessionEstablish(result);
+      } else {
+        openLoginErrorDialog(
+          "Login Failed",
+          result.message || res?.data?.message || "Invalid credentials.",
+        );
+      }
+    } catch (err) {
+      console.error("Login error:", err);
+      
+      // FIX: Handle 429 Too Many Requests
+      if (err.response?.status === 429) {
+        // Note: Axios lowercases all header names automatically.
+        // Replace 'retry-after' or 'x-retry-time' with the EXACT header name you saw in your screenshot (in lowercase).
+        const retryTime = err.response.headers['retry-after'] || err.response.headers['x-retry-time'] || err.response.headers['retry-time'] || "a few minutes";
+        openLoginErrorDialog(
+          "Too Many Requests",
+          `Maximum login attempts exceeded. Please retry after: ${retryTime}.`
+        );
+        return;
+      }
+
+      const errResult = err.response?.data?.data || {};
+
+      if (errResult?.userStatus === "RESTRICTED") {
+        openLoginErrorDialog(
+          "Access Restricted",
+          "This system is restricted to use FinCore, Please contact the administrator.",
+        );
+        return;
+      }
+      if (errResult?.passwordLoginStatus === "INACTIVE") {
+        openLoginErrorDialog(
+          "Password Locked!",
+          "You cannot login using password currently. Please contact the administrator.",
+        );
+        return;
+      }
+
+      const msg =
+        err.response?.data?.message ||
+        err.message ||
+        "Something went wrong, please try again later.";
+      openLoginErrorDialog("Login Failed", msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      // FIX: Pre-validate in handleKeyDown to stop execution before setting loading state, 
+      // but still let handleLogin trigger the inline UI errors if needed
+      if (!loading) {
+        handleLogin();
+      }
+    }
+  };
+
+  const handlePasswordUpdateSuccess = () => {
+    setPage("HOME");
+    setUserIdDisabled(false);
+    setPassword(""); // Clear password so they log in fresh
+  };
+
+  const enableEditingBackToHome = () => {
+    setPage("HOME");
+    setUserIdDisabled(false);
+    setError("");
+    setPasswordError("");
+    setPassword("");
+    setOtpData(null);
+  };
+
+  // Shared token payload & redux session hydration
+  const handleDirectSessionEstablish = (result) => {
+    if (result?.roleData?.root_menus?.length === 0) {
+      openLoginErrorDialog(
+        "Access Denied",
+        "You don't have enough permissions to access this application.",
+      );
+      return;
+    }
+
+    const user = parseJwt(result.accessToken);
+    const tabId = crypto.randomUUID();
+
+    dispatch(loginSuccess({ token: result.accessToken, user }));
+    localStorage.setItem("payloadEncryptionKey", result.payloadEncryptionKey);
+
+    dispatch(setTabId(tabId));
+    dispatch(setMenus(result.roleData.root_menus));
+    dispatch(setSelectedMenuItem(result.roleData.root_menus[0]));
+
+    const bc = new BroadcastChannel("auth");
+    setTimeout(() => {
+      bc.postMessage({
+        type: "USER_LOGGED_IN",
+        tabId,
+        userId: user.userId,
+      });
+    }, 1000);
+  };
+
+  if (!content) return null;
+
+  return (
+    <Root sx={{ justifyContent: "space-between", padding: 0 }}>
+      <Box
+        sx={{
+          flexGrow: 1,
+          display: "flex",
+          alignItems: "center",
+          width: "100%",
+          py: { xs: 4, md: 6 },
+          px: { xs: 2.5, sm: 4, md: 6 },
+        }}
+      >
+        <ContainerInner>
+          <Content
+            sx={{
+              display: "flex",
+              flexDirection: { xs: "column", md: "row" },
+              gap: { xs: 5, md: 4 },
+            }}
+          >
+            <LeftCol>
+              <LogoWrap>
+                <Box
+                  component="img"
+                  src={LogoImg}
+                  alt="Logo Icon"
+                  sx={{
+                    width: { xs: 100, sm: 130, md: 150 },
+                    height: "auto",
+                  }}
+                />
+                <Box sx={{ textAlign: { xs: "center", md: "left" } }}>
+                  <Box
+                    component="img"
+                    src={fTitle}
+                    alt="FinCore"
+                    sx={{
+                      height: { xs: 28, md: 35 },
+                      width: "auto",
+                      mx: { xs: "auto", md: 0 },
+                      mt: { xs: 2, md: 5 },
+                      mb: 1,
+                    }}
+                  />
+                  <BrandSub>{content?.brand?.subtitle}</BrandSub>
+                </Box>
+              </LogoWrap>
+
+              <Box
+                sx={{
+                  display: { xs: "none", md: "block" },
+                  mt: 2,
+                  mb: 1,
+                  textAlign: { xs: "center", md: "left" },
+                }}
+              >
+                <BigHeading>
+                  {(content?.hero?.welcomeTitle || "").split(" - ")[0]}
+                </BigHeading>
+                {content?.hero?.welcomeTitle?.includes(" - ") && (
+                  <SubHeadingText>
+                    {content?.hero?.welcomeTitle.split(" - ")[1]}
+                  </SubHeadingText>
+                )}
+              </Box>
+
+              <SubText
+                sx={{
+                  display: { xs: "none", md: "block" },
+                  textAlign: { xs: "center", md: "left" },
+                }}
+              >
+                {content?.hero?.subText}
+              </SubText>
+
+              <Box sx={{ display: { xs: "none", md: "block" }, mt: 3 }}>
+                <BigHeading>{content?.legal?.title}</BigHeading>
+                <FeatureList sx={{ mt: 2 }}>
+                  {content?.legal?.items.map((item, idx) => (
+                    <FeatureItem key={idx}>
+                      <Bullet /> {item}
+                    </FeatureItem>
+                  ))}
+                </FeatureList>
+              </Box>
+            </LeftCol>
+
+            <RightCol
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                width: "100%",
+              }}
+            >
+              <GlassCard elevation={3} sx={{ width: "100%" }}>
+                <FormTitle align="center">
+                  {page === "OTP"
+                    ? "Two-Factor Verification"
+                    : content?.form?.signIn}
+                </FormTitle>
+
+                {page === "HOME" && (
+                  <Box>
+                    <StyledTextField
+                      fullWidth
+                      required
+                      inputRef={userIdInputRef}
+                      label="User ID"
+                      placeholder={content?.form?.userIdPlaceholder}
+                      margin="dense"
+                      value={userId}
+                      onChange={(e) => handleUserIdChange(e.target.value)}
+                      onPaste={handleUserIdPaste}
+                      onKeyDown={handleKeyDown}
+                      error={Boolean(error)}
+                      helperText={error || " "}
+                      disabled={userIdDisabled || loading}
+                      InputProps={{
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <PersonIcon />
+                          </InputAdornment>
+                        ),
+                      }}
+                    />
+
+                    <StyledTextField
+                      fullWidth
+                      required
+                      inputRef={passwordInputRef}
+                      label="Password"
+                      placeholder="Enter your Password"
+                      type={showPassword ? "text" : "password"}
+                      margin="dense"
+                      value={password}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        if (passwordError) setPasswordError("");
+                      }}
+                      onKeyDown={handleKeyDown}
+                      error={Boolean(passwordError)}
+                      helperText={passwordError || " "}
+                      disabled={loading}
+                      autoComplete="current-password"
+                      InputProps={{
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <LockIcon />
+                          </InputAdornment>
+                        ),
+                        endAdornment: password.trim() && (
+                          <InputAdornment position="end">
+                            <IconButton
+                              onClick={() => setShowPassword(!showPassword)}
+                              edge="end"
+                              disabled={loading}
+                            >
+                              {showPassword ? (
+                                <Visibility />
+                              ) : (
+                                <VisibilityOff />
+                              )}
+                            </IconButton>
+                          </InputAdornment>
+                        ),
+                      }}
+                    />
+
+                    <PrimaryButton
+                      type="button"
+                      variant="contained"
+                      onClick={handleLogin}
+                      disabled={
+                        loading || !userId || password.trim().length < 8
+                      }
+                    >
+                      {loading
+                        ? content?.form?.checking || "Verifying..."
+                        : content?.form?.signInButton}
+                    </PrimaryButton>
+                  </Box>
+                )}
+
+                {page === "OTP" && (
+                  <Box>
+                    <LoginWithOTP
+                      userId={userId}
+                      otpData={otpData}
+                      openLoginErrorDialog={openLoginErrorDialog}
+                      onBackToHome={enableEditingBackToHome}
+                      onSessionEstablished={handleDirectSessionEstablish}
+                    />
+                  </Box>
+                )}
+
+                {page === "UPDATE" && (
+                  <Box>
+                    <UpdatePassword
+                      userId={userId}
+                      publicKey={publicKey}
+                      openLoginErrorDialog={openLoginErrorDialog}
+                      onUpdateSuccess={handlePasswordUpdateSuccess}
+                    />
+                  </Box>
+                )}
+              </GlassCard>
+
+              <Box
+                sx={{
+                  display: { xs: "block", md: "none" },
+                  mt: 5,
+                  width: "100%",
+                }}
+              >
+                <BigHeading
+                  sx={{
+                    fontSize: { xs: "1.2rem", md: "1.5rem" },
+                    textAlign: "center",
+                    mb: 2,
+                  }}
+                >
+                  {content?.legal?.title}
+                </BigHeading>
+                <FeatureList>
+                  {content?.legal?.items.map((item, idx) => (
+                    <FeatureItem
+                      key={idx}
+                      sx={{
+                        fontSize: { xs: "0.875rem", sm: "1rem" },
+                      }}
+                    >
+                      <Bullet /> <span style={{ flex: 1 }}>{item}</span>
+                    </FeatureItem>
+                  ))}
+                </FeatureList>
+              </Box>
+            </RightCol>
+          </Content>
+        </ContainerInner>
+      </Box>
+
+      <Box sx={{ width: "100%", zIndex: 2 }}>
+        <Copyright appVersion={appVersion} />
+      </Box>
+
+      <LoginErrorDialog
+        showErrorDialog={showErrorDialog}
+        title={dialogHeading}
+        content={dialogContent}
+        onDialogClose={handleDialogClose}
+      />
+    </Root>
+  );
 }
