@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import api from "../../../config/axiosConfig";
 import { useDispatch, useSelector } from "react-redux";
@@ -56,9 +56,12 @@ export default function LoginPort() {
   const [passwordError, setPasswordError] = useState("");
 
   const [page, setPage] = useState("HOME"); // HOME | UPDATE | OTP
-  const [dialogHeading, setDialogHeading] = useState("");
-  const [dialogContent, setDialogContent] = useState("");
-  const [showErrorDialog, setShowErrorDialog] = useState(false);
+  const [dialogConfig, setDialogConfig] = useState({
+    show: false,
+    heading: "",
+    content: "",
+    type: "error", // invalid | error | locked | restricted | rateLimit | denied | warning
+  });
   const [loading, setLoading] = useState(false);
   const [userIdDisabled, setUserIdDisabled] = useState(false);
   const [otpData, setOtpData] = useState(null);
@@ -81,66 +84,56 @@ export default function LoginPort() {
 
   // Focus User ID initially
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (userIdInputRef.current && page === "HOME") {
+    let timer;
+    if (page === "HOME" && userIdInputRef.current && !loading) {
+      timer = setTimeout(() => {
         userIdInputRef.current.focus();
-      }
-    }, 100);
+      }, 100);
+    }
     return () => clearTimeout(timer);
-  }, [page]);
+  }, [page, loading]);
 
   // Post-authentication navigation handler
   useEffect(() => {
-    if (menus && menus.length > 0 && menus[0]?.route) {
-      if (menus[0].hasChildren) {
-        navigate("/choose-option" + menus[0]?.route);
-      } else {
-        navigate(menus[0]?.route);
-      }
+    if (menus?.length > 0 && menus[0]?.route) {
+      const targetRoute = menus[0].hasChildren
+        ? `/choose-option${menus[0].route}`
+        : menus[0].route;
+      navigate(targetRoute, { replace: true });
     }
   }, [menus, navigate]);
 
-  const handleDialogClose = () => {
-    setShowErrorDialog(false);
-    setDialogHeading("");
-    setDialogContent("");
-  };
+  const handleDialogClose = useCallback(() => {
+    setDialogConfig({ show: false, heading: "", content: "", type: "error" });
+  }, []);
 
-  const openLoginErrorDialog = (heading, content) => {
-    setDialogHeading(heading);
-    setDialogContent(content);
-    setShowErrorDialog(true);
-  };
+  const openLoginErrorDialog = useCallback((heading, content, type = "error") => {
+    setDialogConfig({ show: true, heading, content, type });
+  }, []);
 
   const validateId = (id) => {
     if (!id) return false;
-    const v = id.trim().toLowerCase();
     const regex = /^(?:\d{7}|v\d{7}|tcs\d{7}|tcsv\d{7})$/;
-    return regex.test(v);
+    return regex.test(id.trim().toLowerCase());
   };
 
   const handleUserIdChange = (raw) => {
     if (userIdDisabled) return;
-    let val = (raw || "").replace(/\s+/g, "");
+    const val = (raw || "").replace(/\s+/g, "");
     const m = val.match(/^([A-Za-z]*)(.*)$/);
-    let prefixCandidate = (m && m[1]) || "";
-    let rest = (m && m[2]) || "";
+    let prefixCandidate = (m?.[1] || "").toLowerCase();
+    const rest = m?.[2] || "";
 
-    const prefixLow = prefixCandidate.toLowerCase();
     const allowedPrefixList = ["", "t", "tc", "tcs", "tcsv", "v"];
-    if (!allowedPrefixList.some((p) => prefixLow?.startsWith(p))) {
+    if (!allowedPrefixList.some((p) => prefixCandidate.startsWith(p))) {
       prefixCandidate = "";
     }
 
-    const prefix = prefixCandidate;
     let digitsPart = rest.replace(/\D/g, "");
     if (digitsPart.length > 7) digitsPart = digitsPart.slice(0, 7);
 
-    const newVal = prefix + digitsPart;
-    if (
-      digitsPart.length < 8 &&
-      allowedPrefixList.some((p) => p.startsWith(prefix?.toLowerCase()))
-    ) {
+    const newVal = prefixCandidate + digitsPart;
+    if (digitsPart.length <= 7) {
       setUserId(newVal);
     }
     if (error) setError("");
@@ -155,6 +148,7 @@ export default function LoginPort() {
   // Unified Login & Validation Execution
   const handleLogin = async (e) => {
     if (e) e.preventDefault();
+    if (loading) return; // Prevent double-clicks
 
     setError("");
     setPasswordError("");
@@ -165,8 +159,6 @@ export default function LoginPort() {
       return;
     }
 
-    // FIX: Enforce minimum 8 characters validation explicitly
-    // so hitting 'Enter' doesn't bypass the button's disabled state
     if (!password || password.trim().length < 8) {
       setPasswordError("Password must be at least 8 characters.");
       passwordInputRef.current?.focus();
@@ -175,8 +167,9 @@ export default function LoginPort() {
 
     if (!publicKey) {
       openLoginErrorDialog(
-        "Error",
-        "Encryption key is failed to fetch. Please refresh the page.",
+        "Initialization Error",
+        "Encryption key failed to fetch. Please refresh the page and try again.",
+        "warning"
       );
       return;
     }
@@ -190,9 +183,7 @@ export default function LoginPort() {
       encryptor.setPublicKey(publicKey);
       const encryptedPassword = encryptor.encrypt(password);
 
-      if (!encryptedPassword) {
-        throw new Error("Encryption failed.");
-      }
+      if (!encryptedPassword) throw new Error("Encryption failed.");
 
       const res = await api.post(`${resolveConfig("/LS")}/auth/login`, {
         userId: payloadUserId,
@@ -201,7 +192,9 @@ export default function LoginPort() {
 
       const result = res?.data?.data || {};
 
-      // Validate Headers & Route to Success/OTP
+      // Clear password from memory right after successful encryption & dispatch
+      setPassword(""); 
+
       if (!result.payloadEncryptionKey) {
         result.payloadEncryptionKey = res.headers["x-payload-key"];
       }
@@ -214,49 +207,55 @@ export default function LoginPort() {
       } else {
         openLoginErrorDialog(
           "Login Failed",
-          result.message ||
-            res?.data?.message ||
-            "Something went wrong, Kindly try again.",
+          result.message || res?.data?.message || "Something went wrong, please try again.",
+          "error"
         );
       }
     } catch (err) {
       console.error("Login error:", err);
 
-      // Handling 429 Too Many Requests
-      if (err.response?.status === 429) {
-        const retryTime =
-          err.response.headers["retry-after"] || "a few minutes";
-        console.log(
-          `Maximum login attempts exceeded. Please retry after ${retryTime} seconds.`,
+      // Handle Network / CORS Errors
+      if (!err.response) {
+        openLoginErrorDialog(
+          "Network Error",
+          "Unable to reach the server. Please check your internet connection.",
+          "error"
         );
+        return;
+      }
+
+      // Handle specific HTTP Status codes
+      const status = err.response.status;
+      const errResult = err.response.data?.data || {};
+      const msg = err.response.data?.message || "Something went wrong, please try again.";
+
+      if (status === 429) {
+        const retryTime = err.response.headers["retry-after"] || "a few minutes";
         openLoginErrorDialog(
           "Too Many Requests",
-          "Maximum login attempts exceeded. Please try after sometime.",
+          `Maximum login attempts exceeded. Please try after ${retryTime} seconds.`,
+          "rateLimit"
         );
         return;
       }
 
-      if (err.response?.status === 401) {
-        openLoginErrorDialog(
-          "Invalid Credentials",
-          err.response?.data?.message ||
-            "Invalid User ID or Password. Please check and try again.",
-        );
+      if (status === 401) {
+        openLoginErrorDialog("Invalid Credentials", msg, "invalid");
         return;
       }
 
-      const errResult = err.response?.data?.data || {};
-
-      if (err.response?.status === 428) {
+      if (status === 428) {
         setPage("UPDATE");
         setUserIdDisabled(true);
         return;
       }
 
+      // Handle API-specific business logic errors
       if (errResult?.userStatus === "RESTRICTED") {
         openLoginErrorDialog(
           "Access Restricted",
-          "This system is restricted to use FinCore, Please contact the administrator.",
+          "This system is restricted to use FinCore. Please contact the administrator.",
+          "restricted"
         );
         return;
       }
@@ -264,36 +263,30 @@ export default function LoginPort() {
       if (errResult?.passwordLoginStatus === "INACTIVE") {
         openLoginErrorDialog(
           "Account Locked",
-          "This account is locked and cannot be sign in to FinCore. Please contact the administrator for assistance.",
+          "This account is locked and cannot sign in to FinCore. Please contact the administrator.",
+          "locked"
         );
         return;
       }
 
-      const msg =
-        err.response?.data?.message ||
-        err.message ||
-        "Something went wrong, please try again later.";
-      openLoginErrorDialog("Login Failed", msg);
+      // Default fallback error
+      openLoginErrorDialog("Login Failed", msg, "error");
     } finally {
       setLoading(false);
     }
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !loading) {
       e.preventDefault();
-      // FIX: Pre-validate in handleKeyDown to stop execution before setting loading state,
-      // but still let handleLogin trigger the inline UI errors if needed
-      if (!loading) {
-        handleLogin();
-      }
+      handleLogin();
     }
   };
 
   const handlePasswordUpdateSuccess = () => {
     setPage("HOME");
     setUserIdDisabled(false);
-    setPassword(""); // Clear password so they log in fresh
+    setPassword("");
   };
 
   const enableEditingBackToHome = () => {
@@ -307,10 +300,11 @@ export default function LoginPort() {
 
   // Shared token payload & redux session hydration
   const handleDirectSessionEstablish = (result) => {
-    if (result?.roleData?.root_menus?.length === 0) {
+    if (!result?.roleData?.root_menus?.length) {
       openLoginErrorDialog(
         "Access Denied",
         "You don't have enough permissions to access this application.",
+        "denied"
       );
       return;
     }
@@ -327,11 +321,8 @@ export default function LoginPort() {
 
     const bc = new BroadcastChannel("auth");
     setTimeout(() => {
-      bc.postMessage({
-        type: "USER_LOGGED_IN",
-        tabId,
-        userId: user.userId,
-      });
+      bc.postMessage({ type: "USER_LOGGED_IN", tabId, userId: user.userId });
+      bc.close(); // Memory cleanup
     }, 1000);
   };
 
@@ -339,76 +330,36 @@ export default function LoginPort() {
 
   return (
     <Root sx={{ justifyContent: "space-between", padding: 0 }}>
+      {/* ... Your Existing Layout Containers (Box, ContainerInner, Content, LeftCol) remain unchanged ... */}
       <Box
         sx={{
-          flexGrow: 1,
-          display: "flex",
-          alignItems: "center",
-          width: "100%",
-          py: { xs: 4, md: 6 },
-          px: { xs: 2.5, sm: 4, md: 6 },
+          flexGrow: 1, display: "flex", alignItems: "center", width: "100%",
+          py: { xs: 4, md: 6 }, px: { xs: 2.5, sm: 4, md: 6 },
         }}
       >
         <ContainerInner>
           <Content
             sx={{
-              display: "flex",
-              flexDirection: { xs: "column", md: "row" },
-              gap: { xs: 5, md: 4 },
+              display: "flex", flexDirection: { xs: "column", md: "row" }, gap: { xs: 5, md: 4 },
             }}
           >
             <LeftCol>
               <LogoWrap>
-                <Box
-                  component="img"
-                  src={LogoImg}
-                  alt="Logo Icon"
-                  sx={{
-                    width: { xs: 100, sm: 130, md: 150 },
-                    height: "auto",
-                  }}
-                />
+                <Box component="img" src={LogoImg} alt="Logo Icon" sx={{ width: { xs: 100, sm: 130, md: 150 }, height: "auto" }} />
                 <Box sx={{ textAlign: { xs: "center", md: "left" } }}>
-                  <Box
-                    component="img"
-                    src={fTitle}
-                    alt="FinCore"
-                    sx={{
-                      height: { xs: 28, md: 35 },
-                      width: "auto",
-                      mx: { xs: "auto", md: 0 },
-                      mt: { xs: 2, md: 5 },
-                      mb: 1,
-                    }}
-                  />
+                  <Box component="img" src={fTitle} alt="FinCore" sx={{ height: { xs: 28, md: 35 }, width: "auto", mx: { xs: "auto", md: 0 }, mt: { xs: 2, md: 5 }, mb: 1 }} />
                   <BrandSub>{content?.brand?.subtitle}</BrandSub>
                 </Box>
               </LogoWrap>
 
-              <Box
-                sx={{
-                  display: { xs: "none", md: "block" },
-                  mt: 2,
-                  mb: 1,
-                  textAlign: { xs: "center", md: "left" },
-                }}
-              >
-                <BigHeading>
-                  {(content?.hero?.welcomeTitle || "").split(" - ")[0]}
-                </BigHeading>
+              <Box sx={{ display: { xs: "none", md: "block" }, mt: 2, mb: 1, textAlign: { xs: "center", md: "left" } }}>
+                <BigHeading>{(content?.hero?.welcomeTitle || "").split(" - ")[0]}</BigHeading>
                 {content?.hero?.welcomeTitle?.includes(" - ") && (
-                  <SubHeadingText>
-                    {content?.hero?.welcomeTitle.split(" - ")[1]}
-                  </SubHeadingText>
+                  <SubHeadingText>{content?.hero?.welcomeTitle.split(" - ")[1]}</SubHeadingText>
                 )}
               </Box>
 
-              <SubText
-                sx={{
-                  display: { xs: "none", md: "block" },
-                  textAlign: { xs: "center", md: "left" },
-                }}
-              >
+              <SubText sx={{ display: { xs: "none", md: "block" }, textAlign: { xs: "center", md: "left" } }}>
                 {content?.hero?.subText}
               </SubText>
 
@@ -416,36 +367,20 @@ export default function LoginPort() {
                 <BigHeading>{content?.legal?.title}</BigHeading>
                 <FeatureList sx={{ mt: 2 }}>
                   {content?.legal?.items.map((item, idx) => (
-                    <FeatureItem key={idx}>
-                      <Bullet /> {item}
-                    </FeatureItem>
+                    <FeatureItem key={idx}><Bullet /> {item}</FeatureItem>
                   ))}
                 </FeatureList>
               </Box>
             </LeftCol>
 
-            <RightCol
-              sx={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                width: "100%",
-              }}
-            >
+            <RightCol sx={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
               <GlassCard elevation={3} sx={{ width: "100%" }}>
                 <FormTitle align="center">
-                  {page === "OTP"
-                    ? "Two-Factor Verification"
-                    : content?.form?.signIn}
+                  {page === "OTP" ? "Two-Factor Verification" : content?.form?.signIn}
                 </FormTitle>
 
                 {page === "HOME" && (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      handleLogin();
-                    }}
-                  >
+                  <form onSubmit={handleLogin}>
                     <StyledTextField
                       fullWidth
                       required
@@ -462,11 +397,7 @@ export default function LoginPort() {
                       disabled={userIdDisabled || loading}
                       autoComplete="username"
                       InputProps={{
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <PersonIcon />
-                          </InputAdornment>
-                        ),
+                        startAdornment: <InputAdornment position="start"><PersonIcon /></InputAdornment>,
                       }}
                     />
 
@@ -489,11 +420,7 @@ export default function LoginPort() {
                       disabled={loading}
                       autoComplete="current-password"
                       InputProps={{
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <LockIcon />
-                          </InputAdornment>
-                        ),
+                        startAdornment: <InputAdornment position="start"><LockIcon /></InputAdornment>,
                         endAdornment: password.trim() && (
                           <InputAdornment position="end">
                             <IconButton
@@ -501,12 +428,9 @@ export default function LoginPort() {
                               edge="end"
                               disabled={loading}
                               type="button"
+                              aria-label={showPassword ? "Hide password" : "Show password"}
                             >
-                              {showPassword ? (
-                                <Visibility />
-                              ) : (
-                                <VisibilityOff />
-                              )}
+                              {showPassword ? <Visibility /> : <VisibilityOff />}
                             </IconButton>
                           </InputAdornment>
                         ),
@@ -516,65 +440,41 @@ export default function LoginPort() {
                     <PrimaryButton
                       type="submit"
                       variant="contained"
-                      disabled={
-                        loading || !userId || password.trim().length < 8
-                      }
+                      disabled={loading || !userId || password.trim().length < 8}
                     >
-                      {loading
-                        ? content?.form?.checking || "Verifying..."
-                        : content?.form?.signInButton}
+                      {loading ? content?.form?.checking || "Verifying..." : content?.form?.signInButton}
                     </PrimaryButton>
                   </form>
                 )}
 
                 {page === "OTP" && (
-                  <Box>
-                    <LoginWithOTP
-                      userId={userId}
-                      otpData={otpData}
-                      openLoginErrorDialog={openLoginErrorDialog}
-                      onBackToHome={enableEditingBackToHome}
-                      onSessionEstablished={handleDirectSessionEstablish}
-                    />
-                  </Box>
+                  <LoginWithOTP
+                    userId={userId}
+                    otpData={otpData}
+                    openLoginErrorDialog={openLoginErrorDialog}
+                    onBackToHome={enableEditingBackToHome}
+                    onSessionEstablished={handleDirectSessionEstablish}
+                  />
                 )}
 
                 {page === "UPDATE" && (
-                  <Box>
-                    <UpdatePassword
-                      userId={userId}
-                      publicKey={publicKey}
-                      openLoginErrorDialog={openLoginErrorDialog}
-                      onUpdateSuccess={handlePasswordUpdateSuccess}
-                    />
-                  </Box>
+                  <UpdatePassword
+                    userId={userId}
+                    publicKey={publicKey}
+                    openLoginErrorDialog={openLoginErrorDialog}
+                    onUpdateSuccess={handlePasswordUpdateSuccess}
+                  />
                 )}
               </GlassCard>
 
-              <Box
-                sx={{
-                  display: { xs: "block", md: "none" },
-                  mt: 5,
-                  width: "100%",
-                }}
-              >
-                <BigHeading
-                  sx={{
-                    fontSize: { xs: "1.2rem", md: "1.5rem" },
-                    textAlign: "center",
-                    mb: 2,
-                  }}
-                >
+              {/* Mobile Legal Box */}
+              <Box sx={{ display: { xs: "block", md: "none" }, mt: 5, width: "100%" }}>
+                <BigHeading sx={{ fontSize: { xs: "1.2rem", md: "1.5rem" }, textAlign: "center", mb: 2 }}>
                   {content?.legal?.title}
                 </BigHeading>
                 <FeatureList>
                   {content?.legal?.items.map((item, idx) => (
-                    <FeatureItem
-                      key={idx}
-                      sx={{
-                        fontSize: { xs: "0.875rem", sm: "1rem" },
-                      }}
-                    >
+                    <FeatureItem key={idx} sx={{ fontSize: { xs: "0.875rem", sm: "1rem" } }}>
                       <Bullet /> <span style={{ flex: 1 }}>{item}</span>
                     </FeatureItem>
                   ))}
@@ -589,16 +489,17 @@ export default function LoginPort() {
         <Copyright />
       </Box>
 
+      {/* Passed type dynamically here */}
       <LoginErrorDialog
-        showErrorDialog={showErrorDialog}
-        title={dialogHeading}
-        content={dialogContent}
+        showErrorDialog={dialogConfig.show}
+        title={dialogConfig.heading}
+        content={dialogConfig.content}
+        type={dialogConfig.type} 
         onDialogClose={handleDialogClose}
       />
     </Root>
   );
 }
-
 
 
 
@@ -611,6 +512,7 @@ import {
   IconButton,
   Typography,
   Box,
+  Fade
 } from "@mui/material";
 import CloseSharpIcon from "@mui/icons-material/CloseSharp";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
@@ -620,8 +522,9 @@ import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import DoNotDisturbIcon from "@mui/icons-material/DoNotDisturb";
 
+// Normalized keys to match standard camelCase convention
 const iconMap = {
-  inValid: { icon: <BlockIcon />, color: "error.main" },
+  invalid: { icon: <BlockIcon />, color: "error.main" },
   error: { icon: <ErrorOutlineIcon />, color: "error.main" },
   locked: { icon: <LockIcon />, color: "warning.main" },
   restricted: { icon: <BlockIcon />, color: "warning.main" },
@@ -630,23 +533,37 @@ const iconMap = {
   warning: { icon: <WarningAmberIcon />, color: "warning.main" },
 };
 
+// Added smooth fade transition
+const Transition = React.forwardRef(function Transition(props, ref) {
+  return <Fade ref={ref} {...props} />;
+});
+
 const LoginErrorDialog = ({
   showErrorDialog,
   onDialogClose,
   title,
   content,
-  type = "error", // ← new prop
+  type = "error", 
 }) => {
+  // Safety fallback if an unknown type is passed
   const { icon, color } = iconMap[type] || iconMap.error;
 
   return (
     <Dialog
       open={showErrorDialog}
       fullWidth
+      maxWidth="sm"
       onClose={onDialogClose}
-      sx={{ backdropFilter: "blur(5px)" }}
+      TransitionComponent={Transition}
+      aria-labelledby="login-error-dialog-title"
+      aria-describedby="login-error-dialog-description"
+      sx={{ 
+        backdropFilter: "blur(4px)",
+        "& .MuiDialog-paper": { borderRadius: 2 } 
+      }}
     >
       <DialogTitle
+        id="login-error-dialog-title"
         sx={{
           backgroundColor: color,
           color: "white",
@@ -657,19 +574,26 @@ const LoginErrorDialog = ({
         }}
       >
         <Box display="flex" alignItems="center">
-          {React.cloneElement(icon, { sx: { mr: 1.5, fontSize: "1.5rem" } })}
-          <Typography variant="h6" component="span" sx={{ fontWeight: 600 }}>
-            {title}
+          {React.cloneElement(icon, { sx: { mr: 1.5, fontSize: "1.75rem" }, "aria-hidden": true })}
+          <Typography variant="h6" component="span" sx={{ fontWeight: 600, fontSize: "1.1rem" }}>
+            {title || "Error"}
           </Typography>
         </Box>
-        <IconButton onClick={onDialogClose} sx={{ color: "white" }}>
+        <IconButton 
+          onClick={onDialogClose} 
+          sx={{ color: "white" }} 
+          aria-label="close dialog"
+        >
           <CloseSharpIcon />
         </IconButton>
       </DialogTitle>
 
-      <DialogContent sx={{ padding: 3 }}>
-        <DialogContentText sx={{ color: "text.primary", pt: 1 }}>
-          <Typography variant="body1" gutterBottom>
+      <DialogContent sx={{ padding: 3, pt: "24px !important" }}>
+        <DialogContentText 
+          id="login-error-dialog-description" 
+          sx={{ color: "text.primary" }}
+        >
+          <Typography variant="body1">
             {content}
           </Typography>
         </DialogContentText>
