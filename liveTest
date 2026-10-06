@@ -1,255 +1,156 @@
-import axios from "axios";
-import { jwtDecrypt } from "jose"; // <-- Added import
+import { useState, useCallback, useRef, useEffect } from "react";
+import { useSelector } from "react-redux";
+import { useLocation } from "react-router-dom";
+import api from "../config/axiosConfig";
 import { resolveConfig } from "../config/EnvironmentConfig";
-import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
-import { encryptPayload, decryptPayload } from "../utils/cryptoUtil";
-// Removed parseJwt import as it's no longer compatible with JWE
+import { convertToKebabCase } from "../utils/CommonUtilities";
 
-let store;
+const useApi = () => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
-export const injectStore = (_store) => {
-  store = _store;
-};
+  const activeRequests = useRef(new Set());
+  const latestController = useRef(null); // <-- Track the latest request
+  const location = useLocation();
 
-const api = axios.create({
-  baseURL: "",
-  withCredentials: true,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+  const menus = useSelector((state) => state.menus.menus);
+  const selectedMenuItem = useSelector((state) => state.menus.selectedMenuItem);
 
-const authClient = axios.create({
-  baseURL: "",
-  withCredentials: true,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
-
-// --- Request Interceptor ---
-api.interceptors.request.use(
-  async (config) => {
-    const state = store?.getState();
-    const token = state?.auth?.token;
-
-    const isRefreshRequest = config.url?.includes("/auth/refresh-token");
-    if (!isRefreshRequest && token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-
-    if (!config.headers["X-Request-Type"]) {
-      config.headers["X-Request-Type"] = "*";
-    }
-
-    const excludedUrls = [
-      "/auth/refresh-token",
-      "/auth/start-prod",
-      "/auth/login",
-      "/auth/check-user",
-      "/admin-support/admin-execute",
-      "/admin-support/upload-script",
-      "/report-builder",
-      "/template-config",
-      "/reports/types",
-      "/reports/download",
-    ];
-
-    const shouldSkipEncryption = excludedUrls.some((url) =>
-      config.url?.includes(url),
-    );
-
-    if (
-      !shouldSkipEncryption &&
-      ["post", "put", "patch"].includes(config.method?.toLowerCase()) &&
-      config.data &&
-      !(config.data instanceof FormData)
-    ) {
-      const state = store?.getState();
-      const sessionKey = state?.auth?.payloadEncryptionKey;
-
-      if (sessionKey) {
-        const encryptedString = await encryptPayload(config.data, sessionKey);
-        config.data = encryptedString;
-        config.headers["X-Encrypted-Payload"] = "true";
-        config.headers["Content-Type"] = "application/json";
-      }
-    }
-    return config;
-  },
-  (error) => Promise.reject(error),
-);
-
-// --- Response Interceptor ---
-let isRefreshing = false;
-let failedQueue = [];
-
-const processQueue = (error, token = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
-};
-
-api.interceptors.response.use(
-  async (response) => {
-    const isEncrypted = response.headers["x-encrypted-response"] === "true";
-
-    if (isEncrypted && response.data) {
-      const state = store?.getState();
-      const sessionKey = state?.auth?.payloadEncryptionKey;
-
-      if (sessionKey) {
-        try {
-          const decryptedJsonString = await decryptPayload(
-            response.data.encryptedResponse,
-            sessionKey,
-          );
-          response.data = JSON.parse(decryptedJsonString);
-        } catch (error) {
-          console.error("Failed to decrypt response", error);
-          return Promise.reject(error);
+  const findMenuItem = useCallback((items, route) => {
+    if (!items?.length) return null;
+    for (const item of items) {
+      if (item.route === route) return item;
+      if (item.children?.length) {
+        if (route.includes("/choose-option/")) {
+          const param = route.split("/choose-option/")[1];
+          if (param === convertToKebabCase(item.title)) return item;
         }
+        const found = findMenuItem(item.children, route);
+        if (found) return found;
       }
     }
+    return null;
+  }, []);
 
-    return response;
-  },
+  const xRequestType = (() => {
+    const currentMenu = findMenuItem(menus, location.pathname);
+    return currentMenu?.requestType || selectedMenuItem?.requestType || "*";
+  })();
 
-  async (error) => {
-    const originalRequest = error.config;
+  const cancelAllRequests = useCallback(() => {
+    activeRequests.current.forEach((controller) => controller.abort());
+    activeRequests.current.clear();
+    latestController.current = null;
+  }, []);
 
-    if (!originalRequest || originalRequest._retryCount > 2) {
-      return Promise.reject(error);
+  // NEW: Cancel only the most recent API call
+  const cancelApi = useCallback(() => {
+    if (latestController.current) {
+      latestController.current.abort();
+      activeRequests.current.delete(latestController.current);
+      latestController.current = null;
     }
+  }, []);
 
-    const status = error.response?.status;
-    const errorCode = error.response?.data?.error || error.response?.data?.code;
+  useEffect(() => () => cancelAllRequests(), [cancelAllRequests]);
 
-    // SCENARIO 1: Concurrent Login / Session Invalidated
-    if (
-      status === 401 &&
-      (errorCode === "CONCURRENT_LOGIN" ||
-        errorCode === "SESSION_EXPIRED" ||
-        errorCode === "INVALID_TOKEN")
-    ) {
-      window.dispatchEvent(
-        new CustomEvent("auth:session-expired", {
-          detail: { reason: errorCode },
-        }),
-      );
-      store.dispatch(logoutSuccess());
-      return Promise.reject(error);
-    }
+  const callApi = useCallback(
+    async (
+      url,
+      payload = null,
+      method = "GET",
+      responseType = "json",
+      contentType = "application/json",
+      extraConfig = {},
+      returnDataOnly = true,
+    ) => {
+      setLoading(true);
+      setError(null);
 
-    // SCENARIO 2: Access Token Expired (Try Refresh)
-    if (
-      status === 401 &&
-      errorCode === "TOKEN_EXPIRED" &&
-      !originalRequest._retry
-    ) {
-      if (isRefreshing) {
-        return new Promise(function (resolve, reject) {
-          failedQueue.push({
-            resolve: (token) => {
-              originalRequest.headers["Authorization"] = "Bearer " + token;
-              resolve(api(originalRequest));
-            },
-            reject: (err) => {
-              reject(err);
-            },
-          });
-        });
-      }
+      const parts = url.split("/");
+      const service = parts[1];
+      const resolved = resolveConfig(`/${service}`);
+      parts[1] = resolved;
+      const finalUrl = parts.slice(1).join("/");
 
-      originalRequest._retry = true;
-      isRefreshing = true;
+      const controller = new AbortController();
+      activeRequests.current.add(controller);
+      latestController.current = controller; // <-- Set as the latest request
 
       try {
-        const response = await authClient.post(
-          `${resolveConfig("/LS") || ""}/auth/refresh-token`,
-          {},
-        );
+        const config = {
+          method,
+          url: finalUrl,
+          data: method !== "GET" ? payload : undefined,
+          params: method === "GET" ? payload : undefined,
+          responseType,
+          signal: controller.signal, // Attach the abort signal
+          headers: {
+            "Content-Type": contentType,
+            "X-Request-Type": xRequestType,
+            ...(extraConfig.headers || {}),
+          },
+          ...extraConfig,
+        };
 
-        let { accessToken, payloadEncryptionKey: newPayloadKey } = response?.data?.data || {};
+        const response = await api(config);
+        setData(response.data);
+        return returnDataOnly || responseType == "json"
+          ? response.data
+          : response;
+      } catch (err) {
+        setError(err);
 
-        // Fallback to check headers in case the backend sends the new key there
-        if (!newPayloadKey) {
-          newPayloadKey = response.headers["x-payload-key"];
+        // Safely pass cancellation errors back to the component without logging them as standard API errors
+        if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
+          throw err;
         }
 
-        if (accessToken) {
-          // If the backend doesn't rotate the key on refresh, fallback to the existing one in state
-          const activeKey = newPayloadKey || store.getState()?.auth?.payloadEncryptionKey;
+        // --- NEW: Handle 429 Locally for Hook Consumers ---
+        if (err?.response?.status === 429) {
+          const retryTime =
+            err.response.headers["retry-after"] ||
+            err.response.headers["x-retry-time"];
 
-          if (!activeKey) {
-            throw new Error("Missing decryption key for refreshed token.");
+          const msg =
+            retryTime && !isNaN(Number(retryTime))
+              ? `Too many requests. Please retry after ${retryTime} seconds.`
+              : "Too many requests. Please try again after sometime.";
+
+          console.error(msg);
+
+          throw err?.response?.data || err?.response;
+        }
+
+        if (err?.response?.status !== 401) {
+          if (responseType == "arraybuffer") {
+            const decoder = new TextDecoder("utf-8");
+            const jsonString = decoder.decode(err?.response?.data);
+            const jsonObject = JSON.parse(jsonString);
+            throw jsonObject;
           }
 
-          // Convert Base64 key and decrypt the new JWE token
-          const secretKey = Uint8Array.from(atob(activeKey), (c) => c.charCodeAt(0));
-          const { payload: user } = await jwtDecrypt(accessToken, secretKey);
-
-          // 1. Update Redux
-          store.dispatch(
-            tokenRefreshed({ 
-              token: accessToken, 
-              user, 
-              payloadEncryptionKey: activeKey 
-            })
+          console.error(
+            err.response?.data?.message ||
+              err.response?.data?.error ||
+              "An error occurred",
           );
-          
-          api.defaults.headers.common.Authorization = `Bearer ${accessToken}`;
-
-          // 2. Process Queue
-          processQueue(null, accessToken);
-
-          // 3. Retry Original Request
-          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
-          return api(originalRequest);
-        } else {
-          throw new Error("No access token returned");
         }
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        store.dispatch(logoutSuccess());
-        window.dispatchEvent(
-          new CustomEvent("auth:session-expired", {
-            detail: { reason: "SESSION_EXPIRED" },
-          }),
-        );
-        return Promise.reject(refreshError);
+
+        throw err?.response?.data || err?.response;
       } finally {
-        isRefreshing = false;
+        activeRequests.current.delete(controller);
+        if (latestController.current === controller) {
+          latestController.current = null;
+        }
+        setLoading(false);
       }
-    }
+    },
+    [xRequestType],
+  );
 
-    // SCENARIO 3: Rate Limiting / Too Many Requests (429)
-    if (status === 429) {
-      const retryTime =
-        error.response.headers["retry-after"] ||
-        error.response.headers["x-retry-time"];
+  return { data, error, loading, callApi, cancelAllRequests, cancelApi };
+};
 
-      const rateLimitMsg =
-        retryTime && !isNaN(Number(retryTime))
-          ? `Too many requests. Please retry after ${retryTime} seconds.`
-          : "Too many requests. Please try again after sometime.";
-
-      window.dispatchEvent(
-        new CustomEvent("api:rate-limit", {
-          detail: { message: rateLimitMsg },
-        }),
-      );
-
-      return Promise.reject(error);
-    }
-
-    return Promise.reject(error);
-  },
-);
-
-export default api;
+export default useApi;
