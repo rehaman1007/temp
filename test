@@ -1,175 +1,259 @@
-import React, {
-  createContext,
-  useEffect,
-  useRef,
-  useCallback,
-  useState,
-} from "react";
-
-import { useDispatch, useSelector } from "react-redux";
-import { throttle } from "lodash";
-import SessionDialog from "../components/SessionDialog";
-import RateLimitDialog from "../components/RateLimitDialog";
-import SessionWarningDialog from "../components/SessionWarningDialog";
-import { logoutSuccess } from "../store/slices/authSlice";
-import { clearMenus } from "../store/slices/menuSlice";
-import api from "../config/axiosConfig";
+import axios from "axios";
+import { jwtDecrypt } from "jose"; // <-- Added import
 import { resolveConfig } from "../config/EnvironmentConfig";
+import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
+import { encryptPayload, decryptPayload } from "../utils/cryptoUtil";
+// Removed parseJwt import as it's no longer compatible with JWE
 
-export const AuthContext = createContext();
+let store;
 
-const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 min
-const WARNING_SECONDS = 30;
-const WARNING_TIME = INACTIVITY_TIMEOUT - WARNING_SECONDS * 1000; // 30s
+export const injectStore = (_store) => {
+  store = _store;
+};
 
-export const AuthProvider = ({ children }) => {
-  const dispatch = useDispatch();
-  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
-  const [warningOpen, setWarningOpen] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(WARNING_SECONDS);
-  
-  // You might not even need sessionDialogOpen anymore if you redirect instantly,
-  // but we keep it here so your component doesn't break.
-  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
-  const [sessionReason, setSessionReason] = useState("");
-  
-  const [rateLimitDialogOpen, setRateLimitDialogOpen] = useState(false);
-  const [rateLimitMessage, setRateLimitMessage] = useState(
-    "Too many requests. Please try again after sometime",
-  );
+const api = axios.create({
+  baseURL: "",
+  withCredentials: true,
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
 
-  const inactivityTimerRef = useRef(null);
-  const warningTimerRef = useRef(null);
-  const countdownRef = useRef(null);
+const authClient = axios.create({
+  baseURL: "",
+  withCredentials: true,
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
 
-  // --- Clear all timers ---
-  const clearAllTimers = useCallback(() => {
-    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
-    if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-  }, []);
+// --- Request Interceptor ---
+api.interceptors.request.use(
+  async (config) => {
+    const state = store?.getState();
+    const token = state?.auth?.token;
 
-  // --- Perform Logout ---
-  const performLogout = useCallback(
-    async (reason = "USER_INITIATED") => {
-      clearAllTimers();
-      setWarningOpen(false);
+    const isRefreshRequest = config.url?.includes("/auth/refresh-token");
+    if (!isRefreshRequest && token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    if (!config.headers["X-Request-Type"]) {
+      config.headers["X-Request-Type"] = "*";
+    }
+
+    const excludedUrls = [
+      "/auth/refresh-token",
+      "/auth/start-prod",
+      "/auth/login",
+      "/auth/check-user",
+      "/admin-support/admin-execute",
+      "/admin-support/upload-script",
+      "/report-builder",
+      "/template-config",
+      "/reports/types",
+      "/reports/download",
+    ];
+
+    const shouldSkipEncryption = excludedUrls.some((url) =>
+      config.url?.includes(url),
+    );
+
+    if (
+      !shouldSkipEncryption &&
+      ["post", "put", "patch"].includes(config.method?.toLowerCase()) &&
+      config.data &&
+      !(config.data instanceof FormData)
+    ) {
+      const state = store?.getState();
+      const sessionKey = state?.auth?.payloadEncryptionKey;
+
+      if (sessionKey) {
+        const encryptedString = await encryptPayload(config.data, sessionKey);
+        config.data = encryptedString;
+        config.headers["X-Encrypted-Payload"] = "true";
+        config.headers["Content-Type"] = "application/json";
+      }
+    }
+    return config;
+  },
+  (error) => Promise.reject(error),
+);
+
+// --- Response Interceptor ---
+let isRefreshing = false;
+let failedQueue = [];
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+};
+
+api.interceptors.response.use(
+  async (response) => {
+    const isEncrypted = response.headers["x-encrypted-response"] === "true";
+
+    if (isEncrypted && response.data) {
+      const state = store?.getState();
+      const sessionKey = state?.auth?.payloadEncryptionKey;
+
+      if (sessionKey) {
+        try {
+          const decryptedJsonString = await decryptPayload(
+            response.data.encryptedResponse,
+            sessionKey,
+          );
+          response.data = JSON.parse(decryptedJsonString);
+        } catch (error) {
+          console.error("Failed to decrypt response", error);
+          return Promise.reject(error);
+        }
+      }
+    }
+
+    return response;
+  },
+
+  async (error) => {
+    const originalRequest = error.config;
+
+    if (!originalRequest || originalRequest._retryCount > 2) {
+      return Promise.reject(error);
+    }
+
+    const status = error.response?.status;
+    const errorCode = error.response?.data?.error || error.response?.data?.code;
+
+    // SCENARIO 1: Concurrent Login / Session Invalidated
+    if (
+      status === 401 &&
+      (errorCode === "CONCURRENT_LOGIN" ||
+        errorCode === "SESSION_EXPIRED" ||
+        errorCode === "INVALID_TOKEN")
+    ) {
+      window.dispatchEvent(
+        new CustomEvent("auth:session-expired", {
+          detail: { reason: errorCode },
+        }),
+      );
+      store.dispatch(logoutSuccess());
+      return Promise.reject(error);
+    }
+
+    // SCENARIO 2: Access Token Expired (Try Refresh)
+    if (
+      status === 401 &&
+      errorCode === "TOKEN_EXPIRED" &&
+      !originalRequest._retry
+    ) {
+      if (isRefreshing) {
+        return new Promise(function (resolve, reject) {
+          failedQueue.push({
+            resolve: (token) => {
+              originalRequest.headers["Authorization"] = "Bearer " + token;
+              resolve(api(originalRequest));
+            },
+            reject: (err) => {
+              reject(err);
+            },
+          });
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
 
       try {
-        await api.post(`${resolveConfig("/LS")}/auth/logout`);
-      } catch (e) {
-        console.error(e);
-      } finally {
-        // DIRECT LOGOUT: Instantly clear state and redirect without waiting
-        dispatch(logoutSuccess());
-        dispatch(clearMenus());
-        window.location.replace("/");
-      }
-    },
-    [dispatch, clearAllTimers],
-  );
+        const response = await authClient.post(
+          `${resolveConfig("/LS") || ""}/auth/refresh-token`,
+          {},
+        );
 
-  // --- Start inactivity timers ---
-  const startInactivityTimer = useCallback(() => {
-    clearAllTimers();
-    if (!isAuthenticated) return;
-    
-    warningTimerRef.current = setTimeout(() => {
-      setSecondsLeft(WARNING_SECONDS);
-      setWarningOpen(true);
-      countdownRef.current = setInterval(() => {
-        setSecondsLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(countdownRef.current);
-            performLogout("SESSION_TIMEOUT");
-            return 0;
+        let { accessToken, payloadEncryptionKey: newPayloadKey } =
+          response?.data?.data || {};
+
+        // Fallback to check headers in case the backend sends the new key there
+        if (!newPayloadKey) {
+          newPayloadKey = response.headers["x-payload-key"];
+        }
+
+        if (accessToken) {
+          // If the backend doesn't rotate the key on refresh, fallback to the existing one in state
+          const activeKey =
+            newPayloadKey || store.getState()?.auth?.payloadEncryptionKey;
+
+          if (!activeKey) {
+            throw new Error("Missing decryption key for refreshed token.");
           }
-          return prev - 1;
-        });
-      }, 1000);
-    }, WARNING_TIME);
-    
-    inactivityTimerRef.current = setTimeout(() => {
-      performLogout("SESSION_TIMEOUT");
-    }, INACTIVITY_TIMEOUT);
-  }, [isAuthenticated, clearAllTimers, performLogout]);
 
-  // --- User Activity Listener ---
-  const onActivity = useCallback(
-    throttle(() => {
-      if (!isAuthenticated || sessionDialogOpen) return;
-      setWarningOpen(false);
-      startInactivityTimer();
-    }, 2000),
-    [isAuthenticated, sessionDialogOpen, startInactivityTimer],
-  );
+          // Convert Base64 key and decrypt the new JWE token
+          const secretKey = Uint8Array.from(atob(activeKey), (c) =>
+            c.charCodeAt(0),
+          );
+          const { payload: user } = await jwtDecrypt(accessToken, secretKey);
 
-  useEffect(() => {
-    if (!isAuthenticated) {
-      clearAllTimers();
-      setWarningOpen(false);
-      return;
+          // 1. Update Redux
+          store.dispatch(
+            tokenRefreshed({
+              token: accessToken,
+              user,
+              payloadEncryptionKey: activeKey,
+            }),
+          );
+
+          api.defaults.headers.common.Authorization = `Bearer ${accessToken}`;
+
+          // 2. Process Queue
+          processQueue(null, accessToken);
+
+          // 3. Retry Original Request
+          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
+          return api(originalRequest);
+        } else {
+          throw new Error("No access token returned");
+        }
+      } catch (refreshError) {
+        processQueue(refreshError, null);
+        store.dispatch(logoutSuccess());
+        window.dispatchEvent(
+          new CustomEvent("auth:session-expired", {
+            detail: { reason: "SESSION_EXPIRED" },
+          }),
+        );
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
+      }
     }
-    startInactivityTimer();
-    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-    events.forEach((e) => window.addEventListener(e, onActivity));
-    return () => {
-      events.forEach((e) => window.removeEventListener(e, onActivity));
-      onActivity.cancel();
-      clearAllTimers();
-    };
-  }, [isAuthenticated, startInactivityTimer, onActivity, clearAllTimers]);
 
-  useEffect(() => {
-    const handleSessionEvent = (e) => {
-      performLogout(e.detail?.reason || "SESSION_EXPIRED");
-    };
-    window.addEventListener("auth:session-expired", handleSessionEvent);
-    return () =>
-      window.removeEventListener("auth:session-expired", handleSessionEvent);
-  }, [performLogout]);
+    // SCENARIO 3: Rate Limiting / Too Many Requests (429)
+    if (status === 429) {
+      const retryTime =
+        error.response.headers["retry-after"] ||
+        error.response.headers["x-retry-time"];
 
-  useEffect(() => {
-    const handleRateLimitEvent = (e) => {
-      setRateLimitMessage(e.detail?.message);
-      setRateLimitDialogOpen(true);
-    };
+      const rateLimitMsg =
+        retryTime && !isNaN(Number(retryTime))
+          ? `Too many requests. Please retry after ${retryTime} seconds.`
+          : "Too many requests. Please try again after sometime.";
 
-    window.addEventListener("api:rate-limit", handleRateLimitEvent);
-    return () =>
-      window.removeEventListener("api:rate-limit", handleRateLimitEvent);
-  }, []);
+      window.dispatchEvent(
+        new CustomEvent("api:rate-limit", {
+          detail: { message: rateLimitMsg },
+        }),
+      );
 
-  return (
-    <AuthContext.Provider
-      value={{
-        logout: () => performLogout("USER_INITIATED"),
-        triggerSessionDialog: (reason) => performLogout(reason),
-      }}
-    >
-      {children}
-      <SessionWarningDialog
-        open={warningOpen}
-        secondsLeft={secondsLeft}
-        onContinue={() => {
-          setWarningOpen(false);
-          startInactivityTimer();
-        }}
-      />
-      <SessionDialog
-        open={sessionDialogOpen}
-        reason={sessionReason}
-        onConfirm={() => {
-          setSessionDialogOpen(false);
-        }}
-      />
-      <RateLimitDialog
-        open={rateLimitDialogOpen}
-        message={rateLimitMessage}
-        onConfirm={() => {
-          setRateLimitDialogOpen(false);
-        }}
-      />
-    </AuthContext.Provider>
-  );
-};
+      return Promise.reject(error);
+    }
+
+    return Promise.reject(error);
+  },
+);
+
+export default api;
