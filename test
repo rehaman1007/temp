@@ -1,259 +1,310 @@
-import axios from "axios";
-import { jwtDecrypt } from "jose"; // <-- Added import
-import { resolveConfig } from "../config/EnvironmentConfig";
-import { tokenRefreshed, logoutSuccess } from "../store/slices/authSlice";
-import { encryptPayload, decryptPayload } from "../utils/cryptoUtil";
-// Removed parseJwt import as it's no longer compatible with JWE
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
 
-let store;
+    <modelVersion>4.0.0</modelVersion>
 
-export const injectStore = (_store) => {
-  store = _store;
-};
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.0</version>
+        <relativePath/>
+    </parent>
 
-const api = axios.create({
-  baseURL: "",
-  withCredentials: true,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+    <groupId>com.fincore</groupId>
+    <artifactId>LoginService</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>Login-service</name>
 
-const authClient = axios.create({
-  baseURL: "",
-  withCredentials: true,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+    <properties>
+        <java.version>21</java.version>
 
-// --- Request Interceptor ---
-api.interceptors.request.use(
-  async (config) => {
-    const state = store?.getState();
-    const token = state?.auth?.token;
+        <!-- Existing project versions -->
+        <spring-cloud.version>2025.0.0</spring-cloud.version>
+        <jjwt.version>0.12.6</jjwt.version>
+        <netty.version>4.2.18.Final</netty.version>
+        <kafka.version>4.1.2</kafka.version>
+        <lz4.version>1.8.1</lz4.version>
 
-    const isRefreshRequest = config.url?.includes("/auth/refresh-token");
-    if (!isRefreshRequest && token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
+        <!-- Existing security-related overrides -->
+        <spring-framework.version>7.0.9</spring-framework.version>
+        <spring-security.version>7.1.1</spring-security.version>
+        <jackson.version>2.22.2</jackson.version>
+        <tools.jackson.version>3.2.2</tools.jackson.version>
+        <micrometer.version>1.16.6</micrometer.version>
 
-    if (!config.headers["X-Request-Type"]) {
-      config.headers["X-Request-Type"] = "*";
-    }
+        <!-- SCA remediation overrides -->
+        <tomcat.version>11.0.27</tomcat.version>
+        <snappy.version>1.1.10.12</snappy.version>
+        <yawk.lz4.version>1.12.1</yawk.lz4.version>
+        <zstd.version>1.5.7-17</zstd.version>
+        <log4j.version>2.26.1</log4j.version>
+    </properties>
 
-    const excludedUrls = [
-      "/auth/refresh-token",
-      "/auth/start-prod",
-      "/auth/login",
-      "/auth/check-user",
-      "/admin-support/admin-execute",
-      "/admin-support/upload-script",
-      "/report-builder",
-      "/template-config",
-      "/reports/types",
-      "/reports/download",
-    ];
+    <dependencyManagement>
+        <dependencies>
 
-    const shouldSkipEncryption = excludedUrls.some((url) =>
-      config.url?.includes(url),
-    );
+            <!-- Spring Cloud BOM -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
 
-    if (
-      !shouldSkipEncryption &&
-      ["post", "put", "patch"].includes(config.method?.toLowerCase()) &&
-      config.data &&
-      !(config.data instanceof FormData)
-    ) {
-      const state = store?.getState();
-      const sessionKey = state?.auth?.payloadEncryptionKey;
+            <!-- Netty BOM -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
 
-      if (sessionKey) {
-        const encryptedString = await encryptPayload(config.data, sessionKey);
-        config.data = encryptedString;
-        config.headers["X-Encrypted-Payload"] = "true";
-        config.headers["Content-Type"] = "application/json";
-      }
-    }
-    return config;
-  },
-  (error) => Promise.reject(error),
-);
+            <!-- Jackson 2.x BOM -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
 
-// --- Response Interceptor ---
-let isRefreshing = false;
-let failedQueue = [];
+            <!-- Jackson 3.x BOM -->
+            <dependency>
+                <groupId>tools.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${tools.jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
 
-const processQueue = (error, token = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
-};
+            <!-- Tomcat security override -->
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-core</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
 
-api.interceptors.response.use(
-  async (response) => {
-    const isEncrypted = response.headers["x-encrypted-response"] === "true";
+            <!-- Kafka clients -->
+            <dependency>
+                <groupId>org.apache.kafka</groupId>
+                <artifactId>kafka-clients</artifactId>
+                <version>${kafka.version}</version>
+            </dependency>
 
-    if (isEncrypted && response.data) {
-      const state = store?.getState();
-      const sessionKey = state?.auth?.payloadEncryptionKey;
+            <!-- Existing LZ4 dependency -->
+            <dependency>
+                <groupId>org.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>${lz4.version}</version>
+            </dependency>
 
-      if (sessionKey) {
-        try {
-          const decryptedJsonString = await decryptPayload(
-            response.data.encryptedResponse,
-            sessionKey,
-          );
-          response.data = JSON.parse(decryptedJsonString);
-        } catch (error) {
-          console.error("Failed to decrypt response", error);
-          return Promise.reject(error);
-        }
-      }
-    }
+            <!-- SCA: at.yawk.lz4 is a separate Maven coordinate -->
+            <dependency>
+                <groupId>at.yawk.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>${yawk.lz4.version}</version>
+            </dependency>
 
-    return response;
-  },
+            <!-- Snappy Java security override -->
+            <dependency>
+                <groupId>org.xerial.snappy</groupId>
+                <artifactId>snappy-java</artifactId>
+                <version>${snappy.version}</version>
+            </dependency>
 
-  async (error) => {
-    const originalRequest = error.config;
+            <!-- Zstandard JNI security override -->
+            <dependency>
+                <groupId>com.github.luben</groupId>
+                <artifactId>zstd-jni</artifactId>
+                <version>${zstd.version}</version>
+            </dependency>
 
-    if (!originalRequest || originalRequest._retryCount > 2) {
-      return Promise.reject(error);
-    }
+            <!-- Log4j API security override -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-api</artifactId>
+                <version>${log4j.version}</version>
+            </dependency>
 
-    const status = error.response?.status;
-    const errorCode = error.response?.data?.error || error.response?.data?.code;
+            <!-- Keep Log4j Core aligned if it is used -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-core</artifactId>
+                <version>${log4j.version}</version>
+            </dependency>
 
-    // SCENARIO 1: Concurrent Login / Session Invalidated
-    if (
-      status === 401 &&
-      (errorCode === "CONCURRENT_LOGIN" ||
-        errorCode === "SESSION_EXPIRED" ||
-        errorCode === "INVALID_TOKEN")
-    ) {
-      window.dispatchEvent(
-        new CustomEvent("auth:session-expired", {
-          detail: { reason: errorCode },
-        }),
-      );
-      store.dispatch(logoutSuccess());
-      return Promise.reject(error);
-    }
+            <!-- Micrometer override -->
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-core</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
 
-    // SCENARIO 2: Access Token Expired (Try Refresh)
-    if (
-      status === 401 &&
-      errorCode === "TOKEN_EXPIRED" &&
-      !originalRequest._retry
-    ) {
-      if (isRefreshing) {
-        return new Promise(function (resolve, reject) {
-          failedQueue.push({
-            resolve: (token) => {
-              originalRequest.headers["Authorization"] = "Bearer " + token;
-              resolve(api(originalRequest));
-            },
-            reject: (err) => {
-              reject(err);
-            },
-          });
-        });
-      }
+        </dependencies>
+    </dependencyManagement>
 
-      originalRequest._retry = true;
-      isRefreshing = true;
+    <dependencies>
 
-      try {
-        const response = await authClient.post(
-          `${resolveConfig("/LS") || ""}/auth/refresh-token`,
-          {},
-        );
+        <!-- Web and Reactive -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
 
-        let { accessToken, payloadEncryptionKey: newPayloadKey } =
-          response?.data?.data || {};
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
 
-        // Fallback to check headers in case the backend sends the new key there
-        if (!newPayloadKey) {
-          newPayloadKey = response.headers["x-payload-key"];
-        }
+        <!-- Security and OAuth2 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
 
-        if (accessToken) {
-          // If the backend doesn't rotate the key on refresh, fallback to the existing one in state
-          const activeKey =
-            newPayloadKey || store.getState()?.auth?.payloadEncryptionKey;
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
 
-          if (!activeKey) {
-            throw new Error("Missing decryption key for refreshed token.");
-          }
+        <!-- Data and persistence -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
 
-          // Convert Base64 key and decrypt the new JWE token
-          const secretKey = Uint8Array.from(atob(activeKey), (c) =>
-            c.charCodeAt(0),
-          );
-          const { payload: user } = await jwtDecrypt(accessToken, secretKey);
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+        </dependency>
 
-          // 1. Update Redux
-          store.dispatch(
-            tokenRefreshed({
-              token: accessToken,
-              user,
-              payloadEncryptionKey: activeKey,
-            }),
-          );
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-ldap</artifactId>
+        </dependency>
 
-          api.defaults.headers.common.Authorization = `Bearer ${accessToken}`;
+        <dependency>
+            <groupId>com.oracle.database.jdbc</groupId>
+            <artifactId>ojdbc11</artifactId>
+            <scope>runtime</scope>
+        </dependency>
 
-          // 2. Process Queue
-          processQueue(null, accessToken);
+        <!-- JWT -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
 
-          // 3. Retry Original Request
-          originalRequest.headers["Authorization"] = "Bearer " + accessToken;
-          return api(originalRequest);
-        } else {
-          throw new Error("No access token returned");
-        }
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        store.dispatch(logoutSuccess());
-        window.dispatchEvent(
-          new CustomEvent("auth:session-expired", {
-            detail: { reason: "SESSION_EXPIRED" },
-          }),
-        );
-        return Promise.reject(refreshError);
-      } finally {
-        isRefreshing = false;
-      }
-    }
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
 
-    // SCENARIO 3: Rate Limiting / Too Many Requests (429)
-    if (status === 429) {
-      const retryTime =
-        error.response.headers["retry-after"] ||
-        error.response.headers["x-retry-time"];
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
 
-      const rateLimitMsg =
-        retryTime && !isNaN(Number(retryTime))
-          ? `Too many requests. Please retry after ${retryTime} seconds.`
-          : "Too many requests. Please try again after sometime.";
+        <!-- Validation -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
 
-      window.dispatchEvent(
-        new CustomEvent("api:rate-limit", {
-          detail: { message: rateLimitMsg },
-        }),
-      );
+        <!-- Messaging and Kafka -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
 
-      return Promise.reject(error);
-    }
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-messaging</artifactId>
+        </dependency>
 
-    return Promise.reject(error);
-  },
-);
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
 
-export default api;
+        <!-- Observability -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <!-- Utilities -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
+        <!-- Internal dependency -->
+        <dependency>
+            <groupId>com.fincore</groupId>
+            <artifactId>common-utilities</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <!-- Jakarta SOAP implementation -->
+        <dependency>
+            <groupId>com.sun.xml.messaging.saaj</groupId>
+            <artifactId>saaj-impl</artifactId>
+            <version>3.0.3</version>
+        </dependency>
+
+        <!-- Testing -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+    </dependencies>
+
+    <build>
+        <finalName>${project.artifactId}</finalName>
+
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
