@@ -1,40 +1,138 @@
-// src/context/AuthContext.jsx
-import { clearMenus } from "../store/slices/menuSlice"; // <-- Add this import
-import { persistor } from "../store/store";             // <-- Add this import
-// ... other imports
 
-export const AuthProvider = ({ children }) => {
-  // ... existing state and refs ...
+import React, { useMemo, Suspense } from "react";
+import {
+  createBrowserRouter,
+  RouterProvider,
+  Navigate,
+} from "react-router-dom";
+import { useSelector } from "react-redux";
+import { Box, CircularProgress, Typography } from "@mui/material";
 
-  const performLogout = useCallback(
-    async (reason = "USER_INITIATED") => {
-      clearAllTimers();
-      setSessionReason(reason);
-      setSessionDialogOpen(true);
+import PrivateRouter from "./PrivateRouter";
+import NotFound from "../pages/NotFound";
+import ServerError from "../pages/ServerError";
+import CommonLayout from "../layout/CommonLayout";
+import SubmenuSelectionPage from "../pages/SubmenuSelectionPage";
+import { generateRouteObjects } from "./RouteGenerator";
+import Help from "../features/help/Help";
+import LaunchScreen from "../components/live-countdown/LaunchScreen";
 
-      try {
-        await api.post(`${resolveConfig("/LS")}/auth/logout`);
-      } catch (e) {
-        console.error(e);
-      } finally {
-        // 1. Clear menus
-        dispatch(clearMenus());
-        
-        // 2. Clear auth state
-        dispatch(logoutSuccess());
-        
-        // 3. Purge storage BEFORE navigating to the login screen
-        try {
-          await persistor.purge();
-        } catch (error) {
-          console.error("Error while purging persisted store:", error);
-        }
-        
-        setWarningOpen(false);
-      }
-    },
-    [dispatch, clearAllTimers]
+// Page Loader
+const PageLoader = () => (
+  <Box
+    sx={{
+      position: "fixed",
+      inset: 0,
+      display: "flex",
+      flexDirection: "column",
+      justifyContent: "center",
+      alignItems: "center",
+      background:
+        "linear-gradient(to bottom right, rgba(20,20,30,0.95), rgba(10,10,15,0.98))",
+      zIndex: 9999,
+      gap: 3,
+    }}
+  >
+    <CircularProgress
+      size={64}
+      thickness={4.5}
+      sx={{
+        color: "primary.main",
+        filter: "drop-shadow(0px 0px 12px rgba(25,118,210,0.5))",
+      }}
+    />
+
+    <Typography
+      variant="body2"
+      sx={{
+        color: "rgba(255,255,255,0.7)",
+        fontWeight: 500,
+        letterSpacing: "1px",
+        textTransform: "uppercase",
+        fontSize: "0.75rem",
+      }}
+    >
+      Loading FinCore Portal...
+    </Typography>
+  </Box>
+);
+
+const DynamicLayout = () => (
+  <Suspense fallback={<PageLoader />}>
+    <CommonLayout />
+  </Suspense>
+);
+
+// IMPORTANT: Handle unmatched routes based on authentication state.
+const RouteFallback = () => {
+  const isAuthenticated = useSelector(
+    (state) => state.auth.isAuthenticated
   );
 
-  // ... rest of the context provider
+  if (!isAuthenticated) {
+    return <Navigate to="/" replace />;
+  }
+
+  return <NotFound />;
 };
+
+const AppRouter = () => {
+  const menus = useSelector((state) => state.menus.menus);
+
+  const router = useMemo(() => {
+    const dynamicRoutes = generateRouteObjects(menus || []);
+
+    const routeConfig = [
+      // Public launch / login route
+      {
+        path: "/",
+        element: <LaunchScreen />,
+        errorElement: <ServerError />,
+      },
+
+      {
+        path: "/server-error",
+        element: <ServerError />,
+      },
+
+      // Protected routes
+      {
+        element: <PrivateRouter />,
+        errorElement: <ServerError />,
+        children: [
+          {
+            element: <DynamicLayout />,
+            children: [
+              {
+                path: "/help",
+                element: <Help />,
+              },
+              {
+                path: "/choose-option/:mainMenuTitle",
+                element: <SubmenuSelectionPage />,
+              },
+              ...dynamicRoutes,
+            ],
+          },
+        ],
+      },
+
+      // CRITICAL: Authentication-aware fallback
+      {
+        path: "*",
+        element: <RouteFallback />,
+        errorElement: <ServerError />,
+      },
+    ];
+
+    return createBrowserRouter(routeConfig);
+  }, [menus]);
+
+  return (
+    <Suspense fallback={<PageLoader />}>
+      <RouterProvider router={router} />
+    </Suspense>
+  );
+};
+
+export default AppRouter;
