@@ -1,221 +1,1197 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
 
-    <modelVersion>4.0.0</modelVersion>
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+} from "react";
 
-    <parent>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.1</version>
-        <relativePath/>
-    </parent>
+import {
+  Typography,
+  Button,
+  Box,
+  InputBase,
+  Stack,
+  CircularProgress,
+} from "@mui/material";
 
-    <groupId>com.fincore</groupId>
-    <artifactId>EnquiryService</artifactId>
-    <version>1.0.0</version>
-    <packaging>jar</packaging>
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import EmailIcon from "@mui/icons-material/Email";
+import PhoneAndroidIcon from "@mui/icons-material/PhoneAndroid";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 
-    <name>enquiry-service</name>
-    <description>Service to view all the enquiries</description>
+import api from "../../../config/axiosConfig";
+import { resolveConfig } from "../../../config/EnvironmentConfig";
+import { PrimaryButton } from "./LoginStyles";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 
-    <properties>
-        <java.version>21</java.version>
+// --------------------------------------------------
+// DEFAULT CONFIGURATION
+// Used only when backend parameters are unavailable.
+// Backend remains authoritative for all OTP limits.
+// --------------------------------------------------
 
-        <!-- Jackson 3.x: fixes CVE-2026-110879 and related reported issues -->
-        <jackson-bom.version>3.2.4</jackson-bom.version>
+const DEFAULT_OTP_CONFIG = {
+  otpLength: 6,
+  expirySeconds: 300,
+  resendCooldownSeconds: 60,
+  maxResends: 3,
+  resendWindowSeconds: 600,
+  maxVerificationAttempts: 5,
+  inactivityTimeoutSeconds: 900,
+};
 
-        <!-- Jackson 2.x: fixes CVE-2026-110879 and related reported issues -->
-        <jackson-2-bom.version>2.22.4</jackson-2-bom.version>
+const LoginWithOTP = ({
+  userId,
+  otpData,
+  openLoginErrorDialog,
+  onBackToHome,
+  onSessionTimeout,
+  onSessionEstablished,
+}) => {
+  const showSnackbar = useCustomSnackbar();
 
-        <!-- Security overrides -->
-        <tomcat.version>11.0.26</tomcat.version>
-        <log4j2.version>2.25.4</log4j2.version>
-        <netty.version>4.2.17.Final</netty.version>
+  // --------------------------------------------------
+  // CONFIGURATION
+  // --------------------------------------------------
 
-        <!-- Apache POI -->
-        <poi.version>5.2.5</poi.version>
+  const otpConfig = {
+    ...DEFAULT_OTP_CONFIG,
+    ...(otpData?.otpConfig || {}),
+  };
 
-        <!-- Logging encoder -->
-        <logstash-logback-encoder.version>7.4</logstash-logback-encoder.version>
-    </properties>
+  const OTP_LENGTH = otpConfig.otpLength;
+  const MAX_WRONG_ATTEMPTS =
+    otpConfig.maxVerificationAttempts;
+  const MAX_RESENDS = otpConfig.maxResends;
 
-    <dependencyManagement>
-        <dependencies>
+  const SESSION_IDLE_TIMEOUT =
+    otpConfig.inactivityTimeoutSeconds * 1000;
 
-            <!-- Jackson 3 BOM: tools.jackson.core dependencies -->
-            <dependency>
-                <groupId>tools.jackson</groupId>
-                <artifactId>jackson-bom</artifactId>
-                <version>${jackson-bom.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
+  const EMPTY_OTP = Array(OTP_LENGTH).fill("");
 
-            <!-- Jackson 2 BOM: com.fasterxml.jackson dependencies -->
-            <dependency>
-                <groupId>com.fasterxml.jackson</groupId>
-                <artifactId>jackson-bom</artifactId>
-                <version>${jackson-2-bom.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
+  // --------------------------------------------------
+  // STATE
+  // --------------------------------------------------
 
-            <!-- Align Spring MVC with the selected Spring Framework patch -->
-            <dependency>
-                <groupId>org.springframework</groupId>
-                <artifactId>spring-webmvc</artifactId>
-                <version>7.0.9</version>
-            </dependency>
+  const [otpValues, setOtpValues] = useState(EMPTY_OTP);
 
-            <!-- Explicit POI version alignment -->
-            <dependency>
-                <groupId>org.apache.poi</groupId>
-                <artifactId>poi</artifactId>
-                <version>${poi.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.poi</groupId>
-                <artifactId>poi-ooxml</artifactId>
-                <version>${poi.version}</version>
-            </dependency>
+  const [isLoading, setIsLoading] = useState(false);
 
-        </dependencies>
-    </dependencyManagement>
+  const [wrongAttempts, setWrongAttempts] = useState(
+    MAX_WRONG_ATTEMPTS -
+      (otpData?.attemptsRemaining ?? MAX_WRONG_ATTEMPTS)
+  );
 
-    <dependencies>
+  const [expiresIn, setExpiresIn] = useState(
+    otpData?.expiresInSeconds ?? otpConfig.expirySeconds
+  );
 
-        <!-- Spring MVC / REST APIs -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
+  const [cooldown, setCooldown] = useState(
+    otpData?.resendCooldownSeconds ??
+      otpConfig.resendCooldownSeconds
+  );
 
-        <!-- Embedded Tomcat -->
-        <dependency>
-            <groupId>org.apache.tomcat.embed</groupId>
-            <artifactId>tomcat-embed-core</artifactId>
-            <version>${tomcat.version}</version>
-        </dependency>
+  const [resendsLeft, setResendsLeft] = useState(
+    otpData?.resendsRemaining ?? MAX_RESENDS
+  );
 
-        <!-- Bean validation -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-validation</artifactId>
-        </dependency>
+  const [currentTxnId, setCurrentTxnId] = useState(
+    otpData?.transactionId || ""
+  );
 
-        <!-- JPA / Hibernate -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
-        </dependency>
+  const [codeExpired, setCodeExpired] = useState(false);
 
-        <!-- Oracle JDBC -->
-        <dependency>
-            <groupId>com.oracle.database.jdbc</groupId>
-            <artifactId>ojdbc11</artifactId>
-        </dependency>
+  const [sessionTimedOut, setSessionTimedOut] =
+    useState(false);
 
-        <!-- Lombok -->
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <optional>true</optional>
-        </dependency>
+  const [verificationError, setVerificationError] =
+    useState("");
 
-        <!-- Internal shared utilities -->
-        <dependency>
-            <groupId>com.fincore</groupId>
-            <artifactId>common-utilities</artifactId>
-            <version>2.0.0</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.apache.poi</groupId>
-                    <artifactId>poi</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.poi</groupId>
-                    <artifactId>poi-ooxml</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.poi</groupId>
-                    <artifactId>poi-ooxml-schemas</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
+  const [resendError, setResendError] = useState("");
 
-        <!-- Apache POI -->
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>poi</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.poi</groupId>
-            <artifactId>poi-ooxml</artifactId>
-        </dependency>
+  const inputRefs = useRef([]);
 
-        <!-- Actuator and Prometheus metrics -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-registry-prometheus</artifactId>
-        </dependency>
+  const loadingRef = useRef(false);
 
-        <!-- Structured Logback logging -->
-        <dependency>
-            <groupId>net.logstash.logback</groupId>
-            <artifactId>logstash-logback-encoder</artifactId>
-            <version>${logstash-logback-encoder.version}</version>
-        </dependency>
+  const expiryRef = useRef(false);
 
-        <!-- Spring REST client -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-restclient</artifactId>
-        </dependency>
+  const otpString = otpValues.join("");
 
-    </dependencies>
+  const isExhausted = resendsLeft <= 0;
 
-    <build>
-        <finalName>${project.artifactId}</finalName>
+  const canResend =
+    !sessionTimedOut &&
+    !isExhausted &&
+    cooldown <= 0 &&
+    !isLoading;
 
-        <plugins>
+  // --------------------------------------------------
+  // RESPONSE HELPERS
+  // --------------------------------------------------
 
-            <!-- Java 21 compilation and Lombok annotation processing -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <release>${java.version}</release>
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                            <version>${lombok.version}</version>
-                        </path>
-                    </annotationProcessorPaths>
-                </configuration>
-            </plugin>
+  const getResponseData = (response) =>
+    response?.data?.data || {};
 
-            <!-- Executable Spring Boot JAR -->
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-                <configuration>
-                    <excludes>
-                        <exclude>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                        </exclude>
-                    </excludes>
-                </configuration>
-            </plugin>
+  const clearOtpInputs = useCallback(() => {
+    setOtpValues(Array(OTP_LENGTH).fill(""));
+    inputRefs.current[0]?.focus();
+  }, [OTP_LENGTH]);
 
-        </plugins>
-    </build>
+  const formatTime = (seconds) => {
+    const safeSeconds = Math.max(0, seconds);
 
-</project>
+    const minutes = Math.floor(safeSeconds / 60)
+      .toString()
+      .padStart(2, "0");
+
+    const remainingSeconds = (safeSeconds % 60)
+      .toString()
+      .padStart(2, "0");
+
+    return `${minutes}:${remainingSeconds}`;
+  };
+
+  const updateTimersFromResponse = useCallback(
+    (data) => {
+      if (data?.transactionId) {
+        setCurrentTxnId(data.transactionId);
+      }
+
+      setExpiresIn(
+        data?.expiresInSeconds ??
+          otpConfig.expirySeconds
+      );
+
+      setCooldown(
+        data?.resendCooldownSeconds ??
+          otpConfig.resendCooldownSeconds
+      );
+
+      if (data?.resendsRemaining !== undefined) {
+        setResendsLeft(data.resendsRemaining);
+      }
+
+      if (data?.attemptsRemaining !== undefined) {
+        setWrongAttempts(
+          Math.max(
+            0,
+            MAX_WRONG_ATTEMPTS -
+              data.attemptsRemaining
+          )
+        );
+      } else {
+        setWrongAttempts(0);
+      }
+
+      expiryRef.current = false;
+
+      setCodeExpired(false);
+      setVerificationError("");
+      setResendError("");
+    },
+    [
+      otpConfig.expirySeconds,
+      otpConfig.resendCooldownSeconds,
+      MAX_WRONG_ATTEMPTS,
+    ]
+  );
+
+  // --------------------------------------------------
+  // INITIAL OTP SETUP
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!otpData) return;
+
+    updateTimersFromResponse(otpData);
+  }, [otpData, updateTimersFromResponse]);
+
+  useEffect(() => {
+    if (!codeExpired && !sessionTimedOut) {
+      inputRefs.current[0]?.focus();
+    }
+  }, [codeExpired, sessionTimedOut]);
+
+  // --------------------------------------------------
+  // OTP EXPIRY TIMER
+  // --------------------------------------------------
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setExpiresIn((previous) => {
+        if (previous <= 1) {
+          expiryRef.current = true;
+          setCodeExpired(true);
+          return 0;
+        }
+
+        return previous - 1;
+      });
+
+      setCooldown((previous) =>
+        Math.max(0, previous - 1)
+      );
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // --------------------------------------------------
+  // 15-MINUTE OTP SCREEN INACTIVITY TIMEOUT
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (sessionTimedOut) return;
+
+    let idleTimer;
+
+    const logoutForInactivity = () => {
+      setSessionTimedOut(true);
+      setCodeExpired(true);
+      expiryRef.current = true;
+
+      setOtpValues(Array(OTP_LENGTH).fill(""));
+
+      showSnackbar(
+        "Your session has timed out. Please log in again.",
+        "warning"
+      );
+
+      if (onSessionTimeout) {
+        onSessionTimeout();
+      } else {
+        onBackToHome?.();
+      }
+    };
+
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+
+      idleTimer = setTimeout(
+        logoutForInactivity,
+        SESSION_IDLE_TIMEOUT
+      );
+    };
+
+    const activityEvents = [
+      "mousedown",
+      "mousemove",
+      "keydown",
+      "touchstart",
+      "scroll",
+      "click",
+    ];
+
+    activityEvents.forEach((event) => {
+      document.addEventListener(
+        event,
+        resetIdleTimer,
+        { passive: true }
+      );
+    });
+
+    resetIdleTimer();
+
+    return () => {
+      clearTimeout(idleTimer);
+
+      activityEvents.forEach((event) => {
+        document.removeEventListener(
+          event,
+          resetIdleTimer
+        );
+      });
+    };
+  }, [
+    sessionTimedOut,
+    SESSION_IDLE_TIMEOUT,
+    OTP_LENGTH,
+    onSessionTimeout,
+    onBackToHome,
+    showSnackbar,
+  ]);
+
+  // --------------------------------------------------
+  // RESEND OTP
+  // --------------------------------------------------
+
+  const handleResendClick = async () => {
+    if (
+      isLoading ||
+      loadingRef.current ||
+      sessionTimedOut ||
+      isExhausted ||
+      cooldown > 0
+    ) {
+      return;
+    }
+
+    loadingRef.current = true;
+    setIsLoading(true);
+    setResendError("");
+
+    try {
+      const response = await api.post(
+        `${resolveConfig("/LS")}/auth/resend-otp`,
+        {
+          userId,
+          transactionId: currentTxnId,
+        }
+      );
+
+      const data = getResponseData(response);
+
+      if (response?.data?.success !== true) {
+        throw new Error(
+          response?.data?.message ||
+            "Unable to resend verification code."
+        );
+      }
+
+      updateTimersFromResponse(data);
+
+      clearOtpInputs();
+
+      showSnackbar(
+        response?.data?.message ||
+          "New Code sent successfully.",
+        "success"
+      );
+    } catch (err) {
+      console.error("OTP Resend Error:", err);
+
+      const status = err.response?.status;
+
+      const data = err.response?.data?.data || {};
+
+      if (status === 429) {
+        if (data?.resendsRemaining !== undefined) {
+          setResendsLeft(data.resendsRemaining);
+        }
+
+        const retryAfter = Number(
+          err.response?.headers?.["retry-after"]
+        );
+
+        setCooldown(
+          data?.resendCooldownSeconds ??
+            (Number.isFinite(retryAfter) && retryAfter > 0
+              ? retryAfter
+              : otpConfig.resendCooldownSeconds)
+        );
+
+        setResendError(
+          "Maximum resend limit reached. Kindly Wait."
+        );
+      } else if (status === 401 || status === 403) {
+        setSessionTimedOut(true);
+
+        showSnackbar(
+          "Your session has timed out. Please log in again.",
+          "warning"
+        );
+
+        if (onSessionTimeout) {
+          onSessionTimeout();
+        } else {
+          onBackToHome?.();
+        }
+      } else {
+        const message =
+          err.response?.data?.message ||
+          "Unable to reach the SMS/email provider. Please try again after some time.";
+
+        setResendError(message);
+
+        showSnackbar(message, "error");
+      }
+    } finally {
+      loadingRef.current = false;
+      setIsLoading(false);
+    }
+  };
+
+  // --------------------------------------------------
+  // VERIFY OTP
+  // --------------------------------------------------
+
+  const handleVerifyOTP = async () => {
+    if (
+      otpString.length !== OTP_LENGTH ||
+      codeExpired ||
+      sessionTimedOut ||
+      isLoading ||
+      loadingRef.current
+    ) {
+      return;
+    }
+
+    loadingRef.current = true;
+    setIsLoading(true);
+
+    setVerificationError("");
+
+    try {
+      const response = await api.post(
+        `${resolveConfig("/LS")}/auth/verify-otp`,
+        {
+          userId,
+          transactionId: currentTxnId,
+          otp: otpString,
+        }
+      );
+
+      const data = getResponseData(response);
+
+      if (response?.data?.success !== true) {
+        const remaining = data?.attemptsRemaining;
+
+        if (remaining !== undefined) {
+          const remainingAttempts = Math.max(
+            0,
+            remaining
+          );
+
+          setWrongAttempts(
+            MAX_WRONG_ATTEMPTS - remainingAttempts
+          );
+
+          if (remainingAttempts <= 0) {
+            expiryRef.current = true;
+            setCodeExpired(true);
+
+            setVerificationError(
+              "Too many incorrect attempts. The code has been expired. Please request a new code."
+            );
+          } else {
+            setVerificationError(
+              `Invalid code. ${remainingAttempts} attempts remaining.`
+            );
+          }
+        } else {
+          const failed = wrongAttempts + 1;
+
+          setWrongAttempts(failed);
+
+          if (failed >= MAX_WRONG_ATTEMPTS) {
+            expiryRef.current = true;
+            setCodeExpired(true);
+
+            setVerificationError(
+              "Too many incorrect attempts. The code has been expired. Please request a new code."
+            );
+          } else {
+            setVerificationError(
+              `Invalid code. ${
+                MAX_WRONG_ATTEMPTS - failed
+              } attempts remaining.`
+            );
+          }
+        }
+
+        clearOtpInputs();
+        return;
+      }
+
+      // ----------------------------------------------
+      // SUCCESSFUL OTP VERIFICATION
+      // ----------------------------------------------
+
+      if (!data?.accessToken || !data?.roleData) {
+        throw new Error(
+          "Authentication response is incomplete. Please contact support."
+        );
+      }
+
+      const result = { ...data };
+
+      if (!result.payloadEncryptionKey) {
+        result.payloadEncryptionKey =
+          response.headers?.["x-payload-key"];
+      }
+
+      if (!result.payloadEncryptionKey) {
+        throw new Error(
+          "Missing secure authentication key."
+        );
+      }
+
+      expiryRef.current = true;
+      setCodeExpired(true);
+
+      clearOtpInputs();
+
+      await onSessionEstablished(result);
+    } catch (err) {
+      const status = err.response?.status;
+
+      const data = err.response?.data?.data || {};
+
+      if (status === 400) {
+        const remaining = data?.attemptsRemaining;
+
+        if (remaining !== undefined) {
+          const remainingAttempts = Math.max(
+            0,
+            remaining
+          );
+
+          setWrongAttempts(
+            MAX_WRONG_ATTEMPTS - remainingAttempts
+          );
+
+          if (remainingAttempts <= 0) {
+            expiryRef.current = true;
+            setCodeExpired(true);
+
+            setVerificationError(
+              "Too many incorrect attempts. The code has been expired. Please request a new code."
+            );
+          } else {
+            setVerificationError(
+              `Invalid code. ${remainingAttempts} attempts remaining.`
+            );
+          }
+        } else {
+          const failed = wrongAttempts + 1;
+
+          setWrongAttempts(failed);
+
+          if (failed >= MAX_WRONG_ATTEMPTS) {
+            expiryRef.current = true;
+            setCodeExpired(true);
+
+            setVerificationError(
+              "Too many incorrect attempts. The code has been expired. Please request a new code."
+            );
+          } else {
+            setVerificationError(
+              `Invalid code. ${
+                MAX_WRONG_ATTEMPTS - failed
+              } attempts remaining.`
+            );
+          }
+        }
+
+        clearOtpInputs();
+      } else if (status === 401 || status === 410) {
+        expiryRef.current = true;
+        setCodeExpired(true);
+
+        setVerificationError(
+          "The code is invalid or has expired. Please request a new code."
+        );
+
+        clearOtpInputs();
+      } else {
+        console.error(
+          "OTP Verification Error:",
+          err
+        );
+
+        showSnackbar(
+          err.response?.data?.message ||
+            err.message ||
+            "Verification request failed. Please try again.",
+          "error"
+        );
+      }
+    } finally {
+      loadingRef.current = false;
+      setIsLoading(false);
+    }
+  };
+
+  // --------------------------------------------------
+  // OTP INPUT MANAGEMENT
+  // --------------------------------------------------
+
+  const handleChange = (index, event) => {
+    if (codeExpired || isLoading) return;
+
+    const digits = event.target.value.replace(/\D/g, "");
+
+    if (!digits) {
+      setOtpValues((previous) => {
+        const updated = [...previous];
+        updated[index] = "";
+        return updated;
+      });
+
+      setVerificationError("");
+      return;
+    }
+
+    setOtpValues((previous) => {
+      const updated = [...previous];
+
+      digits
+        .split("")
+        .forEach((char, position) => {
+          if (index + position < OTP_LENGTH) {
+            updated[index + position] = char;
+          }
+        });
+
+      return updated;
+    });
+
+    setVerificationError("");
+
+    const nextIndex = Math.min(
+      index + digits.length,
+      OTP_LENGTH - 1
+    );
+
+    inputRefs.current[nextIndex]?.focus();
+  };
+
+  const handleKeyDown = (index, event) => {
+    if (event.key === "Backspace") {
+      event.preventDefault();
+
+      setOtpValues((previous) => {
+        const updated = [...previous];
+
+        if (updated[index]) {
+          updated[index] = "";
+        } else if (index > 0) {
+          updated[index - 1] = "";
+        }
+
+        return updated;
+      });
+
+      if (index > 0 && !otpValues[index]) {
+        inputRefs.current[index - 1]?.focus();
+      }
+
+      setVerificationError("");
+    } else if (
+      event.key === "ArrowLeft" &&
+      index > 0
+    ) {
+      event.preventDefault();
+      inputRefs.current[index - 1]?.focus();
+    } else if (
+      event.key === "ArrowRight" &&
+      index < OTP_LENGTH - 1
+    ) {
+      event.preventDefault();
+      inputRefs.current[index + 1]?.focus();
+    } else if (
+      event.key === "Enter" &&
+      otpString.length === OTP_LENGTH &&
+      !isLoading
+    ) {
+      event.preventDefault();
+      handleVerifyOTP();
+    }
+  };
+
+  const handlePaste = (event) => {
+    event.preventDefault();
+
+    if (codeExpired || isLoading) return;
+
+    const pasted = event.clipboardData
+      .getData("text/plain")
+      .replace(/\D/g, "")
+      .slice(0, OTP_LENGTH);
+
+    if (!pasted) return;
+
+    const updated = Array(OTP_LENGTH).fill("");
+
+    pasted.split("").forEach((digit, index) => {
+      updated[index] = digit;
+    });
+
+    setOtpValues(updated);
+    setVerificationError("");
+
+    inputRefs.current[
+      Math.min(pasted.length, OTP_LENGTH - 1)
+    ]?.focus();
+  };
+
+  // --------------------------------------------------
+  // CONTACT DETAILS
+  // --------------------------------------------------
+
+  const maskedMobile = otpData?.maskedMobile;
+
+  const maskedEmail = otpData?.maskedEmail;
+
+  // --------------------------------------------------
+  // SESSION TIMEOUT VIEW
+  // --------------------------------------------------
+
+  if (sessionTimedOut) {
+    return null;
+  }
+
+  // --------------------------------------------------
+  // RENDER
+  // --------------------------------------------------
+
+  return (
+    <Box
+      sx={{
+        width: "100%",
+        maxWidth: "420px",
+        mx: "auto",
+      }}
+    >
+      {/* --------------------------------------------
+          OTP DELIVERY INFORMATION
+      --------------------------------------------- */}
+
+      <Box
+        sx={{
+          mb: 3,
+          p: { xs: 1.5, sm: 2 },
+          borderRadius: 2,
+          bgcolor: "rgba(0,0,0,0.03)",
+          border: "1px solid rgba(0,0,0,0.06)",
+        }}
+      >
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            mb: 1.5,
+          }}
+        >
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            fontWeight={600}
+          >
+            {codeExpired
+              ? "Verification Status"
+              : "Security Code Sent To"}
+          </Typography>
+
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 0.5,
+              px: 1,
+              py: 0.5,
+              borderRadius: 1.5,
+              bgcolor: codeExpired
+                ? "error.50"
+                : expiresIn <= 60
+                  ? "warning.50"
+                  : "primary.50",
+              color: codeExpired
+                ? "error.main"
+                : expiresIn <= 60
+                  ? "warning.dark"
+                  : "primary.main",
+              border: "1px solid",
+              borderColor: codeExpired
+                ? "error.100"
+                : expiresIn <= 60
+                  ? "warning.100"
+                  : "primary.100",
+            }}
+          >
+            <AccessTimeIcon sx={{ fontSize: 15 }} />
+
+            <Typography
+              sx={{
+                fontFamily: "monospace",
+                fontWeight: 700,
+                fontSize: "0.8rem",
+              }}
+            >
+              {formatTime(expiresIn)}
+            </Typography>
+          </Box>
+        </Box>
+
+        {!codeExpired && (
+          <Stack spacing={1}>
+            {maskedMobile && (
+              <Box
+                display="flex"
+                alignItems="center"
+                gap={1.25}
+              >
+                <PhoneAndroidIcon
+                  sx={{
+                    fontSize: 19,
+                    color: "text.secondary",
+                  }}
+                />
+
+                <Typography variant="body2">
+                  {maskedMobile}
+                </Typography>
+              </Box>
+            )}
+
+            {maskedEmail && (
+              <Box
+                display="flex"
+                alignItems="center"
+                gap={1.25}
+              >
+                <EmailIcon
+                  sx={{
+                    fontSize: 19,
+                    color: "text.secondary",
+                  }}
+                />
+
+                <Typography
+                  variant="body2"
+                  sx={{ wordBreak: "break-all" }}
+                >
+                  {maskedEmail}
+                </Typography>
+              </Box>
+            )}
+          </Stack>
+        )}
+
+        {codeExpired && (
+          <Typography
+            variant="body2"
+            color="error.main"
+            fontWeight={600}
+          >
+            The verification code has expired. Request a
+            new code to continue.
+          </Typography>
+        )}
+      </Box>
+
+      {/* --------------------------------------------
+          OTP ENTRY
+      --------------------------------------------- */}
+
+      {!codeExpired ? (
+        <>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{
+              mb: 2,
+              textAlign: "center",
+            }}
+          >
+            Enter the {OTP_LENGTH}-digit verification code
+            sent to your registered contact details.
+          </Typography>
+
+          {/* OTP INPUT FIELDS */}
+
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: `repeat(${OTP_LENGTH}, minmax(0, 1fr))`,
+              gap: { xs: 0.75, sm: 1.25 },
+              mb: 2,
+            }}
+          >
+            {otpValues.map((value, index) => (
+              <Box
+                key={index}
+                sx={{
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  height: {
+                    xs: 48,
+                    sm: 54,
+                    md: 58,
+                  },
+                  border: "1.5px solid",
+                  borderColor: value
+                    ? "primary.main"
+                    : "rgba(0,0,0,0.15)",
+                  borderRadius: 2,
+                  bgcolor: "background.paper",
+                  "&:focus-within": {
+                    borderColor: "primary.main",
+                    boxShadow:
+                      "0 0 0 3px rgba(25,118,210,0.15)",
+                  },
+                }}
+              >
+                <InputBase
+                  inputRef={(element) => {
+                    inputRefs.current[index] = element;
+                  }}
+                  value={value}
+                  onChange={(event) =>
+                    handleChange(index, event)
+                  }
+                  onKeyDown={(event) =>
+                    handleKeyDown(index, event)
+                  }
+                  onPaste={handlePaste}
+                  disabled={isLoading}
+                  inputProps={{
+                    maxLength: OTP_LENGTH,
+                    inputMode: "numeric",
+                    pattern: "[0-9]*",
+                    "aria-label": `OTP digit ${index + 1}`,
+                    style: {
+                      textAlign: "center",
+                      fontSize: "1.25rem",
+                      fontWeight: 700,
+                      padding: 0,
+                      width: "100%",
+                      height: "100%",
+                    },
+                  }}
+                  sx={{ width: "100%" }}
+                />
+              </Box>
+            ))}
+          </Box>
+
+          {/* ATTEMPTS REMAINING */}
+
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            display="block"
+            textAlign="center"
+            sx={{ mb: 1 }}
+          >
+            {Math.max(
+              0,
+              MAX_WRONG_ATTEMPTS - wrongAttempts
+            )}{" "}
+            verification attempts remaining
+          </Typography>
+
+          {/* INLINE OTP ERROR - ABOVE VERIFY BUTTON */}
+
+          {verificationError && (
+            <Typography
+              variant="body2"
+              color="error.main"
+              sx={{
+                mt: 1,
+                mb: 2,
+                textAlign: "center",
+                fontWeight: 500,
+              }}
+              role="alert"
+              aria-live="polite"
+            >
+              {verificationError}
+            </Typography>
+          )}
+
+          {/* VERIFY BUTTON */}
+
+          <PrimaryButton
+            fullWidth
+            variant="contained"
+            onClick={handleVerifyOTP}
+            disabled={
+              isLoading ||
+              otpString.length !== OTP_LENGTH ||
+              codeExpired
+            }
+            sx={{
+              py: 1.25,
+              fontSize: "0.95rem",
+            }}
+          >
+            {isLoading ? (
+              <CircularProgress
+                size={22}
+                color="inherit"
+              />
+            ) : (
+              "Verify OTP & Sign In"
+            )}
+          </PrimaryButton>
+        </>
+      ) : (
+        /* --------------------------------------------
+           EXPIRED OTP VIEW
+        --------------------------------------------- */
+
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            textAlign: "center",
+            py: 2,
+            px: 1,
+          }}
+        >
+          <Box
+            sx={{
+              width: 56,
+              height: 56,
+              borderRadius: "50%",
+              bgcolor: "error.50",
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              color: "error.main",
+              mb: 2,
+            }}
+          >
+            <WarningAmberIcon sx={{ fontSize: 32 }} />
+          </Box>
+
+          <Typography
+            variant="h6"
+            fontWeight={700}
+            gutterBottom
+          >
+            Verification Code Expired
+          </Typography>
+
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{
+              mb: 2,
+              maxWidth: "320px",
+              lineHeight: 1.5,
+            }}
+          >
+            {wrongAttempts >= MAX_WRONG_ATTEMPTS
+              ? "Too many incorrect attempts. Request a new verification code."
+              : "Your verification code is no longer valid. Request a new code to continue."}
+          </Typography>
+
+          {/* Fifth-attempt error is also inline */}
+          {verificationError && (
+            <Typography
+              variant="body2"
+              color="error.main"
+              sx={{
+                mb: 2,
+                fontWeight: 500,
+              }}
+              role="alert"
+            >
+              {verificationError}
+            </Typography>
+          )}
+        </Box>
+      )}
+
+      {/* --------------------------------------------
+          BACK AND RESEND BUTTONS
+      --------------------------------------------- */}
+
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          mt: 2.5,
+          gap: 1,
+        }}
+      >
+        <Button
+          startIcon={<ArrowBackIcon />}
+          onClick={onBackToHome}
+          disabled={isLoading}
+          size="small"
+          sx={{
+            textTransform: "none",
+            color: "text.secondary",
+            whiteSpace: "nowrap",
+            fontSize: {
+              xs: "0.75rem",
+              sm: "0.85rem",
+            },
+          }}
+        >
+          Back To Sign In
+        </Button>
+
+        <Box sx={{ textAlign: "right" }}>
+          {isExhausted ? (
+            <Typography
+              variant="caption"
+              color="error.main"
+              fontWeight={600}
+            >
+              Maximum resend limit reached. Kindly Wait.
+            </Typography>
+          ) : (
+            <>
+              <Button
+                onClick={handleResendClick}
+                disabled={!canResend}
+                startIcon={
+                  isLoading ? (
+                    <CircularProgress size={15} />
+                  ) : (
+                    <RefreshIcon />
+                  )
+                }
+                size="small"
+                sx={{
+                  textTransform: "none",
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                  minWidth: 100,
+                }}
+              >
+                {cooldown > 0
+                  ? `Resend in ${cooldown}s`
+                  : "Resend Code"}
+              </Button>
+
+              {cooldown > 0 && (
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  display="block"
+                >
+                  Please wait {cooldown} seconds
+                </Typography>
+              )}
+
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                display="block"
+              >
+                {resendsLeft} resend
+                {resendsLeft === 1 ? "" : "s"} remaining
+              </Typography>
+            </>
+          )}
+
+          {resendError && (
+            <Typography
+              variant="caption"
+              color="error.main"
+              display="block"
+              sx={{ mt: 0.5, maxWidth: 220 }}
+              role="alert"
+            >
+              {resendError}
+            </Typography>
+          )}
+        </Box>
+      </Box>
+    </Box>
+  );
+};
+
+export default LoginWithOTP;
