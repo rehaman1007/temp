@@ -1,364 +1,712 @@
 
-/*
-=========================================================
-1. LOGIN API
-POST /api/auth/login
-=========================================================
-*/
+import React, { useState, useEffect, useRef } from "react";
+import {
+  Typography,
+  Button,
+  Box,
+  InputBase,
+  Stack,
+  CircularProgress,
+} from "@mui/material";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import EmailIcon from "@mui/icons-material/Email";
+import PhoneAndroidIcon from "@mui/icons-material/PhoneAndroid";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
+import api from "../../../config/axiosConfig";
+import { resolveConfig } from "../../../config/EnvironmentConfig";
+import { PrimaryButton } from "./LoginStyles";
+import useCustomSnackbar from "../../../utils/useCustomSnackbar";
 
-// SCENARIO 1: MFA DISABLED OR MFA SKIPPED DUE TO PROVIDER FAILURE
-// HTTP 200 OK
-// Frontend: Establish session directly and navigate to dashboard.
+const LoginWithOTP = ({
+  userId,
+  otpData,
+  onBackToHome,
+  onSessionEstablished,
+}) => {
+  const showSnackbar = useCustomSnackbar();
+  const inputRefs = useRef([]);
+  const idleTimer = useRef(null);
 
-{
-  "success": true,
-  "message": "Login successful.",
-  "data": {
-    "accessToken": "<access-token>",
-    "refreshToken": "<refresh-token>",
-    "user": {},
-    "roleData": {
-      "root_menus": []
+  const config = otpData?.otpConfig || {};
+  const otpLength = Number(config.otpLength ?? 6);
+  const inactivitySeconds = Number(
+    config.inactivityTimeoutSeconds ?? 900
+  );
+
+  const [otpValues, setOtpValues] = useState(
+    () => Array(otpLength).fill("")
+  );
+  const [transactionId, setTransactionId] = useState(
+    otpData?.transactionId || ""
+  );
+  const [expiresIn, setExpiresIn] = useState(
+    otpData?.expiresInSeconds ?? config.expirySeconds ?? 300
+  );
+  const [cooldown, setCooldown] = useState(
+    otpData?.resendCooldownSeconds ??
+      config.resendCooldownSeconds ??
+      60
+  );
+  const [resendsLeft, setResendsLeft] = useState(
+    otpData?.resendsRemaining ?? config.maxResends ?? 3
+  );
+  const [sessionRemaining, setSessionRemaining] = useState(
+    inactivitySeconds
+  );
+
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
+  const [isOtpExpired, setIsOtpExpired] = useState(false);
+  const [isSessionExpired, setIsSessionExpired] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const otp = otpValues.join("");
+  const isOtpComplete = otp.length === otpLength;
+  const isExpired = isOtpExpired || expiresIn <= 0;
+
+  // Format seconds as MM:SS
+  const formatTime = (seconds) => {
+    const minutes = Math.floor(seconds / 60)
+      .toString()
+      .padStart(2, "0");
+
+    const remainingSeconds = (seconds % 60)
+      .toString()
+      .padStart(2, "0");
+
+    return `${minutes}:${remainingSeconds}`;
+  };
+
+  // Focus first input
+  const focusFirstInput = () => {
+    setTimeout(() => inputRefs.current[0]?.focus(), 0);
+  };
+
+  // Clear OTP and focus first input
+  const clearOtp = () => {
+    setOtpValues(Array(otpLength).fill(""));
+    focusFirstInput();
+  };
+
+  // Handle actual session expiration
+  const expireSession = (message) => {
+    setErrorMessage(
+      message || "Your session has timed out. Please log in again."
+    );
+    setIsSessionExpired(true);
+    setOtpValues(Array(otpLength).fill(""));
+    clearTimeout(idleTimer.current);
+  };
+
+  // Reset inactivity timer whenever the user interacts
+  useEffect(() => {
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer.current);
+
+      setSessionRemaining(inactivitySeconds);
+
+      idleTimer.current = setTimeout(() => {
+        expireSession(
+          "Your session has timed out. Please log in again."
+        );
+      }, inactivitySeconds * 1000);
+    };
+
+    const events = [
+      "mousedown",
+      "keydown",
+      "touchstart",
+      "scroll",
+      "click",
+    ];
+
+    events.forEach((event) =>
+      window.addEventListener(event, resetIdleTimer)
+    );
+
+    resetIdleTimer();
+
+    return () => {
+      clearTimeout(idleTimer.current);
+
+      events.forEach((event) =>
+        window.removeEventListener(event, resetIdleTimer)
+      );
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inactivitySeconds]);
+
+  // OTP expiry, resend cooldown and session display timer
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setExpiresIn((prev) => {
+        if (prev <= 1) {
+          setIsOtpExpired(true);
+          setErrorMessage(
+            "The code is invalid or has expired. Please request a new code."
+          );
+          return 0;
+        }
+
+        return prev - 1;
+      });
+
+      setCooldown((prev) => Math.max(0, prev - 1));
+
+      setSessionRemaining((prev) => Math.max(0, prev - 1));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // Initial focus
+  useEffect(() => {
+    focusFirstInput();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Update values from backend
+  const updateOtpData = (data) => {
+    if (!data) return;
+
+    if (data.transactionId) {
+      setTransactionId(data.transactionId);
     }
-  }
-}
 
-// Response header:
-// X-Payload-Key: <encrypted-payload-key>
-
-
-// SCENARIO 2: MFA ENABLED AND OTP SENT SUCCESSFULLY
-// HTTP 202 ACCEPTED
-// Frontend: Navigate to OTP screen.
-// Display the backend message exactly as received.
-
-{
-  "success": true,
-  "message": "Code sent to ***1234 and a***o@sbi.co.in",
-  "data": {
-    "transactionId": "uuid-tx-string",
-    "maskedMobile": "***1234",
-    "maskedEmail": "a***o@sbi.co.in",
-    "expiresInSeconds": 300,
-    "resendCooldownSeconds": 60,
-    "resendsRemaining": 3,
-    "otpConfig": {
-      "otpLength": 6,
-      "expirySeconds": 300,
-      "resendCooldownSeconds": 60,
-      "maxResends": 3,
-      "resendWindowSeconds": 600,
-      "maxVerificationAttempts": 5,
-      "inactivityTimeoutSeconds": 900
+    if (data.expiresInSeconds !== undefined) {
+      setExpiresIn(data.expiresInSeconds);
+      setIsOtpExpired(data.expiresInSeconds <= 0);
     }
-  }
-}
 
-
-// SCENARIO 3: NO REGISTERED MOBILE NUMBER OR EMAIL
-// Suggested HTTP 422 UNPROCESSABLE ENTITY
-// Frontend: Display error on login screen. Do not navigate to OTP.
-
-{
-  "success": false,
-  "message": "Code cannot be sent: No valid mobile number or email address is mapped with User ID.",
-  "data": null
-}
-
-
-// SCENARIO 4: SMS/EMAIL PROVIDER FAILURE
-// If MFA is skipped as permitted by business rules and login succeeds:
-// HTTP 200 with the normal authenticated login response (Scenario 1).
-//
-// If login cannot proceed:
-// Suggested HTTP 503 SERVICE UNAVAILABLE.
-
-{
-  "success": false,
-  "message": "Unable to reach the SMS/email provider. Please try again after some time.",
-  "data": null
-}
-
-
-/*
-=========================================================
-2. VERIFY OTP API
-POST /api/auth/verify-otp
-=========================================================*/
-
-// REQUEST BODY FOR ALL VERIFICATION SCENARIOS:
-
-{
-  "transactionId": "uuid-tx-string",
-  "otp": "123456"
-}
-
-
-// SCENARIO 5: OTP VERIFIED SUCCESSFULLY
-// HTTP 200 OK
-// Frontend: Establish authenticated session and navigate to dashboard.
-
-{
-  "success": true,
-  "message": "OTP verified successfully.",
-  "data": {
-    "accessToken": "<access-token>",
-    "refreshToken": "<refresh-token>",
-    "user": {},
-    "roleData": {
-      "root_menus": []
+    if (data.resendCooldownSeconds !== undefined) {
+      setCooldown(data.resendCooldownSeconds);
     }
-  }
-}
 
-// Response header:
-// X-Payload-Key: <encrypted-payload-key>
+    if (data.resendsRemaining !== undefined) {
+      setResendsLeft(data.resendsRemaining);
+    }
+  };
 
+  // Check whether backend has expired the complete session
+  const handleBackendSessionError = (err) => {
+    const data = err.response?.data?.data || {};
+    const message = err.response?.data?.message || "";
 
-// SCENARIO 6: INVALID OTP FORMAT
-// HTTP 400 BAD REQUEST
-// Frontend: Display exact message, clear all six inputs,
-// and focus the first input.
+    if (
+      data.sessionExpired === true ||
+      message.toLowerCase().includes("session has timed out") ||
+      message.toLowerCase().includes("session timed out")
+    ) {
+      expireSession(message);
+      return true;
+    }
 
-{
-  "success": false,
-  "message": "Please enter a valid 6-digit numeric code.",
-  "data": null
-}
+    return false;
+  };
 
+  // Resend OTP
+  const handleResendOTP = async () => {
+    if (
+      isLoading ||
+      cooldown > 0 ||
+      resendsLeft <= 0 ||
+      isSessionExpired
+    ) {
+      return;
+    }
 
-// SCENARIO 7: FIRST INCORRECT OTP ATTEMPT
-// HTTP 401 UNAUTHORIZED
-// Frontend: Display message inline, clear OTP and refocus.
+    setIsLoading(true);
+    setErrorMessage("");
 
-{
-  "success": false,
-  "message": "Invalid code. 4 attempts remaining.",
-  "data": {
-    "attemptsRemaining": 4
-  }
-}
+    try {
+      const response = await api.post(
+        `${resolveConfig("/LS") || ""}/auth/resend-otp`,
+        { transactionId }
+      );
 
+      const data = response?.data?.data || {};
 
-// SCENARIO 8: SECOND INCORRECT OTP ATTEMPT
-// HTTP 401 UNAUTHORIZED
+      updateOtpData(data);
 
-{
-  "success": false,
-  "message": "Invalid code. 3 attempts remaining.",
-  "data": {
-    "attemptsRemaining": 3
-  }
-}
+      setExpiresIn(
+        data.expiresInSeconds ??
+          config.expirySeconds ??
+          300
+      );
 
+      setIsOtpExpired(false);
+      setIsLocked(false);
+      setErrorMessage("");
 
-// SCENARIO 9: THIRD INCORRECT OTP ATTEMPT
-// HTTP 401 UNAUTHORIZED
+      clearOtp();
 
-{
-  "success": false,
-  "message": "Invalid code. 2 attempts remaining.",
-  "data": {
-    "attemptsRemaining": 2
-  }
-}
+      showSnackbar(
+        response?.data?.message || data.message,
+        "success"
+      );
+    } catch (err) {
+      if (!handleBackendSessionError(err)) {
+        const data = err.response?.data?.data || {};
 
+        updateOtpData(data);
 
-// SCENARIO 10: FOURTH INCORRECT OTP ATTEMPT
-// HTTP 401 UNAUTHORIZED
+        if (data.otpExpired === true) {
+          setIsOtpExpired(true);
+        }
 
-{
-  "success": false,
-  "message": "Invalid code. 1 attempts remaining.",
-  "data": {
-    "attemptsRemaining": 1
-  }
-}
+        setErrorMessage(
+          err.response?.data?.message ||
+            "Unable to resend OTP. Please try again."
+        );
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
+  // Verify OTP
+  const handleVerifyOTP = async () => {
+    if (
+      isLoading ||
+      !isOtpComplete ||
+      isLocked ||
+      isExpired ||
+      isSessionExpired
+    ) {
+      return;
+    }
 
-// SCENARIO 11: FIFTH INCORRECT OTP ATTEMPT
-// HTTP 401 UNAUTHORIZED
-// Frontend:
-// - Keep user on OTP screen.
-// - Clear and disable OTP inputs.
-// - Display backend message.
-// - Keep Resend OTP enabled when cooldown permits.
-// - Do NOT redirect to login screen.
+    setIsLoading(true);
+    setErrorMessage("");
 
-{
-  "success": false,
-  "message": "Too many incorrect attempts. The code has been expired. Please request a new code.",
-  "data": {
-    "attemptsRemaining": 0,
-    "otpExpired": true,
-    "resendAllowed": true
-  }
-}
+    try {
+      const response = await api.post(
+        `${resolveConfig("/LS") || ""}/auth/verify-otp`,
+        {
+          transactionId,
+          otp,
+        }
+      );
 
+      const result = response?.data?.data || {};
 
-// SCENARIO 12: OTP EXPIRED (5-MINUTE VALIDITY EXCEEDED)
-// HTTP 401 UNAUTHORIZED
-// Frontend: Return user to sign-in screen with an error message.
-// User must enter User ID and password again.
+      if (!result.payloadEncryptionKey) {
+        result.payloadEncryptionKey =
+          response.headers["x-payload-key"];
+      }
 
-{
-  "success": false,
-  "message": "The code is invalid or has expired. Please request a new code.",
-  "data": {
-    "otpExpired": true
-  }
-}
+      if (response?.data?.success) {
+        onSessionEstablished?.(result);
+      } else {
+        setErrorMessage(response?.data?.message || "");
+        clearOtp();
+      }
+    } catch (err) {
+      const status = err.response?.status;
+      const message = err.response?.data?.message || "";
+      const backendData = err.response?.data?.data || {};
 
+      if (handleBackendSessionError(err)) {
+        return;
+      }
 
-// SCENARIO 13: OTP TRANSACTION DOES NOT EXIST OR IS INVALID
-// HTTP 401 UNAUTHORIZED
+      if (status === 401) {
+        if (
+          message.toLowerCase().includes("too many incorrect attempts") ||
+          backendData.attemptsRemaining === 0
+        ) {
+          // Fifth failed attempt: stay on OTP screen and allow resend
+          setIsLocked(true);
+          setErrorMessage(message);
+          setOtpValues(Array(otpLength).fill(""));
+        } else if (
+          backendData.otpExpired === true ||
+          message.toLowerCase().includes("invalid or has expired")
+        ) {
+          // OTP expired, but transaction/session may still be active
+          setIsOtpExpired(true);
+          setErrorMessage(message);
+          setOtpValues(Array(otpLength).fill(""));
+        } else {
+          // Incorrect OTP
+          setErrorMessage(message);
+          clearOtp();
+        }
+      } else if (status === 400) {
+        setErrorMessage(message);
+        clearOtp();
+      } else {
+        setErrorMessage(
+          message || "Verification request failed."
+        );
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-{
-  "success": false,
-  "message": "The code is invalid or has expired. Please request a new code.",
-  "data": {
-    "otpExpired": true
-  }
-}
+  // OTP input handling
+  const handleChange = (index, event) => {
+    const digits = event.target.value.replace(/\D/g, "");
 
+    if (!digits) {
+      const updated = [...otpValues];
+      updated[index] = "";
+      setOtpValues(updated);
+      return;
+    }
 
-// SCENARIO 14: OTP SESSION IDLE TIMEOUT (15 MINUTES)
-// HTTP 401 UNAUTHORIZED
-// Frontend: Return to sign-in screen.
-// User must enter credentials again.
+    const updated = [...otpValues];
 
-{
-  "success": false,
-  "message": "Your session has timed out. Please log in again.",
-  "data": {
-    "sessionExpired": true
-  }
-}
+    digits.split("").forEach((digit, offset) => {
+      if (index + offset < otpLength) {
+        updated[index + offset] = digit;
+      }
+    });
 
+    setOtpValues(updated);
 
-/*
-=========================================================
-3. RESEND OTP API
-POST /api/auth/resend-otp
-=========================================================*/
+    inputRefs.current[
+      Math.min(index + digits.length, otpLength - 1)
+    ]?.focus();
+  };
 
-// REQUEST BODY:
+  // Paste OTP
+  const handlePaste = (event) => {
+    event.preventDefault();
 
-{
-  "transactionId": "uuid-tx-string"
-}
+    const digits = event.clipboardData
+      .getData("text")
+      .replace(/\D/g, "")
+      .slice(0, otpLength);
 
+    if (!digits) return;
 
-// SCENARIO 15: RESEND OTP SUCCESSFUL
-// HTTP 200 OK
-// Frontend:
-// - Update transactionId and timer values.
-// - Update remaining resend count.
-// - Clear all OTP inputs.
-// - Focus first OTP input.
-// - Display backend success message.
+    const updated = Array(otpLength).fill("");
 
-{
-  "success": true,
-  "message": "New Code sent to ***1234 and a***o@sbi.co.in",
-  "data": {
-    "transactionId": "new-uuid-tx-string",
-    "maskedMobile": "***1234",
-    "maskedEmail": "a***o@sbi.co.in",
-    "expiresInSeconds": 300,
-    "resendCooldownSeconds": 60,
-    "resendsRemaining": 2
-  }
-}
+    digits.split("").forEach((digit, index) => {
+      updated[index] = digit;
+    });
 
+    setOtpValues(updated);
 
-// SCENARIO 16: RESEND REQUESTED BEFORE 60-SECOND COOLDOWN
-// HTTP 429 TOO MANY REQUESTS
-// Frontend: Display exact backend message.
-// Update cooldown using retryAfterSeconds if returned.
+    inputRefs.current[
+      Math.min(digits.length, otpLength - 1)
+    ]?.focus();
+  };
 
-{
-  "success": false,
-  "message": "Please wait 35 seconds before requesting another code.",
-  "data": {
-    "retryAfterSeconds": 35,
-    "resendsRemaining": 2
-  }
-}
+  // Keyboard navigation
+  const handleKeyDown = (index, event) => {
+    if (event.key === "Backspace") {
+      event.preventDefault();
 
+      const updated = [...otpValues];
 
-// SCENARIO 17: MAXIMUM RESEND LIMIT REACHED
-// HTTP 429 TOO MANY REQUESTS
-// Frontend: Disable Resend OTP and display backend message.
+      if (updated[index]) {
+        updated[index] = "";
+      } else if (index > 0) {
+        updated[index - 1] = "";
+        inputRefs.current[index - 1]?.focus();
+      }
 
-{
-  "success": false,
-  "message": "Maximum resend limit reached. Kindly Wait.",
-  "data": {
-    "resendsRemaining": 0,
-    "resendWindowSeconds": 600
-  }
-}
+      setOtpValues(updated);
+    } else if (event.key === "ArrowLeft" && index > 0) {
+      inputRefs.current[index - 1]?.focus();
+    } else if (
+      event.key === "ArrowRight" &&
+      index < otpLength - 1
+    ) {
+      inputRefs.current[index + 1]?.focus();
+    } else if (event.key === "Enter") {
+      handleVerifyOTP();
+    }
+  };
 
+  return (
+    <Box sx={{ width: "100%", maxWidth: "420px", mx: "auto" }}>
+      {/* Session expired screen */}
+      {isSessionExpired ? (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            textAlign: "center",
+            py: 3,
+            px: 1,
+          }}
+        >
+          <WarningAmberIcon
+            sx={{ fontSize: 52, color: "error.main", mb: 1.5 }}
+          />
 
-// SCENARIO 18: RESEND REQUEST AFTER SESSION TIMEOUT
-// HTTP 401 UNAUTHORIZED
-// Frontend: Return to sign-in screen.
+          <Typography variant="h6" fontWeight={700} gutterBottom>
+            Session Expired
+          </Typography>
 
-{
-  "success": false,
-  "message": "Your session has timed out. Please log in again.",
-  "data": {
-    "sessionExpired": true
-  }
-}
+          <Typography
+            variant="body2"
+            color="error.main"
+            sx={{ mb: 3, maxWidth: 320, lineHeight: 1.6 }}
+          >
+            {errorMessage}
+          </Typography>
 
+          <PrimaryButton
+            fullWidth
+            variant="contained"
+            startIcon={<ArrowBackIcon />}
+            onClick={onBackToHome}
+            sx={{ py: 1.25 }}
+          >
+            Back to Sign In
+          </PrimaryButton>
+        </Box>
+      ) : (
+        <>
+          {/* OTP information */}
+          <Box
+            sx={{
+              mb: 3,
+              p: { xs: 1.5, sm: 2 },
+              borderRadius: 2,
+              bgcolor: "rgba(0,0,0,0.03)",
+              border: "1px solid rgba(0,0,0,0.06)",
+            }}
+          >
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{ mb: 1.5 }}
+            >
+              OTP sent to below registered contact details
+            </Typography>
 
-// SCENARIO 19: RESEND REQUEST FOR EXPIRED TRANSACTION
-// HTTP 401 UNAUTHORIZED
-// Frontend: Return to sign-in screen and request fresh login.
+            <Stack spacing={0.75}>
+              {otpData?.maskedMobile && (
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1.25,
+                  }}
+                >
+                  <PhoneAndroidIcon
+                    sx={{ fontSize: 18, color: "text.secondary" }}
+                  />
+                  <Typography variant="subtitle2">
+                    {otpData.maskedMobile}
+                  </Typography>
+                </Box>
+              )}
 
-{
-  "success": false,
-  "message": "The code is invalid or has expired. Please request a new code.",
-  "data": {
-    "otpExpired": true
-  }
-}
+              {otpData?.maskedEmail && (
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1.25,
+                  }}
+                >
+                  <EmailIcon
+                    sx={{ fontSize: 18, color: "text.secondary" }}
+                  />
+                  <Typography
+                    variant="subtitle2"
+                    sx={{ wordBreak: "break-all" }}
+                  >
+                    {otpData.maskedEmail}
+                  </Typography>
+                </Box>
+              )}
+            </Stack>
 
+            {/* Temporary timer display for debugging */}
+            <Box
+              sx={{
+                mt: 2,
+                p: 1.5,
+                borderRadius: 1.5,
+                bgcolor: "rgba(25,118,210,0.06)",
+              }}
+            >
+              <Typography
+                variant="caption"
+                display="block"
+                sx={{ fontWeight: 600, mb: 0.5 }}
+              >
+                <AccessTimeIcon
+                  sx={{
+                    fontSize: 13,
+                    verticalAlign: "middle",
+                    mr: 0.5,
+                  }}
+                />
+                Temporary timer diagnostics
+              </Typography>
 
-// SCENARIO 20: SMS/EMAIL PROVIDER FAILURE DURING RESEND
-// Suggested HTTP 503 SERVICE UNAVAILABLE
-// Frontend: Keep user on OTP screen and display backend message.
+              <Typography variant="caption" display="block">
+                Session inactivity: {formatTime(sessionRemaining)}
+              </Typography>
 
-{
-  "success": false,
-  "message": "Unable to reach the SMS/email provider. Please try again after some time.",
-  "data": null
-}
+              <Typography variant="caption" display="block">
+                OTP validity: {formatTime(expiresIn)}
+              </Typography>
 
+              <Typography variant="caption" display="block">
+                Resend cooldown: {formatTime(cooldown)}
+              </Typography>
+            </Box>
+          </Box>
 
-/*
-=========================================================
-4. GENERAL ERROR RESPONSES
-=========================================================
-*/
+          {/* OTP inputs */}
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: `repeat(${otpLength}, 1fr)`,
+              gap: { xs: 0.75, sm: 1.25 },
+              mb: 2,
+            }}
+          >
+            {otpValues.map((value, index) => (
+              <Box
+                key={index}
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: 2,
+                  bgcolor: "background.paper",
+                  border: "1.5px solid",
+                  borderColor: value
+                    ? "primary.main"
+                    : "rgba(0,0,0,0.15)",
+                  height: { xs: 48, sm: 54, md: 58 },
+                  "&:focus-within": {
+                    borderColor: "primary.main",
+                    boxShadow: "0 0 0 3px rgba(25,118,210,0.15)",
+                  },
+                }}
+              >
+                <InputBase
+                  inputRef={(element) => {
+                    inputRefs.current[index] = element;
+                  }}
+                  value={value}
+                  onChange={(event) => handleChange(index, event)}
+                  onKeyDown={(event) => handleKeyDown(index, event)}
+                  onPaste={handlePaste}
+                  disabled={isLoading || isLocked || isExpired}
+                  inputProps={{
+                    maxLength: otpLength,
+                    inputMode: "numeric",
+                    pattern: "[0-9]*",
+                    style: {
+                      textAlign: "center",
+                      fontSize: "1.25rem",
+                      fontWeight: 700,
+                      padding: 0,
+                      width: "100%",
+                    },
+                  }}
+                />
+              </Box>
+            ))}
+          </Box>
 
-// SCENARIO 21: INTERNAL SERVER ERROR
-// HTTP 500 INTERNAL SERVER ERROR
+          {/* Fixed-height error area prevents card movement */}
+          <Box
+            sx={{
+              minHeight: 48,
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "center",
+              mb: 1,
+            }}
+          >
+            {errorMessage && (
+              <Typography
+                variant="body2"
+                color="error.main"
+                sx={{ textAlign: "center", width: "100%" }}
+              >
+                {errorMessage}
+              </Typography>
+            )}
+          </Box>
 
-{
-  "success": false,
-  "message": "Something went wrong. Please try again later.",
-  "data": null
-}
+          <PrimaryButton
+            fullWidth
+            variant="contained"
+            onClick={handleVerifyOTP}
+            disabled={
+              isLoading ||
+              !isOtpComplete ||
+              isLocked ||
+              isExpired
+            }
+            sx={{ py: 1.25, fontSize: "0.95rem" }}
+          >
+            {isLoading ? (
+              <CircularProgress size={22} color="inherit" />
+            ) : (
+              "Verify OTP & Sign In"
+            )}
+          </PrimaryButton>
 
+          {/* Navigation and resend */}
+          <Box
+            sx={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              mt: 2.5,
+            }}
+          >
+            <Button
+              startIcon={<ArrowBackIcon />}
+              onClick={onBackToHome}
+              size="small"
+              sx={{
+                textTransform: "none",
+                color: "text.secondary",
+                fontSize: { xs: "0.75rem", sm: "0.85rem" },
+                p: 0.5,
+              }}
+            >
+              Back To Sign In
+            </Button>
 
-// SCENARIO 22: INVALID OR MISSING TRANSACTION ID
-// HTTP 400 BAD REQUEST
+            <Button
+              onClick={handleResendOTP}
+              disabled={
+                isLoading ||
+                cooldown > 0 ||
+                resendsLeft <= 0
+              }
+              startIcon={<RefreshIcon />}
+              size="small"
+              sx={{ fontWeight: 600, px: 1.5 }}
+            >
+              {cooldown > 0
+                ? `Resend in ${cooldown}s`
+                : "Resend OTP"}
+            </Button>
+          </Box>
 
-{
-  "success": false,
-  "message": "Invalid OTP transaction.",
-  "data": null
-}
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", textAlign: "right", mt: 1 }}
+          >
+            {resendsLeft} resend(s) remaining
+          </Typography>
+        </>
+      )}
+    </Box>
+  );
+};
+
+export default LoginWithOTP;
