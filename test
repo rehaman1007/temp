@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Typography,
   Button,
@@ -30,6 +30,7 @@ const LoginWithOTP = ({
   const inputRefs = useRef([]);
   const sessionCheckInterval = useRef(null);
   const lastActivityRef = useRef(Date.now());
+  const sessionExpiredRef = useRef(false);
 
   const config = otpData?.otpConfig || {};
 
@@ -93,23 +94,49 @@ const LoginWithOTP = ({
     return `${minutes}:${remainingSeconds}`;
   };
 
-  // Focus first input
-  const focusFirstInput = () => {
-    setTimeout(() => inputRefs.current[0]?.focus(), 0);
-  };
+  // Focus first OTP field
+  const focusFirstInput = useCallback(() => {
+    requestAnimationFrame(() => {
+      inputRefs.current[0]?.focus();
+    });
+  }, []);
 
-  // Clear OTP and focus first input
-  const clearOtp = () => {
+  // Clear OTP fields
+  const clearOtp = useCallback(() => {
     setOtpValues(Array(otpLength).fill(""));
-    focusFirstInput();
-  };
+  }, [otpLength]);
+
+  // Automatically focus first field whenever OTP is cleared
+  useEffect(() => {
+    const isOtpCleared = otpValues.every(
+      (value) => value === ""
+    );
+
+    if (
+      isOtpCleared &&
+      !isLocked &&
+      !isExpired &&
+      !isSessionExpired
+    ) {
+      focusFirstInput();
+    }
+  }, [
+    otpValues,
+    isLocked,
+    isExpired,
+    isSessionExpired,
+    focusFirstInput,
+  ]);
 
   // Handle actual session expiration
-  const expireSession = (message) => {
-    if (isSessionExpired) return;
+  const expireSession = useCallback((message) => {
+    if (sessionExpiredRef.current) return;
+
+    sessionExpiredRef.current = true;
 
     setErrorMessage(
-      message || "Your session has timed out. Please log in again."
+      message ||
+        "Your session has timed out. Please log in again."
     );
 
     setIsSessionExpired(true);
@@ -117,7 +144,7 @@ const LoginWithOTP = ({
     setSessionRemaining(0);
 
     clearInterval(sessionCheckInterval.current);
-  };
+  }, [otpLength]);
 
   // =========================================================
   // 15-MINUTE IDLE SESSION TIMEOUT
@@ -128,15 +155,16 @@ const LoginWithOTP = ({
 
     lastActivityRef.current = Date.now();
 
-    // Capture all user activities
+    // Capture user activity
     const handleUserActivity = () => {
-      if (isSessionExpired) return;
+      if (sessionExpiredRef.current) return;
 
       const currentTime = Date.now();
+
       const inactiveTime =
         currentTime - lastActivityRef.current;
 
-      // If timeout has already elapsed, expire instead of resetting
+      // Do not reset an already expired session
       if (inactiveTime >= timeoutMilliseconds) {
         expireSession(
           "Your session has timed out due to inactivity. Please log in again."
@@ -146,8 +174,6 @@ const LoginWithOTP = ({
 
       // Reset inactivity timer
       lastActivityRef.current = currentTime;
-
-      setSessionRemaining(INACTIVITY_TIMEOUT_SECONDS);
     };
 
     const activityEvents = [
@@ -162,11 +188,15 @@ const LoginWithOTP = ({
     ];
 
     activityEvents.forEach((event) => {
-      window.addEventListener(event, handleUserActivity);
+      window.addEventListener(event, handleUserActivity, {
+        passive: true,
+      });
     });
 
     // Continuously check inactivity every second
     sessionCheckInterval.current = setInterval(() => {
+      if (sessionExpiredRef.current) return;
+
       const inactiveTime =
         Date.now() - lastActivityRef.current;
 
@@ -190,17 +220,21 @@ const LoginWithOTP = ({
       clearInterval(sessionCheckInterval.current);
 
       activityEvents.forEach((event) => {
-        window.removeEventListener(event, handleUserActivity);
+        window.removeEventListener(
+          event,
+          handleUserActivity
+        );
       });
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [INACTIVITY_TIMEOUT_SECONDS]);
+  }, [INACTIVITY_TIMEOUT_SECONDS, expireSession]);
 
   // =========================================================
   // OTP EXPIRY AND RESEND COOLDOWN
   // =========================================================
   useEffect(() => {
     const timer = setInterval(() => {
+      if (sessionExpiredRef.current) return;
+
       setExpiresIn((prev) => {
         if (prev <= 1) {
           setIsOtpExpired(true);
@@ -224,7 +258,7 @@ const LoginWithOTP = ({
   // Initial focus
   useEffect(() => {
     focusFirstInput();
-  }, []);
+  }, [focusFirstInput]);
 
   // Update values from backend
   const updateOtpData = (data) => {
@@ -287,9 +321,10 @@ const LoginWithOTP = ({
         { transactionId }
       );
 
+      if (sessionExpiredRef.current) return;
+
       const data = response?.data?.data || {};
 
-      // Calculate resend count only after successful response
       const nextResendsLeft =
         data.resendsRemaining !== undefined
           ? Number(data.resendsRemaining)
@@ -320,9 +355,10 @@ const LoginWithOTP = ({
       setIsLocked(false);
       setErrorMessage("");
 
+      // Clear fields and automatically focus first input
       clearOtp();
 
-      // Resend count appears only in Snackbar
+      // Preserve backend success message and append count
       const successMessage =
         response?.data?.message ||
         data.message ||
@@ -378,6 +414,8 @@ const LoginWithOTP = ({
         }
       );
 
+      if (sessionExpiredRef.current) return;
+
       const result = response?.data?.data || {};
 
       if (!result.payloadEncryptionKey) {
@@ -386,12 +424,14 @@ const LoginWithOTP = ({
       }
 
       if (response?.data?.success) {
-        // Stop inactivity monitoring after successful login
         clearInterval(sessionCheckInterval.current);
 
         onSessionEstablished?.(result);
       } else {
-        setErrorMessage(response?.data?.message || "");
+        setErrorMessage(
+          response?.data?.message || ""
+        );
+
         clearOtp();
       }
     } catch (err) {
@@ -410,11 +450,12 @@ const LoginWithOTP = ({
           ) ||
           backendData.attemptsRemaining === 0
         ) {
-          // Fifth failed attempt: stay on OTP screen
-          // Resend remains available based on cooldown
+          // Fifth failed attempt: remain on OTP screen
+          // User can resend OTP when cooldown permits
           setIsLocked(true);
           setErrorMessage(message);
-          setOtpValues(Array(otpLength).fill(""));
+
+          clearOtp();
         } else if (
           backendData.otpExpired === true ||
           message.toLowerCase().includes(
@@ -423,14 +464,17 @@ const LoginWithOTP = ({
         ) {
           setIsOtpExpired(true);
           setErrorMessage(message);
-          setOtpValues(Array(otpLength).fill(""));
+
+          clearOtp();
         } else {
           // Incorrect OTP
           setErrorMessage(message);
+
           clearOtp();
         }
       } else if (status === 400) {
         setErrorMessage(message);
+
         clearOtp();
       } else {
         setErrorMessage(
@@ -446,6 +490,8 @@ const LoginWithOTP = ({
   // OTP INPUT HANDLING
   // =========================================================
   const handleChange = (index, event) => {
+    if (isSessionExpired || isLocked || isExpired) return;
+
     const digits = event.target.value.replace(/\D/g, "");
 
     if (!digits) {
@@ -473,6 +519,8 @@ const LoginWithOTP = ({
   // Paste OTP
   const handlePaste = (event) => {
     event.preventDefault();
+
+    if (isSessionExpired || isLocked || isExpired) return;
 
     const digits = event.clipboardData
       .getData("text")
@@ -509,7 +557,10 @@ const LoginWithOTP = ({
       }
 
       setOtpValues(updated);
-    } else if (event.key === "ArrowLeft" && index > 0) {
+    } else if (
+      event.key === "ArrowLeft" &&
+      index > 0
+    ) {
       inputRefs.current[index - 1]?.focus();
     } else if (
       event.key === "ArrowRight" &&
@@ -609,6 +660,7 @@ const LoginWithOTP = ({
                       color: "text.secondary",
                     }}
                   />
+
                   <Typography variant="subtitle2">
                     {userId}
                   </Typography>
@@ -629,6 +681,7 @@ const LoginWithOTP = ({
                       color: "text.secondary",
                     }}
                   />
+
                   <Typography variant="subtitle2">
                     {otpData.maskedMobile?.toString()}
                   </Typography>
@@ -649,6 +702,7 @@ const LoginWithOTP = ({
                       color: "text.secondary",
                     }}
                   />
+
                   <Typography
                     variant="subtitle2"
                     sx={{ wordBreak: "break-all" }}
